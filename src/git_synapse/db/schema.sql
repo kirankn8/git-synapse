@@ -852,7 +852,7 @@ CREATE INDEX IF NOT EXISTS dep_bump_sha_idx      ON dep_bump (dep_sha);
 --
 -- Measured on this corpus: the best single measure over all ordered pairs
 -- reaches AUC 0.80 but only 0.63 directional accuracy; the ensemble ranked
--- *within* this candidate set reaches 0.86 in sample, 0.69 held out in time.
+-- *within* this candidate set reaches 0.88 in sample, 0.69 held out in time.
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS repo_dependency (
@@ -881,7 +881,7 @@ CREATE INDEX IF NOT EXISTS repo_dependency_dep_idx ON repo_dependency (dep_repo_
 -- that actually matters was being discarded as a self-reference.
 --
 -- This is the same structural prior that lifts cross-repo ranking from AUC 0.80
--- to 0.86 in sample, applied inside a repository: "you changed gateway/, which declares
+-- to 0.88 in sample, applied inside a repository: "you changed gateway/, which declares
 -- apis, models and pkg". Behavioural file coupling cannot state that as cleanly,
 -- because a module boundary is a fact rather than a correlation.
 -- ---------------------------------------------------------------------------
@@ -1082,6 +1082,11 @@ ALTER TABLE repo ADD COLUMN IF NOT EXISTS last_ingested_refs JSONB NOT NULL DEFA
 ALTER TABLE repo ADD COLUMN IF NOT EXISTS last_depbump_at TIMESTAMPTZ;
 ALTER TABLE repo ADD COLUMN IF NOT EXISTS last_mining_at TIMESTAMPTZ;
 ALTER TABLE repo ADD COLUMN IF NOT EXISTS last_depbump_sha TEXT;
+-- Separate from last_depbump_sha because the bump scan and the declared-set
+-- refresh are independent passes. Sharing one watermark meant the scan cleared
+-- it before the refresh read it, so the declared set silently stopped tracking
+-- HEAD and reported "no repository manifests changed" forever.
+ALTER TABLE repo ADD COLUMN IF NOT EXISTS last_declared_sha TEXT;
 
 DO $$
 BEGIN

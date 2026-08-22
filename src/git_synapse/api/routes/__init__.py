@@ -659,7 +659,7 @@ def validation(
             "table while managing only ~0.63 directional accuracy, because it is "
             "pure joint frequency and mostly ranks 'both repos are busy'. "
             "Restricting "
-            "candidates to declared dependencies raises it to 0.86 in sample "
+            "candidates to declared dependencies raises it to 0.88 in sample "
             "(0.69 held out in time), "
             "which is why the impact view ranks within that structural set."
         ),

@@ -187,7 +187,7 @@ def wait_for_database(timeout_s: float = 120.0, interval_s: float = 1.0) -> None
 
 
 #: Bumped whenever ``schema.sql`` changes in a way that needs re-applying.
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 #: How long a DDL statement waits for a lock before giving up. Short on purpose:
 #: DDL queues ahead of ordinary queries in Postgres, so a schema apply that
@@ -274,18 +274,26 @@ def get_watermark(key: str) -> str | None:
     return str(value) if value is not None else None
 
 
-def set_watermark(key: str, value: str) -> None:
-    """Record a derived-stage watermark."""
+def set_watermark(key: str, value: str, conn: Any = None) -> None:
+    """Record a derived-stage watermark.
+
+    Pass ``conn`` when the watermark describes work in an open transaction. On
+    its own pooled connection it commits independently, so a rebuild that later
+    rolled back left the watermark advanced and the next run skipped it -- the
+    table stayed a generation behind while the system reported it current.
+    """
     import json as _json
 
-    execute(
-        """
+    sql = """
         INSERT INTO meta (key, value, updated_at)
         VALUES (%s, %s::jsonb, now())
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
-        """,
-        (f"watermark:{key}", _json.dumps(value)),
-    )
+        """
+    params = (f"watermark:{key}", _json.dumps(value))
+    if conn is not None:
+        conn.execute(sql, params)
+    else:
+        execute(sql, params)
 
 
 def copy_rows(

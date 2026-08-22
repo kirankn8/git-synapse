@@ -1316,7 +1316,7 @@ on('/dir/:id', async ({ id }) => {
           { key: 'path', label: 'Directory', render: (d) => h('span', { class: 'mono' }, d.path || '<root>') },
           { key: 'file_count', label: 'Files', num: true },
           { key: 'n_ab', label: 'Together', num: true },
-          { key: 'n_b', label: 'Its commits', num: true },
+          { key: 'n_other', label: 'Its commits', num: true },
           { key: 'confidence_out', label: 'P(it|this)', num: true, render: (d) => pct(d.confidence_out) },
           { key: 'score', label: spec ? spec.label : state.measure, num: true, render: (d) => scoreCell(d.score, spec) },
         ],
@@ -1774,14 +1774,14 @@ boot();
  * Render the evidence tier for a cross-repo edge.
  *
  * This is the most important piece of presentation in the app. Declared and
- * bump-backed edges were measured at AUC 0.86 in sample against real dependency
+ * bump-backed edges were measured at AUC 0.88 in sample against real dependency
  * propagation; discovery edges are statistical only and unvalidated, and skew
  * toward merely busy repositories. Showing them identically would be
  * misleading, so tier is always rendered, never inferred from the score.
  */
 const tierBadge = (row) => {
   if (row.is_declared)
-    return h('span', { class: 'tier tier-declared', title: 'Declared dependency — validated tier (AUC 0.86 in sample, 0.69 held out)' },
+    return h('span', { class: 'tier tier-declared', title: 'Declared dependency — validated tier (AUC 0.88 in sample, 0.69 held out)' },
       h('i', { class: 'dot' }), 'declared');
   if (row.has_bump_history)
     return h('span', { class: 'tier tier-bump', title: 'Observed manifest bumps — ground truth' },
@@ -2264,7 +2264,7 @@ on('/validation', async (_args, params) => {
     statTile('Candidate pairs', num(val.candidates), 'ordered repo pairs'),
     statTile('Base rate', pct(val.true_edges / Math.max(val.candidates, 1)), 'positives among all pairs'),
     statTile('Best AUC (global)', fx(val.measures[0] && val.measures[0].auc, 4), val.measures[0] ? val.measures[0].measure : ''),
-    statTile('Within declared set', '0.86', 'in sample; 0.69 held out in time'),
+    statTile('Within declared set', '0.88', 'in sample; 0.69 held out in time'),
     statTile('Lift from structure', '~350×', 'base rate 0.23% → 82%')));
 
   wrap.append(h('div', { class: 'help', style: 'border-left-color:var(--warn)' },
@@ -2296,8 +2296,8 @@ on('/validation', async (_args, params) => {
       h('strong', { style: 'color:var(--text)' }, '2. Structure is a decisive prior. '),
       'Restricting candidates to declared dependencies lifts the base rate from 0.23% to 82% before any measure is evaluated. But structure alone is not enough either — of telemetry’s 9 declared internal dependencies, 1 has never once co-changed.'),
     h('p', { style: 'margin:0;font-size:13px;color:var(--text-dim);line-height:1.6' },
-      h('strong', { style: 'color:var(--accent)' }, '3. Together they reach AUC 0.86 in sample '),
-      '(measured 0.859 over the shipped score, declared candidates only) and 0.69 held out in time. No cross-validation figure is quoted: the ensemble has no fitted parameters, so folds train nothing. A coupling-free baseline — the consumer repo\'s raw commit count — reaches 0.80 on the same task, so activity confounding is present inside the declared set too. That is what the Impact view uses, and why its rows carry an explicit evidence tier.'))));
+      h('strong', { style: 'color:var(--accent)' }, '3. Together they reach AUC 0.88 in sample '),
+      '(measured 0.884 over the shipped score, declared candidates only) and 0.69 held out in time. No cross-validation figure is quoted: the ensemble has no fitted parameters, so folds train nothing. A coupling-free baseline — the consumer repo\'s raw commit count — reaches 0.80 on the same task, so activity confounding is present inside the declared set too. That is what the Impact view uses, and why its rows carry an explicit evidence tier.'))));
   return wrap;
 });
 

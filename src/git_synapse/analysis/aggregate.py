@@ -125,6 +125,37 @@ def _refresh_repo_population(conn: psycopg.Connection, repo_id: int) -> int:
     return int(row[0]) if row else 0
 
 
+def _head_tree_paths(conn: psycopg.Connection, repo_id: int) -> set[str] | None:
+    """Paths present in the repository's default branch tree, or None.
+
+    None means the mirror could not be read, which is the signal to fall back
+    rather than to treat every file as deleted.
+    """
+    import subprocess
+
+    from git_synapse.ingest.gitops import mirror_path_for
+
+    row = conn.execute(
+        "SELECT full_name FROM repo WHERE id = %s", (repo_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    mirror = mirror_path_for(str(row[0]))
+    if not mirror.is_dir():
+        return None
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed executable
+            ["git", "ls-tree", "-r", "--name-only", "HEAD"],
+            cwd=str(mirror), capture_output=True, text=True,
+            errors="replace", timeout=300, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return {line for line in proc.stdout.split("\n") if line}
+
+
 def _refresh_file_marginals(conn: psycopg.Connection, repo_id: int) -> int:
     """Recompute per-file counters from ``commit_file``.
 
@@ -161,21 +192,37 @@ def _refresh_file_marginals(conn: psycopg.Connection, repo_id: int) -> int:
         """,
         {"repo": repo_id},
     )
-    # Mark files whose most recent change was a delete, so the UI can grey them out.
-    conn.execute(
-        """
-        UPDATE file f SET is_deleted = latest.change_type = 'D'
-        FROM (
-            SELECT DISTINCT ON (cf.file_id) cf.file_id, cf.change_type
-            FROM commit_file cf
-            JOIN commit c ON c.id = cf.commit_id
-            WHERE cf.repo_id = %(repo)s
-            ORDER BY cf.file_id, c.committed_at DESC, c.id DESC
-        ) latest
-        WHERE f.id = latest.file_id
-        """,
-        {"repo": repo_id},
-    )
+    # Mark files that are absent from the default branch's tree.
+    #
+    # This used to be "the most recent change across all refs was a delete",
+    # which is a different question: an abandoned branch that deletes a vendor
+    # directory marked 10,065 files gone that are live on main. The flag is
+    # published to agents as "this file no longer exists at HEAD; do not try to
+    # edit it", so it has to be an actual statement about HEAD. The tree is read
+    # from the mirror when one is available; without it, fall back to the old
+    # last-change rule rather than silently marking everything live.
+    head_paths = _head_tree_paths(conn, repo_id)
+    if head_paths is not None:
+        conn.execute(
+            "UPDATE file SET is_deleted = NOT (path = ANY(%(paths)s))"
+            " WHERE repo_id = %(repo)s",
+            {"repo": repo_id, "paths": list(head_paths)},
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE file f SET is_deleted = latest.change_type = 'D'
+            FROM (
+                SELECT DISTINCT ON (cf.file_id) cf.file_id, cf.change_type
+                FROM commit_file cf
+                JOIN commit c ON c.id = cf.commit_id
+                WHERE cf.repo_id = %(repo)s
+                ORDER BY cf.file_id, c.committed_at DESC, c.id DESC
+            ) latest
+            WHERE f.id = latest.file_id
+            """,
+            {"repo": repo_id},
+        )
     count = conn.execute(
         "SELECT count(*) FROM file WHERE repo_id = %s", (repo_id,)
     ).fetchone()

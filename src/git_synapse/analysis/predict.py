@@ -19,7 +19,7 @@ design:
    single measure is evaluated. But structure alone is not enough either: of
    telemetry's 9 declared internal dependencies, 1 has never once co-changed.
 
-3. **Together they reach AUC 0.86 in sample** (measured 0.859 over the shipped
+3. **Together they reach AUC 0.88 in sample** (measured 0.884 over the shipped
    `repo_impact.score`, restricted to declared candidates). Held out in time --
    features from before 2025-01-01, labels from after -- it is 0.69. Treat 0.86
    as the optimistic bound and 0.69 as the honest one. No cross-validation
@@ -195,17 +195,6 @@ def rebuild(
                         best_lag[pair] = int(r[2])
             support[pair] = max(support.get(pair, 0), int(r[4] or 0))
 
-        pairs = list(best.keys())
-        matrix = np.array([best[p] for p in pairs], dtype=np.float64)
-        matrix = np.where(np.isfinite(matrix), matrix, 0.0)
-
-        # Rank-normalise every measure once, then build two ensembles from the
-        # same columns: the validated one for structural candidates, and a
-        # confounder-resistant one for discovery.
-        col = {key: _rank_normalise(matrix[:, i]) for i, key in enumerate(all_keys)}
-        ensemble = np.mean([col[k] for k in ENSEMBLE_MEASURES], axis=0)
-        discovery = np.mean([col[k] for k in DISCOVERY_MEASURES], axis=0)
-
         declared = {
             (int(r[0]), int(r[1]))
             for r in c.execute(
@@ -225,6 +214,28 @@ def rebuild(
                 """
             ).fetchall()
         }
+
+        # A declared or bump-backed edge is structural evidence in its own right,
+        # so it has to be a candidate even with no lagged row. Joint support below
+        # `lag_min_support` used to drop it before scoring, and `upstream_repos`
+        # then reported nothing at all for a repository whose manifest names an
+        # upstream -- the most expensive wrong answer this system can give. They
+        # enter with a zero feature vector, which ranks them last on statistics
+        # while keeping their tier.
+        for pair in (declared | set(bumps)):
+            if pair not in best and pair[0] != pair[1]:
+                best[pair] = [0.0] * n_measures
+
+        pairs = list(best.keys())
+        matrix = np.array([best[p] for p in pairs], dtype=np.float64)
+        matrix = np.where(np.isfinite(matrix), matrix, 0.0)
+
+        # Rank-normalise every measure once, then build two ensembles from the
+        # same columns: the validated one for structural candidates, and a
+        # confounder-resistant one for discovery.
+        col = {key: _rank_normalise(matrix[:, i]) for i, key in enumerate(all_keys)}
+        ensemble = np.mean([col[k] for k in ENSEMBLE_MEASURES], axis=0)
+        discovery = np.mean([col[k] for k in DISCOVERY_MEASURES], axis=0)
 
         # Declared and bump-backed edges are always kept: they carry structural
         # or ground-truth evidence regardless of score. Undeclared candidates are
@@ -313,7 +324,7 @@ def rebuild(
         )
         stats.sources = len(by_source)
         stats.bin_hours = bin_hours
-        set_watermark("impact", fingerprint)
+        set_watermark("impact", fingerprint, conn=c)
         stats.duration_s = time.monotonic() - started
 
         log.info(

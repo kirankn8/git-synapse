@@ -146,7 +146,12 @@ def _build_change_sets(
     cfg = get_config().crossrepo
 
     if force:
-        conn.execute("TRUNCATE change_set, change_set_commit RESTART IDENTITY CASCADE")
+        # DELETE rather than TRUNCATE: TRUNCATE takes AccessExclusive, which lets a
+        # concurrent reader invert lock order and deadlock the rebuild -- and the
+        # rebuild is always the victim, so it rolls back while the run still
+        # reports success. These tables are small enough that the cost is noise.
+        conn.execute("DELETE FROM change_set_commit")
+        conn.execute("DELETE FROM change_set")
         scope_sql = "c.pair_eligible"
         scope_params: dict = {}
     else:
@@ -404,7 +409,7 @@ def _refresh_marginals(conn: psycopg.Connection) -> None:
     count *change sets*, not commits -- so they are stored separately from
     ``file.pair_change_count`` rather than reusing it.
     """
-    conn.execute("TRUNCATE repo_change_stats")
+    conn.execute("DELETE FROM repo_change_stats")
     conn.execute(
         """
         INSERT INTO repo_change_stats (repo_id, change_set_count, ticket_set_count,
@@ -447,7 +452,7 @@ def _build_repo_pairs(conn: psycopg.Connection) -> int:
     half_life = max(cfg.analysis.recency_half_life_days, 1)
     min_support = max(cfg.crossrepo.min_support, 1)
 
-    conn.execute("TRUNCATE repo_pair")
+    conn.execute("DELETE FROM repo_pair")
     row = conn.execute(
         """
         WITH cs_repo AS (
@@ -488,7 +493,7 @@ def _build_file_pairs(conn: psycopg.Connection) -> int:
     min_support = max(cfg.crossrepo.min_support, 1)
     file_cap = max(cfg.crossrepo.max_files_per_repo_per_changeset, 1)
 
-    conn.execute("TRUNCATE xrepo_file_pair")
+    conn.execute("DELETE FROM xrepo_file_pair")
     row = conn.execute(
         """
         WITH cs_file AS (
@@ -574,7 +579,7 @@ def _score(conn: psycopg.Connection, level: str) -> int:
     else:
         raise ValueError(f"unknown level {level!r}")
 
-    conn.execute(f"TRUNCATE {metric_table}")
+    conn.execute(f"DELETE FROM {metric_table}")
     if n_total <= 0:
         return 0
 

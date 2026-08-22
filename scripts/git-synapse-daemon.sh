@@ -57,15 +57,16 @@ fi
 # mirrors. The daemon runs on the host, where gh is authenticated, so it can
 # refresh the value the containers read.
 cd "$PROJECT_DIR" || exit 1
-if command -v gh >/dev/null 2>&1 && [ -f .env ]; then
+# Read the token at start rather than storing a copy: a copy in .env goes stale
+# the moment gh reissues, and the expired copy wins over the live one. Exporting
+# it here means compose interpolates the current value and nothing is written to
+# disk. An empty value is never exported -- that would blank a working token.
+if command -v gh >/dev/null 2>&1; then
     fresh=$(gh auth token 2>/dev/null || true)
-    current=$(sed -n 's/^GITHUB_TOKEN=//p' .env | head -1)
-    if [ -n "$fresh" ] && [ "$fresh" != "$current" ]; then
-        tmp=$(mktemp)
-        sed "s|^GITHUB_TOKEN=.*|GITHUB_TOKEN=$fresh|" .env > "$tmp" && mv "$tmp" .env
-        log "refreshed GITHUB_TOKEN in .env; restarting scheduler to pick it up"
-        docker compose up -d --force-recreate scheduler >>"$LOG" 2>&1 || \
-            log "WARNING: scheduler restart after token refresh failed"
+    if [ -n "$fresh" ]; then
+        export GITHUB_TOKEN="$fresh"
+    else
+        log "WARNING: gh auth token returned nothing; leaving GITHUB_TOKEN as-is"
     fi
 fi
 
