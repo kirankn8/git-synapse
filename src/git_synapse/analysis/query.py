@@ -227,6 +227,26 @@ def file_extensions(repo_id: int | None = None) -> list[dict]:
 _METRIC_COLUMNS = ", ".join(f"m.{spec.key}" for spec in MEASURES)
 
 
+def _oriented_order(measure: str) -> tuple[str, str, str]:
+    """Order and filter columns for queries that union both pair orientations.
+
+    Those queries flip confidence into ``confidence_out``/``confidence_in`` so it
+    always reads outward from the entity asked about. Ranking on the stored
+    ``confidence_ab`` instead would rank by whichever direction the pair happens
+    to be stored in, which is arbitrary, so the directional measures map onto the
+    flipped aliases.
+
+    Returns the outer order column and the raw column to filter on in the A-side
+    and B-side branches, which differ for exactly those two measures.
+    """
+    order = _safe_order(measure)
+    if order == "confidence_ab":
+        return "confidence_out", "confidence_ab", "confidence_ba"
+    if order == "confidence_ba":
+        return "confidence_in", "confidence_ba", "confidence_ab"
+    return order, order, order
+
+
 def coupled_files(
     file_id: int,
     measure: str = DEFAULT_MEASURE,
@@ -243,16 +263,17 @@ def coupled_files(
     unioned. ``confidence`` is flipped where needed so it always reads as
     ``P(partner changes | this file changed)``.
     """
-    order = _safe_order(measure)
+    order, order_a, order_b = _oriented_order(measure)
     params: dict[str, Any] = {
         "file_id": file_id,
         "limit": _clamp_limit(limit),
         "min_support": max(min_support, 1),
     }
 
-    score_clause = ""
+    score_a = score_b = ""
     if min_score is not None:
-        score_clause = f"AND m.{order} >= %(min_score)s"
+        score_a = f"AND m.{order_a} >= %(min_score)s"
+        score_b = f"AND m.{order_b} >= %(min_score)s"
         params["min_score"] = min_score
 
     return query(
@@ -263,7 +284,7 @@ def coupled_files(
                    m.confidence_ba AS confidence_in,
                    {_METRIC_COLUMNS}, m.n_ab, m.n_a, m.n_b, m.n_total
             FROM file_pair_metric m
-            WHERE m.file_a_id = %(file_id)s AND m.n_ab >= %(min_support)s {score_clause}
+            WHERE m.file_a_id = %(file_id)s AND m.n_ab >= %(min_support)s {score_a}
             UNION ALL
             SELECT m.file_a_id AS other_id,
                    -- This file is the B side, so P(partner | this) is ba.
@@ -271,7 +292,7 @@ def coupled_files(
                    m.confidence_ab AS confidence_in,
                    {_METRIC_COLUMNS}, m.n_ab, m.n_a, m.n_b, m.n_total
             FROM file_pair_metric m
-            WHERE m.file_b_id = %(file_id)s AND m.n_ab >= %(min_support)s {score_clause}
+            WHERE m.file_b_id = %(file_id)s AND m.n_ab >= %(min_support)s {score_b}
         )
         SELECT p.*, f.path, f.dir_path, f.basename, f.extension, f.repo_id,
                f.change_count, f.is_deleted, r.full_name AS repo,
@@ -671,7 +692,7 @@ def repo_partners(
     with the stored direction flipped when this repo is the ``b`` side -- the same
     correction :func:`coupled_files` applies.
     """
-    order = _safe_order(measure)
+    order, _, _ = _oriented_order(measure)
     return query(
         f"""
         WITH partners AS (
@@ -721,7 +742,7 @@ def crossrepo_file_partners(
     This is the actionable cross-repo answer: "the contracts spec changed, so this
     telemetry handler probably needs updating too".
     """
-    order = _safe_order(measure)
+    order, _, _ = _oriented_order(measure)
     return query(
         f"""
         WITH partners AS (
