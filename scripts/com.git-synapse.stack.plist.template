@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LaunchAgent that keeps the Git Synapse stack alive on macOS.
+
+  RunAtLoad starts it at login. StartInterval re-runs it as a watchdog, which
+  covers the cases a one-shot cannot: Colima crashing, the VM being stopped by
+  hand, or Docker being restarted. The script is idempotent and exits silently
+  when everything is already up, so a short interval costs nothing.
+
+  This is a LaunchAgent, not a LaunchDaemon: Colima is a per-user VM and cannot
+  be started from a root context.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.git-synapse.stack</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__SCRIPT__</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>GIT_SYNAPSE_DIR</key>
+        <string>__PROJECT__</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Watchdog interval, in seconds. -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <!-- The script exits after checking; it is not a long-lived process, so
+         KeepAlive would make launchd restart it in a tight loop. -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__LOG__</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG__</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

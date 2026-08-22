@@ -1,0 +1,12 @@
+{
+  "name": "git-synapse-ui-smoke",
+  "private": true,
+  "type": "module",
+  "description": "Headless smoke test: boots the real UI in jsdom against a running API.",
+  "scripts": {
+    "test": "node build-bundle.mjs && node smoke.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^30.0.0"
+  }
+}

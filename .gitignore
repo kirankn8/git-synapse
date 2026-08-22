@@ -1,0 +1,18 @@
+# Local dev virtualenv
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Secrets and machine-local config
+.env
+.claude/settings.local.json
+
+# Bare git mirrors and any local scratch data
+data/
+
+# Optional UI smoke test: installed deps and its generated bundle
+tests/ui/node_modules
+tests/ui/bundle.js
+tests/ui/package-lock.json
