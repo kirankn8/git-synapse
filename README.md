@@ -525,6 +525,7 @@ $ docker compose run --rm cli coupled terraform-provider-acme \
 | Target | Purpose |
 |---|---|
 | `make skills-install` / `-uninstall` | Symlink `skills/git-synapse-mcp` into `~/.claude/skills` |
+| `make claudemd-install` / `-uninstall` | Symlink `config/CLAUDE.md` as the user-level coding standard |
 | `make hostname-install` / `-uninstall` | Map / unmap `http://git-synapse` in `/etc/hosts` |
 | `make daemon-install` / `-uninstall` | Install / remove the macOS LaunchAgent |
 | `make daemon-status` | Agent state, daemon log tail, next scheduled runs |
@@ -633,6 +634,8 @@ src/git_synapse/
 web/           index.html + app.js + graph.js + style.css   (no build step)
 skills/
   git-synapse-mcp/    SKILL.md   -- standalone: how an agent should use the MCP server
+config/
+  CLAUDE.md      user-level coding standard, symlinked into ~/.claude
 docker/        Dockerfile (one image, four services)
 tests/
 ```
