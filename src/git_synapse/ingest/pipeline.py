@@ -192,6 +192,65 @@ def _record_repo_result(run_id: int, result: RepoResult) -> None:
         )
 
 
+class AuthError(RuntimeError):
+    """The GitHub credential is missing or rejected."""
+
+
+def verify_credentials() -> str:
+    """Confirm the token works before any mirror is touched.
+
+    Called at the start of every run. Without it, an expired token produces 272
+    individually-failing repositories and a run that looks like a mass outage
+    instead of one bad credential -- and `gh auth token` yields short-lived
+    `ghu_` tokens, so expiry is routine rather than exceptional.
+
+    Returns:
+        The authenticated login.
+
+    Raises:
+        AuthError: if the token is absent or rejected.
+    """
+    cfg = get_config().github
+    if not cfg.token:
+        raise AuthError(
+            "GITHUB_TOKEN is empty. Private repositories cannot be mirrored. "
+            "Set it in .env and restart the affected services."
+        )
+
+    import httpx
+
+    try:
+        response = httpx.get(
+            f"{cfg.api_url}/user",
+            headers={
+                "Authorization": f"Bearer {cfg.token}",
+                "Accept": "application/vnd.github+json",
+            },
+            timeout=15.0,
+        )
+    except httpx.HTTPError as exc:
+        # A network problem is not an auth problem; let the run proceed and let
+        # the per-repo retry logic deal with it.
+        log.warning("could not reach the GitHub API to verify the token: %s", exc)
+        return "unverified"
+
+    if response.status_code == 401:
+        raise AuthError(
+            "GITHUB_TOKEN was rejected (HTTP 401). It has most likely expired -- "
+            "`gh auth token` issues short-lived credentials. Refresh it in .env, "
+            "then `docker compose up -d`. No mirrors were touched."
+        )
+    if response.status_code >= 400:
+        raise AuthError(
+            f"GitHub rejected the token with HTTP {response.status_code}: "
+            f"{response.text[:200]}"
+        )
+
+    login = (response.json() or {}).get("login", "unknown")
+    log.info("github credential verified as %s", login)
+    return login
+
+
 def discover(trigger: str = "manual") -> list[RepoRecord]:
     """Fetch the org's repository list from GitHub and upsert every record.
 
@@ -395,6 +454,24 @@ def run_ingest(
     started = time.monotonic()
 
     reconcile_stale_runs()
+
+    # Fail the whole run on a bad credential rather than letting every
+    # repository fail individually. Deliberately before any mirror is touched.
+    try:
+        verify_credentials()
+    except AuthError as exc:
+        log.error("aborting run: %s", exc)
+        run = RunResult(kind="full" if force_full else "sync")
+        run.run_id = _start_run(run.kind, trigger, 0)
+        run.duration_s = time.monotonic() - started
+        run.status = "failed"
+        with connection() as conn:
+            conn.execute(
+                "UPDATE ingest_run SET status='failed', finished_at=now(),"
+                " duration_s=%s, error=%s WHERE id=%s",
+                (run.duration_s, str(exc)[:4000], run.run_id),
+            )
+        return run
 
     if records is None:
         records = discover(trigger)

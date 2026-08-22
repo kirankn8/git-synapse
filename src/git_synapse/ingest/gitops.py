@@ -151,8 +151,34 @@ TRANSIENT_ERROR_MARKERS = (
     "504 gateway timeout",
 )
 
+#: Substrings identifying a PERMANENT failure: retrying or re-cloning cannot
+#: help, because the problem is credentials or the repository itself.
+#:
+#: Distinguishing these matters more than it looks. An expired token made every
+#: fetch fail, `sync_mirror` treated that like a corrupt mirror and fell back to
+#: a fresh clone, and the clone deleted the existing mirror before failing on the
+#: same auth error -- destroying 213 of 272 working mirrors in one run.
+PERMANENT_ERROR_MARKERS = (
+    "authentication failed",
+    "invalid username or token",
+    "password authentication is not supported",
+    "could not read username",
+    "permission denied",
+    "repository not found",
+    "does not exist",
+    "access denied",
+    "403 forbidden",
+    "401 unauthorized",
+)
+
 #: Attempts for a network-touching git operation.
 NETWORK_RETRIES = 4
+
+
+def is_permanent_error(stderr: str) -> bool:
+    """True if retrying or re-cloning cannot possibly help."""
+    lowered = (stderr or "").lower()
+    return any(marker in lowered for marker in PERMANENT_ERROR_MARKERS)
 
 
 def is_transient_error(stderr: str) -> bool:
@@ -237,30 +263,52 @@ def clone_mirror(
 ) -> None:
     """Create a bare mirror at ``path``.
 
+    Clones into a sibling temporary directory and swaps it into place only once
+    the clone has succeeded. The obvious implementation -- remove the old mirror,
+    then clone -- loses the existing mirror whenever the clone fails, which is
+    exactly what happened when a token expired: 213 working mirrors were deleted
+    and not replaced. A mirror is expensive to rebuild, so it must never be
+    destroyed on the strength of an operation that has not completed.
+
     Args:
         clone_url: URL used for the clone; may embed a token.
-        path: destination directory, recreated from scratch.
+        path: final destination directory.
         public_url: token-free URL to store as the remote afterwards, so the
             credential is never written into the mirror's config on disk.
-        blobless: omit blob objects. See the module docstring for what this
-            costs.
+        blobless: omit blob objects. See the module docstring for what this costs.
     """
-    if path.exists():
-        shutil.rmtree(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    staging = path.with_name(path.name + ".incoming")
+    if staging.exists():
+        shutil.rmtree(staging)
 
     args = ["clone", "--bare", "--no-tags", "--quiet"]
     if blobless:
         args.append("--filter=blob:none")
-    args += [clone_url, str(path)]
+    args += [clone_url, str(staging)]
 
     log.info("cloning %s mirror -> %s", "blobless" if blobless else "full", path)
-    run_git_network(args)
+    try:
+        run_git_network(args)
+        # Mirror refspec so future fetches track every branch, not just HEAD.
+        run_git(["config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"], cwd=staging)
+        if public_url:
+            run_git(["config", "remote.origin.url", public_url], cwd=staging)
+    except BaseException:
+        # Leave the previous mirror untouched on any failure.
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
 
-    # Mirror refspec so future fetches track every branch, not just HEAD.
-    run_git(["config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"], cwd=path)
-    if public_url:
-        run_git(["config", "remote.origin.url", public_url], cwd=path)
+    # Swap: move the old aside, promote the new, then discard the old.
+    retired = path.with_name(path.name + ".retired")
+    if retired.exists():
+        shutil.rmtree(retired, ignore_errors=True)
+    if path.exists():
+        path.rename(retired)
+    staging.rename(path)
+    if retired.exists():
+        shutil.rmtree(retired, ignore_errors=True)
 
 
 def fetch_mirror(
@@ -339,6 +387,16 @@ def sync_mirror(
         try:
             changed = fetch_mirror(path, clone_url, public_url, blobless=blobless)
         except GitError as exc:
+            if is_permanent_error(exc.stderr):
+                # Bad credentials or a repository that no longer exists. A
+                # re-clone would fail identically, so surface the real error and
+                # keep the mirror we already have.
+                log.error(
+                    "fetch failed for %s and the cause is not recoverable "
+                    "(mirror preserved): %s",
+                    full_name, exc.stderr[:200],
+                )
+                raise
             log.warning("fetch failed for %s (%s); re-cloning", full_name, exc)
             clone_mirror(clone_url, path, public_url, blobless=blobless)
             cloned = True
