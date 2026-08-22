@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from git_synapse.db.engine import connection
+from git_synapse.db.engine import connection, query, query_one
 from git_synapse.ingest.github import RepoRecord
 from git_synapse.ingest.parser import FileChange, ParsedCommit
 from git_synapse.ingest.store import COMMIT_FLUSH_SIZE, load_commits, upsert_repo
@@ -186,3 +186,39 @@ def test_duplicate_paths_within_one_commit_are_collapsed(temp_repo):
         stats = load_commits(temp_repo, [commit], conn)
     assert stats.changes_written == 2
     assert counts(temp_repo)[1] == 2
+
+
+def test_rename_onto_an_occupied_path_does_not_cross_identities(temp_repo):
+    """A rename whose destination another file already holds must not be carried.
+
+    flush() guards its UPDATE against violating the unique index, so the row kept
+    its old path while the in-memory map pointed the new path at it. Every later
+    commit to that path landed on the wrong file, and the file that genuinely
+    lived there sat frozen -- 10,586 rows across 55 repositories.
+    """
+    repo_id = temp_repo
+
+    both = make_commit(1, ["old.txt", "new.txt"])
+    rename = make_commit(2, [])
+    rename.files = [FileChange(path="new.txt", change_type="R", old_path="old.txt",
+                               similarity=100, insertions=1, deletions=0)]
+    later = make_commit(3, ["new.txt"])
+    with connection() as conn:
+        load_commits(repo_id, [both, rename, later], conn)
+
+    rows = {r["path"]: r["id"] for r in query(
+        "SELECT id, path FROM file WHERE repo_id = %s", (repo_id,))}
+    assert "new.txt" in rows, "the occupant must keep its own row"
+    assert rows.get("old.txt") != rows.get("new.txt"), "identities must stay separate"
+
+    owner = query_one(
+        """
+        SELECT cf.file_id FROM commit_file cf
+        JOIN commit c ON c.id = cf.commit_id
+        WHERE c.sha = %s AND cf.repo_id = %s
+        """,
+        (f"{3:040x}", repo_id),
+    )
+    assert owner["file_id"] == rows["new.txt"], (
+        "a later change must land on the file that lives at that path"
+    )
