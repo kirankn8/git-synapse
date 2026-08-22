@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 import psycopg
 
@@ -28,7 +30,7 @@ from git_synapse.analysis import crossrepo, depbump, lagged, mining, predict
 from git_synapse.analysis.aggregate import rebuild_repo
 from git_synapse.analysis.score import score_repo
 from git_synapse.config import get_config
-from git_synapse.db.engine import connection
+from git_synapse.db.engine import connection, copy_rows
 from git_synapse.ingest import gitops
 from git_synapse.ingest.github import GitHubClient, RepoRecord, select_repos
 from git_synapse.ingest.parser import iter_commits
@@ -308,6 +310,64 @@ def _is_contention(error: str | None) -> bool:
     )
 
 
+def _drop_unreachable_commits(repo_id: int, mirror: Path) -> int:
+    """Delete commits the mirror no longer reaches, e.g. after a force-push.
+
+    Mirrors are pruned on fetch but the database was insert-only, so rewritten
+    history accumulated forever: 735 commits across 24 repositories, inflating
+    the ``N`` of every contingency table in those repos and keeping files alive
+    that were deliberately removed. The reachable-set walk is only worth its cost
+    when the counts actually disagree, so a cheap comparison gates it.
+    """
+    with connection() as conn:
+        stored = int(
+            conn.execute(
+                "SELECT count(*) FROM commit WHERE repo_id = %s", (repo_id,)
+            ).fetchone()[0]
+        )
+    if stored == 0:
+        return 0
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed executable
+            ["git", "rev-list", "--all", "--no-merges", "--count"],
+            cwd=str(mirror), capture_output=True, text=True, timeout=600, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    if proc.returncode != 0 or stored <= int(proc.stdout.strip() or 0):
+        return 0
+
+    try:
+        walk = subprocess.run(  # noqa: S603 - fixed executable
+            ["git", "rev-list", "--all", "--no-merges"],
+            cwd=str(mirror), capture_output=True, text=True, timeout=900, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    if walk.returncode != 0:
+        return 0
+    reachable = [line for line in walk.stdout.split("\n") if line]
+    if not reachable:
+        return 0
+
+    with connection() as conn:
+        conn.execute(
+            "CREATE TEMP TABLE reachable_sha (sha TEXT PRIMARY KEY) ON COMMIT DROP"
+        )
+        copy_rows("reachable_sha", ["sha"], ((sha,) for sha in reachable), conn=conn)
+        return int(
+            conn.execute(
+                """
+                DELETE FROM commit c
+                WHERE c.repo_id = %s
+                  AND NOT EXISTS (SELECT 1 FROM reachable_sha r WHERE r.sha = c.sha)
+                """,
+                (repo_id,),
+            ).rowcount
+            or 0
+        )
+
+
 def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
     """One attempt at mirroring, parsing, loading, aggregating and scoring."""
     cfg = get_config()
@@ -399,8 +459,13 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
         result.commits_added = stats.commits_written
         result.files_created = stats.files_created
 
+        # History that has been rewritten away still counts toward N.
+        removed = _drop_unreachable_commits(repo_id, fetch.path)
+        if removed:
+            log.info("repo %d: removed %d commit(s) no longer in git", repo_id, removed)
+
         # Re-derive aggregates only when the atomic data actually moved.
-        if stats.commits_written > 0 or force_full:
+        if stats.commits_written > 0 or removed or force_full:
             with connection() as conn:
                 agg = rebuild_repo(repo_id, conn)
                 result.pairs = agg.file_pairs

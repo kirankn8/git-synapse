@@ -15,7 +15,9 @@ x-app-env: &app-env
   POSTGRES_USER: ${POSTGRES_USER:-git_synapse}
   POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-git_synapse}
   POSTGRES_DB: ${POSTGRES_DB:-git_synapse}
-  GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+  # gh exports GH_TOKEN on this machine, so accept either name and read the
+  # live value rather than a copy that goes stale when gh reissues.
+  GITHUB_TOKEN: ${GITHUB_TOKEN:-${GH_TOKEN:-}}
   GITHUB_ORG: ${GITHUB_ORG:-acme}
   INCLUDE_PRIVATE: ${INCLUDE_PRIVATE:-true}
   INCLUDE_FORKS: ${INCLUDE_FORKS:-true}
