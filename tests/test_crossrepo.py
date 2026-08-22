@@ -428,8 +428,11 @@ def test_deleted_partners_are_flagged_not_merely_scored(db):
     assert "DELETED" in _describe_currency(0, "emerging", deleted=True), (
         "deletion must win over a recent or emerging trend"
     )
-    assert "DECAYING" in _describe_currency(400, "decaying")
+    # Age wins over trend past the staleness threshold; `trend` is returned as
+    # its own field, so nothing is lost by saying how old the pair is.
+    assert "STALE" in _describe_currency(400, "decaying")
     assert "STALE" in _describe_currency(400, None)
+    assert "DECAYING" in _describe_currency(100, "decaying")
     assert "current" in _describe_currency(3, None)
     assert _describe_currency(None, None) is None
 
@@ -511,6 +514,86 @@ def test_module_context_is_honest_about_single_module_repos(db):
     assert ctx["owning_module"] is None
 
 
+def test_partner_marginal_is_the_partners_own_count(db):
+    """`n_other` must be the partner's change count, not the queried file's.
+
+    The union flips confidence but passed the marginals through in storage order,
+    so every partner stored on the B side reported the queried file's own total --
+    inflating it toward whatever hotspot was asked about.
+    """
+    from git_synapse.analysis.query import coupled_files, get_file, resolve_file
+
+    target = resolve_file("acme/runtime", "go.mod")
+    if target is None:
+        pytest.skip("fixture repository not indexed")
+
+    rows = coupled_files(target["id"], limit=8, min_support=5)
+    if not rows:
+        pytest.skip("no partners")
+
+    for r in rows:
+        partner = get_file(r["other_id"])
+        assert r["n_other"] == partner["pair_change_count"], r["path"]
+        assert r["n_this"] >= r["n_ab"]
+        assert r["n_other"] >= r["n_ab"]
+
+    # The queried file's own marginal is identical on every row; the partner's is not.
+    assert len({r["n_this"] for r in rows}) == 1
+    assert len({r["n_other"] for r in rows}) > 1, "n_other must vary by partner"
+
+
+def test_score_is_the_value_the_rows_were_ranked_by(db):
+    """Every surface prints `score`; it must be what the ORDER BY used."""
+    from git_synapse.analysis.query import coupled_files, resolve_file
+
+    target = resolve_file("acme/runtime", "go.mod")
+    if target is None:
+        pytest.skip("fixture repository not indexed")
+
+    for measure in ("npmi", "confidence_ab", "confidence_ba", "jaccard"):
+        rows = coupled_files(target["id"], measure=measure, limit=8, min_support=2)
+        scores = [r["score"] for r in rows]
+        assert scores == sorted(scores, reverse=True), measure
+    # For the directional pair the score is the flipped alias, not the stored column.
+    rows = coupled_files(target["id"], measure="confidence_ab", limit=5, min_support=2)
+    assert all(r["score"] == r["confidence_out"] for r in rows)
+
+
+def test_coupled_directories_reports_outward_confidence(db):
+    """The fourth union site had no flip at all, so subdirectories read 100%."""
+    from git_synapse.analysis.query import coupled_directories, query_one as _q
+
+    row = _q("SELECT id FROM directory ORDER BY change_count DESC LIMIT 1")
+    if row is None:
+        pytest.skip("no directories indexed")
+
+    rows = coupled_directories(row["id"], measure="confidence_ab", limit=10)
+    if len(rows) < 2:
+        pytest.skip("not enough partners")
+    assert [r["score"] for r in rows] == sorted((r["score"] for r in rows), reverse=True)
+    assert all(r["score"] == r["confidence_out"] for r in rows)
+    assert all(r["n_other"] >= r["n_ab"] for r in rows)
+
+
+def test_pair_detail_answers_in_the_callers_argument_order(db):
+    """Storage canonicalises by id; the answer must not silently transpose."""
+    from git_synapse.analysis.query import pair_detail, resolve_file
+
+    a = resolve_file("acme/runtime", "go.mod")
+    b = resolve_file("acme/runtime", "go.sum")
+    if a is None or b is None:
+        pytest.skip("fixture repository not indexed")
+
+    fwd = pair_detail(a["id"], b["id"])
+    rev = pair_detail(b["id"], a["id"])
+    assert fwd["path_a"] == "go.mod" and fwd["path_b"] == "go.sum"
+    assert rev["path_a"] == "go.sum" and rev["path_b"] == "go.mod"
+    # The two directions are genuinely different numbers, transposed together.
+    assert fwd["confidence_ab"] == rev["confidence_ba"]
+    assert fwd["n_a"] == rev["n_b"]
+    assert fwd["cells"]["b"] == rev["cells"]["c"]
+
+
 def test_directional_measure_ranks_outward_from_the_file_asked_about(db):
     """P(B|A) must rank by the probability the *partner* changes.
 
@@ -533,6 +616,25 @@ def test_directional_measure_ranks_outward_from_the_file_asked_about(db):
     assert outward == sorted(outward, reverse=True), (
         "ranking must follow the outward probability that is displayed"
     )
+
+
+def test_staleness_outranks_trend_in_currency():
+    """A year-old pair must read as stale even when it carries a trend label.
+
+    The drift window is wider than the staleness threshold, so returning the
+    trend first made the stale branch unreachable for thousands of pairs and two
+    partners of the same file at identical recency reported opposite verdicts.
+    """
+    from git_synapse.mcp.server import _describe_currency
+
+    for trend in ("emerging", "decaying", None):
+        assert _describe_currency(338, trend, False).startswith("STALE")
+
+    # Deletion is a harder fact still, and trend survives below the threshold.
+    assert _describe_currency(338, "emerging", True).startswith("DELETED")
+    assert _describe_currency(12, "emerging", False).startswith("emerging")
+    assert _describe_currency(100, "decaying", False).startswith("DECAYING")
+    assert _describe_currency(5, None, False).startswith("current")
 
 
 def test_feedback_deduplicates_on_identity_not_wording(db):

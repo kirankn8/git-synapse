@@ -126,17 +126,20 @@ def _describe_currency(
             "historical; do not try to edit it. If the behaviour moved, find "
             "where it moved to."
         )
+    # Age outranks trend. The drift window is wider than the staleness threshold,
+    # so a pair can carry a trend label while its last co-change is a year old;
+    # returning the label first made the stale branch unreachable for those.
+    if days is not None and days > STALE_AFTER_DAYS:
+        return (
+            f"STALE -- last co-changed {days} days ago; treat as historical, "
+            "verify the path still exists"
+        )
     if trend == "decaying":
         return "DECAYING -- weaker lately than historically; likely a finished refactor"
     if trend == "emerging":
         return "emerging -- stronger lately than historically"
     if days is None:
         return None
-    if days > STALE_AFTER_DAYS:
-        return (
-            f"STALE -- last co-changed {days} days ago; treat as historical, "
-            "verify the path still exists"
-        )
     if days <= 30:
         return f"current -- co-changed {days} days ago"
     return f"co-changed {days} days ago"
@@ -219,9 +222,9 @@ def coupled_files(
             {
                 "path": p["path"],
                 "repo": p["repo"],
-                "score": _round(p.get(spec.key)),
+                "score": _round(p.get("score")),
                 "co_changes": p["n_ab"],
-                "partner_total_changes": p["n_b"] if p["path"] else None,
+                "partner_total_changes": p["n_other"] if p["path"] else None,
                 "probability_also_changes": _round(p.get("confidence_out"), 3),
                 "probability_reverse": _round(p.get("confidence_in"), 3),
                 "log_likelihood_ratio": _round(p.get("log_likelihood_ratio"), 2),

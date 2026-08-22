@@ -395,7 +395,7 @@ def xcoupled(
     table.add_column("repository")
     for r in rows:
         table.add_row(
-            f"{(r.get(measure) or 0):.3f}",
+            f"{(r.get('score') or 0):.3f}",
             f"{(r.get('confidence_out') or 0):.0%}",
             f"{(r.get('confidence_in') or 0):.0%}",
             str(r["n_ab"]),
@@ -455,7 +455,7 @@ def coupled(
     table.add_column("file")
     for p in partners:
         table.add_row(
-            f"{(p.get(measure) or 0):.3f}",
+            f"{(p.get('score') or 0):.3f}",
             f"{(p.get('confidence_out') or 0):.0%}",
             str(p["n_ab"]),
             f"{(p.get('log_likelihood_ratio') or 0):.1f}",
