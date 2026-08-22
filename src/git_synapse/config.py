@@ -181,10 +181,14 @@ class CrossRepoConfig:
         default_factory=lambda: _env_int("MAX_REPOS_PER_CHANGESET", 8)
     )
     #: Per change set, per repo, cap on files considered for *file-level*
-    #: cross-repo pairing. Uncapped this is O(files_a * files_b) per change set;
-    #: measured on this org, a cap of 25 takes it from ~593k to ~173k instances.
+    #: cross-repo pairing. Uncapped this is O(files_a * files_b) per change set.
+    #: A safety valve against a sprawling change set, not a routine filter: at 200
+    #: it clips 5 of 24,994 (change set, repo) groups on this org for 3.5M
+    #: intermediate instances, where 25 clipped 1,211 of them and dropped ~16,800
+    #: real pairs. The cap also defines the population the marginals are counted
+    #: over, so lowering it narrows coverage rather than biasing the scores.
     max_files_per_repo_per_changeset: int = field(
-        default_factory=lambda: _env_int("MAX_FILES_PER_REPO_PER_CHANGESET", 25)
+        default_factory=lambda: _env_int("MAX_FILES_PER_REPO_PER_CHANGESET", 200)
     )
     #: Minimum shared change sets before a cross-repo pair is persisted.
     min_support: int = field(default_factory=lambda: _env_int("MIN_XREPO_SUPPORT", 2))

@@ -101,6 +101,7 @@ def rebuild(
             stats.duration_s = time.monotonic() - started
             return stats
         _mark_eligibility(c, stats)
+        _build_capped_files(c)
         _refresh_marginals(c)
         stats.repo_pairs = _build_repo_pairs(c)
         stats.file_pairs = _build_file_pairs(c)
@@ -402,6 +403,48 @@ def _mark_eligibility(conn: psycopg.Connection, stats: CrossRepoStats) -> None:
     )
 
 
+def _build_capped_files(conn: psycopg.Connection) -> None:
+    """The (change set, repo, file) rows that cross-repo pairing actually sees.
+
+    The per-change-set-per-repo cap keeps the pair join tractable, but it has to
+    define the population for the marginals too. Counting the joint over capped
+    rows and the marginals over every row mixes two populations, which understated
+    confidence by up to 3.5x -- always downward, and worst exactly where the
+    evidence is strongest, because large change sets are the ones the cap bites.
+    """
+    cfg = get_config()
+    file_cap = max(cfg.crossrepo.max_files_per_repo_per_changeset, 1)
+    conn.execute("DROP TABLE IF EXISTS cs_file_capped")
+    conn.execute(
+        """
+        CREATE TEMP TABLE cs_file_capped ON COMMIT DROP AS
+        WITH cs_file AS (
+            SELECT DISTINCT cs.id AS change_set_id, cs.signal, cs.last_at,
+                   csc.repo_id, cf.file_id, f.change_count
+            FROM change_set cs
+            JOIN change_set_commit csc ON csc.change_set_id = cs.id
+            JOIN commit_file cf ON cf.commit_id = csc.commit_id
+            JOIN file f ON f.id = cf.file_id
+            WHERE cs.pair_eligible
+        ),
+        ranked AS (
+            SELECT *, row_number() OVER (
+                       PARTITION BY change_set_id, repo_id
+                       ORDER BY change_count DESC, file_id
+                   ) AS rn
+            FROM cs_file
+        )
+        SELECT change_set_id, signal, last_at, repo_id, file_id
+        FROM ranked WHERE rn <= %(file_cap)s
+        """,
+        {"file_cap": file_cap},
+    )
+    conn.execute(
+        "CREATE INDEX ON cs_file_capped (change_set_id, repo_id)"
+    )
+    conn.execute("CREATE INDEX ON cs_file_capped (file_id)")
+
+
 def _refresh_marginals(conn: psycopg.Connection) -> None:
     """Recompute the per-repo and per-file change-set marginals.
 
@@ -428,12 +471,9 @@ def _refresh_marginals(conn: psycopg.Connection) -> None:
         """
         UPDATE file f SET xrepo_change_count = COALESCE(sub.n, 0)
         FROM (
-            SELECT cf.file_id, count(DISTINCT cs.id) AS n
-            FROM change_set cs
-            JOIN change_set_commit csc ON csc.change_set_id = cs.id
-            JOIN commit_file cf ON cf.commit_id = csc.commit_id
-            WHERE cs.pair_eligible
-            GROUP BY cf.file_id
+            SELECT file_id, count(DISTINCT change_set_id) AS n
+            FROM cs_file_capped
+            GROUP BY file_id
         ) sub
         WHERE f.id = sub.file_id
         """
@@ -491,30 +531,14 @@ def _build_file_pairs(conn: psycopg.Connection) -> int:
     cfg = get_config()
     half_life = max(cfg.analysis.recency_half_life_days, 1)
     min_support = max(cfg.crossrepo.min_support, 1)
-    file_cap = max(cfg.crossrepo.max_files_per_repo_per_changeset, 1)
-
     conn.execute("DELETE FROM xrepo_file_pair")
     row = conn.execute(
         """
-        WITH cs_file AS (
-            SELECT DISTINCT cs.id AS change_set_id, cs.signal, cs.last_at,
-                   csc.repo_id, cf.file_id, f.change_count
-            FROM change_set cs
-            JOIN change_set_commit csc ON csc.change_set_id = cs.id
-            JOIN commit_file cf ON cf.commit_id = csc.commit_id
-            JOIN file f ON f.id = cf.file_id
-            WHERE cs.pair_eligible AND cs.n_repos > 1
-        ),
-        ranked AS (
-            SELECT *, row_number() OVER (
-                       PARTITION BY change_set_id, repo_id
-                       ORDER BY change_count DESC, file_id
-                   ) AS rn
-            FROM cs_file
-        ),
-        capped AS (
-            SELECT change_set_id, signal, last_at, repo_id, file_id
-            FROM ranked WHERE rn <= %(file_cap)s
+        WITH capped AS (
+            SELECT c.change_set_id, c.signal, c.last_at, c.repo_id, c.file_id
+            FROM cs_file_capped c
+            JOIN change_set cs ON cs.id = c.change_set_id
+            WHERE cs.n_repos > 1
         )
         INSERT INTO xrepo_file_pair (file_a_id, file_b_id, repo_a_id, repo_b_id,
                                      n_ab, n_ab_ticket, w_ab,
@@ -537,7 +561,7 @@ def _build_file_pairs(conn: psycopg.Connection) -> int:
         GROUP BY 1, 2, 3, 4
         HAVING count(*) >= %(min_support)s
         """,
-        {"half_life": half_life, "min_support": min_support, "file_cap": file_cap},
+        {"half_life": half_life, "min_support": min_support},
     ).rowcount
     return int(row or 0)
 
