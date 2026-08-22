@@ -266,6 +266,17 @@ class FileResolver:
         if old_path:
             existing = self._by_path.get(old_path)
             if existing is not None:
+                occupant = self._by_path.get(path)
+                if occupant is not None and occupant != existing:
+                    # Another file already holds the destination, so the rename
+                    # cannot carry the identity there: the UPDATE in flush() is
+                    # guarded against violating the unique index and would be
+                    # skipped, leaving the map pointing at a row that still has
+                    # the old path. Every later commit to this path then landed
+                    # on the wrong file while the real one sat frozen -- 10,586
+                    # rows across 55 repositories. Record against the occupant,
+                    # which is the file that genuinely lives at this path.
+                    return occupant
                 # Carry the identity across the move.
                 self._by_path[path] = existing
                 self._pending_renames[existing] = path
