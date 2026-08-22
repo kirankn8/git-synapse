@@ -48,8 +48,15 @@ export const num = (n) => {
 export const fx = (v, d = 3) =>
   v === null || v === undefined || !Number.isFinite(Number(v)) ? '—' : Number(v).toFixed(d);
 
-export const pct = (v) =>
-  v === null || v === undefined || !Number.isFinite(Number(v)) ? '—' : (Number(v) * 100).toFixed(0) + '%';
+export const pct = (v) => {
+  if (v === null || v === undefined || !Number.isFinite(Number(v))) return '—';
+  const n = Number(v) * 100;
+  if (n === 0) return '0%';
+  // Rounding a real probability to "0%" states it never happens. Below the
+  // rounding floor, show enough digits to keep it distinguishable from zero.
+  if (n < 0.5) return n < 0.05 ? '<0.1%' : n.toFixed(1) + '%';
+  return n.toFixed(0) + '%';
+};
 
 export const bytes = (kb) => {
   if (!kb) return '—';
@@ -110,7 +117,17 @@ export async function api(path, params) {
     let detail = `${res.status} ${res.statusText}`;
     try {
       const body = await res.json();
-      if (body.detail) detail = body.detail;
+      if (Array.isArray(body.detail)) {
+        // FastAPI validation errors arrive as a list of objects; String() on
+        // them renders "[object Object]", which tells the user nothing.
+        detail = body.detail
+          .map((e) => `${(e.loc || []).slice(1).join('.') || 'input'}: ${e.msg || 'invalid'}`)
+          .join('; ');
+      } else if (typeof body.detail === 'string') {
+        detail = body.detail;
+      } else if (body.detail) {
+        detail = JSON.stringify(body.detail);
+      }
     } catch { /* non-JSON error body; keep the status line */ }
     throw new Error(detail);
   }
@@ -726,7 +743,11 @@ on('/repo/:id', async ({ id }, params) => {
     const pairs = await api(`/api/repos/${id}/pairs`, { measure: state.measure, limit: 300, min_support: 2 });
     body.append(
       h('div', { class: 'help' }, `Ranked by ${spec ? spec.label : state.measure}. ${spec ? spec.detail : ''}`),
-      card(`${pairs.pairs.length} pairs`, pairTable(pairs.pairs, spec, true)),
+      card(
+        pairs.pairs.length >= 300
+          ? `Top 300 pairs by ${spec ? spec.label : state.measure}`
+          : `${pairs.pairs.length} pairs`,
+        pairTable(pairs.pairs, spec, true)),
     );
   } else if (tab === 'files') {
     body.append(await repoFilesPanel(id, params));
@@ -1055,7 +1076,8 @@ on('/file/:id', async ({ id }, params) => {
         { class: 'toolbar' },
         h('div', { class: 'field' }, h('label', {}, 'Min shared commits'), supportInput),
         h('span', { class: 'spacer' }),
-        h('span', { class: 'card-sub' }, `${data.partners.length} partners`),
+        h('span', { class: 'card-sub' },
+          data.partners.length >= 200 ? `top ${data.partners.length} partners` : `${data.partners.length} partners`),
       ),
       card(
         'What changes together with this file',
@@ -1234,7 +1256,9 @@ on('/pair/:a/:b', async ({ a, b }) => {
   wrap.append(h('div', { class: 'section-title' }, 'Evidence'));
   wrap.append(
     card(
-      `${commits.commits.length} commits where both files changed`,
+      commits.commits.length < (detail.n_ab || 0)
+        ? `${commits.commits.length} of ${num(detail.n_ab)} commits where both files changed`
+        : `${commits.commits.length} commits where both files changed`,
       dataTable(
         commits.commits,
         [
@@ -1374,7 +1398,7 @@ on('/explore', async (_args, params) => {
   const files = await api('/api/files', { search: params.q, min_changes: Number(params.min || 0), limit: 300 });
   wrap.append(
     card(
-      `${files.count} matching files`,
+      files.count >= 300 ? `Top ${files.count} matching files` : `${files.count} matching files`,
       dataTable(
         files.files,
         [
@@ -1876,7 +1900,7 @@ on('/impact', async (_args, params) => {
 
   if (!repoId) {
     const top = await api('/api/crossrepo/pairs', { measure: state.measure, limit: 40, min_support: 8 });
-    wrap.append(card('Strongest repository couplings org-wide',
+    wrap.append(card(`Top 40 repository couplings by ${spec ? spec.label : state.measure}`,
       dataTable(top.pairs, [
         { key: 'repo_a', label: 'Repository A', render: (r) => h('span', { class: 'mono' }, r.repo_a) },
         { key: 'repo_b', label: 'Repository B', render: (r) => h('span', { class: 'mono' }, r.repo_b) },
@@ -1886,7 +1910,7 @@ on('/impact', async (_args, params) => {
         { key: 'confidence_ab', label: 'P(B|A)', num: true, render: (r) => pct(r.confidence_ab) },
         { key: 'confidence_ba', label: 'P(A|B)', num: true, render: (r) => pct(r.confidence_ba) },
         { key: 'score', label: 'Score', num: true, render: (r) => scoreCell(r.score, state.byKey.get(state.measure)) },
-      ], { initialSort: 'n_ab', onRow: (r) => go(`/impact?repo=${r.repo_b_id}&dir=upstream`) }),
+      ], { initialSort: 'score', onRow: (r) => go(`/impact?repo=${r.repo_b_id}&dir=upstream`) }),
       'Pick a repository above for its ranked impact list'));
     return wrap;
   }
@@ -1957,12 +1981,13 @@ on('/impact', async (_args, params) => {
 on('/repopair/:a/:b', async ({ a, b }) => {
   const [depsA, profile] = await Promise.all([
     api(`/api/repos/${b}/dependencies`),
-    api(`/api/repos/${a}/lag-profile/${b}`, { measure: 'confidence_ab' }).catch(() => null),
+    api(`/api/repos/${a}/lag-profile/${b}`, { measure: 'confidence_ab' }).catch((e) => ({ __failed: String(e.message || e) })),
   ]);
   const [repoA, repoB] = await Promise.all([api(`/api/repos/${a}`), api(`/api/repos/${b}`)]);
   const partners = await api(`/api/repos/${b}/impact`, { direction: 'upstream', limit: 200 });
   const edge = partners.edges.find((e) => String(e.source_repo_id) === String(a));
-  const sets = await api(`/api/repos/${a}/partners/${b}/change-sets`, { limit: 20 }).catch(() => ({ change_sets: [] }));
+  const sets = await api(`/api/repos/${a}/partners/${b}/change-sets`, { limit: 20 })
+    .catch((e) => ({ change_sets: [], __failed: String(e.message || e) }));
 
   const wrap = h('div');
   wrap.append(crumbs(['Impact', '/impact'], [`${repoA.name} → ${repoB.name}`]));
@@ -1984,7 +2009,11 @@ on('/repopair/:a/:b', async ({ a, b }) => {
 
   // Lag profile: two directional curves. If A precedes B, the forward curve
   // sits above the reverse one — that visual gap IS the directional evidence.
-  if (profile && profile.forward.length) {
+  if (profile && profile.__failed) {
+    wrap.append(h('div', { class: 'section-title' }, 'Directional lag profile'));
+    wrap.append(card('Could not load the lag profile', h('div', { class: 'empty' },
+      `This section failed to load, so it is not evidence of absence: ${profile.__failed}`)));
+  } else if (profile && profile.forward.length) {
     const W = 640, H = 170, PAD = 30;
     const all = [...profile.forward, ...profile.reverse];
     const maxV = Math.max(1e-9, ...all.map((r) => Number(r.value) || 0));
@@ -2016,7 +2045,10 @@ on('/repopair/:a/:b', async ({ a, b }) => {
       'The same 2×2 table, recomputed at each lag'));
   }
 
-  if (sets.change_sets.length) {
+  if (sets.__failed) {
+    wrap.append(card('Could not load the shared change sets', h('div', { class: 'empty' },
+      `This section failed to load, so it is not evidence of absence: ${sets.__failed}`)));
+  } else if (sets.change_sets.length) {
     wrap.append(h('div', { class: 'section-title' }, 'Shared change sets — the evidence'));
     wrap.append(card(`${sets.change_sets.length} change sets touching both repositories`,
       dataTable(sets.change_sets, [
