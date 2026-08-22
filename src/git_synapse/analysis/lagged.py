@@ -275,7 +275,7 @@ def rebuild(
             stats.rows_written += copy_rows("repo_lag_metric", columns, payload, conn=c)
             log.debug("lag %d: %d ordered pairs", lag, len(payload))
 
-        set_watermark("lagged", fingerprint)
+        set_watermark("lagged", fingerprint, conn=c)
         stats.duration_s = time.monotonic() - started
         log.info(
             "lagged coupling: %d repos x %d bins of %dh, lags %s -> %d rows in %.1fs",

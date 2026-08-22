@@ -643,7 +643,7 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 /* ------------------------------------------------------ impact & chains -- */
 
 /* Evidence tiers are load-bearing: declared/bump edges are validated at
-   AUC 0.86 in sample, discovery edges are not. The UI must never let them look alike. */
+   AUC 0.88 in sample, discovery edges are not. The UI must never let them look alike. */
 .tier { display: inline-flex; align-items: center; gap: 4px; }
 .tier-declared  { color: var(--ok); }
 .tier-bump      { color: var(--info); }

@@ -135,8 +135,21 @@ def manifest_paths(mirror: Path) -> list[tuple[str, str]]:
 
 
 def _parse_manifest_line(line: str, ecosystem: str) -> tuple[str, str] | None:
-    """Extract an internal ``(dep_name, version)`` from one manifest line."""
+    """Extract an internal ``(dep_name, version)`` from one manifest line.
+
+    A commented-out or excluded line is not a dependency. Both were being read as
+    one, and `declared` is the tier agents are told to trust above all others: a
+    line a developer commented out became the top-ranked impact edge for its
+    repository. ``exclude`` is the opposite of a requirement, so it must not
+    produce an edge either.
+    """
     if ecosystem == "go":
+        stripped = line.lstrip()
+        if stripped.startswith("//") or stripped.startswith("exclude "):
+            return None
+        # A trailing comment can still carry a module path; only the code before
+        # it declares anything.
+        line = line.split("//", 1)[0]
         match = _MODULE.search(line)
         return (match.group(1), match.group(2)) if match else None
 
@@ -406,9 +419,9 @@ def refresh_declared(
 
     def _run(c: psycopg.Connection) -> int:
         stale = "" if force else (
-            " AND (r.last_depbump_sha IS NULL"
+            " AND (r.last_declared_sha IS NULL"
             " OR r.head_sha IS NULL"
-            " OR r.last_depbump_sha <> r.head_sha)"
+            " OR r.last_declared_sha <> r.head_sha)"
         )
         rows = c.execute(
             f"""
@@ -476,6 +489,13 @@ def refresh_declared(
                 """
             )
             c.execute("DROP TABLE IF EXISTS tmp_dep")
+
+        # Record the watermark this pass consumed, so the next one can skip
+        # repositories whose HEAD has not moved.
+        c.execute(
+            "UPDATE repo SET last_declared_sha = head_sha WHERE id = ANY(%s)",
+            ([r[0] for r in rows],),
+        )
 
         total = int(c.execute("SELECT count(*) FROM repo_dependency").fetchone()[0])
         internal = int(

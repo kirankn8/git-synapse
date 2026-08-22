@@ -132,7 +132,7 @@ Set `REFRESH_CRON=*/5 * * * *` for near-real-time, or `0 * * * *` to be gentler.
 | Mirrors on disk | 11.1 GB |
 | Database | 8.5 GB |
 | API latency | 10–70 ms typical, 220 ms worst |
-| Prediction quality | **AUC 0.86** in sample within the declared candidate set; **0.69** held out in time |
+| Prediction quality | **AUC 0.88** in sample within the declared candidate set; **0.69** held out in time |
 
 ---
 
@@ -245,7 +245,7 @@ was not flattering to pure statistics:
 |---|---|---|
 | Best single measure over all ordered pairs | 0.80 | **0.63** |
 | Declared dependencies alone | — precise, but 4 of telemetry's 11 never co-change | — |
-| **Ensemble ranked within the declared set, in sample** | **0.859** | — |
+| **Ensemble ranked within the declared set, in sample** | **0.884** | — |
 | **The same, held out in time** (features pre-2025, labels after) | **0.685** | — |
 
 There is no cross-validation figure here on purpose. The ensemble is an
