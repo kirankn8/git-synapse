@@ -225,3 +225,32 @@ def test_change_set_counters_survive_a_partial_incremental_pass(three_repos):
         """
     )
     assert empty["n"] == 0, "empty change sets keep inflating N"
+
+
+def test_crossrepo_joint_and_marginals_share_one_population(three_repos):
+    """Both cells of a cross-repo contingency table must be counted the same way.
+
+    The joint was counted over the capped file set and the marginals over every
+    file, so the two cells described different populations. That understated
+    confidence by up to 3.5x, always downward, and worst where the evidence was
+    strongest -- large change sets are the ones the cap bites.
+    """
+    bad = query(
+        """
+        SELECT m.file_a_id, m.file_b_id, m.n_ab, m.n_a, m.n_b, m.n_total
+        FROM xrepo_file_pair_metric m
+        WHERE m.n_ab > m.n_a OR m.n_ab > m.n_b
+           OR m.n_a > m.n_total OR m.n_b > m.n_total
+           OR m.n_total - m.n_a - m.n_b + m.n_ab < 0
+        """
+    )
+    assert not bad, f"infeasible cross-repo contingency tables: {bad[:3]}"
+
+    out_of_range = query(
+        """
+        SELECT count(*) AS n FROM xrepo_file_pair_metric
+        WHERE confidence_ab < 0 OR confidence_ab > 1
+           OR confidence_ba < 0 OR confidence_ba > 1
+        """
+    )
+    assert out_of_range[0]["n"] == 0
