@@ -542,6 +542,75 @@ def test_feedback_deduplicates_on_identity_not_wording(db):
         execute("DELETE FROM feedback WHERE repo = %s", (fp_repo,))
 
 
+def test_feedback_survives_an_oversized_args_payload(db):
+    """A serialised JSON string cannot be trimmed to fit; the column is jsonb."""
+    from git_synapse.analysis.query import record_feedback
+    from git_synapse.db.engine import execute
+
+    fp_repo = "test/feedback-args"
+    execute("DELETE FROM feedback WHERE repo = %s", (fp_repo,))
+    try:
+        row = record_feedback(
+            kind="tool_error", tool="coupled_files", repo=fp_repo,
+            args={"paths": [f"a/long/path/number/{i}.go" for i in range(400)]},
+            detail="Reported with a large argument list.",
+        )
+        stored = query_one("SELECT args FROM feedback WHERE id = %s", (row["id"],))
+        assert stored["args"]["truncated"] is True
+        assert stored["args"]["preview"]
+    finally:
+        execute("DELETE FROM feedback WHERE repo = %s", (fp_repo,))
+
+
+def test_feedback_reopen_drops_the_resolution_that_closed_it(db):
+    """A reopened report must not still display the fix that closed it."""
+    from git_synapse.analysis.query import record_feedback, resolve_feedback
+    from git_synapse.db.engine import execute
+
+    fp_repo = "test/feedback-reopen"
+    execute("DELETE FROM feedback WHERE repo = %s", (fp_repo,))
+    try:
+        first = record_feedback(
+            kind="wrong_data", tool="coupled_files", repo=fp_repo,
+            expected="a partner that exists", detail="First sighting.",
+        )
+        resolve_feedback(first["id"], "fixed", "Corrected the join.")
+        again = record_feedback(
+            kind="wrong_data", tool="coupled_files", repo=fp_repo,
+            expected="a partner that exists", detail="Still happening.",
+        )
+        assert again["id"] == first["id"]
+        row = query_one(
+            "SELECT status, resolution, resolved_at FROM feedback WHERE id = %s",
+            (first["id"],),
+        )
+        assert row["status"] == "open"
+        assert row["resolution"] is None
+        assert row["resolved_at"] is None
+    finally:
+        execute("DELETE FROM feedback WHERE repo = %s", (fp_repo,))
+
+
+def test_feedback_without_context_does_not_collapse(db):
+    """With no tool, repo, path or expectation there is no identity to dedup on.
+
+    Fingerprinting those reports on context alone made every suggestion the same
+    row, silently discarding all but the first.
+    """
+    from git_synapse.analysis.query import record_feedback
+    from git_synapse.db.engine import execute
+
+    a = record_feedback(kind="suggestion", detail="Rank modules by centrality.")
+    b = record_feedback(kind="suggestion", detail="Support cargo manifests.")
+    try:
+        assert a["id"] != b["id"], "unrelated suggestions must stay separate"
+        repeat = record_feedback(kind="suggestion", detail="  RANK MODULES BY CENTRALITY.  ")
+        assert repeat["id"] == a["id"], "the same suggestion must still collapse"
+        assert repeat["occurrences"] == 2
+    finally:
+        execute("DELETE FROM feedback WHERE id = ANY(%s)", ([a["id"], b["id"]],))
+
+
 def test_feedback_rejects_opinions(db):
     """The log is for defects in Git Synapse, not disagreement with a score."""
     from git_synapse.analysis.query import record_feedback

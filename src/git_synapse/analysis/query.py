@@ -1149,11 +1149,20 @@ def record_feedback(
         raise ValueError("detail is required: describe the defect concretely")
 
     # Fingerprint on the identity of the defect, not its prose, so the same gap
-    # described in different words still collapses to one row.
-    seed = "|".join(
-        (kind, tool or "", repo or "", path or "", (expected or "").strip().lower()[:200])
-    )
+    # described in different words still collapses to one row. With no locating
+    # context there is no identity to collapse on, so fall back to the prose --
+    # otherwise two unrelated reports of the same kind become one and the second
+    # is discarded.
+    context = (tool or "", repo or "", path or "", (expected or "").strip().lower()[:200])
+    seed = "|".join((kind, *context) if any(context) else (kind, detail.strip().lower()[:200]))
     fingerprint = hashlib.sha256(seed.encode()).hexdigest()[:32]
+
+    # Cutting a serialised JSON string mid-token leaves invalid JSON, and the
+    # column is jsonb, so an oversized payload has to be replaced rather than
+    # trimmed.
+    payload = _json.dumps(args or {}, default=str)
+    if len(payload) > 4000:
+        payload = _json.dumps({"truncated": True, "preview": payload[:3800]})
 
     with connection() as conn:
         row = conn.execute(
@@ -1168,6 +1177,10 @@ def record_feedback(
                 -- A repeat of something already closed is a reopen.
                 status = CASE WHEN feedback.status IN ('fixed', 'wontfix')
                               THEN 'open' ELSE feedback.status END,
+                resolution = CASE WHEN feedback.status IN ('fixed', 'wontfix')
+                                  THEN NULL ELSE feedback.resolution END,
+                resolved_at = CASE WHEN feedback.status IN ('fixed', 'wontfix')
+                                   THEN NULL ELSE feedback.resolved_at END,
                 -- Keep the worse severity. GREATEST() on text would rank
                 -- 'low' above 'high' alphabetically, so rank explicitly.
                 severity = CASE
@@ -1181,7 +1194,7 @@ def record_feedback(
                 "kind": kind,
                 "severity": severity,
                 "tool": tool,
-                "args": _json.dumps(args or {}, default=str)[:4000],
+                "args": payload,
                 "repo": repo,
                 "path": path,
                 "expected": (expected or "")[:2000] or None,
