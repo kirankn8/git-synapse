@@ -1,0 +1,138 @@
+"""FastAPI application: the REST API and the static web UI.
+
+The API is deliberately thin. All real work lives in :mod:`git_synapse.analysis.query`
+and :mod:`git_synapse.ingest.pipeline`, so the MCP server and the CLI expose exactly
+the same behaviour without duplicating logic.
+"""
+
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from git_synapse.api.routes import router
+from git_synapse.config import get_config
+from git_synapse.db.engine import apply_schema, close_pool, wait_for_database
+
+log = logging.getLogger(__name__)
+
+
+def configure_logging() -> None:
+    cfg = get_config()
+    logging.basicConfig(
+        level=getattr(logging, cfg.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)-7s %(name)-28s %(message)s",
+    )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Wait for Postgres and apply the schema before serving traffic.
+
+    Compose starts the API alongside the database, so the first request can
+    otherwise arrive before Postgres is accepting connections.
+    """
+    configure_logging()
+    wait_for_database()
+    apply_schema()
+    # A run left in flight by a killed container would otherwise block the
+    # refresh endpoint indefinitely.
+    from git_synapse.ingest.pipeline import reconcile_stale_runs
+
+    reconcile_stale_runs()
+    log.info("git-synapse api ready")
+    yield
+    close_pool()
+
+
+app = FastAPI(
+    title="Git Synapse",
+    version="1.0.0",
+    summary="Change-coupling statistics over git history.",
+    description=(
+        "Ranks the files that historically change together, using 29 association "
+        "measures computed from commit co-occurrence. Built so a coding agent can "
+        "ask 'I am editing X, what else must change?' and get a statistically "
+        "grounded answer."
+    ),
+    lifespan=lifespan,
+    docs_url="/api/docs",
+    openapi_url="/api/openapi.json",
+    redoc_url=None,
+)
+
+_cfg = get_config()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=list(_cfg.server.cors_origins),
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(router, prefix="/api")
+
+
+@app.exception_handler(KeyError)
+async def _key_error_handler(_request, exc: KeyError) -> JSONResponse:
+    """Surface an unknown measure name as a 400 rather than a 500."""
+    return JSONResponse(status_code=400, content={"detail": str(exc).strip("'\"")})
+
+
+# --- static UI -------------------------------------------------------------
+# Mounted last so /api/* always wins. The SPA is plain ES modules with no build
+# step, which keeps the image free of a Node toolchain.
+_web_root = _cfg.server.web_root
+if _web_root.is_dir():
+    app.mount("/static", StaticFiles(directory=str(_web_root / "static")), name="static")
+
+    #: The UI uses the History API, so a deep link like /insights arrives as a
+    #: real path. Every non-API path therefore has to serve the shell and let the
+    #: client router take over -- without this, refreshing on /insights 404s.
+    _INDEX = _web_root / "index.html"
+
+    def _shell() -> FileResponse:
+        # no-store on the shell only. Hashed asset URLs would be cacheable, but
+        # this project has no build step to hash them, and a stale app.js after a
+        # redeploy silently renders half the routes as blank pages.
+        return FileResponse(
+            str(_INDEX),
+            headers={"Cache-Control": "no-store, must-revalidate"},
+        )
+
+    @app.get("/", include_in_schema=False)
+    async def index() -> FileResponse:
+        return _shell()
+
+    @app.get("/favicon.svg", include_in_schema=False)
+    async def favicon() -> FileResponse:
+        return FileResponse(str(_web_root / "static" / "favicon.svg"))
+
+    #: Client-side routes the SPA owns. Enumerated rather than matched with a
+    #: catch-all so a genuine typo still returns 404 instead of silently
+    #: rendering the shell.
+    SPA_ROUTES = (
+        "repos", "repo", "impact", "repopair", "crossrepo", "changeset",
+        "insights", "validation", "explore", "graph", "measures", "runs",
+        "run", "file", "pair", "dir",
+    )
+
+    @app.get("/{segment}", include_in_schema=False)
+    async def spa_root(segment: str):
+        if segment not in SPA_ROUTES:
+            raise HTTPException(status_code=404, detail=f"no route /{segment}")
+        return _shell()
+
+    @app.get("/{segment}/{rest:path}", include_in_schema=False)
+    async def spa_nested(segment: str, rest: str):
+        if segment not in SPA_ROUTES:
+            raise HTTPException(status_code=404, detail=f"no route /{segment}")
+        return _shell()
+
+else:  # pragma: no cover - only hit in a misconfigured deployment
+    log.warning("web root %s not found; UI will not be served", _web_root)

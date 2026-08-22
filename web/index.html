@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Git Synapse — change coupling</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <a class="brand" href="/" data-nav>
+        <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="6" cy="6" r="2.6"/><circle cx="18" cy="7" r="2.2"/>
+          <circle cx="12" cy="14" r="3"/><circle cx="5" cy="18" r="2"/>
+          <circle cx="19" cy="18" r="1.8"/>
+          <path d="M6 6 L12 14 M18 7 L12 14 M12 14 L5 18 M12 14 L19 18 M6 6 L18 7"/>
+        </svg>
+        <span class="brand-text">Git Synapse</span>
+      </a>
+
+      <nav class="mainnav" id="mainnav">
+        <a href="/" data-nav data-route="overview">Overview</a>
+        <a href="/repos" data-nav data-route="repos">Repositories</a>
+        <a href="/impact" data-nav data-route="impact">Impact</a>
+        <a href="/crossrepo" data-nav data-route="crossrepo">Cross-repo</a>
+        <a href="/insights" data-nav data-route="insights">Insights</a>
+        <a href="/explore" data-nav data-route="explore">Explore</a>
+        <a href="/graph" data-nav data-route="graph">Graph</a>
+        <a href="/measures" data-nav data-route="measures">Measures</a>
+        <a href="/validation" data-nav data-route="validation">Validation</a>
+        <a href="/runs" data-nav data-route="runs">Jobs</a>
+      </nav>
+
+      <div class="topbar-tools">
+        <div class="omnibox">
+          <svg viewBox="0 0 24 24" class="omnibox-icon" aria-hidden="true">
+            <circle cx="11" cy="11" r="6"/><path d="M15.5 15.5 L20 20"/>
+          </svg>
+          <input id="omnibox" type="search" placeholder="Search files and repositories…"
+                 autocomplete="off" spellcheck="false" aria-label="Search">
+          <kbd>/</kbd>
+          <div class="omnibox-results" id="omnibox-results" hidden></div>
+        </div>
+        <button class="icon-btn" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="measure-bar" id="measure-bar">
+      <span class="measure-bar-label">Ranking measure</span>
+      <div class="measure-chips" id="measure-chips"></div>
+      <select id="measure-select" class="measure-select" aria-label="All measures"></select>
+      <span class="measure-hint" id="measure-hint"></span>
+    </div>
+
+    <main id="view" class="view" tabindex="-1"></main>
+
+    <footer class="footer">
+      <span id="footer-stats" class="footer-stats"></span>
+      <span class="footer-links">
+        <a href="/api/docs" target="_blank" rel="noopener">API docs</a>
+        <a href="/measures" data-nav>29 measures</a>
+      </span>
+    </footer>
+  </div>
+
+  <div class="toast-stack" id="toasts" aria-live="polite"></div>
+
+  <script type="module" src="/static/app.js?v=2"></script>
+</body>
+</html>
