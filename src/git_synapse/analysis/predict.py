@@ -5,7 +5,9 @@ results from :mod:`git_synapse.analysis.validate`, all on this corpus, drive its
 design:
 
 1. **Statistics alone cannot tell direction.** Ranking all ~74,000 ordered
-   repository pairs by a single lagged measure reaches AUC 0.80 at best
+   repository pairs by a single lagged measure reaches AUC 0.80 at best (lag 0,
+   where a symmetric measure is 0.50 directional by construction; the best
+   directional accuracy anywhere is 0.63 at lag 4, where AUC is 0.74)
    (``russell_rao`` at lag 0) -- but its directional accuracy is only ~0.63.
    That combination is the tell: ``russell_rao`` is ``a / N``, pure joint
    frequency, so it scores well by ranking *both repos are busy* and is close to
@@ -15,12 +17,15 @@ design:
 2. **Structure is a decisive prior.** Restricting candidates to *declared*
    dependencies raises the base rate from 0.23% to 82% -- a ~350x lift -- before a
    single measure is evaluated. But structure alone is not enough either: of
-   telemetry's 11 declared internal modules, 4 have never once co-changed.
+   telemetry's 9 declared internal dependencies, 1 has never once co-changed.
 
-3. **Together they reach AUC ~0.93** (measured 0.928; 5-fold CV mean 0.91,
-   sd 0.05; bootstrap 95% CI [0.877, 0.973]). The CV mean moves by a few points
-   with the fold split, so the interval is the honest summary rather than the
-   point estimate. That is the configuration this module implements.
+3. **Together they reach AUC 0.86 in sample** (measured 0.859 over the shipped
+   `repo_impact.score`, restricted to declared candidates). Held out in time --
+   features from before 2025-01-01, labels from after -- it is 0.69. Treat 0.86
+   as the optimistic bound and 0.69 as the honest one. No cross-validation
+   figure is quoted: the ensemble has no fitted parameters, so folds train
+   nothing and their spread is subsample noise. That is the configuration this
+   module implements.
 
 The ensemble
 ------------

@@ -1774,14 +1774,14 @@ boot();
  * Render the evidence tier for a cross-repo edge.
  *
  * This is the most important piece of presentation in the app. Declared and
- * bump-backed edges were measured at AUC 0.93 against real dependency
+ * bump-backed edges were measured at AUC 0.86 in sample against real dependency
  * propagation; discovery edges are statistical only and unvalidated, and skew
  * toward merely busy repositories. Showing them identically would be
  * misleading, so tier is always rendered, never inferred from the score.
  */
 const tierBadge = (row) => {
   if (row.is_declared)
-    return h('span', { class: 'tier tier-declared', title: 'Declared dependency — validated tier (AUC 0.93)' },
+    return h('span', { class: 'tier tier-declared', title: 'Declared dependency — validated tier (AUC 0.86 in sample, 0.69 held out)' },
       h('i', { class: 'dot' }), 'declared');
   if (row.has_bump_history)
     return h('span', { class: 'tier tier-bump', title: 'Observed manifest bumps — ground truth' },
@@ -1848,7 +1848,7 @@ on('/impact', async (_args, params) => {
       ' — commits grouped by shared ticket key, or by one author’s work session. ',
       'Ranking is then done inside the ',
       h('strong', {}, 'declared dependency'),
-      ' set, which lifts the base rate from 0.23% to 82% and takes AUC to ~0.93. ',
+      ' set, which lifts the base rate from 0.23% to 82% and takes AUC to 0.86 in sample. ',
       h('strong', {}, 'Discovery'),
       ' rows fall outside that set and are unvalidated.',
     ),
@@ -2264,7 +2264,7 @@ on('/validation', async (_args, params) => {
     statTile('Candidate pairs', num(val.candidates), 'ordered repo pairs'),
     statTile('Base rate', pct(val.true_edges / Math.max(val.candidates, 1)), 'positives among all pairs'),
     statTile('Best AUC (global)', fx(val.measures[0] && val.measures[0].auc, 4), val.measures[0] ? val.measures[0].measure : ''),
-    statTile('Within declared set', '~0.93', 'the configuration actually used'),
+    statTile('Within declared set', '0.86', 'in sample; 0.69 held out in time'),
     statTile('Lift from structure', '~350×', 'base rate 0.23% → 82%')));
 
   wrap.append(h('div', { class: 'help', style: 'border-left-color:var(--warn)' },
@@ -2291,13 +2291,13 @@ on('/validation', async (_args, params) => {
   wrap.append(h('div', { class: 'card' }, h('div', { class: 'card-body' },
     h('p', { style: 'margin:0 0 9px;font-size:13px;color:var(--text-dim);line-height:1.6' },
       h('strong', { style: 'color:var(--text)' }, '1. A high AUC is not a useful answer. '),
-      'The best single measure over all ordered pairs reaches AUC 0.80 — but only ~0.63 directional accuracy. That measure is Russell-Rao, which is pure joint frequency, so it scores well by ranking “both repositories are busy” and is near a coin flip on which way the arrow points. Activity confounding is the cause.'),
+      'The best single measure over all ordered pairs reaches AUC 0.80 at lag 0 — where a symmetric measure is 0.50 directional by construction, not by measurement. The best directional accuracy anywhere is 0.63, at lag 4, where AUC is 0.74. That measure is Russell-Rao, which is pure joint frequency, so it scores well by ranking “both repositories are busy” and is near a coin flip on which way the arrow points. Activity confounding is the cause.'),
     h('p', { style: 'margin:0 0 9px;font-size:13px;color:var(--text-dim);line-height:1.6' },
       h('strong', { style: 'color:var(--text)' }, '2. Structure is a decisive prior. '),
-      'Restricting candidates to declared dependencies lifts the base rate from 0.23% to 82% before any measure is evaluated. But structure alone is not enough either — of telemetry’s 11 declared internal modules, 4 have never once co-changed.'),
+      'Restricting candidates to declared dependencies lifts the base rate from 0.23% to 82% before any measure is evaluated. But structure alone is not enough either — of telemetry’s 9 declared internal dependencies, 1 has never once co-changed.'),
     h('p', { style: 'margin:0;font-size:13px;color:var(--text-dim);line-height:1.6' },
-      h('strong', { style: 'color:var(--accent)' }, '3. Together they reach AUC ~0.93 '),
-      '(measured 0.928; 5-fold CV mean 0.91, sd 0.05; bootstrap 95% CI [0.877, 0.973]). The CV mean shifts a few points with the fold split, so the interval is the honest summary. That is what the Impact view uses, and why its rows carry an explicit evidence tier.'))));
+      h('strong', { style: 'color:var(--accent)' }, '3. Together they reach AUC 0.86 in sample '),
+      '(measured 0.859 over the shipped score, declared candidates only) and 0.69 held out in time. No cross-validation figure is quoted: the ensemble has no fitted parameters, so folds train nothing. A coupling-free baseline — the consumer repo\'s raw commit count — reaches 0.80 on the same task, so activity confounding is present inside the declared set too. That is what the Impact view uses, and why its rows carry an explicit evidence tier.'))));
   return wrap;
 });
 

@@ -85,7 +85,7 @@ scales** — never sort them into one list or compare their scores.
 
 | tier | meaning | what to do |
 |---|---|---|
-| `declared` | the consumer declares it in a manifest | measured AUC ~0.93 — act on it |
+| `declared` | the consumer declares it in a manifest | AUC 0.86 in sample, 0.69 held out — the best evidence there is; act on it |
 | `bump-backed` | an actual version bump was observed | ground truth — act on it |
 | `discovery` | statistical only | **unvalidated** — a lead to verify, not a fact |
 
@@ -207,7 +207,8 @@ inference.
 | Approach | AUC | Directional accuracy |
 |---|---|---|
 | Best single measure over all ordered repository pairs | 0.80 | **0.63** |
-| Ensemble ranked *within declared dependencies* | **0.928** | — |
+| Ensemble ranked *within declared dependencies*, in sample | **0.859** | — |
+| The same, held out in time (features pre-2025, labels after) | **0.685** | — |
 
 A high AUC is not the same as a useful answer. The measure topping the global
 table is pure joint frequency, which scores well by ranking *both repositories

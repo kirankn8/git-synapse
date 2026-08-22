@@ -54,7 +54,9 @@ paths such as signer -> packager -> runtime.
 TRUST THE EVIDENCE TIER, NOT THE SCORE. Cross-repo results carry an `evidence` \
 field, and the tiers are on DIFFERENT SCALES -- never sort them into one list:
   * `declared` / `bump-backed` -- structural or ground-truth evidence, measured at \
-    AUC ~0.93 against real dependency propagation. Act on these.
+    AUC 0.86 in sample against real dependency propagation, 0.69 held
+    out in time. The strongest evidence available here; act on these, but the
+    number is an in-sample bound, not a guarantee.
   * `discovery` -- statistical only, unvalidated, and prone to flagging merely \
     busy repositories. A lead to verify, not a fact.
 
@@ -554,7 +556,7 @@ def _resolve_repo(name: str) -> dict | None:
 def _impact_row(row: dict, name: str) -> dict:
     """Serialise one impact row with an explicit evidence tier."""
     if row["is_declared"]:
-        tier, note = "declared", "declared dependency; validated tier (AUC 0.93)"
+        tier, note = "declared", "declared dependency; validated tier (AUC 0.86 in sample)"
     elif row["has_bump_history"]:
         tier, note = "bump-backed", "observed manifest bumps; ground truth"
     else:
