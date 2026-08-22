@@ -601,3 +601,46 @@ def test_feedback_feeds_no_analytical_table(db):
         if "feedback" in text:
             offenders.append(module)
     assert not offenders, f"analytical modules must not reference feedback: {offenders}"
+
+
+def test_published_accuracy_figures_still_reproduce(db):
+    """The numbers in README, SKILL.md and the MCP instructions must be measured.
+
+    The headline figure was asserted in the first commit and never recomputed by
+    anything. It drifted to 0.928 against a real value of 0.859 and stayed there,
+    while every tier-trust instruction an agent reads cited it. This test fails
+    if the documented figure and the shipped scoring column part company again.
+    """
+    import re
+    from pathlib import Path
+
+    import numpy as np
+
+    from git_synapse.analysis.validate import ground_truth_edges
+
+    rows = query("SELECT source_repo_id, target_repo_id, score, is_declared FROM repo_impact")
+    declared = [r for r in rows if r["is_declared"]]
+    if len(declared) < 50:
+        pytest.skip("impact table not built")
+
+    truth = ground_truth_edges(min_bumps=2)
+    y = np.array([1 if (r["source_repo_id"], r["target_repo_id"]) in truth else 0
+                  for r in declared])
+    s = np.array([float(r["score"]) for r in declared])
+    if y.sum() in (0, len(y)):
+        pytest.skip("degenerate label set")
+
+    order = np.argsort(s)
+    ranks = np.empty(len(s), float)
+    ranks[order] = np.arange(1, len(s) + 1)
+    n1 = y.sum()
+    measured = (ranks[y == 1].sum() - n1 * (n1 + 1) / 2) / (n1 * (len(y) - n1))
+
+    readme = Path(__file__).resolve().parents[1] / "README.md"
+    published = [
+        float(m) for m in re.findall(r"\*\*(0\.8\d\d)\*\*", readme.read_text())
+    ]
+    assert published, "README no longer states an in-sample AUC"
+    assert abs(published[0] - measured) < 0.02, (
+        f"README publishes {published[0]}, shipped score measures {measured:.4f}"
+    )

@@ -132,7 +132,7 @@ Set `REFRESH_CRON=*/5 * * * *` for near-real-time, or `0 * * * *` to be gentler.
 | Mirrors on disk | 11.1 GB |
 | Database | 8.5 GB |
 | API latency | 10–70 ms typical, 220 ms worst |
-| Prediction quality | **AUC ~0.93** within the declared candidate set |
+| Prediction quality | **AUC 0.86** in sample within the declared candidate set; **0.69** held out in time |
 
 ---
 
@@ -245,10 +245,20 @@ was not flattering to pure statistics:
 |---|---|---|
 | Best single measure over all ordered pairs | 0.80 | **0.63** |
 | Declared dependencies alone | — precise, but 4 of telemetry's 11 never co-change | — |
-| **Ensemble ranked within the declared set** | **0.928** | — |
+| **Ensemble ranked within the declared set, in sample** | **0.859** | — |
+| **The same, held out in time** (features pre-2025, labels after) | **0.685** | — |
 
-5-fold CV mean 0.91 (sd 0.05); bootstrap 95% CI [0.877, 0.973]. The CV mean moves
-a few points with the fold split, so the interval is the honest summary.
+There is no cross-validation figure here on purpose. The ensemble is an
+unweighted mean of fixed measures with no fitted parameters, so folds train
+nothing and the spread across them is subsample noise, not generalisation error.
+The honest generalisation number is the held-out-in-time row above.
+
+Two caveats on the in-sample figure, both measured. Every declared candidate has
+at least one bump, so the label is "bumped once or more than once" -- a
+bump-frequency question, not purely a coupling one. And a coupling-free baseline,
+the consumer repository's raw commit count, reaches 0.803 on the same task
+against the ensemble's 0.859, so activity confounding is present inside the
+declared set too, not only outside it. 
 
 **A high AUC is not the same as a useful answer.** The measure that tops the
 global table is Russell-Rao — `a / N`, pure joint frequency — which scores 0.80 by
@@ -264,7 +274,7 @@ never mixes them in one sorted column:
 
 | Tier | Meaning | Trust |
 |---|---|---|
-| `declared` | the consumer declares it in a manifest | validated, AUC 0.93 |
+| `declared` | the consumer declares it in a manifest | validated, AUC 0.86 in sample |
 | `bump-backed` | an actual version bump was observed | ground truth |
 | `discovery` | statistical only | unvalidated — verify before acting |
 
