@@ -412,3 +412,100 @@ def test_credential_preflight_rejects_a_bad_token(monkeypatch):
             verify_credentials()
     finally:
         reset_config_cache()
+
+
+def test_deleted_partners_are_flagged_not_merely_scored(db):
+    """A partner that no longer exists must be reported as deleted.
+
+    38,716 deleted files remain coupling partners in this corpus, and an agent
+    cannot edit any of them. Age does not catch this: the case that prompted the
+    fix was a file deleted 50 days ago whose last co-change was also 50 days ago,
+    so no staleness threshold would have flagged it.
+    """
+    from git_synapse.mcp.server import _describe_currency
+
+    assert "DELETED" in _describe_currency(50, None, deleted=True)
+    assert "DELETED" in _describe_currency(0, "emerging", deleted=True), (
+        "deletion must win over a recent or emerging trend"
+    )
+    assert "DECAYING" in _describe_currency(400, "decaying")
+    assert "STALE" in _describe_currency(400, None)
+    assert "current" in _describe_currency(3, None)
+    assert _describe_currency(None, None) is None
+
+
+def test_coupled_files_exposes_currency_fields(db):
+    """The query must return what the MCP layer needs to judge currency."""
+    row = query_one(
+        """
+        SELECT f.id, r.name FROM file f JOIN repo r ON r.id = f.repo_id
+        WHERE EXISTS (SELECT 1 FROM file_pair p
+                       WHERE p.file_a_id = f.id OR p.file_b_id = f.id)
+        LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("no coupled files present")
+
+    from git_synapse.analysis.query import coupled_files
+
+    partners = coupled_files(row["id"], limit=3, min_support=1)
+    if not partners:
+        pytest.skip("no partners above threshold")
+    for key in ("days_since_co_change", "trend", "is_deleted", "last_co_change"):
+        assert key in partners[0], f"coupled_files must return {key}"
+
+
+def test_module_context_resolves_the_owning_module(db):
+    """A file must resolve to its deepest matching module, not the root.
+
+    Cross-repo analysis correctly finds no upstream for a monorepo whose internal
+    references all point at itself, so the module graph is the only structural
+    prior available there -- and it was previously discarded as a self-reference.
+    """
+    from git_synapse.analysis.query import module_context
+
+    row = query_one(
+        """
+        SELECT repo_id, count(*) AS n FROM module_dependency
+        GROUP BY repo_id ORDER BY n DESC LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("no module graph built; run `git-synapse depbump`")
+
+    repo_id = row["repo_id"]
+    edge = query_one(
+        "SELECT consumer_module, dep_module FROM module_dependency"
+        " WHERE repo_id = %s AND consumer_module <> '' LIMIT 1",
+        (repo_id,),
+    )
+    consumer = edge["consumer_module"]
+
+    ctx = module_context(repo_id, f"{consumer}/internal/deep/file.go")
+    assert ctx["owning_module"] == consumer, (
+        f"a file under {consumer}/ must resolve to it, got {ctx['owning_module']!r}"
+    )
+    assert edge["dep_module"] in ctx["declares"]
+
+    # The reverse direction is the one that matters for impact.
+    reverse = module_context(repo_id, f"{edge['dep_module']}/x.go")
+    assert consumer in reverse["declared_by"]
+
+
+def test_module_context_is_honest_about_single_module_repos(db):
+    """A repo with one module has no internal graph, and must say so."""
+    from git_synapse.analysis.query import module_context
+
+    row = query_one(
+        """
+        SELECT id FROM repo r
+        WHERE NOT EXISTS (SELECT 1 FROM module_dependency m WHERE m.repo_id = r.id)
+        LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("every repo has a module graph")
+    ctx = module_context(row["id"], "any/path.go")
+    assert ctx["modules"] == []
+    assert ctx["owning_module"] is None

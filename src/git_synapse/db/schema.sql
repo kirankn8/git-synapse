@@ -861,6 +861,8 @@ CREATE TABLE IF NOT EXISTS repo_dependency (
     dep_repo_id      BIGINT REFERENCES repo (id) ON DELETE CASCADE,
     dep_name         TEXT   NOT NULL,
     dep_version      TEXT,
+    -- Full path, not a basename: a monorepo declares different dependencies in
+    -- gateway/go.mod than in model-controller/go.mod, and both matter.
     manifest         TEXT   NOT NULL DEFAULT 'go.mod',
     ecosystem        TEXT   NOT NULL DEFAULT 'go',
     observed_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -868,6 +870,37 @@ CREATE TABLE IF NOT EXISTS repo_dependency (
 );
 
 CREATE INDEX IF NOT EXISTS repo_dependency_dep_idx ON repo_dependency (dep_repo_id);
+
+-- ---------------------------------------------------------------------------
+-- Intra-repository module graph.
+--
+-- A monorepo's real dependency structure lives in its own submodules, not in
+-- cross-repo edges. `platform` has 14 go.mod files and every internal
+-- reference in them points at itself (platform/apis, /gateway, /models,
+-- /pkg) -- so cross-repo analysis correctly finds no upstream, and the structure
+-- that actually matters was being discarded as a self-reference.
+--
+-- This is the same structural prior that lifts cross-repo ranking from AUC 0.80
+-- to 0.93, applied inside a repository: "you changed gateway/, which declares
+-- apis, models and pkg". Behavioural file coupling cannot state that as cleanly,
+-- because a module boundary is a fact rather than a correlation.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS module_dependency (
+    repo_id         BIGINT NOT NULL REFERENCES repo (id) ON DELETE CASCADE,
+    -- Directory owning the manifest. '' is the repository root.
+    consumer_module TEXT   NOT NULL,
+    -- Module path relative to the repository, as declared. '' is the root module.
+    dep_module      TEXT   NOT NULL,
+    manifest        TEXT   NOT NULL,
+    ecosystem       TEXT   NOT NULL DEFAULT 'go',
+    dep_version     TEXT,
+    observed_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (repo_id, consumer_module, dep_module, manifest)
+);
+
+CREATE INDEX IF NOT EXISTS module_dependency_repo_idx ON module_dependency (repo_id);
+CREATE INDEX IF NOT EXISTS module_dependency_dep_idx  ON module_dependency (repo_id, dep_module);
 
 -- ---------------------------------------------------------------------------
 -- Impact prediction: the ranked answer to "I am changing X, what else?"
@@ -1032,5 +1065,5 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 INSERT INTO meta (key, value)
-VALUES ('schema_version', '10'::jsonb)
+VALUES ('schema_version', '11'::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();

@@ -275,7 +275,18 @@ def coupled_files(
         )
         SELECT p.*, f.path, f.dir_path, f.basename, f.extension, f.repo_id,
                f.change_count, f.is_deleted, r.full_name AS repo,
-               fp.last_co_change, fp.first_co_change, fp.distinct_authors, fp.w_ab
+               fp.last_co_change, fp.first_co_change, fp.distinct_authors, fp.w_ab,
+               -- Recency and trend, so a caller cannot mistake a completed
+               -- refactor for live coupling. A lifetime score says nothing about
+               -- whether the relationship still holds, and reading a raw
+               -- timestamp to work that out is a step callers skip.
+               CASE WHEN fp.last_co_change IS NOT NULL
+                    THEN EXTRACT(DAY FROM (now() - fp.last_co_change))::int
+               END AS days_since_co_change,
+               d.trend,
+               d.n_ab_recent,
+               d.n_ab_historic,
+               d.delta AS trend_delta
         FROM partners p
         JOIN file f ON f.id = p.other_id
         JOIN repo r ON r.id = f.repo_id
@@ -283,6 +294,10 @@ def coupled_files(
                ON fp.repo_id = f.repo_id
               AND fp.file_a_id = LEAST(%(file_id)s, p.other_id)
               AND fp.file_b_id = GREATEST(%(file_id)s, p.other_id)
+        LEFT JOIN pair_drift d
+               ON d.repo_id = f.repo_id
+              AND d.file_a_id = LEAST(%(file_id)s, p.other_id)
+              AND d.file_b_id = GREATEST(%(file_id)s, p.other_id)
         ORDER BY p.{order} DESC NULLS LAST
         LIMIT %(limit)s
         """,
@@ -1024,3 +1039,55 @@ def recent_change_sets(
         """,
         params,
     )
+
+
+# ---------------------------------------------------------------------------
+# Intra-repository module graph
+# ---------------------------------------------------------------------------
+
+
+def module_context(repo_id: int, path: str) -> dict:
+    """The module owning ``path``, what it declares, and what declares it.
+
+    In a monorepo this is the structural prior that cross-repo analysis cannot
+    provide, because every internal reference points back at the same repository.
+    The reverse direction usually matters more: changing a shared module is a
+    change to everything that declares it, and no co-change score states that as
+    plainly as the manifest does.
+
+    Returns an empty ``modules`` list for a single-module repository, which is
+    the correct answer rather than an error.
+    """
+    rows = query(
+        """
+        SELECT DISTINCT consumer_module, dep_module, manifest
+        FROM module_dependency WHERE repo_id = %(repo)s
+        """,
+        {"repo": repo_id},
+    )
+    if not rows:
+        return {"owning_module": None, "declares": [], "declared_by": [], "modules": []}
+
+    modules = sorted({r["consumer_module"] for r in rows} | {r["dep_module"] for r in rows})
+
+    # The owning module is the longest module path that prefixes this file, so a
+    # file under gateway/internal/app belongs to `gateway` rather than the root.
+    normalised = path.strip().lstrip("./")
+    owning = ""
+    for module in modules:
+        if not module:
+            continue
+        if normalised == module or normalised.startswith(module + "/"):
+            if len(module) > len(owning):
+                owning = module
+
+    return {
+        "owning_module": owning or "",
+        "declares": sorted(
+            {r["dep_module"] for r in rows if r["consumer_module"] == owning}
+        ),
+        "declared_by": sorted(
+            {r["consumer_module"] for r in rows if r["dep_module"] == owning}
+        ),
+        "modules": modules,
+    }
