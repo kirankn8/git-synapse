@@ -316,6 +316,40 @@ def _build_change_sets(
         ON CONFLICT DO NOTHING
         """
     )
+    # Counters must come from actual membership, not from the slice this pass
+    # happened to see. An incremental run scopes in every commit by an affected
+    # author, including their commits under tickets that were NOT re-partitioned,
+    # so the upsert above overwrites those sets' counts with a fragment of
+    # themselves. n_repos then gates cross-repo pairing, so a fragment both
+    # dropped real pairs and let sprawling sets past the fan-out cap.
+    conn.execute(
+        """
+        UPDATE change_set cs
+           SET n_commits = m.n_commits, n_repos = m.n_repos,
+               first_at = m.first_at, last_at = m.last_at
+        FROM (
+            SELECT csc.change_set_id, count(*) AS n_commits,
+                   count(DISTINCT csc.repo_id) AS n_repos,
+                   min(c.committed_at) AS first_at, max(c.committed_at) AS last_at
+            FROM change_set_commit csc
+            JOIN commit c ON c.id = csc.commit_id
+            GROUP BY csc.change_set_id
+        ) m
+        WHERE m.change_set_id = cs.id
+          AND (cs.n_commits, cs.n_repos, cs.first_at, cs.last_at)
+              IS DISTINCT FROM (m.n_commits, m.n_repos, m.first_at, m.last_at)
+        """
+    )
+    # A set whose commits all went away is not eligible for anything, and left in
+    # place it keeps inflating N -- the denominator of every cross-repo measure.
+    conn.execute(
+        """
+        DELETE FROM change_set cs
+        WHERE NOT EXISTS (
+            SELECT 1 FROM change_set_commit x WHERE x.change_set_id = cs.id
+        )
+        """
+    )
     conn.execute(
         """
         UPDATE change_set cs SET n_files = sub.n
