@@ -42,6 +42,7 @@ than no claim.
 | `explain_repo_pair(a, b)` | Declared status, every observed bump, exact upstream commits consumed |
 | `crossrepo_files(repo, path)` | Which specific file in another repository pairs with this one |
 | `list_repositories()`, `list_measures()` | What exists; the measure catalogue with caveats |
+| `report_gap(kind, detail, ...)` | **When Git Synapse itself is wrong.** See below |
 
 Optional arguments worth knowing: `measure`, `min_support`, `limit` on
 `coupled_files`; `direction` and `max_depth` on `coupling_chain`;
@@ -134,6 +135,28 @@ The reverse direction is the one that matters: changing a shared module is a
 change to everything that declares it. A file in a widely-declared module
 warrants more care than any co-change score conveys, and a file whose module
 declares others is a hint that the behaviour you want may belong in one of them.
+
+## If Git Synapse is wrong, say so
+
+`report_gap` records a defect in Git Synapse itself: data missing that should be
+indexed, a value that contradicts the repository, something correct once and now
+stale, a tool that failed, a repository or path not covered. Include what you
+expected and what you got, so it is reproducible.
+
+Every improvement made on the first day of use came from a session noticing
+exactly that — monorepo manifests below the root were never scanned, deleted
+files were still ranked as editable partners, a monorepo's own module graph was
+discarded. All three were found this way and are now fixed.
+
+Two limits, both deliberate:
+
+- It is **not** a way to disagree with a score or suppress a suggestion. Use
+  judgment for that and say so in your report to the human instead.
+- Reports feed **no** measure, score or ranking. Letting sessions write into the
+  coupling data would close a confirmation loop: Git Synapse suggests a pair, the
+  agent edits both files, the commit strengthens the pair, Git Synapse suggests it
+  more confidently. Agent-authored commits are already ~16% of the last week of
+  history, so that risk is live.
 
 ## Direction is the useful part
 

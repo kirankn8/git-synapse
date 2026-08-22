@@ -678,6 +678,36 @@ def validation(
 
 
 # ---------------------------------------------------------------------------
+# Feedback: defects in Git Synapse reported by the sessions using it
+# ---------------------------------------------------------------------------
+
+
+@router.get("/feedback", tags=["feedback"])
+def feedback(
+    status: str | None = "open",
+    kind: str | None = None,
+    limit: int = Query(50, ge=1, le=500),
+) -> dict:
+    """Defects reported against Git Synapse, most-hit first."""
+    return {
+        "summary": q.feedback_summary(),
+        "reports": q.list_feedback(status, kind, limit),
+    }
+
+
+@router.post("/feedback/{feedback_id}/resolve", tags=["feedback"])
+def resolve_feedback(feedback_id: int, status: str, resolution: str = "") -> dict:
+    """Close or reclassify a report. A human action, not an agent's."""
+    try:
+        ok = q.resolve_feedback(feedback_id, status, resolution)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not ok:
+        raise HTTPException(404, f"report {feedback_id} not found")
+    return {"id": feedback_id, "status": status}
+
+
+# ---------------------------------------------------------------------------
 # Ingest control
 # ---------------------------------------------------------------------------
 

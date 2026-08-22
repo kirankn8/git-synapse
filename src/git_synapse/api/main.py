@@ -119,7 +119,7 @@ if _web_root.is_dir():
     SPA_ROUTES = (
         "repos", "repo", "impact", "repopair", "crossrepo", "changeset",
         "insights", "validation", "explore", "graph", "measures", "runs",
-        "run", "file", "pair", "dir",
+        "run", "file", "pair", "dir", "feedback",
     )
 
     @app.get("/{segment}", include_in_schema=False)

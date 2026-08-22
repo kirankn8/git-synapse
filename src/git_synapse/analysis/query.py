@@ -1091,3 +1091,167 @@ def module_context(repo_id: int, path: str) -> dict:
         ),
         "modules": modules,
     }
+
+
+# ---------------------------------------------------------------------------
+# Feedback: defects in Git Synapse reported by the sessions that use it
+# ---------------------------------------------------------------------------
+
+#: Report kinds accepted. Constrained so the table stays a defect log rather
+#: than a comment box.
+FEEDBACK_KINDS = (
+    "missing_data",   # something that should be indexed is absent
+    "wrong_data",     # a value contradicts the repository
+    "stale_data",     # correct once, no longer true
+    "tool_error",     # a tool failed or returned something unusable
+    "coverage_gap",   # a repo, path or ecosystem is not covered
+    "suggestion",     # a concrete improvement, not a general opinion
+)
+
+FEEDBACK_SEVERITIES = ("low", "medium", "high")
+
+
+def record_feedback(
+    kind: str,
+    detail: str,
+    severity: str = "medium",
+    tool: str | None = None,
+    args: dict | None = None,
+    repo: str | None = None,
+    path: str | None = None,
+    expected: str | None = None,
+    observed: str | None = None,
+) -> dict:
+    """Record a defect in Git Synapse, deduplicating on its content.
+
+    Writes only to ``feedback``, which nothing else reads. See the table comment
+    in ``schema.sql`` for why that boundary exists.
+
+    A repeat of the same defect increments ``occurrences`` rather than adding a
+    row, so the count doubles as a priority signal: a gap twenty sessions hit
+    matters more than one seen once.
+
+    Raises:
+        ValueError: on an unknown kind or severity, or an empty detail.
+    """
+    import hashlib
+    import json as _json
+
+    from git_synapse.db.engine import connection
+
+    if kind not in FEEDBACK_KINDS:
+        raise ValueError(
+            f"unknown kind {kind!r}; expected one of {', '.join(FEEDBACK_KINDS)}"
+        )
+    if severity not in FEEDBACK_SEVERITIES:
+        raise ValueError(f"unknown severity {severity!r}")
+    if not (detail or "").strip():
+        raise ValueError("detail is required: describe the defect concretely")
+
+    # Fingerprint on the identity of the defect, not its prose, so the same gap
+    # described in different words still collapses to one row.
+    seed = "|".join(
+        (kind, tool or "", repo or "", path or "", (expected or "").strip().lower()[:200])
+    )
+    fingerprint = hashlib.sha256(seed.encode()).hexdigest()[:32]
+
+    with connection() as conn:
+        row = conn.execute(
+            """
+            INSERT INTO feedback (kind, severity, tool, args, repo, path,
+                                  expected, observed, detail, fingerprint)
+            VALUES (%(kind)s, %(severity)s, %(tool)s, %(args)s::jsonb, %(repo)s,
+                    %(path)s, %(expected)s, %(observed)s, %(detail)s, %(fp)s)
+            ON CONFLICT (fingerprint) DO UPDATE SET
+                occurrences  = feedback.occurrences + 1,
+                last_seen_at = now(),
+                -- A repeat of something already closed is a reopen.
+                status = CASE WHEN feedback.status IN ('fixed', 'wontfix')
+                              THEN 'open' ELSE feedback.status END,
+                -- Keep the worse severity. GREATEST() on text would rank
+                -- 'low' above 'high' alphabetically, so rank explicitly.
+                severity = CASE
+                    WHEN 'high'   IN (feedback.severity, EXCLUDED.severity) THEN 'high'
+                    WHEN 'medium' IN (feedback.severity, EXCLUDED.severity) THEN 'medium'
+                    ELSE 'low'
+                END
+            RETURNING id, occurrences, status, first_seen_at
+            """,
+            {
+                "kind": kind,
+                "severity": severity,
+                "tool": tool,
+                "args": _json.dumps(args or {}, default=str)[:4000],
+                "repo": repo,
+                "path": path,
+                "expected": (expected or "")[:2000] or None,
+                "observed": (observed or "")[:2000] or None,
+                "detail": detail[:4000],
+                "fp": fingerprint,
+            },
+        ).fetchone()
+
+    return {
+        "id": int(row[0]),
+        "occurrences": int(row[1]),
+        "status": row[2],
+        "first_seen": str(row[3]),
+        "deduplicated": int(row[1]) > 1,
+    }
+
+
+def list_feedback(
+    status: str | None = "open", kind: str | None = None, limit: int = 50
+) -> list[dict]:
+    """Reported defects, most-hit first."""
+    clauses = ["1=1"]
+    params: dict[str, Any] = {"limit": _clamp_limit(limit)}
+    if status:
+        clauses.append("status = %(status)s")
+        params["status"] = status
+    if kind:
+        clauses.append("kind = %(kind)s")
+        params["kind"] = kind
+    return query(
+        f"""
+        SELECT * FROM feedback
+        WHERE {' AND '.join(clauses)}
+        ORDER BY occurrences DESC, last_seen_at DESC
+        LIMIT %(limit)s
+        """,
+        params,
+    )
+
+
+def resolve_feedback(feedback_id: int, status: str, resolution: str) -> bool:
+    """Close or reclassify a report. Human action, not an agent's."""
+    from git_synapse.db.engine import execute
+
+    if status not in ("open", "investigating", "fixed", "wontfix"):
+        raise ValueError(f"unknown status {status!r}")
+    return execute(
+        """
+        UPDATE feedback SET status = %s, resolution = %s,
+               resolved_at = CASE WHEN %s IN ('fixed','wontfix') THEN now() END
+        WHERE id = %s
+        """,
+        (status, resolution[:2000], status, feedback_id),
+    ) > 0
+
+
+def feedback_summary() -> dict:
+    """Counts for the dashboard."""
+    return query_one(
+        """
+        SELECT
+          count(*)                                          AS total,
+          count(*) FILTER (WHERE status='open')             AS open,
+          count(*) FILTER (WHERE status='fixed')            AS fixed,
+          count(*) FILTER (WHERE severity='high'
+                             AND status='open')             AS open_high,
+          COALESCE(sum(occurrences), 0)                     AS total_hits,
+          count(*) FILTER (WHERE last_seen_at > now() - interval '24 hours')
+                                                            AS seen_today
+        FROM feedback
+        """
+    ) or {}

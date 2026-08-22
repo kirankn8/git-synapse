@@ -76,7 +76,14 @@ Scores come from 29 association measures over co-occurrence. NPMI is the default
 bounded to [-1, 1] and resistant to the rare-item bias that plagues raw PMI. Ask \
 for `log_likelihood_ratio` when you need statistical confidence, or \
 `confidence_ab` for "will I have to touch it". `list_measures` returns all of \
-them with caveats.\
+them with caveats.
+
+IF GIT SYNAPSE ITSELF IS WRONG, say so with `report_gap`: data missing that should be \
+indexed, a value that contradicts the repository, something correct once and now \
+stale, a tool that failed, a repository or path not covered. Every improvement \
+made on the first day of use came from someone noticing exactly that. Reports go \
+to a defect log that feeds no measure or score, so this is not a way to suppress \
+a suggestion or to disagree with a number -- it is for when the tool is broken.\
 """
 
 server = MCPServer(
@@ -768,6 +775,79 @@ def list_repositories(search: str | None = None, limit: int = 40) -> dict:
             }
             for r in rows
         ],
+    }
+
+
+@server.tool(
+    name="report_gap",
+    title="Report a defect in Git Synapse itself",
+    description=(
+        "Report that Git Synapse's own data or tooling is wrong: something missing "
+        "that should be indexed, a value that contradicts the repository, data "
+        "that was correct once and no longer is, a tool that failed, or a "
+        "repository or path that should be covered and is not. "
+        "Use this when you notice Git Synapse is the problem -- not to disagree with a "
+        "coupling score, and not to suppress a suggestion. Reports go to a defect "
+        "log that feeds no measure, score or ranking."
+    ),
+)
+def report_gap(
+    kind: str,
+    detail: str,
+    severity: str = "medium",
+    tool: str | None = None,
+    repo: str | None = None,
+    path: str | None = None,
+    expected: str | None = None,
+    observed: str | None = None,
+) -> dict:
+    """File a defect against Git Synapse.
+
+    Args:
+        kind: one of ``missing_data``, ``wrong_data``, ``stale_data``,
+            ``tool_error``, ``coverage_gap``, ``suggestion``.
+        detail: what is wrong, concretely enough to reproduce. Required.
+        severity: ``low``, ``medium`` or ``high``. High means it would mislead
+            someone into a wrong change.
+        tool: the Git Synapse tool involved, if any.
+        repo: repository the problem concerns.
+        path: file path the problem concerns.
+        expected: what the repository or history actually shows.
+        observed: what Git Synapse returned instead.
+
+    Returns:
+        The report id and how many times this same defect has been seen. A
+        repeat increments the count rather than creating a duplicate, so the
+        count is a priority signal.
+    """
+    try:
+        result = q.record_feedback(
+            kind=kind,
+            detail=detail,
+            severity=severity,
+            tool=tool,
+            args={"repo": repo, "path": path},
+            repo=repo,
+            path=path,
+            expected=expected,
+            observed=observed,
+        )
+    except ValueError as exc:
+        return {"error": str(exc), "valid_kinds": list(q.FEEDBACK_KINDS)}
+
+    return {
+        "recorded": True,
+        "id": result["id"],
+        "occurrences": result["occurrences"],
+        "note": (
+            f"Seen {result['occurrences']} times; first on {result['first_seen'][:10]}."
+            if result["deduplicated"]
+            else "First report of this defect."
+        ),
+        "reminder": (
+            "This is a defect log for Git Synapse, not a correction to the coupling "
+            "data. Nothing you write here changes a score."
+        ),
     }
 
 
