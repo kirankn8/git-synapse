@@ -24,8 +24,6 @@ log = logging.getLogger(__name__)
 
 #: Measure keys that may be used for ordering. Restricted to the registry so a
 #: caller-supplied string can never be interpolated into SQL unchecked.
-SORTABLE = {spec.key for spec in MEASURES} | {"n_ab", "w_ab", "last_co_change"}
-
 
 def _clamp_limit(limit: int | None) -> int:
     cfg = get_config().analysis
@@ -41,7 +39,10 @@ def _safe_order(measure: str) -> str:
         KeyError: if the key is not a known measure or pair column.
     """
     key = (measure or DEFAULT_MEASURE).strip().lower()
-    if key in {"n_ab", "w_ab", "last_co_change"}:
+    # Only n_ab is projected by every query that orders on this. w_ab and
+    # last_co_change were accepted here and then failed at the database on the
+    # seven endpoints whose CTEs do not select them.
+    if key == "n_ab":
         return key
     return resolve(key).key
 
@@ -143,7 +144,7 @@ def search_files(
     if term:
         clauses.append("f.path ILIKE %(term)s")
         params["term"] = f"%{term}%"
-    if repo_id:
+    if repo_id is not None:
         clauses.append("f.repo_id = %(repo_id)s")
         params["repo_id"] = repo_id
     if extension:
@@ -210,7 +211,7 @@ def file_extensions(repo_id: int | None = None) -> list[dict]:
     """Extension histogram, for the UI filter."""
     clause = "WHERE extension IS NOT NULL"
     params: dict[str, Any] = {}
-    if repo_id:
+    if repo_id is not None:
         clause += " AND repo_id = %(repo_id)s"
         params["repo_id"] = repo_id
     return query(
@@ -487,7 +488,7 @@ def coupling_graph(
     if min_score is not None:
         filters.append(f"m.{order} >= %(min_score)s")
         params["min_score"] = min_score
-    if center_file_id:
+    if center_file_id is not None:
         filters.append("(m.file_a_id = %(center)s OR m.file_b_id = %(center)s)")
         params["center"] = center_file_id
 
@@ -556,7 +557,7 @@ def hotspots(repo_id: int | None = None, limit: int = 25) -> list[dict]:
     """Most-changed files -- the churn leaders."""
     clause = "WHERE f.change_count > 0"
     params: dict[str, Any] = {"limit": _clamp_limit(limit)}
-    if repo_id:
+    if repo_id is not None:
         clause += " AND f.repo_id = %(repo_id)s"
         params["repo_id"] = repo_id
     return query(
@@ -587,7 +588,7 @@ def strongest_pairs(
         "limit": _clamp_limit(limit),
         "min_support": max(min_support, 1),
     }
-    if repo_id:
+    if repo_id is not None:
         clause += " AND m.repo_id = %(repo_id)s"
         params["repo_id"] = repo_id
     return query(
@@ -962,7 +963,7 @@ def crossrepo_graph(
         "min_support": max(min_support, 1),
     }
     filters = ["m.n_ab >= %(min_support)s"]
-    if center_repo_id:
+    if center_repo_id is not None:
         filters.append("(m.repo_a_id = %(center)s OR m.repo_b_id = %(center)s)")
         params["center"] = center_repo_id
 
@@ -1114,7 +1115,10 @@ def module_context(repo_id: int, path: str) -> dict:
 
     # The owning module is the longest module path that prefixes this file, so a
     # file under gateway/internal/app belongs to `gateway` rather than the root.
-    normalised = path.strip().lstrip("./")
+    # lstrip("./") strips a *character set*, so ".github/x" became "github/x".
+    normalised = path.strip()
+    while normalised.startswith("./") or normalised.startswith("/"):
+        normalised = normalised[2:] if normalised.startswith("./") else normalised[1:]
     owning = ""
     for module in modules:
         if not module:

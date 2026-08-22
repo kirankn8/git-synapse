@@ -544,13 +544,26 @@ def explain_repo_pair(repo_a: str, repo_b: str) -> dict:
 
 
 def _resolve_repo(name: str) -> dict | None:
-    """Resolve a repository by exact name, then by fuzzy search."""
+    """Resolve a repository by exact name, then by unambiguous suffix.
+
+    A substring match is deliberately not a resolution. Falling back to the first
+    of them meant a typo answered confidently about a different repository --
+    "telem" resolved to telemetry, "contr" to contracts, and an empty string to whichever
+    repository happened to have the most commits, complete with evidence tiers
+    and nothing marking it as a guess.
+    """
+    if not (name or "").strip():
+        return None
+    key = name.strip().lower()
     matches = q.list_repos(search=name, limit=8)
-    exact = [r for r in matches if r["name"].lower() == name.lower()]
+    exact = [
+        r for r in matches
+        if r["name"].lower() == key or r["full_name"].lower() == key
+    ]
     if exact:
         return exact[0]
-    suffix = [r for r in matches if r["full_name"].lower().endswith(f"/{name.lower()}")]
-    return suffix[0] if suffix else (matches[0] if matches else None)
+    suffix = [r for r in matches if r["full_name"].lower().endswith(f"/{key}")]
+    return suffix[0] if len(suffix) == 1 else None
 
 
 def _impact_row(row: dict, name: str) -> dict:
@@ -595,6 +608,14 @@ def module_context(repo: str, path: str) -> dict:
     target = _resolve_repo(repo)
     if target is None:
         return {"error": f"no repository matching {repo!r}"}
+
+    # Every other path-taking tool rejects an unknown path. This one answered
+    # "it is a leaf", which an agent reads as "nothing depends on this".
+    if q.resolve_file(target["full_name"], path) is None:
+        return {
+            "error": f"no file {path!r} found in repository {target['full_name']!r}",
+            "hint": "call search_files to find the right path",
+        }
 
     ctx = q.module_context(target["id"], path)
     if not ctx["modules"]:
@@ -656,7 +677,7 @@ def search_files(
     if repo:
         matches = q.list_repos(search=repo, limit=5)
         exact = [r for r in matches if r["full_name"].lower().endswith(f"/{repo.lower()}")]
-        chosen = exact[0] if exact else (matches[0] if matches else None)
+        chosen = exact[0] if exact else None
         if chosen is None:
             return {"error": f"no repository matching {repo!r}"}
         repo_id = chosen["id"]
@@ -732,7 +753,7 @@ def repo_hotspots(repo: str, limit: int = 20) -> dict:
     """Return churn leaders for one repository."""
     matches = q.list_repos(search=repo, limit=5)
     exact = [r for r in matches if r["full_name"].lower().endswith(f"/{repo.lower()}")]
-    chosen = exact[0] if exact else (matches[0] if matches else None)
+    chosen = exact[0] if exact else None
     if chosen is None:
         return {"error": f"no repository matching {repo!r}"}
 
