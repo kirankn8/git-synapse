@@ -464,13 +464,31 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
         if removed:
             log.info("repo %d: removed %d commit(s) no longer in git", repo_id, removed)
 
-        # Re-derive aggregates only when the atomic data actually moved.
-        if stats.commits_written > 0 or removed or force_full:
+        # Re-derive aggregates when the atomic data moved, or when a previous
+        # pass ingested commits but failed before aggregating them. Without the
+        # second condition that failure was permanent: the commit watermark had
+        # already advanced, so every later run saw nothing to do.
+        with connection() as conn:
+            stale_aggregate = bool(
+                conn.execute(
+                    "SELECT last_aggregate_sha IS DISTINCT FROM last_ingested_sha"
+                    " FROM repo WHERE id = %s",
+                    (repo_id,),
+                ).fetchone()[0]
+            )
+        if stats.commits_written > 0 or removed or force_full or stale_aggregate:
             with connection() as conn:
                 agg = rebuild_repo(repo_id, conn)
                 result.pairs = agg.file_pairs
             with connection() as conn:
                 score_repo(repo_id, conn)
+            # Only now is the repository's derived state actually current.
+            with connection() as conn:
+                conn.execute(
+                    "UPDATE repo SET last_aggregate_sha = last_ingested_sha"
+                    " WHERE id = %s",
+                    (repo_id,),
+                )
 
         with connection() as conn:
             conn.execute(

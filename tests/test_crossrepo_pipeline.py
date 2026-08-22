@@ -254,3 +254,52 @@ def test_crossrepo_joint_and_marginals_share_one_population(three_repos):
         """
     )
     assert out_of_range[0]["n"] == 0
+
+
+def test_a_failed_aggregation_is_retried_rather_than_stranded(scratch_db):
+    """Commits and their aggregates commit separately; the watermark must follow
+    the later one.
+
+    The commit watermark advances in the same transaction as the commits, but
+    aggregation runs afterwards. When it failed, the commits were durable and the
+    watermark had moved, so every later run found nothing to do and the
+    repository served statistics frozen at a past point while reporting success.
+    """
+    from git_synapse.db.engine import connection
+
+    with connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO repo (github_id, owner, name, full_name, default_branch,
+                              is_enabled, ingest_status, last_ingested_sha,
+                              last_aggregate_sha)
+            VALUES (990001, 't', 'strand', 't/strand', 'main', TRUE, 'ready',
+                    'aaaa', 'aaaa')
+            ON CONFLICT (github_id) DO UPDATE
+              SET last_ingested_sha = 'aaaa', last_aggregate_sha = 'aaaa'
+            """
+        )
+        rid = conn.execute(
+            "SELECT id FROM repo WHERE github_id = 990001"
+        ).fetchone()[0]
+    try:
+        with connection() as conn:
+            stale = conn.execute(
+                "SELECT last_aggregate_sha IS DISTINCT FROM last_ingested_sha"
+                " FROM repo WHERE id = %s", (rid,)
+            ).fetchone()[0]
+        assert stale is False, "in sync means nothing to redo"
+
+        # Ingest advanced but aggregation did not: the repo must be seen as stale.
+        with connection() as conn:
+            conn.execute(
+                "UPDATE repo SET last_ingested_sha = 'bbbb' WHERE id = %s", (rid,)
+            )
+            stale = conn.execute(
+                "SELECT last_aggregate_sha IS DISTINCT FROM last_ingested_sha"
+                " FROM repo WHERE id = %s", (rid,)
+            ).fetchone()[0]
+        assert stale is True, "a repo whose aggregation never ran must be retried"
+    finally:
+        with connection() as conn:
+            conn.execute("DELETE FROM repo WHERE id = %s", (rid,))
