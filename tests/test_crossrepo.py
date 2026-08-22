@@ -511,6 +511,30 @@ def test_module_context_is_honest_about_single_module_repos(db):
     assert ctx["owning_module"] is None
 
 
+def test_directional_measure_ranks_outward_from_the_file_asked_about(db):
+    """P(B|A) must rank by the probability the *partner* changes.
+
+    The pair table stores each pair once, so half a file's partners are stored
+    with it on the B side. Ranking on the raw column sorted those by the reverse
+    probability -- putting a 17% partner above a 57% one, while the displayed
+    column showed the correct value.
+    """
+    from git_synapse.analysis.query import coupled_files, resolve_file
+
+    target = resolve_file("acme/platform", "gateway/internal/app/placement_test.go")
+    if target is None:
+        pytest.skip("fixture repository not indexed")
+
+    rows = coupled_files(target["id"], measure="confidence_ab", limit=10, min_support=5)
+    if len(rows) < 2:
+        pytest.skip("not enough partners to order")
+
+    outward = [r["confidence_out"] for r in rows]
+    assert outward == sorted(outward, reverse=True), (
+        "ranking must follow the outward probability that is displayed"
+    )
+
+
 def test_feedback_deduplicates_on_identity_not_wording(db):
     """The same defect described twice must be one row with a count of two.
 
