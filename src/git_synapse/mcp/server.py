@@ -92,6 +92,49 @@ def _round(value: Any, places: int = 4) -> Any:
     return round(value, places) if isinstance(value, float) else value
 
 
+#: A pair whose last co-change is older than this is reported as stale. Roughly
+#: two release cycles here: long enough that an active relationship will have
+#: fired at least once, short enough to catch a refactor that finished last year.
+STALE_AFTER_DAYS = 270
+
+
+def _describe_currency(
+    days: int | None, trend: str | None, deleted: bool = False
+) -> str | None:
+    """Say whether a coupling still appears to hold.
+
+    A lifetime score is silent about currency: a pair that co-changed forty times
+    and stopped two years ago outranks one that co-changed eight times last month.
+
+    Deletion is checked first and stated most loudly, because it is both the
+    strongest signal and the one age misses. A file removed in a refactor keeps
+    every co-change it ever had, and its coupling can be recent -- the case that
+    prompted this returned a partner deleted 50 days ago whose last co-change was
+    also 50 days ago, so no age threshold would have caught it. There are 38,716
+    such partners in this corpus, and an agent cannot edit any of them.
+    """
+    if deleted:
+        return (
+            "DELETED -- this file no longer exists at HEAD. The coupling is "
+            "historical; do not try to edit it. If the behaviour moved, find "
+            "where it moved to."
+        )
+    if trend == "decaying":
+        return "DECAYING -- weaker lately than historically; likely a finished refactor"
+    if trend == "emerging":
+        return "emerging -- stronger lately than historically"
+    if days is None:
+        return None
+    if days > STALE_AFTER_DAYS:
+        return (
+            f"STALE -- last co-changed {days} days ago; treat as historical, "
+            "verify the path still exists"
+        )
+    if days <= 30:
+        return f"current -- co-changed {days} days ago"
+    return f"co-changed {days} days ago"
+
+
 def _describe_confidence(confidence: float | None, n_ab: int) -> str:
     """Turn a conditional probability into a sentence a model can act on."""
     if not confidence:
@@ -112,7 +155,10 @@ def _describe_confidence(confidence: float | None, n_ab: int) -> str:
     description=(
         "Given a file, return the files that have historically changed in the same "
         "commits, ranked by statistical association. Call this before editing to "
-        "find the code that usually has to change alongside it."
+        "find the code that usually has to change alongside it. Read each "
+        "partner's `currency` field before acting: it flags partners that no "
+        "longer exist at HEAD, and coupling that has decayed since. A high score "
+        "on a deleted file or a finished refactor is history, not live coupling."
     ),
 )
 def coupled_files(
@@ -175,6 +221,14 @@ def coupled_files(
                 "npmi": _round(p.get("npmi"), 3),
                 "jaccard": _round(p.get("jaccard"), 3),
                 "last_co_change": str(p["last_co_change"]) if p.get("last_co_change") else None,
+                "days_since_co_change": p.get("days_since_co_change"),
+                "trend": p.get("trend"),
+                "deleted": bool(p.get("is_deleted")),
+                "currency": _describe_currency(
+                    p.get("days_since_co_change"),
+                    p.get("trend"),
+                    bool(p.get("is_deleted")),
+                ),
                 "interpretation": _describe_confidence(p.get("confidence_out"), p["n_ab"]),
             }
             for p in partners
@@ -397,6 +451,7 @@ def crossrepo_files(repo: str, path: str, limit: int = 12, min_support: int = 2)
                 "probability_also_changes": _round(r.get("confidence_out"), 3),
                 "npmi": _round(r.get("npmi"), 3),
                 "last_together": str(r["last_co_change"]) if r.get("last_co_change") else None,
+                "deleted": bool(r.get("is_deleted")),
                 "evidence": (
                     "ticket-linked" if (r["ticket_ratio"] or 0) >= 0.5
                     else "mostly temporal proximity -- weaker evidence"
@@ -504,6 +559,68 @@ def _impact_row(row: dict, name: str) -> dict:
             round(float(row["median_lag_days"]), 2)
             if row["median_lag_days"] is not None else None
         ),
+    }
+
+
+@server.tool(
+    name="module_context",
+    title="Which module owns this file, and what depends on that module",
+    description=(
+        "For a monorepo, resolve the file to its own module and report both "
+        "directions of the manifest graph: what that module declares, and which "
+        "other modules declare it. Use this when the repository has several "
+        "modules -- changing a shared one is a change to everything that declares "
+        "it, and that is a fact from the manifest rather than a correlation."
+    ),
+)
+def module_context(repo: str, path: str) -> dict:
+    """Resolve a file to its module and give both directions of the graph.
+
+    Args:
+        repo: repository name.
+        path: file path relative to the repository root.
+    """
+    target = _resolve_repo(repo)
+    if target is None:
+        return {"error": f"no repository matching {repo!r}"}
+
+    ctx = q.module_context(target["id"], path)
+    if not ctx["modules"]:
+        return {
+            "repo": target["full_name"],
+            "path": path,
+            "multi_module": False,
+            "note": "single-module repository; there is no internal module graph",
+        }
+
+    owning = ctx["owning_module"]
+    guidance = []
+    if ctx["declared_by"]:
+        guidance.append(
+            f"'{owning or '(root)'}' is declared by "
+            f"{', '.join(ctx['declared_by'])} -- a change to its exported surface "
+            "is a change to those modules too."
+        )
+    if ctx["declares"]:
+        guidance.append(
+            f"'{owning or '(root)'}' declares {', '.join(ctx['declares'])}; if the "
+            "behaviour you need belongs to one of those, change it there."
+        )
+    if not guidance:
+        guidance.append(
+            f"'{owning or '(root)'}' neither declares nor is declared by another "
+            "module here, so it is a leaf."
+        )
+
+    return {
+        "repo": target["full_name"],
+        "path": path,
+        "multi_module": True,
+        "owning_module": owning or "(root)",
+        "declares": ctx["declares"],
+        "declared_by": ctx["declared_by"],
+        "all_modules": ctx["modules"],
+        "guidance": " ".join(guidance),
     }
 
 

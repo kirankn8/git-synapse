@@ -541,6 +541,7 @@ def run_ingest(
         # incremental variant would add complexity for no measurable gain.
         try:
             depbump.refresh_declared(force=force_full)
+            depbump.refresh_modules()
         except Exception:  # noqa: BLE001
             log.exception("declared dependency refresh failed")
 

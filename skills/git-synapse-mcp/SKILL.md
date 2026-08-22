@@ -28,6 +28,7 @@ than no claim.
 | `coupled_files(repo, path)` | Which files move with this one. **Start here before editing.** |
 | `explain_pair(repo, path_a, path_b)` | Full 2×2 table, all 29 measures, and the commits behind them |
 | `file_history(repo, path)` | Recent commits and who actually owns the file |
+| `module_context(repo, path)` | In a monorepo: which module owns this file, what it declares, and what declares it |
 | `search_files(term)` | Resolve a path |
 | `repo_hotspots(repo)` | Churn leaders — orient in an unfamiliar repository |
 
@@ -56,7 +57,18 @@ Read three fields **together**. A score on its own means nothing.
 |---|---|
 | `probability_also_changes` | `P(partner changes \| this changed)` — the actionable number |
 | `co_changes` | commits the pair actually shares. **Under 3 is noise, whatever the score** |
+| `currency` | whether the coupling still holds. **Read this before acting** |
 | `interpretation` | plain-language summary, already calibrated |
+
+`currency` is not optional reading. A score is computed over all of history, so a
+partner that was deleted in a refactor keeps every co-change it ever had and can
+still rank near the top. It reports, in order of severity:
+
+- `DELETED` — the file no longer exists at HEAD. Historical coupling; nothing to
+  edit. If the behaviour moved, find where it moved to.
+- `DECAYING` — weaker lately than historically. Usually a finished refactor.
+- `STALE` — no co-change in a long time.
+- `current` / `co-changed N days ago` — live.
 
 Act on partners above roughly 60% with double-digit support. Mention but do not
 edit the 20–40% band. Ignore below that.
@@ -105,8 +117,23 @@ appeared in a list.
 - **Absence of a result is not absence of coupling.** Coverage is the
   `acme` organisation only, and declared-dependency evidence exists for
   Go repositories.
+- **A deleted or decaying partner.** `currency` says so; do not spend a step
+  confirming a file exists that the tool already told you does not.
 
 ---
+
+## Monorepos: check the module graph, not just the files
+
+A repository with several modules has a dependency structure in its own
+manifests, and cross-repo tools cannot see it — every internal reference points
+back at the same repository, so `upstream_repos` correctly returns nothing.
+`module_context` is the structural prior in that case, and it is a fact from the
+manifest rather than a correlation.
+
+The reverse direction is the one that matters: changing a shared module is a
+change to everything that declares it. A file in a widely-declared module
+warrants more care than any co-change score conveys, and a file whose module
+declares others is a hint that the behaviour you want may belong in one of them.
 
 ## Direction is the useful part
 

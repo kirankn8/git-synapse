@@ -57,6 +57,13 @@ log = logging.getLogger(__name__)
 #: suffix is stripped so the module maps back to a repository name.
 _MODULE = re.compile(r"github\.com/acme/([A-Za-z0-9._-]+)(?:/v\d+)?\s+(\S+)")
 
+#: Same reference, but keeping everything after the repository name so an
+#: intra-repo submodule (platform/gateway) can be told from a cross-repo
+#: dependency (signer) rather than both collapsing to the leading segment.
+_MODULE_FULL = re.compile(
+    r"github\.com/acme/([A-Za-z0-9._-]+)((?:/[A-Za-z0-9._-]+)*?)(?:/v\d+)?\s+(\S+)"
+)
+
 #: npm dependency on an internal scoped package, as it appears in package.json:
 #:     "@acme/console-design-system": "^1.2.3"
 #: Covers 75 repositories in this org that go.mod alone would miss entirely.
@@ -70,8 +77,61 @@ _NPM_GIT = re.compile(
     r'([A-Za-z0-9._-]+?)(?:\.git)?(?:#([^"]*))?"'
 )
 
-#: Manifests scanned, in (filename, ecosystem) form.
+#: Manifest basenames scanned, in (filename, ecosystem) form.
 MANIFESTS: tuple[tuple[str, str], ...] = (("go.mod", "go"), ("package.json", "npm"))
+
+#: Path prefixes and segments whose manifests describe third-party or fixture
+#: code rather than this repository's own dependencies.
+_EXCLUDED_SEGMENTS = ("vendor/", "node_modules/", "testdata/", "third_party/",
+                      ".git/", "example/", "examples/")
+
+#: Ceiling on manifests read per repository. A monorepo legitimately has dozens;
+#: anything past this is a vendored tree that slipped the filter.
+MAX_MANIFESTS_PER_REPO = 200
+
+
+def manifest_paths(mirror: Path) -> list[tuple[str, str]]:
+    """Every manifest at HEAD, anywhere in the tree, as ``(path, ecosystem)``.
+
+    Reading only the repository root was a real coverage gap, not a simplifying
+    assumption: this organisation's monorepos keep their real dependencies in
+    per-module manifests. `platform` has 14 go.mod files and declares nothing
+    internal at the root, so it looked like a repository with no internal
+    dependencies at all -- and a review of a change under `gateway/` concluded
+    there was no upstream to check, on the strength of data that was simply
+    absent. Across the org this hid 371 internal dependency references in 29
+    repositories.
+    """
+    proc = subprocess.run(  # noqa: S603 - fixed executable
+        ["git", "ls-tree", "-r", "--name-only", "HEAD"],
+        cwd=str(mirror),
+        env=_base_env(),
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=300,
+    )
+    if proc.returncode != 0:
+        return []
+
+    by_basename = {name: eco for name, eco in MANIFESTS}
+    found: list[tuple[str, str]] = []
+    for line in proc.stdout.splitlines():
+        path = line.strip()
+        if not path:
+            continue
+        basename = path.rsplit("/", 1)[-1]
+        eco = by_basename.get(basename)
+        if eco is None:
+            continue
+        lowered = path.lower()
+        if any(seg in lowered for seg in _EXCLUDED_SEGMENTS):
+            continue
+        found.append((path, eco))
+        if len(found) >= MAX_MANIFESTS_PER_REPO:
+            log.warning("manifest cap reached in %s; ignoring the rest", mirror.name)
+            break
+    return found
 
 
 def _parse_manifest_line(line: str, ecosystem: str) -> tuple[str, str] | None:
@@ -214,6 +274,124 @@ def declared_at_head(
     return sorted(out.items())
 
 
+def declared_modules_at_head(
+    mirror: Path, repo_name: str, manifest: str
+) -> list[tuple[str, str, str]]:
+    """Intra-repository module dependencies declared in one manifest.
+
+    Returns ``(consumer_module, dep_module, version)`` for every reference the
+    manifest makes to another module of the *same* repository. These are the
+    references :func:`declared_at_head` deliberately skips as self-references,
+    and in a monorepo they are the whole structural graph.
+
+    ``consumer_module`` is the manifest's own directory, so ``gateway/go.mod``
+    yields ``gateway``. A module declaring itself is dropped: Go manifests name
+    their own module path on the `module` line and in `replace` directives.
+    """
+    proc = subprocess.run(  # noqa: S603 - fixed executable
+        ["git", "show", f"HEAD:{manifest}"],
+        cwd=str(mirror),
+        env=_base_env(),
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        return []
+
+    consumer = manifest.rsplit("/", 1)[0] if "/" in manifest else ""
+    out: dict[str, tuple[str, str, str]] = {}
+    for line in proc.stdout.splitlines():
+        match = _MODULE_FULL.search(line)
+        if match is None:
+            continue
+        repo_part, sub, version = match.group(1), match.group(2) or "", match.group(3)
+        if repo_part != repo_name:
+            continue  # cross-repo; declared_at_head owns that
+        dep_module = sub.lstrip("/")
+        if dep_module == consumer:
+            continue  # the module line, or a replace pointing at itself
+        # A `module` line has no version token; skip those explicitly.
+        if line.strip().startswith("module "):
+            continue
+        out.setdefault(dep_module, (consumer, dep_module, version))
+    return list(out.values())
+
+
+def refresh_modules(conn: psycopg.Connection | None = None) -> int:
+    """Rebuild ``module_dependency`` from every repository's manifests at HEAD.
+
+    Full rebuild for the same reason as :func:`refresh_declared`: a dependency
+    removed from a manifest has to disappear, which an upsert would never do.
+    """
+
+    def _run(c: psycopg.Connection) -> int:
+        rows = c.execute(
+            "SELECT id, full_name, name FROM repo WHERE is_enabled ORDER BY id"
+        ).fetchall()
+
+        payload = []
+        for repo_id, full_name, name in rows:
+            mirror = mirror_path_for(full_name)
+            if not mirror.is_dir():
+                continue
+            manifests = [m for m, eco in manifest_paths(mirror) if eco == "go"]
+            if len(manifests) < 2:
+                continue  # a single-module repo has no internal graph
+            for manifest in manifests:
+                for consumer, dep, version in declared_modules_at_head(
+                    mirror, name, manifest
+                ):
+                    payload.append(
+                        (repo_id, consumer, dep, manifest, "go", version[:200])
+                    )
+
+        c.execute("TRUNCATE module_dependency")
+        if payload:
+            c.execute(
+                """
+                CREATE TEMP TABLE tmp_mod (
+                    repo_id BIGINT, consumer_module TEXT, dep_module TEXT,
+                    manifest TEXT, ecosystem TEXT, dep_version TEXT
+                ) ON COMMIT DROP
+                """
+            )
+            copy_rows(
+                "tmp_mod",
+                ["repo_id", "consumer_module", "dep_module", "manifest",
+                 "ecosystem", "dep_version"],
+                payload,
+                conn=c,
+            )
+            c.execute(
+                """
+                INSERT INTO module_dependency (repo_id, consumer_module, dep_module,
+                                               manifest, ecosystem, dep_version)
+                SELECT DISTINCT ON (repo_id, consumer_module, dep_module, manifest)
+                       repo_id, consumer_module, dep_module, manifest,
+                       ecosystem, dep_version
+                FROM tmp_mod
+                ON CONFLICT DO NOTHING
+                """
+            )
+            c.execute("DROP TABLE IF EXISTS tmp_mod")
+
+        total = int(c.execute("SELECT count(*) FROM module_dependency").fetchone()[0])
+        repos = int(
+            c.execute(
+                "SELECT count(DISTINCT repo_id) FROM module_dependency"
+            ).fetchone()[0]
+        )
+        log.info("module graph: %d edges across %d multi-module repos", total, repos)
+        return total
+
+    if conn is not None:
+        return _run(conn)
+    with connection() as own:
+        return _run(own)
+
+
 def refresh_declared(
     conn: psycopg.Connection | None = None, force: bool = False
 ) -> int:
@@ -257,7 +435,7 @@ def refresh_declared(
             mirror = mirror_path_for(full_name)
             if not mirror.is_dir():
                 continue
-            for manifest, ecosystem in MANIFESTS:
+            for manifest, ecosystem in manifest_paths(mirror):
                 for dep_name, version in declared_at_head(mirror, name, manifest, ecosystem):
                     payload.append(
                         (repo_id, name_to_id.get(dep_name), dep_name,
@@ -376,7 +554,7 @@ def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> Bump
                 continue
             stats.repos_scanned += 1
             edges: list[BumpEdge] = []
-            for manifest, ecosystem in MANIFESTS:
+            for manifest, ecosystem in manifest_paths(mirror):
                 edges.extend(extract_from_mirror(mirror, name, manifest, ecosystem))
             stats.edges_found += len(edges)
             for edge in edges:
