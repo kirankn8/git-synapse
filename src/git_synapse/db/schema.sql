@@ -1087,6 +1087,12 @@ ALTER TABLE repo ADD COLUMN IF NOT EXISTS last_depbump_sha TEXT;
 -- it before the refresh read it, so the declared set silently stopped tracking
 -- HEAD and reported "no repository manifests changed" forever.
 ALTER TABLE repo ADD COLUMN IF NOT EXISTS last_declared_sha TEXT;
+-- The commit watermark is written in the same transaction as the commits, but
+-- aggregation runs in later transactions. When one of those failed, the commits
+-- were durable and the watermark had advanced, so the next run found nothing to
+-- do and the repository's statistics stayed frozen at an arbitrary past point
+-- while the run reported success. This lags until aggregation actually lands.
+ALTER TABLE repo ADD COLUMN IF NOT EXISTS last_aggregate_sha TEXT;
 
 DO $$
 BEGIN
