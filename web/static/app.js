@@ -1900,7 +1900,8 @@ on('/impact', async (_args, params) => {
 
   if (!repoId) {
     const top = await api('/api/crossrepo/pairs', { measure: state.measure, limit: 40, min_support: 8 });
-    wrap.append(card(`Top 40 repository couplings by ${spec ? spec.label : state.measure}`,
+    const mspec = state.byKey.get(state.measure);
+    wrap.append(card(`Top 40 repository couplings by ${mspec ? mspec.label : state.measure}`,
       dataTable(top.pairs, [
         { key: 'repo_a', label: 'Repository A', render: (r) => h('span', { class: 'mono' }, r.repo_a) },
         { key: 'repo_b', label: 'Repository B', render: (r) => h('span', { class: 'mono' }, r.repo_b) },
