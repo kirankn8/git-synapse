@@ -937,6 +937,55 @@ CREATE INDEX IF NOT EXISTS repo_impact_target_idx ON repo_impact (target_repo_id
 CREATE INDEX IF NOT EXISTS repo_impact_declared_idx ON repo_impact (is_declared) WHERE is_declared;
 
 -- ===========================================================================
+-- FEEDBACK: defects in Git Synapse itself, reported by the sessions that use it.
+--
+-- This is the ONLY table any agent may write to, and it deliberately feeds
+-- nothing. No aggregate, measure, score or ranking reads from it.
+--
+-- That boundary is the whole point. Letting sessions write into the coupling
+-- data would close a confirmation loop -- Git Synapse suggests a pair, the agent
+-- edits both files, the commit strengthens the pair, Git Synapse suggests it more
+-- confidently -- and the statistic would drift from measuring the codebase to
+-- measuring its own past advice. Agent-authored commits are already 15.8% of the
+-- last week's history, so that risk is live rather than hypothetical.
+--
+-- What a session CAN usefully report is a defect: data that is missing, wrong or
+-- stale, a tool that failed, a repository or path that should be covered and is
+-- not. Every improvement made on the first day of use came from precisely that
+-- observation, arrived at by hand. This is that path, written down.
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS feedback (
+    id              BIGSERIAL PRIMARY KEY,
+    -- missing_data | wrong_data | stale_data | tool_error | coverage_gap | suggestion
+    kind            TEXT        NOT NULL,
+    severity        TEXT        NOT NULL DEFAULT 'medium',
+    -- The MCP tool involved, and the arguments that produced the problem, so a
+    -- report is reproducible rather than a recollection.
+    tool            TEXT,
+    args            JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    repo            TEXT,
+    path            TEXT,
+    expected        TEXT,
+    observed        TEXT,
+    detail          TEXT,
+    -- Deduplication key. The same defect hit by twenty sessions is one entry
+    -- with a count of twenty, which is also a priority signal.
+    fingerprint     TEXT        NOT NULL UNIQUE,
+    occurrences     INTEGER     NOT NULL DEFAULT 1,
+    first_seen_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- open | investigating | fixed | wontfix
+    status          TEXT        NOT NULL DEFAULT 'open',
+    resolution      TEXT,
+    resolved_at     TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS feedback_status_idx ON feedback (status, occurrences DESC);
+CREATE INDEX IF NOT EXISTS feedback_kind_idx   ON feedback (kind);
+CREATE INDEX IF NOT EXISTS feedback_seen_idx   ON feedback (last_seen_at DESC);
+
+-- ===========================================================================
 -- MINING LAYER
 --
 -- Derived analyses that answer architectural and risk questions rather than
@@ -1065,5 +1114,5 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 INSERT INTO meta (key, value)
-VALUES ('schema_version', '11'::jsonb)
+VALUES ('schema_version', '12'::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();

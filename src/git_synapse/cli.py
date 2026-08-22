@@ -464,6 +464,52 @@ def coupled(
     console.print(table)
 
 
+@app.command("feedback")
+def feedback_cmd(
+    status: str = typer.Option("open", "--status", help="open|investigating|fixed|wontfix|all"),
+    kind: str = typer.Option("", "--kind"),
+    resolve: int = typer.Option(0, "--resolve", help="Report id to close."),
+    as_status: str = typer.Option("fixed", "--as", help="Status to set when resolving."),
+    note: str = typer.Option("", "--note", help="Resolution note."),
+) -> None:
+    """Review defects that sessions reported against Git Synapse.
+
+    The occurrence count is the priority signal: a gap twenty sessions hit
+    matters more than one seen once.
+    """
+    _setup()
+    if resolve:
+        if q.resolve_feedback(resolve, as_status, note or f"marked {as_status}"):
+            console.print(f"[green]report {resolve} -> {as_status}[/green]")
+        else:
+            console.print(f"[red]no report {resolve}[/red]")
+            raise typer.Exit(1)
+        return
+
+    summary = q.feedback_summary()
+    st = Table(box=None, show_header=False)
+    st.add_column("metric", style="dim"); st.add_column("value", justify="right")
+    for key in ("total", "open", "open_high", "fixed", "total_hits", "seen_today"):
+        st.add_row(key.replace("_", " "), str(summary.get(key, 0)))
+    console.print(st)
+
+    rows = q.list_feedback(None if status == "all" else status, kind or None, 60)
+    if not rows:
+        console.print("[dim]no reports[/dim]")
+        return
+    t = Table(title=f"reports ({status})", box=None, title_style="bold")
+    for col in ("id", "hits", "sev", "kind", "tool", "where", "detail"):
+        t.add_column(col, justify="right" if col in ("id", "hits") else "left",
+                     overflow="fold" if col == "detail" else None)
+    for r in rows:
+        sev = r["severity"]
+        style = "red" if sev == "high" else ("yellow" if sev == "medium" else "dim")
+        where = "/".join(x for x in (r["repo"], r["path"]) if x) or "-"
+        t.add_row(str(r["id"]), str(r["occurrences"]), f"[{style}]{sev}[/{style}]",
+                  r["kind"], r["tool"] or "-", where[-38:], (r["detail"] or "")[:70])
+    console.print(t)
+
+
 @app.command("status")
 def status() -> None:
     """Corpus summary and recent ingest runs."""

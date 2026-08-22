@@ -2300,3 +2300,71 @@ on('/validation', async (_args, params) => {
       '(measured 0.928; 5-fold CV mean 0.91, sd 0.05; bootstrap 95% CI [0.877, 0.973]). The CV mean shifts a few points with the fold split, so the interval is the honest summary. That is what the Impact view uses, and why its rows carry an explicit evidence tier.'))));
   return wrap;
 });
+
+
+/* ------------------------------------------------------------- feedback -- */
+
+/**
+ * Defects the sessions using Git Synapse have reported against it.
+ *
+ * The occurrence count is the priority column, not the severity: a gap twenty
+ * sessions hit matters more than one seen once, however it was graded.
+ */
+on('/feedback', async (_args, params) => {
+  const status = params.status || 'open';
+  const data = await api('/api/feedback', { status: status === 'all' ? '' : status, limit: 300 });
+  const s = data.summary || {};
+
+  const wrap = h('div');
+  wrap.append(pageHead('Feedback',
+    'Defects in Git Synapse itself, reported by the sessions that use it.'));
+
+  wrap.append(h('div', { class: 'help' },
+    h('strong', {}, 'This log feeds nothing. '),
+    'No measure, score or ranking reads from it. That boundary is deliberate: letting sessions write into the coupling data would close a confirmation loop — Git Synapse suggests a pair, the agent edits both files, the commit strengthens the pair — and the statistic would drift from measuring the codebase to measuring its own past advice. ',
+    'Agent-authored commits are already ~16% of the last week of history, so that is a live risk rather than a hypothetical one.'));
+
+  wrap.append(h('div', { class: 'grid grid-stats' },
+    statTile('Open', num(s.open), `${num(s.open_high)} high severity`, () => go('/feedback?status=open')),
+    statTile('Fixed', num(s.fixed), 'resolved', () => go('/feedback?status=fixed')),
+    statTile('Total reports', num(s.total), `${num(s.total_hits)} hits`, () => go('/feedback?status=all')),
+    statTile('Seen today', num(s.seen_today), 'last 24h')));
+
+  wrap.append(h('div', { class: 'toolbar' },
+    ...['open', 'investigating', 'fixed', 'wontfix', 'all'].map((st) =>
+      h('button', { class: `chip${status === st ? ' active' : ''}`, onclick: () => go(`/feedback?status=${st}`) }, st))));
+
+  const sevBadge = (sev) => h('span', {
+    class: `badge ${sev === 'high' ? 'danger' : sev === 'medium' ? 'warn' : 'muted'}`,
+  }, sev);
+
+  wrap.append(card(`${data.reports.length} reports`,
+    dataTable(data.reports, [
+      { key: 'occurrences', label: 'Hits', num: true, title: 'How many sessions hit this. The priority signal.' },
+      { key: 'severity', label: 'Sev', render: (r) => sevBadge(r.severity) },
+      { key: 'kind', label: 'Kind', render: (r) => h('span', { class: 'badge muted' }, r.kind) },
+      { key: 'tool', label: 'Tool', mono: true },
+      { key: 'repo', label: 'Where', render: (r) => h('span', { class: 'mono', style: 'font-size:11px' }, [r.repo, r.path].filter(Boolean).join('/') || '—') },
+      { key: 'detail', label: 'Detail', render: (r) => h('span', { style: 'display:block;max-width:420px' }, r.detail || '—') },
+      { key: 'expected', label: 'Expected vs observed', render: (r) => h('div', { style: 'font-size:11px;max-width:300px' },
+          r.expected ? h('div', { style: 'color:var(--ok)' }, `want: ${r.expected}`) : null,
+          r.observed ? h('div', { style: 'color:var(--danger)' }, `got:  ${r.observed}`) : null) },
+      { key: 'status', label: 'Status', render: (r) => h('span', { class: `badge ${r.status === 'fixed' ? 'ok' : r.status === 'open' ? 'info' : 'muted'}` }, r.status) },
+      { key: 'last_seen_at', label: 'Last seen', render: (r) => when(r.last_seen_at) },
+    ], { initialSort: 'occurrences', empty: status === 'open' ? 'Nothing open. Sessions have not reported an unresolved defect.' : 'No reports.' }),
+    'Reported via the report_gap MCP tool'));
+
+  const resolved = data.reports.filter((r) => r.resolution);
+  if (resolved.length) {
+    wrap.append(h('div', { class: 'section-title' }, 'Resolutions'));
+    const body = h('div', { class: 'card-body' });
+    for (const r of resolved) {
+      body.append(h('div', { style: 'margin-bottom:9px;font-size:12.5px' },
+        h('span', { class: 'badge muted' }, `#${r.id}`), ' ',
+        h('span', { style: 'color:var(--text-dim)' }, r.resolution)));
+    }
+    wrap.append(h('div', { class: 'card' },
+      h('div', { class: 'card-head' }, h('h3', { class: 'card-title' }, 'What was done')), body));
+  }
+  return wrap;
+});

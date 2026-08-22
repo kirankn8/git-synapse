@@ -509,3 +509,63 @@ def test_module_context_is_honest_about_single_module_repos(db):
     ctx = module_context(row["id"], "any/path.go")
     assert ctx["modules"] == []
     assert ctx["owning_module"] is None
+
+
+def test_feedback_deduplicates_on_identity_not_wording(db):
+    """The same defect described twice must be one row with a count of two.
+
+    The count is the priority signal, so a gap many sessions hit has to
+    accumulate rather than fragment into near-duplicate rows.
+    """
+    from git_synapse.analysis.query import record_feedback
+    from git_synapse.db.engine import execute
+
+    fp_repo = "test/feedback-fixture"
+    execute("DELETE FROM feedback WHERE repo = %s", (fp_repo,))
+    try:
+        first = record_feedback(
+            kind="wrong_data", severity="low", tool="coupled_files", repo=fp_repo,
+            path="a/b.go", expected="Partner flagged deleted",
+            detail="One wording.",
+        )
+        second = record_feedback(
+            kind="wrong_data", severity="high", tool="coupled_files", repo=fp_repo,
+            path="a/b.go", expected="partner flagged DELETED  ",
+            detail="Entirely different wording, same defect.",
+        )
+        assert second["id"] == first["id"], "should have deduplicated"
+        assert second["occurrences"] == 2
+        row = query_one("SELECT severity FROM feedback WHERE id = %s", (first["id"],))
+        # GREATEST() on text would have ranked 'low' above 'high' alphabetically.
+        assert row["severity"] == "high", "the worse severity must win"
+    finally:
+        execute("DELETE FROM feedback WHERE repo = %s", (fp_repo,))
+
+
+def test_feedback_rejects_opinions(db):
+    """The log is for defects in Git Synapse, not disagreement with a score."""
+    from git_synapse.analysis.query import record_feedback
+
+    with pytest.raises(ValueError, match="unknown kind"):
+        record_feedback(kind="opinion", detail="I disagree with this ranking")
+    with pytest.raises(ValueError, match="detail is required"):
+        record_feedback(kind="wrong_data", detail="   ")
+
+
+def test_feedback_feeds_no_analytical_table(db):
+    """Nothing that produces a score may read from the feedback log.
+
+    This is the boundary that keeps agents out of the coupling data. If a future
+    change joins feedback into an aggregate, this fails.
+    """
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "git_synapse"
+    offenders = []
+    for module in ("analysis/aggregate.py", "analysis/score.py", "analysis/crossrepo.py",
+                   "analysis/lagged.py", "analysis/predict.py", "analysis/mining.py",
+                   "analysis/depbump.py", "analysis/validate.py"):
+        text = (src / module).read_text()
+        if "feedback" in text:
+            offenders.append(module)
+    assert not offenders, f"analytical modules must not reference feedback: {offenders}"

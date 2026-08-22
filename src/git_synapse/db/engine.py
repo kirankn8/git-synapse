@@ -187,7 +187,7 @@ def wait_for_database(timeout_s: float = 120.0, interval_s: float = 1.0) -> None
 
 
 #: Bumped whenever ``schema.sql`` changes in a way that needs re-applying.
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 #: How long a DDL statement waits for a lock before giving up. Short on purpose:
 #: DDL queues ahead of ordinary queries in Postgres, so a schema apply that
