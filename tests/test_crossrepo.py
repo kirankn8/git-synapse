@@ -346,3 +346,69 @@ def test_module_count_uses_the_composite_key(db):
         # This is the normal case once more than one repo has clusters, and it
         # is exactly why the naive count is wrong.
         assert rows[0]["correct"] > 0
+
+
+def test_clone_never_destroys_an_existing_mirror_on_failure(tmp_path):
+    """A failed clone must leave the previous mirror intact.
+
+    This is the regression for the worst incident so far: an expired token made
+    every fetch fail, `sync_mirror` treated that as a corrupt mirror and fell
+    back to a fresh clone, and `clone_mirror` removed the existing directory
+    before attempting it. 213 of 272 working mirrors were deleted and not
+    replaced. A mirror costs minutes to rebuild, so it must never be destroyed on
+    the strength of an operation that has not completed.
+    """
+    from git_synapse.ingest import gitops
+
+    mirror = tmp_path / "existing.git"
+    mirror.mkdir()
+    sentinel = mirror / "HEAD"
+    sentinel.write_text("ref: refs/heads/main\n")
+
+    # A URL that cannot resolve, so the clone is guaranteed to fail.
+    with pytest.raises(Exception):
+        gitops.clone_mirror(
+            "https://invalid.invalid/nope.git", mirror, blobless=True
+        )
+
+    assert mirror.is_dir(), "the existing mirror was removed by a failed clone"
+    assert sentinel.read_text().startswith("ref:"), "mirror contents were damaged"
+    # No staging directory should be left lying around either.
+    assert not (tmp_path / "existing.git.incoming").exists()
+
+
+def test_permanent_errors_are_distinguished_from_transient_ones():
+    """Auth failures must never be retried or trigger a re-clone."""
+    from git_synapse.ingest.gitops import is_permanent_error, is_transient_error
+
+    permanent = [
+        "remote: Invalid username or token. Password authentication is not supported",
+        "fatal: Authentication failed for 'https://github.com/x/y.git/'",
+        "remote: Repository not found.",
+        "fatal: could not read Username for 'https://github.com'",
+    ]
+    transient = [
+        "fatal: unable to access ...: Could not resolve host: github.com",
+        "fatal: Connection reset by peer",
+        "error: RPC failed; curl 92 HTTP/2 stream was reset",
+    ]
+    for message in permanent:
+        assert is_permanent_error(message), f"should be permanent: {message}"
+        assert not is_transient_error(message), f"must not retry: {message}"
+    for message in transient:
+        assert is_transient_error(message), f"should be transient: {message}"
+        assert not is_permanent_error(message), f"should not be permanent: {message}"
+
+
+def test_credential_preflight_rejects_a_bad_token(monkeypatch):
+    """A rejected token must abort the run, not fail 272 repositories one by one."""
+    from git_synapse.config import get_config, reset_config_cache
+    from git_synapse.ingest.pipeline import AuthError, verify_credentials
+
+    monkeypatch.setenv("GITHUB_TOKEN", "")
+    reset_config_cache()
+    try:
+        with pytest.raises(AuthError, match="empty"):
+            verify_credentials()
+    finally:
+        reset_config_cache()

@@ -51,8 +51,25 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
-# --- 2. The stack ------------------------------------------------------------
+# --- 2. Keep the GitHub credential fresh -------------------------------------
+# `gh auth token` issues short-lived ghu_ tokens. When one expires every fetch
+# fails, and before this was hardened the fallback re-clone deleted 213 working
+# mirrors. The daemon runs on the host, where gh is authenticated, so it can
+# refresh the value the containers read.
 cd "$PROJECT_DIR" || exit 1
+if command -v gh >/dev/null 2>&1 && [ -f .env ]; then
+    fresh=$(gh auth token 2>/dev/null || true)
+    current=$(sed -n 's/^GITHUB_TOKEN=//p' .env | head -1)
+    if [ -n "$fresh" ] && [ "$fresh" != "$current" ]; then
+        tmp=$(mktemp)
+        sed "s|^GITHUB_TOKEN=.*|GITHUB_TOKEN=$fresh|" .env > "$tmp" && mv "$tmp" .env
+        log "refreshed GITHUB_TOKEN in .env; restarting scheduler to pick it up"
+        docker compose up -d --force-recreate scheduler >>"$LOG" 2>&1 || \
+            log "WARNING: scheduler restart after token refresh failed"
+    fi
+fi
+
+# --- 3. The stack ------------------------------------------------------------
 
 # Long-running services only. `cli` sits behind a compose profile and must not
 # be started here.
@@ -76,7 +93,7 @@ else
     exit 0
 fi
 
-# --- 3. Confirm the API answers ---------------------------------------------
+# --- 4. Confirm the API answers ---------------------------------------------
 port="$(grep -E '^API_PUBLISHED_PORT=' .env 2>/dev/null | cut -d= -f2)"
 port="${port:-8080}"
 for _ in $(seq 1 30); do
