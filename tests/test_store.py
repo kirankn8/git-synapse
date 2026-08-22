@@ -38,7 +38,7 @@ def make_commit(i: int, paths: list[str], parents: list[str] | None = None, **kw
 
 
 @pytest.fixture
-def temp_repo(db):
+def temp_repo(scratch_db):
     """Create an isolated repository row, and remove it afterwards."""
     record = RepoRecord(
         github_id=999_000_001,

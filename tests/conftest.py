@@ -12,9 +12,13 @@ os.environ.setdefault("POSTGRES_HOST", "127.0.0.1")
 os.environ.setdefault("POSTGRES_PORT", "55432")
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def scratch_db(db):
     """A throwaway database for tests that write.
+
+    Module-scoped, not session-scoped: switching ``POSTGRES_DB`` is process-wide,
+    so a session-scoped switch would point the tests that read the real corpus at
+    an empty database for the rest of the run.
 
     Tests that create fixture repositories or call a global ``rebuild()`` used to
     run against whatever ``POSTGRES_DB`` pointed at, which in practice was the
