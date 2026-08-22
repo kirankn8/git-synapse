@@ -684,14 +684,19 @@ def validation(
 
 @router.get("/feedback", tags=["feedback"])
 def feedback(
-    status: str | None = "open",
+    status: str = "open",
     kind: str | None = None,
     limit: int = Query(50, ge=1, le=500),
 ) -> dict:
-    """Defects reported against Git Synapse, most-hit first."""
+    """Defects reported against Git Synapse, most-hit first.
+
+    ``status=all`` is explicit rather than an empty string, because the client's
+    query-string builder drops empty values and the filter would silently fall
+    back to "open".
+    """
     return {
         "summary": q.feedback_summary(),
-        "reports": q.list_feedback(status, kind, limit),
+        "reports": q.list_feedback(None if status == "all" else status, kind, limit),
     }
 
 

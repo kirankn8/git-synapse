@@ -2312,7 +2312,7 @@ on('/validation', async (_args, params) => {
  */
 on('/feedback', async (_args, params) => {
   const status = params.status || 'open';
-  const data = await api('/api/feedback', { status: status === 'all' ? '' : status, limit: 300 });
+  const data = await api('/api/feedback', { status, limit: 300 });
   const s = data.summary || {};
 
   const wrap = h('div');

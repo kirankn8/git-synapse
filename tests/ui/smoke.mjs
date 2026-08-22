@@ -122,6 +122,8 @@ const routes = [
   ['#/measures',                          'Measures catalogue'],
   ['#/runs',                              'Jobs'],
   [`#/run/${runId}`,                      'Run detail'],
+  ['#/feedback',                          'Feedback (open)'],
+  ['#/feedback?status=all',               'Feedback (all)'],
 ].filter(Boolean);
 
 console.log('\n=== driving every route ===');
