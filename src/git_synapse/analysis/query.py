@@ -282,19 +282,23 @@ def coupled_files(
             SELECT m.file_b_id AS other_id,
                    m.confidence_ab AS confidence_out,
                    m.confidence_ba AS confidence_in,
+                   m.n_a AS n_this, m.n_b AS n_other,
                    {_METRIC_COLUMNS}, m.n_ab, m.n_a, m.n_b, m.n_total
             FROM file_pair_metric m
             WHERE m.file_a_id = %(file_id)s AND m.n_ab >= %(min_support)s {score_a}
             UNION ALL
             SELECT m.file_a_id AS other_id,
-                   -- This file is the B side, so P(partner | this) is ba.
+                   -- This file is the B side, so P(partner | this) is ba and the
+                   -- partner's own change count is n_a, not n_b.
                    m.confidence_ba AS confidence_out,
                    m.confidence_ab AS confidence_in,
+                   m.n_b AS n_this, m.n_a AS n_other,
                    {_METRIC_COLUMNS}, m.n_ab, m.n_a, m.n_b, m.n_total
             FROM file_pair_metric m
             WHERE m.file_b_id = %(file_id)s AND m.n_ab >= %(min_support)s {score_b}
         )
-        SELECT p.*, f.path, f.dir_path, f.basename, f.extension, f.repo_id,
+        SELECT p.*, p.{order} AS score,
+               f.path, f.dir_path, f.basename, f.extension, f.repo_id,
                f.change_count, f.is_deleted, r.full_name AS repo,
                fp.last_co_change, fp.first_co_change, fp.distinct_authors, fp.w_ab,
                -- Recency and trend, so a caller cannot mistake a completed
@@ -330,18 +334,25 @@ def coupled_directories(
     dir_id: int, measure: str = DEFAULT_MEASURE, limit: int | None = 25
 ) -> list[dict]:
     """Directories that change together with ``dir_id``, ranked."""
-    order = _safe_order(measure)
+    order, _, _ = _oriented_order(measure)
     metric_cols = ", ".join(f"m.{spec.key}" for spec in MEASURES)
     return query(
         f"""
         WITH partners AS (
-            SELECT m.dir_b_id AS other_id, {metric_cols}, m.n_ab, m.n_a, m.n_b, m.n_total
+            SELECT m.dir_b_id AS other_id,
+                   m.confidence_ab AS confidence_out, m.confidence_ba AS confidence_in,
+                   m.n_a AS n_this, m.n_b AS n_other,
+                   {metric_cols}, m.n_ab, m.n_a, m.n_b, m.n_total
             FROM dir_pair_metric m WHERE m.dir_a_id = %(dir_id)s
             UNION ALL
-            SELECT m.dir_a_id AS other_id, {metric_cols}, m.n_ab, m.n_a, m.n_b, m.n_total
+            SELECT m.dir_a_id AS other_id,
+                   m.confidence_ba AS confidence_out, m.confidence_ab AS confidence_in,
+                   m.n_b AS n_this, m.n_a AS n_other,
+                   {metric_cols}, m.n_ab, m.n_a, m.n_b, m.n_total
             FROM dir_pair_metric m WHERE m.dir_b_id = %(dir_id)s
         )
-        SELECT p.*, d.path, d.depth, d.file_count, d.change_count, d.repo_id
+        SELECT p.*, p.{order} AS score,
+               d.path, d.depth, d.file_count, d.change_count, d.repo_id
         FROM partners p JOIN directory d ON d.id = p.other_id
         ORDER BY p.{order} DESC NULLS LAST
         LIMIT %(limit)s
@@ -369,6 +380,16 @@ def pair_detail(file_a_id: int, file_b_id: int) -> dict | None:
     )
     if row is None:
         return None
+
+    # The pair is stored once, canonicalised by id. Returning it in storage order
+    # silently transposed the caller's arguments, so confidence_ab read as the
+    # reverse conditional for half of all pairs.
+    if (file_a_id, file_b_id) != (lo, hi):
+        for x, y in (
+            ("file_a_id", "file_b_id"), ("path_a", "path_b"),
+            ("n_a", "n_b"), ("confidence_ab", "confidence_ba"),
+        ):
+            row[x], row[y] = row[y], row[x]
 
     a, n_a, n_b, n = row["n_ab"], row["n_a"], row["n_b"], row["n_total"]
     row["cells"] = {
