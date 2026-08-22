@@ -52,7 +52,7 @@ EXPECTED_B = 13
 
 
 @pytest.fixture(scope="module")
-def analysed(db):
+def analysed(scratch_db):
     """Load, aggregate and score the synthetic repository once."""
     record = RepoRecord(
         github_id=999_000_002,
