@@ -396,3 +396,66 @@ def test_list_repositories_can_be_filtered(db):
     # The tool reports full names, which is what an agent should pass back.
     assert any(r["name"].endswith(f'/{row["name"]}') or r["name"] == row["name"]
                for r in repos), [r["name"] for r in repos][:5]
+
+
+# ---------------------------------------------- the evidence prose, exhaustively
+
+@pytest.mark.parametrize(
+    ("declared", "bumps", "must_say", "must_not_say"),
+    [
+        ("declares x in go.mod", 3, "declares", None),
+        ("declares x in go.mod", 0, "no bump has been observed", None),
+        (None, 3, "bump-backed rather than declared", "declares dsx-lib and"),
+        (None, 0, "no declared dependency", "declares"),
+    ],
+)
+def test_repo_pair_prose_never_outruns_its_evidence(declared, bumps, must_say, must_not_say):
+    """The prose is what a model quotes, and `declared` is the tier agents are
+    told to trust above all others. Every combination must say only what the
+    structured fields beside it support."""
+    out = server._describe_repo_pair(
+        {"name": "dsx-lib"}, {"name": "dsx-app"}, declared,
+        {"bump_count": bumps} if bumps else None,
+    )
+    assert must_say in out, out
+    if must_not_say:
+        assert must_not_say not in out, out
+
+
+@pytest.mark.parametrize(
+    ("validated", "withheld", "must_say"),
+    [
+        (0, 0, "No upstream edges recorded"),
+        (0, 5, "Nothing validated upstream"),
+        (2, 0, "declared"),
+        (2, 3, "withheld"),
+    ],
+)
+def test_upstream_guidance_covers_every_composition(validated, withheld, must_say):
+    """The guidance is read before the scores; it must be right in all four
+    shapes, including the one where nothing is validated at all."""
+    rows = [{"is_declared": True, "has_bump_history": False} for _ in range(validated)]
+    extra = [{"is_declared": False, "has_bump_history": False} for _ in range(withheld)]
+    out = server._upstream_guidance(rows, withheld, False, rows + extra)
+    assert must_say in out, out
+
+
+def test_upstream_guidance_when_discovery_is_requested_describes_everything():
+    rows = [{"is_declared": False, "has_bump_history": False} for _ in range(4)]
+    out = server._upstream_guidance([], 4, True, rows)
+    assert "NONE" in out and "not a probability" in out
+
+
+def test_confidence_wording_matches_the_support_behind_it():
+    """A percentage from a handful of commits and one from three hundred must
+    not read the same. They did, and the confident phrasing on thin support is
+    what sent a reviewer at files their own reading had already ruled out."""
+    strong = server._describe_confidence(0.9, 200)
+    thin = server._describe_confidence(0.9, 4)
+    assert strong != thin
+    assert "very likely" in strong
+    assert "provisional" in thin and "very likely" not in thin
+
+    # Below the reportable floor it is called weak outright.
+    assert "weak evidence" in server._describe_confidence(0.9, 2)
+    assert server._describe_confidence(None, 10) == "no directional signal"
