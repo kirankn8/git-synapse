@@ -38,6 +38,18 @@ from git_synapse.ingest.store import load_commits, upsert_repo
 
 log = logging.getLogger(__name__)
 
+#: Consecutive network-failed repositories before a run gives up. Set above the
+#: worker count so a single unlucky burst cannot trip it.
+NETWORK_FAILURE_ABORT = 12
+
+#: A discovery returning less than this fraction of the repositories already
+#: known is treated as a failed listing rather than as the org having shrunk.
+DISCOVERY_SHRINK_FLOOR = 0.8
+
+#: Advisory lock key serialising ingest runs across processes. Arbitrary but
+#: fixed; anything else taking this key would deadlock with the pipeline.
+INGEST_LOCK_KEY = 0x0C047E5
+
 
 @dataclass
 class RepoResult:
@@ -213,7 +225,8 @@ def verify_credentials() -> str:
         AuthError: if the token is absent or rejected.
     """
     cfg = get_config().github
-    if not cfg.token:
+    token = cfg.current_token()
+    if not token:
         raise AuthError(
             "GITHUB_TOKEN is empty. Private repositories cannot be mirrored. "
             "Set it in .env and restart the affected services."
@@ -225,7 +238,7 @@ def verify_credentials() -> str:
         response = httpx.get(
             f"{cfg.api_url}/user",
             headers={
-                "Authorization": f"Bearer {cfg.token}",
+                "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github+json",
             },
             timeout=15.0,
@@ -239,7 +252,9 @@ def verify_credentials() -> str:
     if response.status_code == 401:
         raise AuthError(
             "GITHUB_TOKEN was rejected (HTTP 401). It has most likely expired -- "
-            "`gh auth token` issues short-lived credentials. Refresh it in .env, "
+            "`gh auth token` issues short-lived credentials. The daemon keeps "
+            "the mounted token file current; if it is not running, refresh it "
+            "with scripts/refresh-token.sh, "
             "then `docker compose up -d`. No mirrors were touched."
         )
     if response.status_code >= 400:
@@ -262,6 +277,24 @@ def discover(trigger: str = "manual") -> list[RepoRecord]:
     with GitHubClient(cfg) as client:
         records = client.list_org_repos()
     selected = select_repos(records, cfg)
+
+    # A discovery that collapses is a symptom, not a fact about the org. An
+    # unauthenticated request returns only public repositories -- 59 of 272 here
+    # -- with HTTP 200 and no error, and the run then quietly refreshes a
+    # fraction of the corpus. Refuse rather than narrow.
+    with connection() as conn:
+        known = int(
+            conn.execute(
+                "SELECT count(*) FROM repo WHERE is_enabled"
+            ).fetchone()[0]
+        )
+    if known and len(selected) < known * DISCOVERY_SHRINK_FLOOR:
+        raise AuthError(
+            f"discovery returned {len(selected)} repositories but {known} are "
+            "already known. That is the shape of an unauthenticated or partial "
+            "listing, not repositories disappearing. Check the credential; "
+            "nothing was changed."
+        )
 
     with connection() as conn:
         for record in selected:
@@ -382,7 +415,7 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
         blobless = gitops.choose_clone_mode(record.disk_usage_kb, cfg.ingest)
         result.blobless = blobless
 
-        token = cfg.github.token
+        token = cfg.github.current_token()
         fetch = gitops.sync_mirror(
             record.full_name,
             record.authed_clone_url(token),
@@ -536,6 +569,41 @@ def run_ingest(
     cfg = get_config()
     started = time.monotonic()
 
+    # One ingest at a time, across processes. A scheduled tick and a human's
+    # `git-synapse ingest` used to run concurrently: they fetched the same mirrors,
+    # redid the same global rebuilds, and left rows stuck in `running` that
+    # blocked the API refresh endpoint for six hours. An advisory lock is held
+    # for the life of the connection, so a crashed run releases it immediately
+    # rather than wedging the next one.
+    lock = connection()
+    conn = lock.__enter__()
+    if not conn.execute(
+        "SELECT pg_try_advisory_lock(%s)", (INGEST_LOCK_KEY,)
+    ).fetchone()[0]:
+        lock.__exit__(None, None, None)
+        log.warning("another ingest run holds the lock; skipping this one")
+        run = RunResult(kind="full" if force_full else "sync")
+        run.status = "skipped"
+        run.duration_s = time.monotonic() - started
+        return run
+
+    try:
+        return _run_ingest_locked(records, trigger, force_full, concurrency, started)
+    finally:
+        conn.execute("SELECT pg_advisory_unlock(%s)", (INGEST_LOCK_KEY,))
+        lock.__exit__(None, None, None)
+
+
+def _run_ingest_locked(
+    records: list[RepoRecord] | None,
+    trigger: str,
+    force_full: bool,
+    concurrency: int | None,
+    started: float,
+) -> RunResult:
+    """The body of :func:`run_ingest`, with the single-run lock already held."""
+    cfg = get_config()
+
     reconcile_stale_runs()
 
     # Fail the whole run on a bad credential rather than letting every
@@ -570,6 +638,8 @@ def run_ingest(
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ingest") as pool:
         futures = {pool.submit(sync_repo, rec, force_full): rec for rec in records}
         done = 0
+        consecutive_network_failures = 0
+        aborted = False
         for future in as_completed(futures):
             record = futures[future]
             try:
@@ -580,6 +650,30 @@ def run_ingest(
                     status="failed",
                     error=f"{type(exc).__name__}: {exc}",
                 )
+
+            # When connectivity goes, every repository fails the same way after
+            # exhausting its retries -- four attempts at a two-minute timeout is
+            # nine minutes each. Grinding through the whole corpus that way took
+            # 25 minutes to accomplish nothing. Give up once the pattern is
+            # unmistakable; the mirrors are untouched and the next run retries.
+            if result.status == "failed" and gitops.is_transient_error(
+                result.error or ""
+            ):
+                consecutive_network_failures += 1
+            elif result.status != "failed":
+                consecutive_network_failures = 0
+
+            if consecutive_network_failures >= NETWORK_FAILURE_ABORT and not aborted:
+                aborted = True
+                log.error(
+                    "aborting run: %d consecutive repositories failed with network "
+                    "errors, so the network is down rather than the repositories. "
+                    "Mirrors are untouched; the next run will retry.",
+                    consecutive_network_failures,
+                )
+                for pending in futures:
+                    pending.cancel()
+
             run.repos.append(result)
             _record_repo_result(run.run_id, result)
             done += 1

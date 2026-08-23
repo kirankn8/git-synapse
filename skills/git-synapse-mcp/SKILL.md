@@ -5,6 +5,11 @@ description: Use the Git Synapse MCP server to find what else has to change. Bef
 
 # Git Synapse MCP: what else has to change
 
+**Scope: file level and no finer.** The atomic record is one row per (commit,
+file); no code is parsed. Git Synapse cannot answer anything about functions, methods
+or symbols, and never will -- the distinction is not in the data. For coupling
+inside a file, read the code.
+
 Git Synapse answers one question from real commit history:
 
 > **If I change this, what else has historically had to change too?**

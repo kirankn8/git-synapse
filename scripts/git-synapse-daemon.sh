@@ -61,12 +61,11 @@ cd "$PROJECT_DIR" || exit 1
 # the moment gh reissues, and the expired copy wins over the live one. Exporting
 # it here means compose interpolates the current value and nothing is written to
 # disk. An empty value is never exported -- that would blank a working token.
-if command -v gh >/dev/null 2>&1; then
-    fresh=$(gh auth token 2>/dev/null || true)
-    if [ -n "$fresh" ]; then
-        export GITHUB_TOKEN="$fresh"
-    else
-        log "WARNING: gh auth token returned nothing; leaving GITHUB_TOKEN as-is"
+# `gh` here is the real binary, not the shell function the interactive shell
+# defines, so `gh auth token` returns nothing. bulwark is the actual source.
+if [ -x "$PROJECT_DIR/scripts/refresh-token.sh" ]; then
+    if ! "$PROJECT_DIR/scripts/refresh-token.sh" >>"$LOG" 2>&1; then
+        log "WARNING: could not refresh the GitHub token; the mounted file is unchanged"
     fi
 fi
 

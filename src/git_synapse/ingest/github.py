@@ -134,8 +134,13 @@ class GitHubClient:
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "git-synapse-change-coupling/1.0",
         }
-        if self.cfg.token:
-            headers["Authorization"] = f"Bearer {self.cfg.token}"
+        # current_token() rather than cfg.token: the credential lives in a file
+        # the host rotates, and reading the frozen env copy sent unauthenticated
+        # requests that quietly returned only the org's 59 public repositories
+        # instead of all 272.
+        token = self.cfg.current_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         self._client = httpx.Client(
             base_url=self.cfg.api_url, headers=headers, timeout=timeout, follow_redirects=True
         )

@@ -17,7 +17,10 @@ x-app-env: &app-env
   POSTGRES_DB: ${POSTGRES_DB:-git_synapse}
   # gh exports GH_TOKEN on this machine, so accept either name and read the
   # live value rather than a copy that goes stale when gh reissues.
+  # Fallback only. The authoritative source is the mounted token file below,
+  # which the host keeps current and the code reads on every use.
   GITHUB_TOKEN: ${GITHUB_TOKEN:-${GH_TOKEN:-}}
+  GITHUB_TOKEN_FILE: /run/git-synapse/github-token
   GITHUB_ORG: ${GITHUB_ORG:-acme}
   INCLUDE_PRIVATE: ${INCLUDE_PRIVATE:-true}
   INCLUDE_FORKS: ${INCLUDE_FORKS:-true}
@@ -49,6 +52,11 @@ x-app-base: &app-base
       condition: service_healthy
   volumes:
     - mirrors:/data/mirrors
+    # The directory, not the file: the refresher replaces the token by atomic
+    # rename, which swaps the inode, and a file bind-mount follows the old inode
+    # and breaks. Read on every use, so a rotated credential takes effect with no
+    # restart. Optional: absent, the code falls back to GITHUB_TOKEN.
+    - ${GIT_SYNAPSE_TOKEN_DIR:-${HOME}/.git-synapse}:/run/git-synapse:ro
 
 services:
   postgres:
