@@ -110,8 +110,14 @@ def test_co_change_commits_are_the_evidence_behind_the_score(db):
     if row is None:
         pytest.skip("no supported pair")
     commits = q.co_change_commits(row["a"], row["b"], limit=100)
-    assert 0 < len(commits) <= row["n_ab"]
-    assert all(c["sha"] for c in commits)
+    assert commits and all(c["sha"] for c in commits)
+    # A commit above the fan-out cap changed both files but contributed to no
+    # statistic; the evidence list marks it rather than quietly disagreeing
+    # with the score it is presented as explaining.
+    counted = [c for c in commits if c["counted"]]
+    assert len(counted) == row["n_ab"], (
+        f"{len(counted)} counted commits against a joint count of {row['n_ab']}"
+    )
 
 
 # ------------------------------------------------------------- aggregates
