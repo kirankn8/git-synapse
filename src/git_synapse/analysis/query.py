@@ -402,11 +402,18 @@ def pair_detail(file_a_id: int, file_b_id: int) -> dict | None:
 
 
 def co_change_commits(file_a_id: int, file_b_id: int, limit: int = 25) -> list[dict]:
-    """The actual commits in which both files changed -- the evidence behind a score."""
+    """The actual commits in which both files changed -- the evidence behind a score.
+
+    Each row carries ``counted``: whether that commit contributed to ``n_ab``. A
+    commit above the fan-out cap changed both files but is excluded from every
+    statistic, so listing it unmarked made the evidence disagree with the score
+    it was presented as explaining -- six commits shown for a joint count of five.
+    """
     return query(
         """
         SELECT c.id, c.sha, c.subject, c.committed_at, c.n_files,
-               c.insertions, c.deletions, a.display_name AS author, a.email
+               c.insertions, c.deletions, a.display_name AS author, a.email,
+               c.pair_eligible AS counted
         FROM commit c
         JOIN commit_file cfa ON cfa.commit_id = c.id AND cfa.file_id = %(a)s
         JOIN commit_file cfb ON cfb.commit_id = c.id AND cfb.file_id = %(b)s

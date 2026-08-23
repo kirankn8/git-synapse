@@ -1266,9 +1266,18 @@ on('/pair/:a/:b', async ({ a, b }) => {
   wrap.append(h('div', { class: 'section-title' }, 'Evidence'));
   wrap.append(
     card(
-      commits.commits.length < (detail.n_ab || 0)
-        ? `${commits.commits.length} of ${num(detail.n_ab)} commits where both files changed`
-        : `${commits.commits.length} commits where both files changed`,
+      (() => {
+        // A commit above the fan-out cap changed both files but contributed to
+        // no statistic. Saying so is the difference between evidence and a
+        // number that quietly disagrees with the table above it.
+        const shown = commits.commits.length;
+        const uncounted = commits.commits.filter((c) => c.counted === false).length;
+        const total = detail.n_ab || 0;
+        let title = shown < total ? `${shown} of ${num(total)} commits where both files changed`
+                                  : `${shown} commits where both files changed`;
+        if (uncounted) title += ` — ${uncounted} above the fan-out cap, not counted in the score`;
+        return title;
+      })(),
       dataTable(
         commits.commits,
         [
