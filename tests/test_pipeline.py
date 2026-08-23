@@ -222,3 +222,71 @@ def test_a_valid_credential_reports_the_login(db, token, monkeypatch):
     from git_synapse.ingest.pipeline import verify_credentials
 
     assert verify_credentials() == "someone"
+
+
+# ------------------------------------------------------- contention retries
+
+def test_a_repo_that_loses_a_deadlock_is_retried(db, monkeypatch):
+    """Postgres resolves a deadlock by killing one participant. The victim's
+    work is still valid, so it is retried rather than reported as failed."""
+    from git_synapse.ingest import pipeline
+    from git_synapse.ingest.github import RepoRecord
+    from git_synapse.ingest.pipeline import RepoResult
+
+    monkeypatch.setattr(pipeline.time, "sleep", lambda _s: None, raising=False)
+    attempts = {"n": 0}
+
+    def flaky(record, force_full=False):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return RepoResult(full_name=record.full_name, status="failed",
+                              error="DeadlockDetected: deadlock detected")
+        return RepoResult(full_name=record.full_name, status="ok")
+
+    monkeypatch.setattr(pipeline, "_sync_repo_once", flaky)
+    record = RepoRecord(github_id=1, owner="t", name="x", full_name="t/x",
+                        clone_url="", default_branch="main")
+    result = pipeline.sync_repo(record)
+    assert result.status == "ok"
+    assert attempts["n"] == 2, "a contention failure must be retried once"
+
+
+def test_a_repo_that_keeps_losing_is_reported_failed_not_retried_forever(db, monkeypatch):
+    from git_synapse.ingest import pipeline
+    from git_synapse.ingest.github import RepoRecord
+    from git_synapse.ingest.pipeline import DB_CONTENTION_RETRIES, RepoResult
+
+    monkeypatch.setattr(pipeline.time, "sleep", lambda _s: None, raising=False)
+    attempts = {"n": 0}
+
+    def always_deadlock(record, force_full=False):
+        attempts["n"] += 1
+        return RepoResult(full_name=record.full_name, status="failed",
+                          error="deadlock detected")
+
+    monkeypatch.setattr(pipeline, "_sync_repo_once", always_deadlock)
+    record = RepoRecord(github_id=1, owner="t", name="x", full_name="t/x",
+                        clone_url="", default_branch="main")
+    result = pipeline.sync_repo(record)
+    assert result.status == "failed"
+    assert attempts["n"] == DB_CONTENTION_RETRIES
+
+
+def test_an_ordinary_failure_is_not_retried(db, monkeypatch):
+    """Retrying an auth error or a missing repository only wastes the timeout."""
+    from git_synapse.ingest import pipeline
+    from git_synapse.ingest.github import RepoRecord
+    from git_synapse.ingest.pipeline import RepoResult
+
+    attempts = {"n": 0}
+
+    def auth_failure(record, force_full=False):
+        attempts["n"] += 1
+        return RepoResult(full_name=record.full_name, status="failed",
+                          error="remote: Invalid username or token.")
+
+    monkeypatch.setattr(pipeline, "_sync_repo_once", auth_failure)
+    record = RepoRecord(github_id=1, owner="t", name="x", full_name="t/x",
+                        clone_url="", default_branch="main")
+    assert pipeline.sync_repo(record).status == "failed"
+    assert attempts["n"] == 1
