@@ -15,6 +15,7 @@ operational situation from "nothing ran".
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import subprocess
@@ -497,8 +498,10 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
 
         with connection() as conn:
             stats = load_commits(repo_id, commits, conn)
-            # Record every branch tip, so the next run's `git log --all` can
-            # exclude all of them and not just the default branch.
+            # Record the default branch tip as the next run's exclusion point.
+            # This was every branch tip when the walk covered every branch;
+            # excluding more than the walk visits would skip commits that must
+            # still be read when their branch merges.
             conn.execute(
                 """
                 UPDATE repo SET last_ingest_at = now(),
@@ -595,23 +598,29 @@ def run_ingest(
     # blocked the API refresh endpoint for six hours. An advisory lock is held
     # for the life of the connection, so a crashed run releases it immediately
     # rather than wedging the next one.
-    lock = connection()
-    conn = lock.__enter__()
-    if not conn.execute(
-        "SELECT pg_try_advisory_lock(%s)", (INGEST_LOCK_KEY,)
-    ).fetchone()[0]:
-        lock.__exit__(None, None, None)
-        log.warning("another ingest run holds the lock; skipping this one")
-        run = RunResult(kind="full" if force_full else "sync")
-        run.status = "skipped"
-        run.duration_s = time.monotonic() - started
-        return run
+    with connection() as conn:
+        if not conn.execute(
+            "SELECT pg_try_advisory_lock(%s)", (INGEST_LOCK_KEY,)
+        ).fetchone()[0]:
+            log.warning("another ingest run holds the lock; skipping this one")
+            run = RunResult(kind="full" if force_full else "sync")
+            run.status = "skipped"
+            run.duration_s = time.monotonic() - started
+            return run
 
-    try:
-        return _run_ingest_locked(records, trigger, force_full, concurrency, started)
-    finally:
-        conn.execute("SELECT pg_advisory_unlock(%s)", (INGEST_LOCK_KEY,))
-        lock.__exit__(None, None, None)
+        try:
+            return _run_ingest_locked(
+                records, trigger, force_full, concurrency, started
+            )
+        finally:
+            # An advisory lock outlives the transaction and is released only by
+            # unlocking or by the session ending -- and a pooled connection's
+            # session does not end when it is returned. So the unlock has to
+            # happen, but it must not raise: a failing one would mask whatever
+            # actually went wrong, and the pool discards a broken connection,
+            # which ends its session and releases the lock anyway.
+            with contextlib.suppress(Exception):
+                conn.execute("SELECT pg_advisory_unlock(%s)", (INGEST_LOCK_KEY,))
 
 
 def _run_ingest_locked(
