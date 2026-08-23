@@ -478,7 +478,14 @@ def ref_tips(path: Path) -> list[str]:
     )
     if proc.returncode != 0:
         return []
-    return sorted({line.strip() for line in proc.stdout.splitlines() if line.strip()})
+    # `git rev-parse HEAD` exits 0 and echoes the literal "HEAD" when the ref
+    # does not resolve, which an empty repository always hits. Storing that as
+    # the watermark would make the next run exclude `^HEAD` and read nothing --
+    # harmless while the repository stays empty, and permanent once it does not.
+    return [
+        tip for tip in (line.strip() for line in proc.stdout.splitlines())
+        if len(tip) == 40 and all(c in "0123456789abcdef" for c in tip)
+    ]
 
 
 def commit_exists(path: Path, sha: str) -> bool:
