@@ -261,3 +261,106 @@ def test_refresh_endpoint_refuses_while_a_run_is_active(client):
                     conn.execute("DELETE FROM ingest_run WHERE id=%s", (rid,))
         finally:
             holder.execute("SELECT pg_advisory_unlock(%s)", (INGEST_LOCK_KEY,))
+
+
+# --------------------------------------------------- every route, discovered
+
+def _real_ids():
+    """Ids that actually exist, so a sweep exercises the query rather than a 404."""
+    from git_synapse.analysis.query import query_one
+
+    ids = {}
+    row = query_one("SELECT id FROM repo WHERE is_enabled ORDER BY commit_count DESC LIMIT 1")
+    if row:
+        ids["repo_id"] = ids["repo_a_id"] = row["id"]
+    row = query_one(
+        "SELECT id FROM repo WHERE is_enabled ORDER BY commit_count DESC OFFSET 1 LIMIT 1"
+    )
+    if row:
+        ids["repo_b_id"] = row["id"]
+    row = query_one("SELECT file_a_id a, file_b_id b FROM file_pair_metric LIMIT 1")
+    if row:
+        ids["file_id"] = ids["file_a_id"] = row["a"]
+        ids["file_b_id"] = row["b"]
+    row = query_one("SELECT id FROM directory ORDER BY change_count DESC LIMIT 1")
+    if row:
+        ids["dir_id"] = row["id"]
+    row = query_one("SELECT id FROM ingest_run ORDER BY id DESC LIMIT 1")
+    if row:
+        ids["run_id"] = row["id"]
+    row = query_one("SELECT id FROM change_set LIMIT 1")
+    if row:
+        ids["change_set_id"] = row["id"]
+    return ids
+
+
+#: Endpoints whose required query arguments the sweep cannot guess. None means
+#: "cannot be swept generically"; a dict is the arguments to pass.
+REQUIRED_QUERY: dict[str, dict | None] = {
+    "/api/files/resolve": {"repo": "acme/runtime", "path": "go.mod"},
+}
+
+
+def test_every_get_route_answers_with_real_arguments(client, db):
+    """A sweep over the routes the app actually declares.
+
+    Enumerating them from the app rather than a hand-written list means a new
+    endpoint is covered the moment it is added, instead of quietly never being
+    called until a user finds it broken.
+    """
+    import re
+
+    ids = _real_ids()
+    checked, skipped, failures = 0, [], []
+
+    # The OpenAPI document is the app's own list of what it serves, so a new
+    # endpoint is swept the moment it exists rather than whenever someone
+    # remembers to add it here.
+    schema = client.get("/api/openapi.json").json()
+    for path, ops in schema.get("paths", {}).items():
+        if "get" not in ops or not path.startswith("/api/"):
+            continue
+
+        params = re.findall(r"\{(\w+)\}", path)
+        if any(p not in ids for p in params):
+            skipped.append(path)
+            continue
+        concrete = path
+        for p in params:
+            concrete = concrete.replace(f"{{{p}}}", str(ids[p]))
+
+        # A few endpoints take required query arguments; give them real ones
+        # rather than letting the sweep report a 422 as a fault.
+        extra = REQUIRED_QUERY.get(path, {})
+        if extra is None:
+            skipped.append(path)
+            continue
+        r = client.get(concrete, params={"limit": 3, **extra})
+        checked += 1
+        if r.status_code != 200:
+            failures.append(f"{concrete} -> {r.status_code} {r.text[:100]}")
+
+    assert checked > 25, f"the sweep only reached {checked} routes"
+    assert not failures, "\n".join(failures)
+
+
+def test_every_route_refuses_a_nonexistent_id_rather_than_500ing(client, db):
+    """404 or an empty result is fine. A 500 means an unguarded query."""
+    import re
+
+    bogus = 999999999
+    failures = []
+    schema = client.get("/api/openapi.json").json()
+    for path, ops in schema.get("paths", {}).items():
+        if "get" not in ops or not path.startswith("/api/"):
+            continue
+        params = re.findall(r"\{(\w+)\}", path)
+        if not params or not all(p.endswith("_id") for p in params):
+            continue
+        concrete = path
+        for p in params:
+            concrete = concrete.replace(f"{{{p}}}", str(bogus))
+        r = client.get(concrete, params={"limit": 3})
+        if r.status_code >= 500:
+            failures.append(f"{concrete} -> {r.status_code}")
+    assert not failures, "\n".join(failures)

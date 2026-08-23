@@ -90,3 +90,76 @@ def test_reversing_labels_reflects_the_auc_about_half():
     scores = rng.random(60)
     labels = rng.integers(0, 2, 60)
     assert _auc(scores, labels) + _auc(scores, 1 - labels) == pytest.approx(1.0)
+
+
+# ------------------------------------------------- evaluation over real data
+
+def test_ground_truth_edges_respect_the_bump_threshold(db):
+    """The label is "bumped more than min_bumps times"; a looser threshold can
+    only ever admit more edges."""
+    from git_synapse.analysis.validate import ground_truth_edges
+
+    loose = ground_truth_edges(min_bumps=2)
+    strict = ground_truth_edges(min_bumps=5)
+    assert strict <= loose, "a stricter threshold cannot add edges"
+
+
+def test_ground_truth_edges_are_directed_pairs(db):
+    from git_synapse.analysis.validate import ground_truth_edges
+
+    for edge in list(ground_truth_edges(min_bumps=2))[:20]:
+        assert isinstance(edge, tuple) and len(edge) == 2
+        assert edge[0] != edge[1], "a repository cannot bump itself"
+
+
+def test_evaluate_returns_a_score_per_measure(db):
+    from git_synapse.analysis.validate import evaluate
+    from git_synapse.stats.registry import MEASURES
+
+    scores = evaluate(lag_bins=1)
+    scores = scores if isinstance(scores, list) else scores.measures
+    if not scores:
+        pytest.skip("no lag data")
+    keys = {s.measure for s in scores}
+    assert keys <= {m.key for m in MEASURES}
+    for s in scores:
+        assert 0.0 <= s.directional_accuracy <= 1.0
+        assert np.isnan(s.auc) or 0.0 <= s.auc <= 1.0
+
+
+def test_a_symmetric_measure_is_exactly_half_directional_at_lag_zero(db):
+    """At lag 0 the joint matrix is M @ M.T, so a symmetric measure is identical
+    in both orientations. Anything other than 0.5 would mean the directional
+    accuracy is measuring something else."""
+    from git_synapse.analysis.validate import evaluate
+
+    scores = evaluate(lag_bins=0)
+    scores = scores if isinstance(scores, list) else scores.measures
+    if not scores:
+        pytest.skip("no lag data")
+    russell = next((s for s in scores if s.measure == "russell_rao"), None)
+    if russell is None:
+        pytest.skip("russell_rao not evaluated")
+    assert russell.directional_accuracy == pytest.approx(0.5, abs=1e-9)
+
+
+def test_sweep_lags_covers_the_configured_lags(db):
+    from git_synapse.analysis.validate import sweep_lags
+
+    out = sweep_lags(measure="npmi")
+    if not out:
+        pytest.skip("no lag data")
+    # MeasureScore objects, one per lag that has rows.
+    lags = [row.lag_bins for row in out]
+    assert len(set(lags)) == len(lags), "one row per lag"
+    assert all(row.measure == "npmi" for row in out)
+    assert lags == sorted(lags), "lags must come back in order"
+
+
+def test_compare_to_symmetric_reports_both_sides(db):
+    from git_synapse.analysis.validate import compare_to_symmetric
+
+    out = compare_to_symmetric()
+    if not out or out.get("comparable_edges", 0) == 0:
+        pytest.skip("nothing comparable")
+    assert 0.0 <= out["symmetric_directional_accuracy"] <= 1.0
