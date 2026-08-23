@@ -1124,6 +1124,10 @@ CREATE TABLE IF NOT EXISTS meta (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Must equal SCHEMA_VERSION in db/engine.py. They are checked against each
+-- other by a test, because they drifted twice: the constant was bumped and this
+-- was not, so schema_is_current() was permanently false and every service boot
+-- re-ran the whole DDL, taking exactly the locks the fast path exists to avoid.
 INSERT INTO meta (key, value)
-VALUES ('schema_version', '12'::jsonb)
+VALUES ('schema_version', '14'::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
