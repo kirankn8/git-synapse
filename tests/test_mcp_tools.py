@@ -325,3 +325,74 @@ def test_an_empty_chain_explains_itself(db):
         pytest.skip("no all-discovery repository")
     out = server.coupling_chain(repo=row["name"], direction="upstream")
     assert out["chains"] == [] and out["explanation"]
+
+
+# ------------------------------------------------------ module_context prose
+
+def test_module_context_describes_a_multi_module_repository(db):
+    """In a monorepo the module graph is the structure; the guidance has to say
+    which direction a change propagates."""
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        """
+        SELECT r.name AS repo, f.path
+        FROM module_dependency m
+        JOIN repo r ON r.id = m.repo_id
+        JOIN file f ON f.repo_id = r.id AND f.dir_path LIKE m.consumer_module || '%'
+        LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("no multi-module repository indexed")
+    out = server.module_context(repo=row["repo"], path=row["path"])
+    assert "error" not in out, out
+    assert out["multi_module"] is True
+    assert out.get("guidance")
+
+
+def test_module_context_says_so_for_a_single_module_repository(db):
+    """"There is no internal module graph" is a real answer, not an empty one."""
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        """
+        SELECT r.name AS repo, f.path
+        FROM file f JOIN repo r ON r.id = f.repo_id
+        WHERE NOT EXISTS (SELECT 1 FROM module_dependency m WHERE m.repo_id = r.id)
+          AND f.change_count > 5
+        LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("every repository is multi-module")
+    out = server.module_context(repo=row["repo"], path=row["path"])
+    assert out.get("multi_module") is False
+    assert "single-module" in (out.get("note") or "")
+
+
+def test_search_files_scoped_to_a_repository_stays_in_it(db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT name FROM repo WHERE is_enabled ORDER BY commit_count DESC LIMIT 1")
+    out = server.search_files(term="go", repo=row["name"], limit=5)
+    files = out["files"] if isinstance(out, dict) else out
+    for f in files:
+        assert f.get("repo", "").endswith(row["name"])
+
+
+def test_search_files_with_no_match_is_an_empty_list_not_an_error(db):
+    out = server.search_files(term="zzz-definitely-no-such-path-zzz", limit=5)
+    files = out["files"] if isinstance(out, dict) else out
+    assert files == []
+
+
+def test_list_repositories_can_be_filtered(db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
+    out = server.list_repositories(search=row["name"], limit=10)
+    repos = out["repositories"] if isinstance(out, dict) else out
+    # The tool reports full names, which is what an agent should pass back.
+    assert any(r["name"].endswith(f'/{row["name"]}') or r["name"] == row["name"]
+               for r in repos), [r["name"] for r in repos][:5]

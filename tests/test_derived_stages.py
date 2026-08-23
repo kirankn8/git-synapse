@@ -317,3 +317,61 @@ def test_repo_results_are_recorded_per_repository(corpus, monkeypatch):
     n = query_one("SELECT count(*) AS n FROM ingest_run_repo WHERE run_id=%s",
                   (result.run_id,))["n"]
     assert n == 1, "each repository's outcome must be recorded, not just the total"
+
+
+def test_a_failing_global_stage_does_not_discard_the_per_repo_work(corpus, monkeypatch):
+    """Each global stage is guarded separately on purpose.
+
+    The per-repo results are already committed and useful on their own, so one
+    stage blowing up must not fail the run or undo the others -- otherwise a
+    transient fault in mining would throw away a completed ingest.
+    """
+    from git_synapse.analysis import crossrepo
+    from git_synapse.db.engine import query_one
+    from git_synapse.ingest import pipeline
+    from git_synapse.ingest.github import RepoRecord
+
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+
+    def explode(*a, **kw):
+        raise RuntimeError("cross-repo stage failed")
+
+    monkeypatch.setattr(crossrepo, "rebuild", explode)
+
+    before = query_one("SELECT count(*) AS n FROM file_pair")["n"]
+    result = pipeline.run_ingest(
+        records=[RepoRecord(github_id=920001, owner="acme", name="dsx-lib",
+                            full_name="acme/dsx-lib",
+                            clone_url=corpus["_lib_remote"], default_branch="main")],
+        trigger="test", force_full=True,
+    )
+    assert result.status in ("success", "partial"), result.status
+    assert query_one("SELECT count(*) AS n FROM file_pair")["n"] >= before, (
+        "a failing global stage discarded per-repo work"
+    )
+
+
+def test_global_stages_are_skipped_when_nothing_moved(corpus, monkeypatch):
+    """The 15-minute tick must not redo the whole corpus for zero commits."""
+    from git_synapse.analysis import crossrepo
+    from git_synapse.ingest import pipeline
+    from git_synapse.ingest.github import RepoRecord
+
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+    calls = []
+    monkeypatch.setattr(crossrepo, "rebuild",
+                        lambda *a, **kw: calls.append("ran") or _Stats())
+
+    pipeline.run_ingest(
+        records=[RepoRecord(github_id=920001, owner="acme", name="dsx-lib",
+                            full_name="acme/dsx-lib",
+                            clone_url=corpus["_lib_remote"], default_branch="main")],
+        trigger="test",
+    )
+    assert not calls, "no new commits, so the global rebuild should not have run"
+
+
+class _Stats:
+    change_sets = ticket_sets = temporal_sets = eligible_sets = 0
+    repo_pairs = file_pairs = 0
+    duration_s = 0.0
