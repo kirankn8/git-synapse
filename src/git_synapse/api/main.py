@@ -8,11 +8,12 @@ the same behaviour without duplicating logic.
 from __future__ import annotations
 
 import logging
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from git_synapse.api.routes import router
@@ -96,17 +97,35 @@ if _web_root.is_dir():
     #: client router take over -- without this, refreshing on /insights 404s.
     _INDEX = _web_root / "index.html"
 
-    def _shell() -> FileResponse:
-        # no-store on the shell only. Hashed asset URLs would be cacheable, but
-        # this project has no build step to hash them, and a stale app.js after a
-        # redeploy silently renders half the routes as blank pages.
-        return FileResponse(
-            str(_INDEX),
-            headers={"Cache-Control": "no-store, must-revalidate"},
+    def _asset_version() -> str:
+        """A token that changes whenever a served asset changes.
+
+        The shell used to link `app.js?v=2`, a hand-written constant. Nobody
+        bumps it, so browsers held a cached copy across redeploys and rendered
+        blank routes from code that no longer existed. Deriving it from the
+        files' modification times invalidates exactly when they change, with no
+        build step.
+        """
+        stamp = 0.0
+        for name in ("static/app.js", "static/style.css", "static/graph.js"):
+            asset = _web_root / name
+            if asset.is_file():
+                stamp = max(stamp, asset.stat().st_mtime)
+        return str(int(stamp))
+
+    def _shell() -> HTMLResponse:
+        # no-store on the shell so the asset URLs it carries are always current;
+        # the assets themselves are versioned and may be cached.
+        html = _INDEX.read_text(encoding="utf-8")
+        version = _asset_version()
+        html = re.sub(r'(/static/[\w.-]+?)(\?v=[^"\']*)?(["\'])',
+                      lambda m: f"{m.group(1)}?v={version}{m.group(3)}", html)
+        return HTMLResponse(
+            html, headers={"Cache-Control": "no-store, must-revalidate"}
         )
 
     @app.get("/", include_in_schema=False)
-    async def index() -> FileResponse:
+    async def index() -> HTMLResponse:
         return _shell()
 
     @app.get("/favicon.svg", include_in_schema=False)
