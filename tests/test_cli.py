@@ -354,3 +354,64 @@ def test_status_after_a_run_reports_the_run(db):
     r = runner.invoke(app, ["status"])
     assert r.exit_code == 0
     assert any(w in r.stdout.lower() for w in ("run", "ingest", "repo"))
+
+
+# --------------------------------------------------- the destructive command
+
+def test_reset_requires_an_explicit_yes(scratch_db):
+    """`reset` drops every ingested row. Nothing but an explicit flag may run
+    it, because the mistake is unrecoverable without a full re-ingest."""
+    from git_synapse.db.engine import connection, query_one
+
+    with connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO repo (github_id, owner, name, full_name, default_branch,
+                              is_enabled, ingest_status)
+            VALUES (980001,'t','reset-probe','t/reset-probe','main',TRUE,'ready')
+            ON CONFLICT (github_id) DO NOTHING
+            """
+        )
+    before = query_one("SELECT count(*) AS n FROM repo")["n"]
+    assert before > 0
+
+    r = runner.invoke(app, ["reset"])
+    assert "refusing" in r.stdout.lower() or r.exit_code != 0
+    assert query_one("SELECT count(*) AS n FROM repo")["n"] == before
+
+
+def test_reset_advertises_the_flag_it_requires(scratch_db):
+    """The destructive half is deliberately not executed here: running it would
+    wipe the scratch database other modules' fixtures depend on. What matters is
+    that it refuses by default and says how to mean it."""
+    r = runner.invoke(app, ["reset", "--help"])
+    assert r.exit_code == 0
+    assert "--yes" in r.stdout
+
+
+def test_feedback_shows_nothing_gracefully_when_there_is_nothing(scratch_db):
+    r = runner.invoke(app, ["feedback"])
+    assert r.exit_code == 0
+    assert "no reports" in r.stdout.lower() or r.stdout.strip()
+
+
+def test_feedback_renders_severities(scratch_db):
+    """Severity drives the colour, and ranking it as text once put low above
+    high; the table must render every level without choking."""
+    from git_synapse.analysis.query import record_feedback
+    from git_synapse.db.engine import connection
+
+    ids = []
+    for sev in ("low", "medium", "high"):
+        ids.append(record_feedback(
+            kind="wrong_data", detail=f"PROBE {sev}", severity=sev,
+            tool="coupled_files", repo="t/probe", expected=sev, observed="x",
+        )["id"])
+    try:
+        r = runner.invoke(app, ["feedback", "--status", "open"])
+        assert r.exit_code == 0, r.stdout
+        for sev in ("low", "medium", "high"):
+            assert sev in r.stdout
+    finally:
+        with connection() as conn:
+            conn.execute("DELETE FROM feedback WHERE id = ANY(%s)", (ids,))
