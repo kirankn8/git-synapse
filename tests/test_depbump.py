@@ -188,3 +188,98 @@ def test_every_declared_manifest_kind_has_a_parser():
         assert ecosystem in probes, f"{ecosystem} is scanned but has no parser test"
         line, expected = probes[ecosystem]
         assert _parse_manifest_line(line, ecosystem) == expected
+
+
+# -------------------------------------------------- the intra-repo module graph
+
+def _module_edges(mirror, repo_name):
+    """Every internal edge across every manifest, the way refresh_modules does."""
+    from git_synapse.analysis.depbump import declared_modules_at_head
+
+    edges = set()
+    for manifest, _ in manifest_paths(mirror):
+        for consumer, dep, _version in declared_modules_at_head(mirror, repo_name, manifest):
+            edges.add((consumer, dep))
+    return edges
+
+
+def test_declared_modules_at_head_maps_a_monorepos_internal_edges(tmp_path):
+    """A monorepo's real structure is in its own submodules, and reading only
+    the root manifest made that invisible."""
+    mirror = _repo(tmp_path, {
+        "go.mod": "module github.com/acme/mono\n",
+        "svc/api/go.mod": (
+            "module github.com/acme/mono/svc/api\n\n"
+            "require github.com/acme/mono/pkg/core v0.0.0\n"
+        ),
+        "pkg/core/go.mod": "module github.com/acme/mono/pkg/core\n",
+        "svc/web/go.mod": (
+            "module github.com/acme/mono/svc/web\n\n"
+            "require (\n"
+            "\tgithub.com/acme/mono/pkg/core v0.0.0\n"
+            "\tgithub.com/acme/mono/svc/api v0.0.0\n"
+            ")\n"
+        ),
+    })
+    pairs = _module_edges(mirror, "mono")
+    assert ("svc/api", "pkg/core") in pairs
+    assert ("svc/web", "pkg/core") in pairs
+    assert ("svc/web", "svc/api") in pairs
+    assert not any(a == b for a, b in pairs), "a module never declares itself"
+
+
+def test_a_single_module_repo_has_no_internal_edges(tmp_path):
+    mirror = _repo(tmp_path, {
+        "go.mod": (
+            "module github.com/acme/solo\n\n"
+            "require github.com/acme/other v1.0.0\n"
+        ),
+    })
+    assert _module_edges(mirror, "solo") == set()
+
+
+def test_a_dependency_on_another_repository_is_not_an_internal_module_edge(tmp_path):
+    """Cross-repo edges belong to repo_dependency, not module_dependency."""
+    mirror = _repo(tmp_path, {
+        "go.mod": "module github.com/acme/mono\n",
+        "svc/api/go.mod": (
+            "module github.com/acme/mono/svc/api\n\n"
+            "require github.com/acme/elsewhere/pkg v1.0.0\n"
+        ),
+    })
+    assert _module_edges(mirror, "mono") == set()
+
+
+# ---------------------------------------------------------- history walking
+
+def test_extract_from_mirror_finds_every_bump_in_history(tmp_path):
+    """Bump history is the ground truth propagation lag rests on."""
+    import subprocess
+
+    from git_synapse.analysis.depbump import extract_from_mirror
+
+    work = tmp_path / "w"
+    work.mkdir()
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e",
+           "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+           "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+    subprocess.run(["git", "init", "--quiet", "-b", "main", str(work)], check=True, env=env)
+    for i in range(4):
+        (work / "go.mod").write_text(
+            "module github.com/acme/consumer\n\n"
+            "require github.com/acme/upstream "
+            f"v0.0.0-2026010100000{i}-abcdef01234{i}\n"
+        )
+        subprocess.run(["git", "add", "-A"], cwd=work, check=True, env=env)
+        subprocess.run(["git", "commit", "--quiet", "-m", f"bump {i}"],
+                       cwd=work, check=True, env=env)
+    bare = tmp_path / "m.git"
+    subprocess.run(["git", "clone", "--quiet", "--bare", str(work), str(bare)],
+                   check=True, env=env)
+
+    bumps = list(extract_from_mirror(bare, "consumer", "go.mod", "go"))
+    assert len(bumps) >= 4, f"four bumps in history, found {len(bumps)}"
+    assert all(b.dep_name == "upstream" for b in bumps)
+    # Each pseudo-version carries the upstream commit it pinned.
+    assert all(b.dep_sha for b in bumps)

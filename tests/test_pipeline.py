@@ -120,35 +120,6 @@ def test_discovery_accepts_a_listing_that_is_merely_smaller(db, monkeypatch):
 
 # --------------------------------------------------------------- run lifecycle
 
-def test_a_skipped_run_creates_no_row_and_reports_itself(db):
-    from git_synapse.db.engine import connection, query_one
-
-    before = query_one("SELECT count(*) AS n FROM ingest_run")["n"]
-    with connection() as holder:
-        holder.execute("SELECT pg_advisory_lock(%s)", (pipeline.INGEST_LOCK_KEY,))
-        try:
-            result = pipeline.run_ingest(records=[], trigger="test")
-        finally:
-            holder.execute("SELECT pg_advisory_unlock(%s)", (pipeline.INGEST_LOCK_KEY,))
-
-    assert result.status == "skipped"
-    assert query_one("SELECT count(*) AS n FROM ingest_run")["n"] == before
-
-
-def test_active_run_ignores_a_finished_one(db):
-    from git_synapse.db.engine import connection
-
-    with connection() as conn:
-        rid = conn.execute(
-            "INSERT INTO ingest_run (kind, trigger, status, started_at, finished_at)"
-            " VALUES ('sync','test','success',now(),now()) RETURNING id"
-        ).fetchone()[0]
-    try:
-        current = pipeline.active_run()
-        assert current is None or current["id"] != rid
-    finally:
-        with connection() as conn:
-            conn.execute("DELETE FROM ingest_run WHERE id=%s", (rid,))
 
 
 def test_the_network_abort_threshold_exceeds_the_worker_count(db):

@@ -150,3 +150,87 @@ def test_an_explicit_allowlist_overrides_every_other_filter():
 def test_a_disabled_repository_is_never_selected():
     records = [RepoRecord.from_api(_repo_payload(1, disabled=True))]
     assert select_repos(records, GitHubConfig(include_archived=True, include_forks=True)) == []
+
+
+# ------------------------------------------------------- retry and limits
+
+def test_a_transient_5xx_is_retried_and_then_succeeds(monkeypatch):
+    monkeypatch.setattr("git_synapse.ingest.github.time.sleep", lambda _s: None)
+    attempts = {"n": 0}
+
+    def handler(request):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            return httpx.Response(502, json={"message": "bad gateway"})
+        return httpx.Response(200, json=[_repo_payload(0)])
+
+    with _client(handler) as c:
+        assert len(c.list_org_repos("acme")) == 1
+    assert attempts["n"] == 3, "it must retry rather than give up on the first 502"
+
+
+def test_rate_limiting_waits_and_retries(monkeypatch):
+    """A 403 with a reset header is a wait, not a failure."""
+    slept = []
+    monkeypatch.setattr("git_synapse.ingest.github.time.sleep", slept.append)
+    attempts = {"n": 0}
+
+    def handler(request):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return httpx.Response(
+                403,
+                headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1"},
+                json={"message": "API rate limit exceeded"},
+            )
+        return httpx.Response(200, json=[_repo_payload(0)])
+
+    with _client(handler) as c:
+        assert len(c.list_org_repos("acme")) == 1
+    assert slept, "a rate limit must be waited out, not hammered"
+
+
+def test_a_client_error_that_is_not_a_rate_limit_is_not_retried(monkeypatch):
+    """Retrying a 404 just multiplies the latency."""
+    monkeypatch.setattr("git_synapse.ingest.github.time.sleep", lambda _s: None)
+    attempts = {"n": 0}
+
+    def handler(request):
+        attempts["n"] += 1
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    with _client(handler) as c, pytest.raises(Exception):
+        c.list_org_repos("acme")
+    assert attempts["n"] == 1, f"a 404 was retried {attempts['n']} times"
+
+
+def test_a_connection_error_is_retried_then_surfaced(monkeypatch):
+    monkeypatch.setattr("git_synapse.ingest.github.time.sleep", lambda _s: None)
+    attempts = {"n": 0}
+
+    def handler(request):
+        attempts["n"] += 1
+        raise httpx.ConnectError("no route to host")
+
+    with _client(handler) as c, pytest.raises(Exception):
+        c.list_org_repos("acme")
+    assert attempts["n"] > 1, "a connection error must be retried before giving up"
+
+
+def test_rate_limit_endpoint_returns_the_budget():
+    def handler(request):
+        return httpx.Response(200, json={"rate": {"remaining": 4321, "limit": 5000}})
+
+    with _client(handler) as c:
+        assert c.rate_limit()["rate"]["remaining"] == 4321
+
+
+def test_fetch_languages_degrades_to_empty_rather_than_failing(monkeypatch):
+    """Languages are a nice-to-have; losing them must not fail an ingest."""
+    monkeypatch.setattr("git_synapse.ingest.github.time.sleep", lambda _s: None)
+
+    def handler(request):
+        return httpx.Response(500, json={})
+
+    with _client(handler) as c:
+        assert c.fetch_languages("acme/x") == {}
