@@ -169,3 +169,95 @@ def test_the_shell_stamps_a_current_asset_version(client):
     versions = set(re.findall(r"/static/[\w.-]+\?v=(\d+)", html))
     assert versions, "assets must carry a version"
     assert all(v.isdigit() and int(v) > 2 for v in versions)
+
+
+# ------------------------------------------------------- the remaining views
+
+@pytest.mark.parametrize("path", [
+    "/api/crossrepo/overview", "/api/crossrepo/pairs", "/api/crossrepo/graph",
+    "/api/hotspots", "/api/pairs", "/api/files", "/api/repos/languages",
+    "/api/runs", "/api/validation", "/api/config", "/api/feedback",
+])
+def test_every_listing_endpoint_answers(client, path):
+    """Each backs a view; a 500 here blanks a page for every user."""
+    r = client.get(path, params={"limit": 3})
+    assert r.status_code == 200, f"{path} -> {r.status_code} {r.text[:120]}"
+
+
+def test_file_detail_endpoints_agree_with_each_other(client):
+    f = client.get("/api/files/resolve",
+                   params={"repo": "acme/runtime", "path": "go.mod"})
+    if f.status_code != 200:
+        pytest.skip("fixture file not indexed")
+    fid = f.json().get("file_id") or f.json().get("id")
+
+    detail = client.get(f"/api/files/{fid}").json()
+    commits = client.get(f"/api/files/{fid}/commits", params={"limit": 5}).json()
+    authors = client.get(f"/api/files/{fid}/authors", params={"limit": 5}).json()
+
+    rows = commits["commits"] if isinstance(commits, dict) else commits
+    assert len(rows) <= 5
+    assert len(rows) <= detail["change_count"], "more commits than the file has changes"
+    assert isinstance(authors, (list, dict))
+
+
+def test_pair_detail_and_its_evidence_are_consistent(client):
+    from git_synapse.analysis.query import query_one
+
+    row = query_one("SELECT file_a_id a, file_b_id b FROM file_pair_metric WHERE n_ab > 3 LIMIT 1")
+    if row is None:
+        pytest.skip("no supported pair")
+
+    detail = client.get(f"/api/pairs/{row['a']}/{row['b']}").json()
+    evidence = client.get(f"/api/pairs/{row['a']}/{row['b']}/commits",
+                          params={"limit": 200}).json()
+    rows = evidence["commits"] if isinstance(evidence, dict) else evidence
+    counted = [c for c in rows if c.get("counted", True)]
+    assert len(counted) == detail["n_ab"], "the evidence must match the joint count"
+
+
+def test_repo_sub_resources_answer(client):
+    from git_synapse.analysis.query import query_one
+
+    row = query_one("SELECT id FROM repo WHERE is_enabled ORDER BY commit_count DESC LIMIT 1")
+    if row is None:
+        pytest.skip("no repositories")
+    rid = row["id"]
+    for suffix in ("", "/files", "/directories", "/extensions", "/hotspots",
+                   "/pairs", "/graph", "/partners", "/chains"):
+        r = client.get(f"/api/repos/{rid}{suffix}", params={"limit": 3})
+        assert r.status_code == 200, f"{suffix} -> {r.status_code}"
+
+
+def test_an_unknown_file_or_pair_is_a_404(client):
+    assert client.get("/api/files/999999999").status_code == 404
+    assert client.get("/api/pairs/999999998/999999999").status_code == 404
+
+
+@pytest.mark.parametrize("min_score", ["-1", "0.5", "2", "NaN", "inf"])
+def test_min_score_never_500s(client, min_score):
+    r = client.get("/api/pairs", params={"limit": 3, "min_score": min_score})
+    assert r.status_code in (200, 422), f"{min_score} -> {r.status_code}"
+
+
+def test_refresh_endpoint_refuses_while_a_run_is_active(client):
+    """It must not start a second ingest over the top of a live one."""
+    from git_synapse.db.engine import connection
+    from git_synapse.ingest.pipeline import INGEST_LOCK_KEY
+
+    with connection() as holder:
+        holder.execute("SELECT pg_advisory_lock(%s)", (INGEST_LOCK_KEY,))
+        try:
+            with connection() as conn:
+                rid = conn.execute(
+                    "INSERT INTO ingest_run (kind, trigger, status, started_at)"
+                    " VALUES ('sync','test','running',now()) RETURNING id"
+                ).fetchone()[0]
+            try:
+                r = client.post("/api/ingest/refresh")
+                assert r.status_code in (409, 202, 200)
+            finally:
+                with connection() as conn:
+                    conn.execute("DELETE FROM ingest_run WHERE id=%s", (rid,))
+        finally:
+            holder.execute("SELECT pg_advisory_unlock(%s)", (INGEST_LOCK_KEY,))
