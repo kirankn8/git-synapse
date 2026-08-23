@@ -195,3 +195,94 @@ def test_impact_on_a_real_repository_reports(db):
         pytest.skip("no repositories")
     r = runner.invoke(app, ["impact", row["name"]])
     assert r.exit_code == 0, r.stdout
+
+
+# --------------------------------------------------- discovery and ingest
+
+def test_discover_prints_what_it_found(db, monkeypatch):
+    """`discover` is the only command that spends GitHub API quota, so it is
+    driven here with a stubbed listing rather than a live call."""
+    from git_synapse.ingest import pipeline
+    from git_synapse.ingest.github import RepoRecord
+
+    fake = [
+        RepoRecord(github_id=940000 + i, owner="t", name=f"disc{i}",
+                   full_name=f"t/disc{i}", clone_url=f"https://x/{i}.git",
+                   default_branch="main", disk_usage_kb=1000 * (i + 1),
+                   is_private=bool(i % 2))
+        for i in range(3)
+    ]
+    monkeypatch.setattr(pipeline, "discover", lambda trigger="manual": fake)
+
+    r = runner.invoke(app, ["discover"])
+    assert r.exit_code == 0, r.stdout
+    assert "disc0" in r.stdout
+
+
+def test_discover_lists_at_most_a_page_and_says_how_many_more(db, monkeypatch):
+    from git_synapse.ingest import pipeline
+    from git_synapse.ingest.github import RepoRecord
+
+    many = [
+        RepoRecord(github_id=950000 + i, owner="t", name=f"m{i}",
+                   full_name=f"t/m{i}", clone_url="https://x.git",
+                   default_branch="main", disk_usage_kb=i)
+        for i in range(50)
+    ]
+    monkeypatch.setattr(pipeline, "discover", lambda trigger="manual": many)
+
+    r = runner.invoke(app, ["discover"])
+    assert r.exit_code == 0
+    assert "more" in r.stdout, "a truncated listing must say it was truncated"
+
+
+def test_ingest_named_repos_filters_to_them(db, monkeypatch):
+    from git_synapse.ingest import pipeline
+    from git_synapse.ingest.github import RepoRecord
+
+    seen = {}
+
+    def fake_run(records=None, trigger="manual", **kw):
+        seen["names"] = [r.name for r in (records or [])]
+
+        class _R:
+            status, run_id, duration_s, commits_added = "success", 1, 0.1, 0
+            ok, failed, repos = [], [], []
+        return _R()
+
+    pool = [
+        RepoRecord(github_id=960000 + i, owner="t", name=n, full_name=f"t/{n}",
+                   clone_url="https://x.git", default_branch="main")
+        for i, n in enumerate(("alpha", "beta", "gamma"))
+    ]
+    monkeypatch.setattr(pipeline, "load_repo_records", lambda: pool)
+    monkeypatch.setattr(pipeline, "run_ingest", fake_run)
+
+    r = runner.invoke(app, ["ingest", "--repo", "beta"])
+    assert r.exit_code == 0, r.stdout
+    assert seen["names"] == ["beta"], seen
+
+
+def test_ingest_with_an_unmatched_repo_name_does_not_silently_do_everything(db, monkeypatch):
+    """Filtering to nothing must stop, not fall through to the whole corpus."""
+    from git_synapse.ingest import pipeline
+    from git_synapse.ingest.github import RepoRecord
+
+    called = {"n": 0}
+
+    def fake_run(records=None, trigger="manual", **kw):
+        called["n"] += 1
+        class _R:
+            status, run_id, duration_s, commits_added = "success", 1, 0.1, 0
+            ok, failed, repos = [], [], []
+        return _R()
+
+    monkeypatch.setattr(pipeline, "load_repo_records", lambda: [
+        RepoRecord(github_id=970001, owner="t", name="only", full_name="t/only",
+                   clone_url="https://x.git", default_branch="main")
+    ])
+    monkeypatch.setattr(pipeline, "run_ingest", fake_run)
+
+    r = runner.invoke(app, ["ingest", "--repo", "does-not-exist"])
+    assert called["n"] == 0, "an unmatched filter must not ingest everything"
+    assert r.exit_code != 0 or "no repositor" in r.stdout.lower()
