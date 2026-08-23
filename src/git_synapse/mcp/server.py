@@ -747,6 +747,97 @@ def _impact_row(row: dict, name: str) -> dict:
 
 
 @server.tool(
+    name="coupled_directories",
+    title="Which other directories move with this one",
+    description=(
+        "Directory-level coupling: given a directory (or any file inside one), "
+        "which other directories in the repository historically change with it. "
+        "Use this when the question is about a package or subsystem rather than a "
+        "single file -- coupled_files cannot see inside a file or across a package, "
+        "and this is the closest available answer. Note that a parent and its own "
+        "child will always score high; that is arithmetic, not a finding."
+    ),
+)
+def coupled_directories(
+    repo: str, path: str, limit: int = 15, measure: str = "npmi"
+) -> dict:
+    """Directories that historically change together with this one.
+
+    Args:
+        repo: repository name.
+        path: a directory path, or a file path whose directory is used.
+        limit: maximum partners.
+        measure: ranking measure.
+    """
+    target = _resolve_repo(repo)
+    if target is None:
+        return {"error": f"no repository matching {repo!r}"}
+
+    cleaned = (path or "").strip().strip("/")
+    row = q.query_one(
+        "SELECT id, path, file_count, change_count FROM directory"
+        " WHERE repo_id = %s AND path = %s",
+        (target["id"], cleaned),
+    )
+    if row is None:
+        # Accept a file path and use its directory, which is what a caller
+        # editing a file will naturally pass.
+        f = q.resolve_file(target["full_name"], path)
+        if f is not None:
+            row = q.query_one(
+                "SELECT id, path, file_count, change_count FROM directory"
+                " WHERE repo_id = %s AND path = %s",
+                (target["id"], f["dir_path"]),
+            )
+    if row is None:
+        return {
+            "error": f"no directory {path!r} in repository {target['full_name']!r}",
+            "hint": "pass a directory path, or any file path inside it",
+        }
+
+    try:
+        spec = BY_KEY[q._safe_order(measure)]
+    except KeyError as exc:
+        return {"error": str(exc)}
+
+    partners = q.coupled_directories(row["id"], spec.key, limit)
+    own = row["path"]
+    shaped = []
+    for pr in partners:
+        other = pr["path"] or ""
+        # A parent or child scores high by construction: every change to the
+        # child is a change to the parent. Say so rather than let it read as a
+        # discovery.
+        nested = other.startswith(f"{own}/") or own.startswith(f"{other}/") or other == own
+        shaped.append({
+            "path": other,
+            "relation": "ancestor-or-descendant" if nested else "sibling-or-unrelated",
+            "informative": not nested,
+            "score": _round(pr.get("score")),
+            "co_changes": pr["n_ab"],
+            "probability_also_changes": _round(pr.get("confidence_out"), 3),
+            "its_total_changes": pr.get("n_other"),
+            "files": pr.get("file_count"),
+        })
+    useful = [x for x in shaped if x["informative"]]
+    return {
+        "directory": {
+            "repo": target["full_name"],
+            "path": own,
+            "files": row["file_count"],
+            "total_changes": row["change_count"],
+        },
+        "measure": {"key": spec.key, "label": spec.label},
+        "summary": (
+            f"{len(useful)} of {len(shaped)} partners are outside this directory's "
+            "own subtree; the rest are its parents or children and move with it by "
+            "construction."
+        ) if shaped else "No directory coupling recorded.",
+        "partners": shaped,
+    }
+
+
+@server.tool(
     name="module_context",
     title="Which module owns this file, and what depends on that module",
     description=(

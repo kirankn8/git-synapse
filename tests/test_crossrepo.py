@@ -755,3 +755,57 @@ def test_all_discovery_result_says_so_before_the_scores(db):
     out = server.upstream_repos(repo=row["name"], limit=5)
     assert "NONE" in out["guidance"]
     assert "not a probability" in out["guidance"]
+
+
+def test_coupled_directories_marks_nesting_as_arithmetic(db):
+    """A directory's parent scores 1.0 by construction, not by discovery.
+
+    Every change to a child is a change to its parent, so the nesting relation
+    has to be labelled or the top of the list reads as a finding.
+    """
+    from git_synapse.mcp import server
+
+    row = query_one(
+        """
+        SELECT r.name AS repo, d.path
+        FROM directory d JOIN repo r ON r.id = d.repo_id
+        WHERE d.file_count > 20 AND d.path LIKE '%/%'
+        ORDER BY d.change_count DESC LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("no nested directory indexed")
+
+    out = server.coupled_directories(repo=row["repo"], path=row["path"], limit=10)
+    assert "error" not in out, out
+    if not out["partners"]:
+        pytest.skip("no directory coupling for this fixture")
+
+    own = out["directory"]["path"]
+    for p in out["partners"]:
+        nested = p["path"].startswith(f"{own}/") or own.startswith(f"{p['path']}/")
+        assert p["informative"] is not nested, p
+    assert "outside this directory" in out["summary"]
+
+
+def test_coupled_directories_accepts_a_file_path(db):
+    """A caller editing a file will pass the file, not its directory."""
+    from git_synapse.mcp import server
+
+    row = query_one(
+        """
+        SELECT r.name AS repo, f.path, f.dir_path
+        FROM file f JOIN repo r ON r.id = f.repo_id
+        WHERE f.dir_path <> '' AND f.change_count > 20 AND NOT f.is_deleted
+        LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("no suitable file")
+
+    out = server.coupled_directories(repo=row["repo"], path=row["path"], limit=5)
+    assert "error" not in out, out
+    assert out["directory"]["path"] == row["dir_path"]
+
+    missing = server.coupled_directories(repo=row["repo"], path="no/such/dir", limit=5)
+    assert "error" in missing and "hint" in missing

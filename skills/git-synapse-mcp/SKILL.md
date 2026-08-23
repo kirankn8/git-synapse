@@ -40,6 +40,7 @@ than no claim.
 | `impact_of_change(repo)` | The reverse: what a change here forces others to update |
 | `coupling_chain(repo, direction)` | Multi-hop paths, upstream or downstream |
 | `explain_repo_pair(a, b)` | Declared status, every observed bump, exact upstream commits consumed |
+| `coupled_directories(repo, path)` | Which other directories move with this one. The package-level question |
 | `crossrepo_files(repo, path)` | Which specific file in another repository pairs with this one |
 | `list_repositories()`, `list_measures()` | What exists; the measure catalogue with caveats |
 | `report_gap(kind, detail, ...)` | **When Git Synapse itself is wrong.** See below |
@@ -87,11 +88,17 @@ Act on partners above roughly 60% with double-digit support. Mention but do not
 edit the 20–40% band. Ignore below that, and ignore anything with
 `informative: false` regardless of score.
 
-**This tool is file-level and cannot see inside a file or across a package.** If
-the coupling you need is between functions in one file, or between files in the
-same Go package that always change together anyway, it will not find it -- read
-the code. Its value is highest as a guardrail ("nothing else across the
-repository has to move") and on parallel-file layouts.
+**`coupled_files` is file-level and cannot see inside a file.** If the coupling
+you need is between functions in one file, it will not find it -- read the code.
+Its value is highest as a guardrail ("nothing else across the repository has to
+move") and on parallel-file layouts.
+
+For the package or subsystem question, use `coupled_directories`. A Go package is
+a directory, so "what else in this subsystem moves with mine" is answerable even
+though "what else in this file" is not. Read its `informative` flag: a directory's
+own parents and children score near 1.0 because every change to a child is a
+change to the parent, which is arithmetic rather than a finding. The
+`sibling-or-unrelated` rows are the ones carrying information.
 
 Raise `min_support` when a repository is noisy.
 
