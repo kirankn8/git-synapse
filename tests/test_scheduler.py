@@ -119,3 +119,49 @@ def test_the_real_configured_crons_are_valid():
     cfg = get_config().schedule
     for expr in (cfg.cron, cfg.discover_cron):
         assert CronTrigger.from_crontab(expr, timezone=cfg.timezone) is not None
+
+
+def test_main_wires_both_tiers_and_survives_a_bad_run(monkeypatch):
+    """`main()` is the container's entrypoint: if it raises, nothing ever
+    refreshes and the only symptom is silence."""
+    import git_synapse.scheduler.main as sched_main
+
+    added = []
+
+    class _FakeScheduler:
+        def __init__(self, *a, **kw): pass
+        def add_job(self, func, trigger, **kw):
+            added.append(kw.get("id") or getattr(func, "__name__", "job"))
+        def start(self): raise KeyboardInterrupt  # exit the blocking loop
+
+    monkeypatch.setattr(sched_main, "BlockingScheduler", _FakeScheduler, raising=False)
+    monkeypatch.setattr(sched_main.pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
+    monkeypatch.setattr(sched_main, "wait_for_database", lambda *a, **kw: None)
+    monkeypatch.setattr(sched_main, "apply_schema", lambda *a, **kw: None)
+
+    rc = sched_main.main()
+    assert rc == 0
+    assert len(added) >= 2, f"both tiers must be scheduled, got {added}"
+
+
+def test_main_waits_for_the_database_before_scheduling(monkeypatch):
+    """Starting jobs against a database that is not up yet fails every tick
+    until someone restarts the container."""
+    import git_synapse.scheduler.main as sched_main
+
+    order = []
+
+    class _FakeScheduler:
+        def __init__(self, *a, **kw): pass
+        def add_job(self, *a, **kw): order.append("add_job")
+        def start(self): raise KeyboardInterrupt
+
+    monkeypatch.setattr(sched_main, "BlockingScheduler", _FakeScheduler, raising=False)
+    monkeypatch.setattr(sched_main.pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
+    monkeypatch.setattr(sched_main, "wait_for_database",
+                        lambda *a, **kw: order.append("wait"))
+    monkeypatch.setattr(sched_main, "apply_schema",
+                        lambda *a, **kw: order.append("schema"))
+
+    sched_main.main()
+    assert order[0] == "wait", order
