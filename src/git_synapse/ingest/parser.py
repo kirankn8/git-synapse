@@ -280,11 +280,10 @@ def iter_commits(
             mainline still has, produced flatly false statements about HEAD.
         since_shas: exclude these commits and all their ancestors, giving an
             incremental read. Pass the previous run's tip, not
-            just HEAD, or commits reachable only from other branches are
-            re-walked every time. The caller must have verified each SHA still
+            the previous run's default-branch tip. The caller must have
+            verified each SHA still
             exists -- a force-push can orphan one, and git errors on an unknown
             revision.
-        rev: revision range to walk. ``--all`` covers every branch.
         include_merges: keep merge commits. Merges restate their parents'
             changes, so they are excluded by default.
         rename_similarity: git rename-detection threshold, as a percentage.

@@ -346,3 +346,50 @@ def test_abandoned_runs_are_reconciled_and_stop_blocking(db):
     finally:
         with connection() as conn:
             conn.execute("DELETE FROM ingest_run WHERE id = ANY(%s)", ([stale_id, fresh_id],))
+
+
+def test_ingest_lock_is_released_when_the_run_raises(db):
+    """A failed run must not leave the lock held or the connection leaked.
+
+    An advisory lock outlives its transaction and ends only with the session,
+    and a pooled connection's session does not end when it is returned -- so a
+    lock left held would wedge every later run permanently.
+    """
+    from git_synapse.db.engine import connection
+    from git_synapse.ingest import pipeline
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("run exploded")
+
+    original = pipeline._run_ingest_locked
+    pipeline._run_ingest_locked = boom
+    try:
+        with pytest.raises(RuntimeError, match="run exploded"):
+            pipeline.run_ingest(records=[], trigger="test")
+    finally:
+        pipeline._run_ingest_locked = original
+
+    # The lock must be free: a fresh caller can take it.
+    with connection() as conn:
+        got = conn.execute(
+            "SELECT pg_try_advisory_lock(%s)", (pipeline.INGEST_LOCK_KEY,)
+        ).fetchone()[0]
+        if got:
+            conn.execute("SELECT pg_advisory_unlock(%s)", (pipeline.INGEST_LOCK_KEY,))
+    assert got, "the lock was still held after the run raised"
+
+
+def test_a_second_run_is_skipped_while_one_holds_the_lock(db):
+    """Concurrent runs fetched the same mirrors and redid the same rebuilds."""
+    from git_synapse.db.engine import connection
+    from git_synapse.ingest import pipeline
+
+    with connection() as holder:
+        holder.execute("SELECT pg_advisory_lock(%s)", (pipeline.INGEST_LOCK_KEY,))
+        try:
+            result = pipeline.run_ingest(records=[], trigger="test")
+        finally:
+            holder.execute("SELECT pg_advisory_unlock(%s)", (pipeline.INGEST_LOCK_KEY,))
+
+    assert result.status == "skipped"
+    assert result.run_id is None, "a skipped run must not create an ingest_run row"
