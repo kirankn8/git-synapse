@@ -351,6 +351,10 @@ def _drop_unreachable_commits(repo_id: int, mirror: Path) -> int:
     the ``N`` of every contingency table in those repos and keeping files alive
     that were deliberately removed. The reachable-set walk is only worth its cost
     when the counts actually disagree, so a cheap comparison gates it.
+
+    Reachability is measured from the default branch, matching what the ingest
+    walks. A commit that only ever lived on a branch that never merged is not
+    part of the shipped history and must not be counted as one.
     """
     with connection() as conn:
         stored = int(
@@ -362,7 +366,7 @@ def _drop_unreachable_commits(repo_id: int, mirror: Path) -> int:
         return 0
     try:
         proc = subprocess.run(  # noqa: S603 - fixed executable
-            ["git", "rev-list", "--all", "--no-merges", "--count"],
+            ["git", "rev-list", "HEAD", "--no-merges", "--count"],
             cwd=str(mirror), capture_output=True, text=True, timeout=600, check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -372,7 +376,7 @@ def _drop_unreachable_commits(repo_id: int, mirror: Path) -> int:
 
     try:
         walk = subprocess.run(  # noqa: S603 - fixed executable
-            ["git", "rev-list", "--all", "--no-merges"],
+            ["git", "rev-list", "HEAD", "--no-merges"],
             cwd=str(mirror), capture_output=True, text=True, timeout=900, check=False,
         )
     except (OSError, subprocess.SubprocessError):

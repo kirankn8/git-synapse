@@ -688,9 +688,10 @@ def test_partner_classifier_labels_noise_without_hiding_real_files():
         "a/other.yaml", "a/piraeus.yaml", 12
     )[0]
 
-    # Thin support is flagged but never suppressed.
+    # Thin support is now withheld, not just flagged: a 1.0 resting on two
+    # commits outranked everything real and was acted on as if it were evidence.
     labels, informative = classify("gateway/pkg/config/applier.go", own, 2)
-    assert "thin_support" in labels and informative
+    assert "thin_support" in labels and not informative
 
 
 def test_classifier_does_not_suppress_packages_merely_named_after_tooling():
@@ -752,9 +753,15 @@ def test_all_discovery_result_says_so_before_the_scores(db):
     if row is None:
         pytest.skip("no all-discovery repository")
 
-    out = server.upstream_repos(repo=row["name"], limit=5)
+    # Opting in is what surfaces them; the default withholds. Both must say
+    # plainly that nothing in the set carries validated evidence.
+    out = server.upstream_repos(repo=row["name"], limit=5, include_discovery=True)
     assert "NONE" in out["guidance"]
     assert "not a probability" in out["guidance"]
+
+    default = server.upstream_repos(repo=row["name"], limit=5)
+    assert default["upstream"] == []
+    assert "withheld" in default["guidance"]
 
 
 def test_coupled_directories_marks_nesting_as_arithmetic(db):
@@ -881,3 +888,63 @@ def test_github_client_sends_the_live_token(tmp_path):
     with GitHubClient(cfg) as client:
         auth = client._client.headers.get("Authorization")
     assert auth == "Bearer ghu_" + "f" * 36, "the live token must reach the header"
+
+
+def test_thin_support_is_withheld_not_merely_labelled():
+    """A perfect score resting on two commits outranks everything real.
+
+    Observed sending a reviewer at four unrelated files: 1.0 is arithmetic on a
+    pair that changed twice and never apart, not evidence. A label only helps a
+    reader who is already sceptical, so these are withheld.
+    """
+    from git_synapse.mcp.server import MIN_REPORTABLE_SUPPORT, _classify_partner
+
+    own = "pkg/init/init.go"
+    for n in range(1, MIN_REPORTABLE_SUPPORT):
+        labels, informative = _classify_partner("pkg/agent/agent-mode.go", own, n)
+        assert "thin_support" in labels and not informative, n
+
+    _, informative = _classify_partner("pkg/agent/agent-mode.go", own, MIN_REPORTABLE_SUPPORT)
+    assert informative
+
+
+def test_discovery_upstream_is_withheld_unless_requested(db):
+    """Unvalidated edges cost attention to dismiss and were never acted on."""
+    from git_synapse.mcp import server
+
+    row = query_one(
+        """
+        SELECT r.name FROM repo r
+        WHERE EXISTS (SELECT 1 FROM repo_impact i WHERE i.target_repo_id = r.id)
+          AND NOT EXISTS (
+              SELECT 1 FROM repo_impact i WHERE i.target_repo_id = r.id
+                AND (i.is_declared OR i.has_bump_history))
+        LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("no all-discovery repository")
+
+    default = server.upstream_repos(repo=row["name"])
+    assert default["upstream"] == []
+    assert "withheld" in default["guidance"]
+    # The count must be stated, or the empty list reads as "no relationship".
+    assert any(ch.isdigit() for ch in default["guidance"])
+
+    opted_in = server.upstream_repos(repo=row["name"], include_discovery=True)
+    assert opted_in["upstream"], "opting in must return them"
+
+
+def test_ingest_walks_only_the_shipped_branch():
+    """Coupling is a claim about code that shipped.
+
+    A quarter of this corpus exists solely on branches that never merged, and a
+    branch that deletes a file the mainline still has produced false statements
+    about HEAD.
+    """
+    import inspect
+
+    from git_synapse.ingest.parser import iter_commits
+
+    default = inspect.signature(iter_commits).parameters["rev"].default
+    assert default == "HEAD", f"walk defaults to {default!r}, not the default branch"

@@ -14,7 +14,7 @@
 
 set -uo pipefail
 
-PROJECT_DIR="${GIT_SYNAPSE_DIR:-$HOME/Documents/git-synapse}"
+PROJECT_DIR="${GIT_SYNAPSE_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 COLIMA_PROFILE="${COLIMA_PROFILE:-default}"
 LOG="${GIT_SYNAPSE_LOG:-$HOME/Library/Logs/git-synapse-daemon.log}"
 
