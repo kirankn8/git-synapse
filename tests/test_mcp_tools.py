@@ -459,3 +459,62 @@ def test_confidence_wording_matches_the_support_behind_it():
     # Below the reportable floor it is called weak outright.
     assert "weak evidence" in server._describe_confidence(0.9, 2)
     assert server._describe_confidence(None, 10) == "no directional signal"
+
+
+# ------------------------------------- every tool, against inputs that do not exist
+
+REPO_TOOLS = [
+    "upstream_repos", "impact_of_change", "coupling_chain", "module_context",
+    "repo_hotspots", "coupled_files", "crossrepo_files", "file_history",
+    "coupled_directories", "explain_pair",
+]
+
+
+@pytest.mark.parametrize("tool_name", REPO_TOOLS)
+def test_every_repo_taking_tool_refuses_an_unknown_repository(db, tool_name):
+    """One tool answering confidently about the wrong repository is worse than
+    ten refusing, so the guard has to be on all of them."""
+    tool = getattr(server, tool_name)
+    kwargs = {"repo": "definitely-not-a-repository-xyz"}
+    if tool_name in ("coupled_files", "crossrepo_files", "file_history",
+                     "module_context", "coupled_directories"):
+        kwargs["path"] = "some/file.go"
+    if tool_name == "explain_pair":
+        kwargs["path_a"], kwargs["path_b"] = "a.go", "b.go"
+    out = tool(**kwargs)
+    assert "error" in out, f"{tool_name} answered for a repository that does not exist"
+
+
+@pytest.mark.parametrize("tool_name", ["coupled_files", "crossrepo_files",
+                                       "file_history", "coupled_directories"])
+def test_every_path_taking_tool_refuses_an_unknown_path(db, tool_name):
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
+    out = getattr(server, tool_name)(repo=row["name"], path="no/such/path.xyz")
+    assert "error" in out, f"{tool_name} answered for a path that does not exist"
+
+
+def test_explain_repo_pair_refuses_an_unknown_side(db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
+    assert "error" in server.explain_repo_pair(repo_a="nope-xyz", repo_b=row["name"])
+    assert "error" in server.explain_repo_pair(repo_a=row["name"], repo_b="nope-xyz")
+
+
+def test_a_directory_with_no_coupling_says_so_rather_than_returning_nothing(db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        """
+        SELECT r.name AS repo, d.path FROM directory d JOIN repo r ON r.id = d.repo_id
+        WHERE d.change_count <= 1 LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("no quiet directory")
+    out = server.coupled_directories(repo=row["repo"], path=row["path"])
+    if "error" in out:
+        pytest.skip("directory not indexed for coupling")
+    assert out["summary"], "an empty result still needs a sentence"
