@@ -139,3 +139,77 @@ def test_the_schema_version_matches_between_the_code_and_the_sql():
     assert int(m.group(1)) == engine.SCHEMA_VERSION, (
         f"schema.sql writes {m.group(1)} but SCHEMA_VERSION is {engine.SCHEMA_VERSION}"
     )
+
+
+# ------------------------------------------------------- failure handling
+
+def test_a_stale_prepared_plan_is_retried_on_a_fresh_connection(db, monkeypatch):
+    """After a live ALTER TABLE, a pooled connection can hold a cached plan for
+    the old shape. That surfaced to a user as "Could not load this view"; the
+    fix is to discard the connection and retry once, not to propagate."""
+    import psycopg
+
+    calls = {"n": 0}
+    real_execute = psycopg.Cursor.execute
+
+    def flaky(self, query, params=None, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise psycopg.errors.FeatureNotSupported(
+                "cached plan must not change result type"
+            )
+        return real_execute(self, query, params, **kw)
+
+    monkeypatch.setattr(psycopg.Cursor, "execute", flaky)
+    assert engine.query_one("SELECT 1 AS a")["a"] == 1
+    assert calls["n"] >= 2, "the stale plan must have been retried"
+
+
+def test_an_error_that_is_not_a_stale_plan_propagates(db, monkeypatch):
+    """Retrying an ordinary error would hide it and double the work."""
+    import psycopg
+
+    def always_fail(self, query, params=None, **kw):
+        raise psycopg.errors.UndefinedColumn("column nope does not exist")
+
+    monkeypatch.setattr(psycopg.Cursor, "execute", always_fail)
+    with pytest.raises(psycopg.errors.UndefinedColumn):
+        engine.query("SELECT nope FROM repo")
+
+
+def test_apply_schema_gives_up_with_a_clear_error_rather_than_looping(db, monkeypatch):
+    """DDL takes locks that can queue behind a running ingest; it must fail
+    fast and say so instead of blocking readers indefinitely."""
+    import psycopg
+
+    monkeypatch.setattr(engine, "schema_is_current", lambda: False)
+    monkeypatch.setattr(engine.time, "sleep", lambda _s: None, raising=False)
+
+    def blocked(*a, **kw):
+        raise psycopg.errors.LockNotAvailable("canceling statement due to lock timeout")
+
+    monkeypatch.setattr(psycopg, "connect", blocked)
+    with pytest.raises(RuntimeError, match="could not apply schema"):
+        engine.apply_schema(force=True)
+
+
+def test_wait_for_database_gives_up_rather_than_hanging(monkeypatch):
+    """A container that waits forever on a database that will never come is
+    indistinguishable from one that is working."""
+    import psycopg
+
+    monkeypatch.setattr(engine.time, "sleep", lambda _s: None, raising=False)
+
+    def refuse(*a, **kw):
+        raise psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr(psycopg, "connect", refuse)
+    with pytest.raises(Exception):
+        engine.wait_for_database(timeout_s=0.3, interval_s=0.1)
+
+
+def test_close_pool_is_safe_to_call_twice(db):
+    engine.close_pool()
+    engine.close_pool()
+    # The pool must rebuild itself on the next use.
+    assert engine.scalar("SELECT 1") == 1
