@@ -166,3 +166,162 @@ def test_report_gap_rejects_an_opinion_and_accepts_a_defect(db):
     assert "error" not in good and good.get("id")
     with connection() as conn:
         conn.execute("DELETE FROM feedback WHERE id=%s", (good["id"],))
+
+
+# ------------------------------------------------------- the explain tools
+
+def test_explain_pair_answers_in_the_callers_argument_order(db):
+    """Storage canonicalises by id; returning that order silently transposed
+    the answer, so confidence_ab was the reverse conditional half the time."""
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        """
+        SELECT r.name AS repo, fa.path AS a, fb.path AS b
+        FROM file_pair_metric m
+        JOIN file fa ON fa.id = m.file_a_id
+        JOIN file fb ON fb.id = m.file_b_id
+        JOIN repo r ON r.id = m.repo_id
+        WHERE m.n_ab > 5 LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("no supported pair")
+
+    fwd = server.explain_pair(repo=row["repo"], path_a=row["a"], path_b=row["b"])
+    rev = server.explain_pair(repo=row["repo"], path_a=row["b"], path_b=row["a"])
+    assert fwd["path_a"] == row["a"] and rev["path_a"] == row["b"]
+    assert fwd["measures"]["confidence_ab"] == rev["measures"]["confidence_ba"]
+
+
+def test_explain_pair_rejects_an_unknown_path(db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        "SELECT r.name AS repo, f.path FROM file f JOIN repo r ON r.id=f.repo_id LIMIT 1"
+    )
+    out = server.explain_pair(repo=row["repo"], path_a=row["path"], path_b="no/such.go")
+    assert "error" in out
+
+
+def test_explain_repo_pair_does_not_claim_a_dependency_that_is_not_declared(db):
+    """The prose field is what a model quotes; it promoted a bump-backed pair to
+    `declared` while the structured field beside it said null."""
+    from git_synapse.db.engine import query
+
+    rows = query(
+        """
+        SELECT p.name AS a, c.name AS b
+        FROM repo_impact i
+        JOIN repo p ON p.id = i.source_repo_id
+        JOIN repo c ON c.id = i.target_repo_id
+        WHERE i.has_bump_history AND NOT i.is_declared LIMIT 3
+        """
+    )
+    if not rows:
+        pytest.skip("no bump-backed-only pair")
+    for r in rows:
+        out = server.explain_repo_pair(repo_a=r["a"], repo_b=r["b"])
+        if "error" in out:
+            continue
+        if out.get("declared_dependency") is None:
+            prose = out.get("interpretation") or ""
+            # It may mention declaration to deny it; what it must not do is
+            # assert one, which reads as the top evidence tier.
+            assert f"declares {r['a']}" not in prose, prose
+            assert "bump-backed rather than declared" in prose or "no declared" in prose, prose
+
+
+def test_impact_of_change_and_upstream_agree(db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        """
+        SELECT p.name AS src, c.name AS tgt FROM repo_impact i
+        JOIN repo p ON p.id = i.source_repo_id
+        JOIN repo c ON c.id = i.target_repo_id
+        WHERE i.is_declared OR i.has_bump_history LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("no validated edge")
+
+    down = server.impact_of_change(repo=row["src"])
+    up = server.upstream_repos(repo=row["tgt"])
+    assert any(x["repo"].endswith(row["tgt"]) for x in down.get("downstream", []))
+    assert any(x["repo"].endswith(row["src"]) for x in up.get("upstream", []))
+
+
+def test_crossrepo_files_reports_a_specific_partner_file(db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        """
+        SELECT ra.name AS repo, fa.path
+        FROM xrepo_file_pair x
+        JOIN file fa ON fa.id = x.file_a_id
+        JOIN repo ra ON ra.id = x.repo_a_id
+        LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("no cross-repo pairs")
+    out = server.crossrepo_files(repo=row["repo"], path=row["path"], min_support=2)
+    assert "error" not in out, out
+
+
+def test_file_history_returns_commits_for_a_real_file(db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        """
+        SELECT r.name AS repo, f.path FROM file f JOIN repo r ON r.id=f.repo_id
+        WHERE f.change_count > 5 LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("no busy file")
+    out = server.file_history(repo=row["repo"], path=row["path"], limit=5)
+    assert "error" not in out
+    assert out["recent_commits"]
+    assert out["total_changes"] >= len(out["recent_commits"])
+
+
+def test_repo_hotspots_are_ranked(db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT name FROM repo WHERE is_enabled ORDER BY commit_count DESC LIMIT 1")
+    out = server.repo_hotspots(repo=row["name"], limit=5)
+    rows = out.get("hotspots", [])
+    counts = [h["changes"] for h in rows]
+    assert counts == sorted(counts, reverse=True)
+
+
+def test_coupling_chain_direction_is_honoured(db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
+    up = server.coupling_chain(repo=row["name"], direction="upstream")
+    down = server.coupling_chain(repo=row["name"], direction="downstream")
+    assert up["direction"] == "upstream"
+    assert down["direction"] == "downstream"
+
+
+def test_an_empty_chain_explains_itself(db):
+    """A bare [] conflated "searched and found nothing" with "nothing to search"."""
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        """
+        SELECT r.name FROM repo r
+        WHERE EXISTS (SELECT 1 FROM repo_impact i WHERE i.target_repo_id=r.id)
+          AND NOT EXISTS (SELECT 1 FROM repo_impact i
+                          WHERE i.target_repo_id=r.id
+                            AND (i.is_declared OR i.has_bump_history))
+        LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("no all-discovery repository")
+    out = server.coupling_chain(repo=row["name"], direction="upstream")
+    assert out["chains"] == [] and out["explanation"]
