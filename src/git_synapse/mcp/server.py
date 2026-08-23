@@ -231,13 +231,19 @@ def _describe_confidence(confidence: float | None, n_ab: int) -> str:
     if not confidence:
         return "no directional signal"
     pct = f"{confidence:.0%}"
-    if n_ab < 3:
+    if n_ab < MIN_REPORTABLE_SUPPORT:
         return f"{pct} of the time, but on only {n_ab} shared commits -- weak evidence"
+    # The same percentage means different things at different support. 90% of
+    # three commits and 90% of three hundred read identically before this, which
+    # is the overconfidence that sent a reviewer at files their own reading had
+    # already ruled out.
+    hedge = f" (on {n_ab} shared commits, so treat as provisional)" if n_ab < THIN_SUPPORT else ""
     if confidence >= 0.7:
-        return f"changes together {pct} of the time -- very likely needs updating too"
+        verdict = "very likely needs updating too" if not hedge else "may need updating too"
+        return f"changes together {pct} of the time -- {verdict}{hedge}"
     if confidence >= 0.4:
-        return f"changes together {pct} of the time -- worth checking"
-    return f"changes together {pct} of the time -- occasional"
+        return f"changes together {pct} of the time -- worth checking{hedge}"
+    return f"changes together {pct} of the time -- occasional{hedge}"
 
 
 @server.tool(
