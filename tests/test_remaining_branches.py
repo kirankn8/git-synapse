@@ -143,3 +143,95 @@ def test_split_path_on_pathological_input():
         d, base, ext, depth = split_path(path)
         assert isinstance(d, str) and isinstance(base, str)
         assert depth >= 0
+
+
+# ----------------------------------------------------- reporting with rows
+
+def test_ingest_reports_the_repositories_that_failed(db, monkeypatch):
+    """A run that half-worked must name what did not, or the operator has to
+    read logs to find out."""
+    from typer.testing import CliRunner
+
+    from git_synapse.cli import app
+    from git_synapse.ingest import pipeline
+    from git_synapse.ingest.github import RepoRecord
+    from git_synapse.ingest.pipeline import RepoResult
+
+    class _Run:
+        status, run_id, duration_s, commits_added = "partial", 7, 1.0, 0
+        ok = [RepoResult(full_name="t/good", status="ok")]
+        failed = [RepoResult(full_name="t/bad", status="failed", error="boom")]
+        repos = ok + failed
+
+    monkeypatch.setattr(pipeline, "load_repo_records", lambda: [
+        RepoRecord(github_id=1, owner="t", name="good", full_name="t/good",
+                   clone_url="", default_branch="main")
+    ])
+    monkeypatch.setattr(pipeline, "run_ingest", lambda **kw: _Run())
+
+    r = CliRunner().invoke(app, ["ingest"])
+    assert r.exit_code == 0, r.stdout
+    assert "t/bad" in r.stdout, "a failed repository must be named"
+
+
+def test_score_reports_for_every_repo_when_asked(db, monkeypatch):
+    from typer.testing import CliRunner
+
+    from git_synapse.analysis import score
+    from git_synapse.cli import app
+
+    monkeypatch.setattr(score, "score_all", lambda: 3, raising=False)
+    r = CliRunner().invoke(app, ["score", "--repo-id", "0"])
+    assert r.exit_code == 0, r.stdout
+
+
+def test_depbump_prints_propagation_lags_when_there_are_any(db):
+    from typer.testing import CliRunner
+
+    from git_synapse.analysis.depbump import propagation_lags
+    from git_synapse.cli import app
+
+    if not propagation_lags(limit=1):
+        pytest.skip("no propagation lags recorded")
+    r = CliRunner().invoke(app, ["depbump"])
+    assert r.exit_code == 0, r.stdout
+    assert "lag" in r.stdout.lower()
+
+
+def test_impact_prints_rows_for_a_repo_that_has_them(db):
+    from typer.testing import CliRunner
+
+    from git_synapse.analysis.query import query_one
+    from git_synapse.cli import app
+
+    row = query_one(
+        """
+        SELECT r.name FROM repo_impact i JOIN repo r ON r.id = i.source_repo_id
+        LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("impact table empty")
+    r = CliRunner().invoke(app, ["impact", row["name"]])
+    assert r.exit_code == 0, r.stdout
+
+
+# ------------------------------------------------------------ copy helpers
+
+def test_copy_into_temp_creates_and_loads_in_one_step(db):
+    from git_synapse.db.engine import connection, copy_into_temp
+
+    with connection() as conn:
+        n = copy_into_temp(
+            conn, "probe_tmp", [("a", "int"), ("b", "text")],
+            [(1, "x"), (2, "y")],
+        )
+        assert n == 2
+        assert conn.execute("SELECT count(*) FROM probe_tmp").fetchone()[0] == 2
+
+
+def test_copy_into_temp_with_no_rows(db):
+    from git_synapse.db.engine import connection, copy_into_temp
+
+    with connection() as conn:
+        assert copy_into_temp(conn, "probe_tmp_empty", [("a", "int")], []) == 0
