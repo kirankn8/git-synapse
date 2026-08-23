@@ -241,13 +241,13 @@ def test_a_repo_that_loses_a_deadlock_is_retried(db, monkeypatch):
         if attempts["n"] == 1:
             return RepoResult(full_name=record.full_name, status="failed",
                               error="DeadlockDetected: deadlock detected")
-        return RepoResult(full_name=record.full_name, status="ok")
+        return RepoResult(full_name=record.full_name, status="success")
 
     monkeypatch.setattr(pipeline, "_sync_repo_once", flaky)
     record = RepoRecord(github_id=1, owner="t", name="x", full_name="t/x",
                         clone_url="", default_branch="main")
     result = pipeline.sync_repo(record)
-    assert result.status == "ok"
+    assert result.status == "success"
     assert attempts["n"] == 2, "a contention failure must be retried once"
 
 
@@ -354,7 +354,7 @@ def test_an_isolated_failure_does_not_trip_the_breaker(db, monkeypatch):
         if len(seen) % 5 == 0:
             return RepoResult(full_name=record.full_name, status="failed",
                               error="fatal: unable to access: Failed to connect")
-        return RepoResult(full_name=record.full_name, status="ok")
+        return RepoResult(full_name=record.full_name, status="success")
 
     monkeypatch.setattr(pipeline, "sync_repo", mostly_fine)
     records = [
@@ -378,7 +378,7 @@ def test_one_repository_raising_does_not_kill_the_run(db, monkeypatch):
     def explode_once(record, force_full=False):
         if record.name == "boom":
             raise RuntimeError("unexpected")
-        return RepoResult(full_name=record.full_name, status="ok")
+        return RepoResult(full_name=record.full_name, status="success")
 
     monkeypatch.setattr(pipeline, "sync_repo", explode_once)
     records = [

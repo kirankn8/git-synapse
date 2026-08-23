@@ -159,7 +159,7 @@ def test_ingest_reports_the_repositories_that_failed(db, monkeypatch):
 
     class _Run:
         status, run_id, duration_s, commits_added = "partial", 7, 1.0, 0
-        ok = [RepoResult(full_name="t/good", status="ok")]
+        ok = [RepoResult(full_name="t/good", status="success")]
         failed = [RepoResult(full_name="t/bad", status="failed", error="boom")]
         repos = ok + failed
 
