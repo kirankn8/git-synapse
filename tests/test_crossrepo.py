@@ -644,3 +644,114 @@ def test_published_accuracy_figures_still_reproduce(db):
     assert abs(published[0] - measured) < 0.02, (
         f"README publishes {published[0]}, shipped score measures {measured:.4f}"
     )
+
+
+def test_partner_classifier_labels_noise_without_hiding_real_files():
+    """Mislabelling a real dependency as noise is the expensive error here.
+
+    An agent is told `informative: false` means "you already know this", so a
+    false positive makes it skip a file it should have edited. False negatives
+    only cost the reader a glance.
+    """
+    from git_synapse.mcp.server import _classify_partner as classify
+
+    own = "gateway/internal/app/router.go"
+
+    # Noise that must be labelled.
+    assert "own_test" in classify("gateway/internal/app/router_test.go", own, 20)[0]
+    assert "generated" in classify("api/gen/restapi/embedded_spec.go", own, 30)[0]
+    assert "generated" in classify("pkg/v1/types.pb.go", own, 30)[0]
+    assert "generated" in classify("vendor/x/y.go", own, 30)[0]
+    assert "generated" in classify("zz_generated.deepcopy.go", own, 30)[0]
+
+    # Real code that must NOT be suppressed.
+    for path in (
+        "gateway/pkg/config/applier.go",
+        "gateway/internal/app/scheduler.go",
+        "pkg/genetics/sequence.go",          # contains "gen" but not "/gen/"
+        "internal/hammock_test.go",          # contains "mock_" as a substring
+        "gateway/internal/app/placement.go",
+        "cmd/generator/main.go",
+    ):
+        labels, informative = classify(path, own, 20)
+        assert informative, f"{path} was suppressed: {labels}"
+
+    # Another file's test is not *this* file's test, so it stays informative.
+    labels, informative = classify("gateway/internal/app/scheduler_test.go", own, 20)
+    assert "own_test" not in labels and informative
+
+    # Sibling variants: same name, different parent.
+    assert "sibling_variant" in classify(
+        "amd-values-yaml/piraeus.yaml", "nvidia-values-yaml/piraeus.yaml", 12
+    )[0]
+    assert "sibling_variant" not in classify(
+        "a/other.yaml", "a/piraeus.yaml", 12
+    )[0]
+
+    # Thin support is flagged but never suppressed.
+    labels, informative = classify("gateway/pkg/config/applier.go", own, 2)
+    assert "thin_support" in labels and informative
+
+
+def test_classifier_does_not_suppress_packages_merely_named_after_tooling():
+    """`openapi` and `swagger` are real package names in Kubernetes-derived code.
+
+    Matching them as directory names suppressed hand-written source; the
+    generated artefacts are caught by filename instead.
+    """
+    from git_synapse.mcp.server import _classify_partner as classify
+
+    for path in (
+        "staging/src/k8s.io/apiserver/pkg/endpoints/openapi/openapi.go",
+        "swagger/spec/v1/installer_resource_v1.yaml",
+    ):
+        labels, informative = classify(path, "other/file.go", 20)
+        assert informative, f"{path} was suppressed: {labels}"
+
+    for path in ("api/swagger.json", "api/openapi.json", "x/gen/embedded_spec.go"):
+        assert "generated" in classify(path, "other/file.go", 20)[0], path
+
+
+def test_empty_chain_says_whether_there_was_anything_to_search(db):
+    """A bare [] conflated "nothing found" with "nothing to look through"."""
+    from git_synapse.mcp import server
+
+    row = query_one(
+        """
+        SELECT r.name FROM repo r
+        WHERE EXISTS (SELECT 1 FROM repo_impact i WHERE i.target_repo_id = r.id)
+          AND NOT EXISTS (
+              SELECT 1 FROM repo_impact i WHERE i.target_repo_id = r.id
+                AND (i.is_declared OR i.has_bump_history))
+        LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("no repository with only discovery-tier upstream edges")
+
+    out = server.coupling_chain(repo=row["name"], direction="upstream")
+    assert out["chains"] == []
+    assert out["explanation"], "an empty chain must say why it is empty"
+    assert "validated" in out["explanation"]
+
+
+def test_all_discovery_result_says_so_before_the_scores(db):
+    """A result set with no validated edge must lead with that fact."""
+    from git_synapse.mcp import server
+
+    row = query_one(
+        """
+        SELECT r.name FROM repo r
+        WHERE EXISTS (SELECT 1 FROM repo_impact i WHERE i.target_repo_id = r.id)
+          AND NOT EXISTS (
+              SELECT 1 FROM repo_impact i WHERE i.target_repo_id = r.id
+                AND (i.is_declared OR i.has_bump_history))
+        LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("no all-discovery repository")
+
+    out = server.upstream_repos(repo=row["name"], limit=5)
+    assert "NONE" in out["guidance"]
+    assert "not a probability" in out["guidance"]
