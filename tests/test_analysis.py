@@ -316,16 +316,33 @@ def test_abandoned_runs_are_reconciled_and_stop_blocking(db):
         ).fetchone()[0]
 
     try:
+        # Liveness is the ingest advisory lock, not the row's age. Holding it
+        # here stands in for a run that is genuinely still going.
+        from git_synapse.ingest.pipeline import INGEST_LOCK_KEY
+
+        with connection() as live:
+            live.execute("SELECT pg_advisory_lock(%s)", (INGEST_LOCK_KEY,))
+            try:
+                assert reconcile_stale_runs(max_age_hours=6) >= 1
+
+                stale = query_one(
+                    "SELECT status, error FROM ingest_run WHERE id=%s", (stale_id,)
+                )
+                assert stale["status"] == "failed"
+                assert "abandoned" in (stale["error"] or "")
+
+                # A run whose lock is held is alive whatever its age says.
+                fresh = query_one("SELECT status FROM ingest_run WHERE id=%s", (fresh_id,))
+                assert fresh["status"] == "running"
+                assert active_run()["id"] == fresh_id
+            finally:
+                live.execute("SELECT pg_advisory_unlock(%s)", (INGEST_LOCK_KEY,))
+
+        # With nothing holding the lock the same row is provably dead, and must
+        # not keep blocking the refresh endpoint for six hours.
         assert reconcile_stale_runs(max_age_hours=6) >= 1
-
-        stale = query_one("SELECT status, error FROM ingest_run WHERE id=%s", (stale_id,))
-        assert stale["status"] == "failed"
-        assert "abandoned" in (stale["error"] or "")
-
-        # A genuinely recent run must be left alone and still reported active.
-        fresh = query_one("SELECT status FROM ingest_run WHERE id=%s", (fresh_id,))
-        assert fresh["status"] == "running"
-        assert active_run()["id"] == fresh_id
+        gone = query_one("SELECT status FROM ingest_run WHERE id=%s", (fresh_id,))
+        assert gone["status"] == "failed"
     finally:
         with connection() as conn:
             conn.execute("DELETE FROM ingest_run WHERE id = ANY(%s)", ([stale_id, fresh_id],))
