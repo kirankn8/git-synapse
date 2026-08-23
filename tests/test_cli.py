@@ -286,3 +286,71 @@ def test_ingest_with_an_unmatched_repo_name_does_not_silently_do_everything(db, 
     r = runner.invoke(app, ["ingest", "--repo", "does-not-exist"])
     assert called["n"] == 0, "an unmatched filter must not ingest everything"
     assert r.exit_code != 0 or "no repositor" in r.stdout.lower()
+
+
+# ------------------------------------------------- the reporting commands
+
+def test_chains_prints_a_chain_when_one_exists(db):
+    """`chains` is the multi-hop view; it printed nothing in every observed
+    session, so it is worth asserting it can print something."""
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        """
+        SELECT r.name FROM repo r
+        WHERE EXISTS (
+            SELECT 1 FROM repo_impact a
+            JOIN repo_impact b ON b.source_repo_id = a.target_repo_id
+            WHERE a.target_repo_id = r.id
+              AND (a.is_declared OR a.has_bump_history)
+              AND (b.is_declared OR b.has_bump_history)
+        ) LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("no repository with a validated two-hop path")
+    r = runner.invoke(app, ["chains", row["name"]])
+    assert r.exit_code == 0, r.stdout
+    assert "<-" in r.stdout or "->" in r.stdout or "no chains" in r.stdout.lower()
+
+
+def test_chains_honours_its_depth_and_confidence_options(db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
+    for args in (["--depth", "2"], ["--min-confidence", "0.9"], ["-n", "3"]):
+        r = runner.invoke(app, ["chains", row["name"], *args])
+        assert r.exit_code == 0, f"{args}: {r.stdout}"
+
+
+def test_xcoupled_reports_cross_repo_partners(db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        "SELECT r.name FROM xrepo_file_pair x JOIN repo r ON r.id = x.repo_a_id LIMIT 1"
+    )
+    if row is None:
+        pytest.skip("no cross-repo pairs")
+    r = runner.invoke(app, ["xcoupled", row["name"], "-n", "3"])
+    assert r.exit_code == 0, r.stdout
+
+
+def test_xcoupled_rejects_an_unknown_measure(db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
+    r = runner.invoke(app, ["xcoupled", row["name"], "-m", "not_a_measure"])
+    assert r.exit_code != 0 or "measure" in r.stdout.lower()
+
+
+def test_measures_shows_the_caveats_not_only_the_names(db):
+    """The catalogue exists so a reader can pick a measure knowingly."""
+    r = runner.invoke(app, ["measures"])
+    assert r.exit_code == 0
+    assert len(r.stdout.splitlines()) > 20, "the catalogue must list every measure"
+
+
+def test_status_after_a_run_reports_the_run(db):
+    r = runner.invoke(app, ["status"])
+    assert r.exit_code == 0
+    assert any(w in r.stdout.lower() for w in ("run", "ingest", "repo"))

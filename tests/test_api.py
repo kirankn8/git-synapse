@@ -364,3 +364,29 @@ def test_every_route_refuses_a_nonexistent_id_rather_than_500ing(client, db):
         if r.status_code >= 500:
             failures.append(f"{concrete} -> {r.status_code}")
     assert not failures, "\n".join(failures)
+
+
+def test_lag_profile_returns_both_directions(client, db):
+    """The two curves are the directional evidence; one without the other
+    would imply an asymmetry that was never measured."""
+    from git_synapse.analysis.query import query_one
+
+    row = query_one("SELECT repo_a_id a, repo_b_id b FROM repo_lag_metric LIMIT 1")
+    if row is None:
+        pytest.skip("no lag data")
+    body = client.get(f"/api/repos/{row['a']}/lag-profile/{row['b']}").json()
+    assert "forward" in body and "reverse" in body
+    for curve in (body["forward"], body["reverse"]):
+        lags = [p["lag_bins"] for p in curve]
+        assert lags == sorted(lags), "a profile must be ordered by lag"
+
+
+def test_lag_profile_rejects_an_unknown_measure(client, db):
+    from git_synapse.analysis.query import query_one
+
+    row = query_one("SELECT repo_a_id a, repo_b_id b FROM repo_lag_metric LIMIT 1")
+    if row is None:
+        pytest.skip("no lag data")
+    r = client.get(f"/api/repos/{row['a']}/lag-profile/{row['b']}",
+                   params={"measure": "not_a_measure"})
+    assert r.status_code in (400, 422)
