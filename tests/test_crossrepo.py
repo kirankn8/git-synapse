@@ -204,8 +204,10 @@ def test_clone_never_destroys_an_existing_mirror_on_failure(tmp_path):
 
     # A URL that cannot resolve, so the clone is guaranteed to fail.
     with pytest.raises(Exception):
+        # A bogus local path fails immediately; an unresolvable URL costs the
+        # full network retry budget and made this the slowest test in the suite.
         gitops.clone_mirror(
-            "https://invalid.invalid/nope.git", mirror, blobless=True
+            str(tmp_path / "definitely-not-a-repo.git"), mirror, blobless=True
         )
 
     assert mirror.is_dir(), "the existing mirror was removed by a failed clone"
