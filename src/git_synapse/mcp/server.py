@@ -685,13 +685,30 @@ def explain_repo_pair(repo_a: str, repo_b: str) -> dict:
             }
             for r in bumps
         ],
-        "interpretation": (
-            f"{b['name']} declares and has bumped {a['name']} "
-            f"{impact['bump_count']} times"
-            if impact and impact["bump_count"]
-            else "no observed manifest bumps between these repositories"
-        ),
+        # The prose is what a model quotes, so it must not claim more than the
+        # structured fields beside it. This branch tested the bump count alone
+        # and so reported a bump-backed pair as "declares", promoting it to the
+        # top evidence tier on the strength of nothing.
+        "interpretation": _describe_repo_pair(a, b, declared, impact),
     }
+
+
+def _describe_repo_pair(a: dict, b: dict, declared: str | None, impact: dict | None) -> str:
+    """One sentence that never outruns the evidence behind it."""
+    bumps = (impact or {}).get("bump_count") or 0
+    if declared and bumps:
+        return f"{b['name']} declares {a['name']} and has bumped it {bumps} times"
+    if declared:
+        return (
+            f"{b['name']} declares {a['name']} in a manifest, but no bump has "
+            "been observed between them"
+        )
+    if bumps:
+        return (
+            f"{b['name']} has bumped {a['name']} {bumps} times. No manifest at "
+            "HEAD declares it, so this is bump-backed rather than declared"
+        )
+    return "no declared dependency and no observed manifest bumps between these repositories"
 
 
 def _resolve_repo(name: str) -> dict | None:
