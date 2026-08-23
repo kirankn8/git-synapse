@@ -60,6 +60,18 @@ Read three fields **together**. A score on its own means nothing.
 | `co_changes` | commits the pair actually shares. **Under 3 is noise, whatever the score** |
 | `currency` | whether the coupling still holds. **Read this before acting** |
 | `interpretation` | plain-language summary, already calibrated |
+| `informative` | `false` means the partner is this file's own test or generated output. It co-changes by construction and tells you nothing you did not already know. Skip it |
+| `labels` | `sibling_variant`, `generated`, `own_test`, `thin_support` |
+
+Read the top-level `summary` first when present. It leads with whichever of two
+things matters: sibling variants found, or how much of the result is noise.
+
+`sibling_variant` is the case worth stopping for -- the same filename under a
+different parent, such as an `amd-values-yaml/` and `nvidia-values-yaml/` copy,
+or a per-cloud or per-arch duplicate. Parallel files must usually be edited in
+lockstep, and this is the one pattern the tool finds that reading the file you
+are editing does not. Everything else it reports tends to confirm rather than
+discover.
 
 `currency` is not optional reading. A score is computed over all of history, so a
 partner that was deleted in a refactor keeps every co-change it ever had and can
@@ -72,7 +84,14 @@ still rank near the top. It reports, in order of severity:
 - `current` / `co-changed N days ago` — live.
 
 Act on partners above roughly 60% with double-digit support. Mention but do not
-edit the 20–40% band. Ignore below that.
+edit the 20–40% band. Ignore below that, and ignore anything with
+`informative: false` regardless of score.
+
+**This tool is file-level and cannot see inside a file or across a package.** If
+the coupling you need is between functions in one file, or between files in the
+same Go package that always change together anyway, it will not find it -- read
+the code. Its value is highest as a guardrail ("nothing else across the
+repository has to move") and on parallel-file layouts.
 
 Raise `min_support` when a repository is noisy.
 
@@ -135,6 +154,21 @@ The reverse direction is the one that matters: changing a shared module is a
 change to everything that declares it. A file in a widely-declared module
 warrants more care than any co-change score conveys, and a file whose module
 declares others is a hint that the behaviour you want may belong in one of them.
+
+## The upstream score is a rank, not a probability
+
+`score` on an `upstream_repos` or `impact_of_change` row is a rank position
+within the corpus, not a likelihood. A `discovery` edge at 0.999 means "ranked
+first among unvalidated guesses", not "almost certainly related". Read
+`guidance` first: it states how many entries are declared, bump-backed and
+discovery, and says plainly when none of them is validated.
+
+When `coupling_chain` returns no chains, read `explanation`. Traversal follows
+declared and bump-backed edges only, so a repository that declares no internal
+dependencies has nothing to walk -- that is "there was nothing to search", not
+"searched and found nothing", and it is not evidence that no relationship exists.
+
+---
 
 ## If Git Synapse is wrong, say so
 

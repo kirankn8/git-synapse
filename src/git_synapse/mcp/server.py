@@ -107,6 +107,78 @@ def _round(value: Any, places: int = 4) -> Any:
 STALE_AFTER_DAYS = 270
 
 
+#: Directory names that hold machine-written or third-party code. Matched as
+#: whole path segments: a substring test flagged `pkg/genetics/` as generated and
+#: missed a top-level `vendor/`, both of which matter.
+#: `swagger` and `openapi` are deliberately absent: they are real package names
+#: in Kubernetes-derived code (apiserver/pkg/endpoints/openapi/openapi.go is
+#: hand-written), and the generated artefacts they produce are already caught by
+#: filename below. Suppressing a real file is the expensive error.
+_GENERATED_DIRS = frozenset(
+    {"gen", "generated", "vendor", "node_modules", "mocks", ".gen", "dist",
+     "__generated__"}
+)
+
+#: Filename shapes that mark generated output.
+_GENERATED_FILE_PARTS = (
+    "zz_generated", ".pb.go", "_pb2.py", ".gen.go", ".generated.", ".min.js",
+    "embedded_spec.go", "swagger.json", "swagger.yaml", "openapi.json",
+)
+
+#: Exact filenames that are always lockfiles or checksums.
+_LOCKFILES = frozenset(
+    {"go.sum", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock",
+     "poetry.lock", "Gemfile.lock", "composer.lock"}
+)
+
+#: Below this many co-changes the interval around a probability is wider than
+#: the probability, so quoting a percentage implies precision that is not there.
+THIN_SUPPORT = 5
+
+
+def _classify_partner(path: str, own_path: str, n_ab: int) -> tuple[list[str], bool]:
+    """Label a partner, and say whether it is worth the reader's attention.
+
+    Ranking without judging pushed the filtering onto the reader: results padded
+    with 5% generated swagger files and the caller's own test file, which the
+    caller already knows about. Returns the labels and whether the row carries
+    information beyond what the caller can see for themselves.
+    """
+    labels: list[str] = []
+    segments = path.split("/")
+    base = segments[-1]
+    lower_base = base.lower()
+
+    if (
+        base in _LOCKFILES
+        or any(seg.lower() in _GENERATED_DIRS for seg in segments[:-1])
+        or any(part in lower_base for part in _GENERATED_FILE_PARTS)
+        or (lower_base.startswith("mock_") or lower_base.startswith("mocks_"))
+    ):
+        labels.append("generated")
+
+    stem = own_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    if stem and (
+        base.startswith(f"{stem}_test.") or base.startswith(f"test_{stem}.")
+        or base.startswith(f"{stem}.test.") or base.startswith(f"{stem}.spec.")
+    ):
+        labels.append("own_test")
+
+    if n_ab < THIN_SUPPORT:
+        labels.append("thin_support")
+
+    # A sibling variant: same filename, different parent. This is where the tool
+    # genuinely discovers rather than confirms -- an amd/nvidia pair, a per-cloud
+    # or per-arch copy that must be edited in lockstep.
+    own_dir, _, own_base = own_path.rpartition("/")
+    p_dir, _, p_base = path.rpartition("/")
+    if own_base and own_base == p_base and own_dir != p_dir:
+        labels.append("sibling_variant")
+
+    informative = not ({"generated", "own_test"} & set(labels))
+    return labels, informative
+
+
 def _describe_currency(
     days: int | None, trend: str | None, deleted: bool = False
 ) -> str | None:
@@ -210,6 +282,30 @@ def coupled_files(
         return {"error": str(exc)}
 
     partners = q.coupled_files(target["id"], spec.key, limit, min_support)
+
+    shaped = []
+    for pr in partners:
+        labels, informative = _classify_partner(
+            pr["path"] or "", target["path"], pr["n_ab"]
+        )
+        shaped.append((pr, labels, informative))
+
+    mirrors = [x for x in shaped if "sibling_variant" in x[1]]
+    noise = [x for x in shaped if not x[2]]
+    lead = None
+    if mirrors:
+        lead = (
+            f"{len(mirrors)} sibling variant(s) share this filename in another "
+            "directory. Parallel copies are the case this tool finds that reading "
+            "one file does not: check whether the edit applies to each."
+        )
+    elif noise:
+        lead = (
+            f"{len(noise)} of {len(shaped)} partners are this file's own tests or "
+            "generated output, marked `informative: false`. They co-change by "
+            "construction and tell you nothing you did not already know."
+        )
+
     return {
         "file": {
             "repo": target["repo"],
@@ -220,10 +316,13 @@ def coupled_files(
         },
         "measure": {"key": spec.key, "label": spec.label, "summary": spec.summary},
         "population": target.get("pair_population"),
+        "summary": lead,
         "partners": [
             {
                 "path": p["path"],
                 "repo": p["repo"],
+                "labels": labels or None,
+                "informative": informative,
                 "score": _round(p.get("score")),
                 "co_changes": p["n_ab"],
                 "partner_total_changes": p["n_other"] if p["path"] else None,
@@ -243,7 +342,7 @@ def coupled_files(
                 ),
                 "interpretation": _describe_confidence(p.get("confidence_out"), p["n_ab"]),
             }
-            for p in partners
+            for p, labels, informative in shaped
         ],
     }
 
@@ -351,11 +450,7 @@ def upstream_repos(repo: str, limit: int = 12) -> dict:
     rows = predict.upstream_of(target["id"], limit=limit)
     return {
         "repo": target["full_name"],
-        "guidance": (
-            "Entries marked declared or bump-backed carry structural or "
-            "ground-truth evidence and are reliable. Entries marked discovery are "
-            "statistical only -- verify before acting on them."
-        ),
+        "guidance": _evidence_guidance(rows, "upstream"),
         "upstream": [_impact_row(r, r["name"]) for r in rows],
     }
 
@@ -418,9 +513,44 @@ def coupling_chain(
     rows = fn(target["id"], max_depth=max_depth, min_score=0.3, limit=limit)
 
     arrow = " <- " if upstream else " -> "
+    # An empty result has two very different meanings and used to render as the
+    # same bare []. Traversal follows validated edges only, so a repository that
+    # declares no internal dependencies has nothing to walk -- that is "there was
+    # nothing to search", not "I searched and found nothing".
+    explanation = None
+    if not rows:
+        side = "target_repo_id" if upstream else "source_repo_id"
+        counts = q.query_one(
+            f"""
+            SELECT count(*) AS total,
+                   count(*) FILTER (WHERE is_declared OR has_bump_history) AS validated
+            FROM repo_impact WHERE {side} = %s
+            """,
+            (target["id"],),
+        ) or {"total": 0, "validated": 0}
+        if counts["validated"] == 0 and counts["total"] > 0:
+            explanation = (
+                f"No chains, because none of this repository's {counts['total']} "
+                f"{'upstream' if upstream else 'downstream'} edges is validated. "
+                "Chain traversal follows declared and bump-backed edges only, so "
+                "there was nothing to walk -- this is not evidence that no "
+                "multi-hop relationship exists. This repository declares no "
+                "internal dependencies in its manifests."
+            )
+        elif counts["total"] == 0:
+            explanation = (
+                "No chains, and no edges of any kind recorded for this repository."
+            )
+        else:
+            explanation = (
+                f"No chains found. {counts['validated']} validated edge(s) exist "
+                "but none extends to a second hop above the confidence floor."
+            )
+
     return {
         "repo": target["full_name"],
         "direction": "upstream" if upstream else "downstream",
+        "explanation": explanation,
         "chains": [
             {
                 "path": arrow.join(c["repo_names"] or []),
@@ -564,6 +694,35 @@ def _resolve_repo(name: str) -> dict | None:
         return exact[0]
     suffix = [r for r in matches if r["full_name"].lower().endswith(f"/{key}")]
     return suffix[0] if len(suffix) == 1 else None
+
+
+def _evidence_guidance(rows: list[dict], direction: str) -> str:
+    """State the composition of the result before the reader reads the scores.
+
+    The discovery score is the mean of three rank-normalised columns, so 0.9998
+    means "top of the corpus ranking", not "99.98% likely". Presenting it beside
+    a tier field let a whole result set of unvalidated edges read as near
+    certainty. When nothing in the set is validated, that has to be the first
+    thing said, not a footnote.
+    """
+    declared = sum(1 for r in rows if r["is_declared"])
+    bumped = sum(1 for r in rows if r["has_bump_history"] and not r["is_declared"])
+    discovery = len(rows) - declared - bumped
+    if not rows:
+        return f"No {direction} edges recorded for this repository."
+    if declared == 0 and bumped == 0:
+        return (
+            f"NONE of these {discovery} {direction} edges is validated -- every one "
+            "is discovery tier. `score` here is a rank position within the corpus, "
+            "not a probability, so 0.999 means 'ranked first', not 'almost "
+            "certain'. Treat the whole list as a hypothesis to check by reading "
+            "code, not as a finding."
+        )
+    return (
+        f"{declared} declared, {bumped} bump-backed, {discovery} discovery. Act on "
+        "the declared and bump-backed entries; discovery entries are statistical "
+        "only and their `score` is a rank position, not a probability."
+    )
 
 
 def _impact_row(row: dict, name: str) -> dict:
