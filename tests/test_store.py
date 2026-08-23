@@ -222,3 +222,20 @@ def test_rename_onto_an_occupied_path_does_not_cross_identities(temp_repo):
     assert owner["file_id"] == rows["new.txt"], (
         "a later change must land on the file that lives at that path"
     )
+
+
+def test_empty_repository_reads_as_no_commits_not_an_error(tmp_path):
+    """A repository with no commits has no HEAD to resolve.
+
+    `git log --all` returned nothing and exited 0; scoping the walk to the
+    default branch made git fail with "Needed a single revision" and turned
+    three empty repositories into hard ingest failures.
+    """
+    import subprocess
+
+    from git_synapse.ingest.parser import iter_commits
+
+    mirror = tmp_path / "empty.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(mirror)], check=True)
+
+    assert list(iter_commits(mirror)) == []

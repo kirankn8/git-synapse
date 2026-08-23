@@ -312,7 +312,6 @@ def iter_commits(
 
     args = [
         "log",
-        rev,
         f"--format={LOG_FORMAT}",
         "-z",
         "--raw",
@@ -330,6 +329,11 @@ def iter_commits(
         args.append("--no-merges")
     if reverse:
         args.append("--reverse")
+    # The revision goes after the options, not before them. Leading `--all` was
+    # fine because it is an option; a bare revision that fails to resolve -- as
+    # HEAD does in a repository with no commits -- is read as a path, and git
+    # then rejects every option that follows it.
+    args.append(rev)
     for sha in since_shas or []:
         args.append(f"^{sha}")
 
@@ -370,6 +374,14 @@ def iter_commits(
             proc.stderr.close()
         returncode = proc.wait()
         if returncode != 0:
+            # A repository with no commits has no HEAD to resolve. `--all`
+            # returned nothing and exited 0, so scoping the walk to the default
+            # branch turned three empty repositories into hard failures. An
+            # empty repository is a legitimate no-op, not an error.
+            lowered = stderr.lower()
+            if "unknown revision" in lowered or "does not have any commits yet" in lowered:
+                log.info("no commits reachable in %s; nothing to read", mirror)
+                return
             raise GitError(args, returncode, stderr)
 
 
