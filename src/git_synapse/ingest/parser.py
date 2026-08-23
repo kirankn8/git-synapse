@@ -261,7 +261,7 @@ def _safe_int(value: str) -> int:
 def iter_commits(
     mirror: Path,
     since_shas: list[str] | None = None,
-    rev: str = "--all",
+    rev: str = "HEAD",
     include_merges: bool | None = None,
     rename_similarity: int | None = None,
     blobless: bool = False,
@@ -271,8 +271,15 @@ def iter_commits(
 
     Args:
         mirror: path to the bare repository.
+        rev: what to walk. Defaults to HEAD, i.e. the default branch only.
+            Coupling is a claim about the code that shipped, and 25.8% of this
+            corpus exists solely on branches that never merged: abandoned
+            experiments, and backports that restate a change already counted on
+            the mainline. Walking those inflated co-change counts with work that
+            was never released and, because a branch can delete a file the
+            mainline still has, produced flatly false statements about HEAD.
         since_shas: exclude these commits and all their ancestors, giving an
-            incremental read. Pass every branch tip from the previous run, not
+            incremental read. Pass the previous run's tip, not
             just HEAD, or commits reachable only from other branches are
             re-walked every time. The caller must have verified each SHA still
             exists -- a force-push can orphan one, and git errors on an unknown

@@ -79,6 +79,16 @@ export const when = (iso) => {
 
 export const dateStr = (iso) => (iso ? new Date(iso).toISOString().slice(0, 10) : '—');
 
+/** Absolute local date + time — for logs/runs where the actual timestamp matters. */
+export const stamp = (iso) => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString(undefined, {
+    year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  });
+};
+
 /** Render a path with the directory dimmed and the basename emphasised. */
 export const pathNode = (p) => {
   const i = String(p || '').lastIndexOf('/');
@@ -566,7 +576,7 @@ const runsTable = (runs) =>
       { key: 'kind', label: 'Kind', render: (r) => h('span', { class: 'badge muted' }, r.kind) },
       { key: 'trigger', label: 'Trigger' },
       { key: 'status', label: 'Status', render: (r) => h('span', { class: `badge ${r.status === 'success' ? 'ok' : r.status === 'failed' ? 'danger' : r.status === 'partial' ? 'warn' : 'info'}` }, r.status) },
-      { key: 'started_at', label: 'Started', render: (r) => when(r.started_at) },
+      { key: 'started_at', label: 'Started', render: (r) => stamp(r.started_at) },
       { key: 'duration_s', label: 'Duration', num: true, render: (r) => (r.duration_s ? `${r.duration_s.toFixed(0)}s` : '—') },
       { key: 'repos_ok', label: 'OK', num: true },
       { key: 'repos_failed', label: 'Failed', num: true },
@@ -1600,7 +1610,7 @@ on('/run/:id', async ({ id }) => {
   wrap.append(
     pageHead(
       `Run ${run.id} — ${run.status}`,
-      `${run.kind} triggered ${run.trigger} · ${when(run.started_at)}${run.duration_s ? ` · ${run.duration_s.toFixed(0)}s` : ''}`,
+      `${run.kind} triggered ${run.trigger} · ${stamp(run.started_at)}${run.duration_s ? ` · ${run.duration_s.toFixed(0)}s` : ''}`,
     ),
   );
   wrap.append(

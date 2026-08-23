@@ -52,6 +52,9 @@ x-app-base: &app-base
       condition: service_healthy
   volumes:
     - mirrors:/data/mirrors
+    # Serve the hand-edited web UI from the host so edits take effect on refresh
+    # (no image rebuild). The baked /app/web remains the fallback if unmounted.
+    - ./web:/app/web:ro
     # The directory, not the file: the refresher replaces the token by atomic
     # rename, which swaps the inode, and a file bind-mount follows the old inode
     # and breaks. Read on every use, so a rotated credential takes effect with no

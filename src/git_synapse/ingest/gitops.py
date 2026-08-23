@@ -463,14 +463,15 @@ def default_branch(path: Path) -> str | None:
 
 
 def ref_tips(path: Path) -> list[str]:
-    """SHAs of every local branch tip in the mirror.
+    """SHA of the default branch tip, as a single-element list.
 
-    These are the watermark for an incremental walk. ``git log --all`` visits
-    every branch, so excluding only HEAD would leave every commit that is
-    reachable solely from another branch to be re-read on each run.
+    The watermark for an incremental walk. It used to be every branch tip,
+    because the walk visited every branch; the walk now follows only the branch
+    that ships, so anything else would exclude commits that must still be read
+    when they eventually merge.
     """
     proc = run_git(
-        ["for-each-ref", "--format=%(objectname)", "refs/heads/"],
+        ["rev-parse", "HEAD"],
         cwd=path,
         check=False,
         timeout=120,

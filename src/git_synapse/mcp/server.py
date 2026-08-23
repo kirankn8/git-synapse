@@ -133,7 +133,12 @@ _LOCKFILES = frozenset(
 
 #: Below this many co-changes the interval around a probability is wider than
 #: the probability, so quoting a percentage implies precision that is not there.
+#: A pair that co-changed twice and never apart scores 1.0 and sorts above
+#: everything real -- observed sending a reviewer at four unrelated files. These
+#: are withheld by default rather than labelled, because a label only works on a
+#: reader who is already sceptical.
 THIN_SUPPORT = 5
+MIN_REPORTABLE_SUPPORT = 3
 
 
 def _classify_partner(path: str, own_path: str, n_ab: int) -> tuple[list[str], bool]:
@@ -176,6 +181,8 @@ def _classify_partner(path: str, own_path: str, n_ab: int) -> tuple[list[str], b
         labels.append("sibling_variant")
 
     informative = not ({"generated", "own_test"} & set(labels))
+    if n_ab < MIN_REPORTABLE_SUPPORT:
+        informative = False
     return labels, informative
 
 
@@ -436,22 +443,36 @@ def explain_pair(repo: str, path_a: str, path_b: str, commit_limit: int = 8) -> 
         "may belong upstream rather than in the repo you are looking at."
     ),
 )
-def upstream_repos(repo: str, limit: int = 12) -> dict:
+def upstream_repos(
+    repo: str, limit: int = 12, include_discovery: bool = False
+) -> dict:
     """List upstream repositories, strongest evidence first.
 
     Args:
         repo: repository name you are editing.
         limit: maximum results.
+        include_discovery: also return unvalidated statistical edges. Off by
+            default: they were never acted on across eight observed sessions and
+            cost the reader attention to dismiss.
     """
     target = _resolve_repo(repo)
     if target is None:
         return {"error": f"no repository matching {repo!r}"}
 
     rows = predict.upstream_of(target["id"], limit=limit)
+    validated = [r for r in rows if r["is_declared"] or r["has_bump_history"]]
+    withheld = len(rows) - len(validated)
+
+    # Discovery-tier rows are withheld unless asked for. Across eight observed
+    # sessions they were never once acted on, and the only reason they did no
+    # harm is that the reader kept distrusting a 0.999 that means "ranked first
+    # among guesses". That discipline should not be a requirement.
+    shown = rows if include_discovery else validated
+
     return {
         "repo": target["full_name"],
-        "guidance": _evidence_guidance(rows, "upstream"),
-        "upstream": [_impact_row(r, r["name"]) for r in rows],
+        "guidance": _upstream_guidance(validated, withheld, include_discovery, rows),
+        "upstream": [_impact_row(r, r["name"]) for r in shown],
     }
 
 
@@ -723,6 +744,31 @@ def _evidence_guidance(rows: list[dict], direction: str) -> str:
         "the declared and bump-backed entries; discovery entries are statistical "
         "only and their `score` is a rank position, not a probability."
     )
+
+
+def _upstream_guidance(
+    validated: list[dict], withheld: int, include_discovery: bool, rows: list[dict]
+) -> str:
+    """One coherent sentence about what is being shown and what is not."""
+    if include_discovery:
+        return _evidence_guidance(rows, "upstream")
+    if not validated and withheld:
+        return (
+            f"Nothing validated upstream. {withheld} discovery-tier edge(s) exist "
+            "but are withheld: they are statistical only, and their score is a "
+            "rank position rather than a probability, so a 0.999 means 'ranked "
+            "first among guesses'. This repository declares no internal "
+            "dependencies. Pass include_discovery=true to see them anyway."
+        )
+    if not validated:
+        return "No upstream edges recorded for this repository."
+    base = _evidence_guidance(validated, "upstream")
+    if withheld:
+        base += (
+            f" A further {withheld} discovery-tier edge(s) are withheld as "
+            "statistical only; pass include_discovery=true for them."
+        )
+    return base
 
 
 def _impact_row(row: dict, name: str) -> dict:

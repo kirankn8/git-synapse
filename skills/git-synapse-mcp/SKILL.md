@@ -5,6 +5,9 @@ description: Use the Git Synapse MCP server to find what else has to change. Bef
 
 # Git Synapse MCP: what else has to change
 
+**Coupling is computed from the default branch only.** Work on branches that
+never merged is not part of the shipped history and is excluded.
+
 **Scope: file level and no finer.** The atomic record is one row per (commit,
 file); no code is parsed. Git Synapse cannot answer anything about functions, methods
 or symbols, and never will -- the distinction is not in the data. For coupling
@@ -66,11 +69,19 @@ Read three fields **together**. A score on its own means nothing.
 | `co_changes` | commits the pair actually shares. **Under 3 is noise, whatever the score** |
 | `currency` | whether the coupling still holds. **Read this before acting** |
 | `interpretation` | plain-language summary, already calibrated |
-| `informative` | `false` means the partner is this file's own test or generated output. It co-changes by construction and tells you nothing you did not already know. Skip it |
+| `informative` | `false` means skip it: this file's own test, generated output, or too few shared commits to mean anything |
 | `labels` | `sibling_variant`, `generated`, `own_test`, `thin_support` |
 
 Read the top-level `summary` first when present. It leads with whichever of two
 things matters: sibling variants found, or how much of the result is noise.
+
+Partners sharing fewer than three commits with yours are withheld. A pair that
+changed twice and never apart scores 1.0 and would sort above everything real;
+that is arithmetic on two commits, not evidence.
+
+`upstream_repos` returns only declared and bump-backed edges. Discovery-tier
+edges are withheld and counted in `guidance`; pass `include_discovery=true` if
+you want them, but they have never been worth acting on.
 
 `sibling_variant` is the case worth stopping for -- the same filename under a
 different parent, such as an `amd-values-yaml/` and `nvidia-values-yaml/` copy,
