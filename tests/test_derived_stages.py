@@ -108,6 +108,8 @@ def corpus(scratch_db, tmp_path_factory):
     predict.rebuild(force=True)
     mining.rebuild(force=True)
 
+    ids["_lib_remote"] = str(lib)
+    ids["_app_remote"] = str(app)
     try:
         yield ids
     finally:
@@ -121,7 +123,7 @@ def corpus(scratch_db, tmp_path_factory):
 def test_every_stage_ran_without_leaving_the_tables_empty(corpus):
     from git_synapse.db.engine import query_one
 
-    ids = list(corpus.values())
+    ids = [v for v in corpus.values() if isinstance(v, int)]
     assert query_one("SELECT count(*) AS n FROM file_pair WHERE repo_id=ANY(%s)",
                      (ids,))["n"] > 0
     assert query_one("SELECT count(*) AS n FROM change_set")["n"] > 0
@@ -217,7 +219,7 @@ def test_impact_prefers_the_declared_edge(corpus):
 def test_mining_produces_clusters_and_risk_without_impossible_values(corpus):
     from git_synapse.db.engine import query, query_one
 
-    ids = list(corpus.values())
+    ids = [v for v in corpus.values() if isinstance(v, int)]
     assert query_one("SELECT count(*) AS n FROM file_cluster WHERE repo_id=ANY(%s)",
                      (ids,))["n"] >= 0
     assert not query(
@@ -247,3 +249,71 @@ def test_running_every_stage_twice_is_idempotent(corpus):
     predict.rebuild(force=True)
     mining.rebuild(force=True)
     assert snapshot() == before
+
+
+def test_a_full_run_through_run_ingest_drives_every_stage(corpus, monkeypatch):
+    """`run_ingest` is the entrypoint the scheduler and the CLI both use.
+
+    Everything below it is covered piecewise; this exercises the orchestration
+    itself -- credential check, lock, per-repo fan-out, the global stages, and
+    the run row -- against repositories already on disk.
+    """
+    from git_synapse.db.engine import query_one
+    from git_synapse.ingest import pipeline
+    from git_synapse.ingest.github import RepoRecord
+
+    # The mirrors exist, so no network and no credential are needed.
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+
+    records = [
+        RepoRecord(github_id=920001, owner="acme", name="dsx-lib",
+                   full_name="acme/dsx-lib",
+                   clone_url=corpus["_lib_remote"], default_branch="main"),
+        RepoRecord(github_id=920002, owner="acme", name="dsx-app",
+                   full_name="acme/dsx-app",
+                   clone_url=corpus["_app_remote"], default_branch="main"),
+    ]
+    result = pipeline.run_ingest(records=records, trigger="test")
+
+    assert result.status in ("success", "partial"), result.status
+    assert result.run_id is not None
+    row = query_one("SELECT status, finished_at FROM ingest_run WHERE id=%s",
+                    (result.run_id,))
+    assert row["status"] in ("success", "partial")
+    assert row["finished_at"] is not None, "a finished run must record when"
+
+
+def test_a_run_aborts_cleanly_when_the_credential_is_rejected(corpus, monkeypatch):
+    """It must fail the whole run before touching a mirror, not let every
+    repository fail individually and re-clone on the way."""
+    from git_synapse.db.engine import query_one
+    from git_synapse.ingest import pipeline
+    from git_synapse.ingest.pipeline import AuthError
+
+    def reject():
+        raise AuthError("GITHUB_TOKEN was rejected (HTTP 401)")
+
+    monkeypatch.setattr(pipeline, "verify_credentials", reject)
+    result = pipeline.run_ingest(records=[], trigger="test")
+
+    assert result.status == "failed"
+    row = query_one("SELECT status, error FROM ingest_run WHERE id=%s", (result.run_id,))
+    assert row["status"] == "failed"
+    assert "401" in (row["error"] or "")
+
+
+def test_repo_results_are_recorded_per_repository(corpus, monkeypatch):
+    from git_synapse.db.engine import query_one
+    from git_synapse.ingest import pipeline
+    from git_synapse.ingest.github import RepoRecord
+
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+    result = pipeline.run_ingest(
+        records=[RepoRecord(github_id=920001, owner="acme", name="dsx-lib",
+                            full_name="acme/dsx-lib",
+                            clone_url=corpus["_lib_remote"], default_branch="main")],
+        trigger="test",
+    )
+    n = query_one("SELECT count(*) AS n FROM ingest_run_repo WHERE run_id=%s",
+                  (result.run_id,))["n"]
+    assert n == 1, "each repository's outcome must be recorded, not just the total"
