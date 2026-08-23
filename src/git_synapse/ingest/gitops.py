@@ -364,9 +364,11 @@ def sync_mirror(
 ) -> FetchResult:
     """Ensure a current mirror exists for ``full_name``.
 
-    Clones when absent or corrupt, fetches otherwise. A fetch that fails against
-    an existing mirror falls back to a fresh clone, which recovers a mirror left
-    inconsistent by an interrupted run.
+    Clones when absent or corrupt, fetches otherwise. A fetch failure falls back
+    to a fresh clone only when the cause suggests the mirror itself is damaged.
+    Auth failures and network failures both keep the existing mirror: neither
+    says anything is wrong with it, and re-cloning on those destroyed 213 working
+    mirrors once and wasted an hour of an outage the other time.
     """
     started = time.monotonic()
     path = mirror_path_for(full_name)
@@ -397,7 +399,22 @@ def sync_mirror(
                     full_name, exc.stderr[:200],
                 )
                 raise
-            log.warning("fetch failed for %s (%s); re-cloning", full_name, exc)
+            if is_transient_error(exc.stderr):
+                # A network failure says nothing about the mirror, which is
+                # still perfectly good. Re-cloning here threw away a working
+                # mirror and spent ten minutes per repository failing to
+                # replace it; during one outage that was 213 repositories. Fail
+                # this repository and let the next run retry the fetch.
+                log.warning(
+                    "fetch failed for %s and the cause looks transient "
+                    "(mirror preserved, will retry next run): %s",
+                    full_name, exc.stderr[:200],
+                )
+                raise
+            log.warning(
+                "fetch failed for %s in a way that suggests a damaged mirror; "
+                "re-cloning: %s", full_name, exc.stderr[:200],
+            )
             clone_mirror(clone_url, path, public_url, blobless=blobless)
             cloned = True
             changed = True

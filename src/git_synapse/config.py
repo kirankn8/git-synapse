@@ -73,11 +73,45 @@ class DatabaseConfig:
         )
 
 
+#: GitHub credential prefixes. Used to reject a partially written token file
+#: rather than send half a credential and get an indistinguishable 401 back.
+_TOKEN_PREFIXES = ("ghu_", "ghp_", "gho_", "ghs_", "ghr_", "github_pat_")
+
+
+def _looks_like_token(value: str) -> bool:
+    """True if the value has the shape of a GitHub token."""
+    return len(value) >= 20 and value.startswith(_TOKEN_PREFIXES)
+
+
 @dataclass(frozen=True)
 class GitHubConfig:
     """Which repositories to mirror, and how to reach GitHub."""
 
     token: str = field(default_factory=lambda: _env_str("GITHUB_TOKEN", ""))
+    #: A file the host keeps current, read fresh on every use. `gh` issues
+    #: short-lived ghu_ credentials, so a token captured into the environment at
+    #: container start is expired within hours and every fetch 401s until someone
+    #: restarts the container. Reading a file decouples credential lifetime from
+    #: container lifetime.
+    token_file: str = field(
+        default_factory=lambda: _env_str("GITHUB_TOKEN_FILE", "/run/git-synapse/github-token")
+    )
+
+    def current_token(self) -> str:
+        """The freshest token available: the file if present, else the env var."""
+        path = Path(self.token_file) if self.token_file else None
+        if path is not None:
+            try:
+                value = path.read_text(encoding="utf-8").strip()
+            except OSError:
+                value = ""
+            # A half-written file would otherwise be sent to GitHub as a
+            # credential and come back 401, which reads as "expired token" and
+            # sends someone hunting the wrong problem. An unreadable, empty or
+            # malformed file must never blank or corrupt a working env token.
+            if value and _looks_like_token(value):
+                return value
+        return self.token
     org: str = field(default_factory=lambda: _env_str("GITHUB_ORG", "acme"))
     api_url: str = field(default_factory=lambda: _env_str("GITHUB_API_URL", "https://api.github.com"))
     #: Include repositories the token can see but that are private.

@@ -809,3 +809,75 @@ def test_coupled_directories_accepts_a_file_path(db):
 
     missing = server.coupled_directories(repo=row["repo"], path="no/such/dir", limit=5)
     assert "error" in missing and "hint" in missing
+
+
+def test_token_file_is_read_fresh_and_validated(tmp_path, monkeypatch):
+    """The credential must not be frozen at process start, nor half-read.
+
+    `gh` here is a shell function wrapping bulwark, so the containers cannot
+    reissue for themselves; the host rotates a file they read on every use. A
+    torn read must never be sent to GitHub, because the 401 it earns is
+    indistinguishable from an expired token.
+    """
+    from git_synapse.config import GitHubConfig
+
+    token_path = tmp_path / "github-token"
+    cfg = GitHubConfig(token="ghu_" + "e" * 36, token_file=str(token_path))
+
+    # No file: the environment value stands.
+    assert cfg.current_token() == "ghu_" + "e" * 36
+
+    # A valid file wins, and a rewrite is picked up with no restart.
+    token_path.write_text("ghu_" + "a" * 36)
+    assert cfg.current_token() == "ghu_" + "a" * 36
+    token_path.write_text("ghu_" + "b" * 36)
+    assert cfg.current_token() == "ghu_" + "b" * 36
+
+    # Empty, truncated or malformed: fall back rather than send rubbish.
+    for bad in ("", "   ", "ghu_", "not-a-token", "ghu_abc"):
+        token_path.write_text(bad)
+        assert cfg.current_token() == "ghu_" + "e" * 36, bad
+
+
+def test_transient_git_failures_do_not_trigger_a_reclone():
+    """A network failure says nothing about the mirror, which is still good.
+
+    Re-cloning on a fetch failure destroyed 213 working mirrors when a token
+    expired, and during a later outage spent ten minutes per repository failing
+    to replace mirrors that were fine.
+    """
+    from git_synapse.ingest.gitops import is_permanent_error, is_transient_error
+
+    outage = (
+        "fatal: unable to access 'https://github.com/x/y.git/': Failed to "
+        "connect to github.com port 443 after 133149 ms: Could not connect"
+    )
+    assert is_transient_error(outage)
+    assert not is_permanent_error(outage)
+
+    auth = "remote: Invalid username or token. Password authentication is not supported"
+    assert is_permanent_error(auth)
+
+    # Only a cause that implicates the mirror should reach the re-clone path.
+    corrupt = "fatal: not a git repository: '/data/mirrors/x/y.git'"
+    assert not is_transient_error(corrupt)
+    assert not is_permanent_error(corrupt)
+
+
+def test_github_client_sends_the_live_token(tmp_path):
+    """An unauthenticated request returns HTTP 200 and only public repositories.
+
+    The credential moved to a file the host rotates, but the client still read
+    the frozen environment copy. With that empty it sent no Authorization header
+    and discovery silently returned 59 of 272 repositories.
+    """
+    from git_synapse.config import GitHubConfig
+    from git_synapse.ingest.github import GitHubClient
+
+    token_path = tmp_path / "github-token"
+    token_path.write_text("ghu_" + "f" * 36)
+    cfg = GitHubConfig(token="", token_file=str(token_path))
+
+    with GitHubClient(cfg) as client:
+        auth = client._client.headers.get("Authorization")
+    assert auth == "Bearer ghu_" + "f" * 36, "the live token must reach the header"
