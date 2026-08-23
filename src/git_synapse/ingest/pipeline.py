@@ -104,6 +104,10 @@ def reconcile_stale_runs(max_age_hours: int = STALE_RUN_HOURS) -> int:
     second run while one is in flight, so a single killed container would
     otherwise disable ingestion permanently.
 
+    Liveness is the ingest advisory lock rather than the row's age: a run holds
+    it for its whole life, so its absence is proof the run is gone. The age
+    window remains as a backstop.
+
     Returns:
         Number of runs reconciled.
     """
@@ -117,9 +121,21 @@ def reconcile_stale_runs(max_age_hours: int = STALE_RUN_HOURS) -> int:
                    error = COALESCE(error,
                        'run abandoned: process exited without recording a result')
              WHERE status = 'running'
-               AND started_at < now() - make_interval(hours => %s)
+               AND (
+                     started_at < now() - make_interval(hours => %s)
+                     -- A live run holds the ingest advisory lock for as long as
+                     -- it runs, so a `running` row with no lock behind it is
+                     -- provably dead. Waiting out the age window instead left a
+                     -- crashed run blocking the API's refresh endpoint for six
+                     -- hours while the scheduler carried on regardless.
+                     OR NOT EXISTS (
+                         SELECT 1 FROM pg_locks
+                          WHERE locktype = 'advisory'
+                            AND objid = %s
+                     )
+                   )
             """,
-            (max_age_hours,),
+            (max_age_hours, INGEST_LOCK_KEY & 0xFFFFFFFF),
         ).rowcount
     if count:
         log.warning("reconciled %d abandoned ingest run(s)", count)
