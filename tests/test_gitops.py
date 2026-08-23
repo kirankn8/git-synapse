@@ -204,3 +204,117 @@ def test_mirror_path_is_namespaced_by_owner(tmp_path, monkeypatch):
         assert p.parent.name == "owner"
     finally:
         reset_config_cache()
+
+
+# --------------------------------------------- sync's response to failure
+
+def test_a_permanent_failure_preserves_the_mirror_and_raises(tmp_path, remote, monkeypatch):
+    """An expired token made every fetch fail; the fallback re-cloned, and the
+    clone deleted the mirror before failing on the same error."""
+    _, bare = remote
+    monkeypatch.setenv("MIRROR_ROOT", str(tmp_path / "mirrors"))
+    from git_synapse.config import reset_config_cache
+
+    reset_config_cache()
+    try:
+        first = sync_mirror("t/perm", str(bare), blobless=False)
+        assert first.cloned
+
+        def auth_failure(*a, **kw):
+            raise GitError(["fetch"], 128, "remote: Invalid username or token.")
+
+        monkeypatch.setattr(gitops, "fetch_mirror", auth_failure)
+        cloned = []
+        monkeypatch.setattr(gitops, "clone_mirror",
+                            lambda *a, **kw: cloned.append(a) or None)
+
+        with pytest.raises(GitError):
+            sync_mirror("t/perm", str(bare), blobless=False)
+        assert not cloned, "a credential failure must never trigger a re-clone"
+        assert is_valid_mirror(gitops.mirror_path_for("t/perm"))
+    finally:
+        reset_config_cache()
+
+
+def test_a_transient_failure_preserves_the_mirror_and_raises(tmp_path, remote, monkeypatch):
+    """A network blip says nothing about the mirror; re-cloning spent nine
+    minutes per repository failing to replace one that was fine."""
+    _, bare = remote
+    monkeypatch.setenv("MIRROR_ROOT", str(tmp_path / "mirrors"))
+    from git_synapse.config import reset_config_cache
+
+    reset_config_cache()
+    try:
+        sync_mirror("t/trans", str(bare), blobless=False)
+
+        def outage(*a, **kw):
+            raise GitError(["fetch"], 128,
+                           "fatal: unable to access: Failed to connect to github.com port 443")
+
+        monkeypatch.setattr(gitops, "fetch_mirror", outage)
+        cloned = []
+        monkeypatch.setattr(gitops, "clone_mirror",
+                            lambda *a, **kw: cloned.append(a) or None)
+
+        with pytest.raises(GitError):
+            sync_mirror("t/trans", str(bare), blobless=False)
+        assert not cloned, "a network failure must never trigger a re-clone"
+        assert is_valid_mirror(gitops.mirror_path_for("t/trans"))
+    finally:
+        reset_config_cache()
+
+
+def test_a_damaged_mirror_is_the_one_case_that_does_re_clone(tmp_path, remote, monkeypatch):
+    """Only a cause that actually implicates the mirror may reach that path."""
+    _, bare = remote
+    monkeypatch.setenv("MIRROR_ROOT", str(tmp_path / "mirrors"))
+    from git_synapse.config import reset_config_cache
+
+    reset_config_cache()
+    try:
+        sync_mirror("t/damaged", str(bare), blobless=False)
+
+        def corrupt(*a, **kw):
+            raise GitError(["fetch"], 128, "fatal: not a git repository")
+
+        monkeypatch.setattr(gitops, "fetch_mirror", corrupt)
+        cloned = []
+
+        def fake_clone(*a, **kw):
+            cloned.append(a)
+
+        monkeypatch.setattr(gitops, "clone_mirror", fake_clone)
+        sync_mirror("t/damaged", str(bare), blobless=False)
+        assert cloned, "a damaged mirror must be re-cloned"
+    finally:
+        reset_config_cache()
+
+
+def test_a_changed_clone_mode_forces_a_re_clone(tmp_path, remote, monkeypatch):
+    """Serving mismatched data is worse than paying for a clone."""
+    _, bare = remote
+    monkeypatch.setenv("MIRROR_ROOT", str(tmp_path / "mirrors"))
+    from git_synapse.config import reset_config_cache
+
+    reset_config_cache()
+    try:
+        sync_mirror("t/mode", str(bare), blobless=False)
+        result = sync_mirror("t/mode", str(bare), blobless=True)
+        assert result.cloned, "switching to blobless must re-clone"
+        assert mirror_is_blobless(gitops.mirror_path_for("t/mode"))
+    finally:
+        reset_config_cache()
+
+
+def test_remove_mirror_reports_whether_there_was_one(tmp_path, remote, monkeypatch):
+    _, bare = remote
+    monkeypatch.setenv("MIRROR_ROOT", str(tmp_path / "mirrors"))
+    from git_synapse.config import reset_config_cache
+
+    reset_config_cache()
+    try:
+        sync_mirror("t/gone", str(bare), blobless=False)
+        assert gitops.remove_mirror("t/gone") is True
+        assert gitops.remove_mirror("t/gone") is False
+    finally:
+        reset_config_cache()

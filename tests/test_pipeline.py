@@ -165,3 +165,89 @@ def test_load_repo_records_returns_usable_records(db):
     r = records[0]
     assert r.full_name and "/" in r.full_name
     assert r.clone_url.startswith("http")
+
+
+# ------------------------------------------------------ credential preflight
+
+@pytest.fixture
+def token(monkeypatch):
+    """Control what current_token() returns; Config is frozen, so patch the class."""
+    from git_synapse.config import GitHubConfig
+
+    def _set(value: str):
+        monkeypatch.setattr(GitHubConfig, "current_token", lambda self: value)
+
+    return _set
+
+
+def test_an_empty_credential_is_refused_before_any_mirror_is_touched(db, token):
+    from git_synapse.ingest.pipeline import AuthError, verify_credentials
+
+    token("")
+    with pytest.raises(AuthError, match="empty"):
+        verify_credentials()
+
+
+def test_a_rejected_credential_says_it_expired_and_that_nothing_was_touched(
+    db, token, monkeypatch
+):
+    """The message is the whole value here: it must send someone at the token,
+    not at the mirrors."""
+    import httpx
+
+    token("ghu_" + "x" * 36)
+    monkeypatch.setattr(
+        httpx, "get",
+        lambda *a, **kw: httpx.Response(401, json={"message": "Bad credentials"},
+                                        request=httpx.Request("GET", "https://api.github.com")),
+    )
+    from git_synapse.ingest.pipeline import AuthError, verify_credentials
+
+    with pytest.raises(AuthError) as exc:
+        verify_credentials()
+    assert "401" in str(exc.value)
+    assert "mirrors" in str(exc.value)
+
+
+def test_a_server_error_during_verification_also_aborts(db, token, monkeypatch):
+    import httpx
+
+    token("ghu_" + "x" * 36)
+    monkeypatch.setattr(
+        httpx, "get",
+        lambda *a, **kw: httpx.Response(503, json={},
+                                        request=httpx.Request("GET", "https://api.github.com")),
+    )
+    from git_synapse.ingest.pipeline import AuthError, verify_credentials
+
+    with pytest.raises(AuthError):
+        verify_credentials()
+
+
+def test_an_unreachable_api_does_not_abort_the_run(db, token, monkeypatch):
+    """GitHub being briefly unreachable is not evidence the token is bad."""
+    import httpx
+
+    token("ghu_" + "x" * 36)
+
+    def unreachable(*a, **kw):
+        raise httpx.ConnectError("no route to host")
+
+    monkeypatch.setattr(httpx, "get", unreachable)
+    from git_synapse.ingest.pipeline import verify_credentials
+
+    assert verify_credentials() == "unverified"
+
+
+def test_a_valid_credential_reports_the_login(db, token, monkeypatch):
+    import httpx
+
+    token("ghu_" + "x" * 36)
+    monkeypatch.setattr(
+        httpx, "get",
+        lambda *a, **kw: httpx.Response(200, json={"login": "someone"},
+                                        request=httpx.Request("GET", "https://api.github.com")),
+    )
+    from git_synapse.ingest.pipeline import verify_credentials
+
+    assert verify_credentials() == "someone"
