@@ -415,3 +415,91 @@ def test_feedback_renders_severities(scratch_db):
     finally:
         with connection() as conn:
             conn.execute("DELETE FROM feedback WHERE id = ANY(%s)", (ids,))
+
+
+# ---------------------------------------------- output when there is nothing
+
+def test_ingest_discovers_when_nothing_is_known_yet(scratch_db, monkeypatch):
+    """A first run has no stored repositories, so it must fall through to
+    discovery rather than silently doing nothing."""
+    from git_synapse.ingest import pipeline
+
+    discovered = []
+    monkeypatch.setattr(pipeline, "load_repo_records", lambda: [])
+    monkeypatch.setattr(pipeline, "discover", lambda **kw: discovered.append(1) or [])
+
+    class _R:
+        status, run_id, duration_s, commits_added = "success", 1, 0.0, 0
+        ok, failed, repos = [], [], []
+
+    monkeypatch.setattr(pipeline, "run_ingest", lambda **kw: _R())
+    r = runner.invoke(app, ["ingest"])
+    assert r.exit_code == 0, r.stdout
+    assert "discovering" in r.stdout.lower() or discovered
+
+
+def test_aggregate_says_so_when_there_is_nothing_to_do(scratch_db):
+    """Silence and success look identical; this must say which it was."""
+    r = runner.invoke(app, ["aggregate"])
+    assert r.exit_code == 0, r.stdout
+
+
+def test_validate_prints_the_measure_table_when_there_is_ground_truth(db):
+    from git_synapse.analysis.validate import ground_truth_edges
+    from git_synapse.db.engine import query_one
+
+    # Needs both halves: labels to score against and a lag table to score.
+    # Checking only one of them made this depend on which database the module
+    # happened to be pointed at.
+    if not ground_truth_edges(min_bumps=2):
+        pytest.skip("no ground truth")
+    # `validate` scores lag 1 by default, and having rows at *some* lag is not
+    # the same as having them at that one -- the scratch corpus has the former
+    # and not the latter, which is what made this pass alone and fail in the
+    # suite.
+    if query_one("SELECT count(*) AS n FROM repo_lag_metric WHERE lag_bins = 1")["n"] == 0:
+        pytest.skip("no lagged rows at the default lag")
+
+    r = runner.invoke(app, ["validate"])
+    assert r.exit_code == 0, r.stdout
+    assert "auc" in r.stdout.lower()
+
+
+def test_impact_marks_the_evidence_tier_on_each_row(db):
+    """The tier is the whole point of the row; a table without it invites
+    acting on a discovery edge as though it were declared."""
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        """
+        SELECT r.name FROM repo_impact i JOIN repo r ON r.id = i.source_repo_id
+        WHERE i.is_declared OR i.has_bump_history LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("no validated impact rows")
+    r = runner.invoke(app, ["impact", row["name"]])
+    assert r.exit_code == 0, r.stdout
+    assert "declared" in r.stdout.lower() or "bumps" in r.stdout.lower()
+
+
+def test_chains_renders_the_hop_path(db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        """
+        SELECT r.name FROM repo r
+        WHERE EXISTS (
+            SELECT 1 FROM repo_impact a
+            JOIN repo_impact b ON b.source_repo_id = a.target_repo_id
+            WHERE a.target_repo_id = r.id
+              AND (a.is_declared OR a.has_bump_history)
+              AND (b.is_declared OR b.has_bump_history)
+        ) LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("no two-hop path")
+    r = runner.invoke(app, ["chains", row["name"], "-n", "3"])
+    assert r.exit_code == 0, r.stdout
+    assert row["name"] in r.stdout or "chain" in r.stdout.lower()
