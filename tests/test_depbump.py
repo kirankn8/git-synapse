@@ -15,6 +15,8 @@ from git_synapse.analysis.depbump import (
     _parse_manifest_line,
     _PSEUDO,
     declared_at_head,
+    declared_modules_at_head,
+    extract_from_mirror,
     manifest_paths,
 )
 
@@ -283,3 +285,140 @@ def test_extract_from_mirror_finds_every_bump_in_history(tmp_path):
     assert all(b.dep_name == "upstream" for b in bumps)
     # Each pseudo-version carries the upstream commit it pinned.
     assert all(b.dep_sha for b in bumps)
+
+
+# ------------------------------------------------- the parser's darker corners
+
+@pytest.mark.parametrize(("line", "expected"), [
+    ('"console-sdk": "github:acme/console-sdk-js#v1.2.0"',
+     ("console-sdk-js", "v1.2.0")),
+    ('"sdk": "git+https://github.com/acme/console-sdk-js.git#main"',
+     ("console-sdk-js", "main")),
+    # No fragment: the dependency is real but unpinned, which is worth an edge
+    # with a version we can distinguish from a tag.
+    ('"sdk": "github:acme/telemetry"', ("telemetry", "git")),
+    # Someone else's fork of the same name is not an internal dependency.
+    ('"sdk": "github:someoneelse/telemetry#v1"', None),
+])
+def test_an_npm_package_pinned_to_a_git_url_is_still_an_internal_dependency(line, expected):
+    assert _parse_manifest_line(line, "npm") == expected
+
+
+def test_a_blank_line_in_the_tree_listing_is_not_a_manifest(tmp_path, monkeypatch):
+    """git can emit an empty line; treating it as a path would make its basename
+    the empty string and index MANIFESTS with it."""
+    import subprocess as sp
+
+    class _Proc:
+        returncode = 0
+        stdout = "\n\ngo.mod\n\n"
+
+    monkeypatch.setattr(sp, "run", lambda *a, **k: _Proc())
+    assert manifest_paths(tmp_path) == [("go.mod", "go")]
+
+
+def test_a_repository_that_is_not_a_git_directory_yields_no_manifests(tmp_path):
+    empty = tmp_path / "notgit"
+    empty.mkdir()
+    assert manifest_paths(empty) == []
+
+
+def test_a_manifest_scan_on_a_non_repository_is_empty_not_an_error(tmp_path):
+    empty = tmp_path / "notgit"
+    empty.mkdir()
+    assert extract_from_mirror(empty, "anything") == []
+
+
+def test_a_diff_line_before_any_commit_marker_is_discarded(tmp_path, monkeypatch):
+    """Attributing a bump to the wrong commit is worse than dropping it: the
+    whole value of a bump edge is the date and SHA it carries."""
+    import subprocess as sp
+
+    orphan = "+\tgithub.com/acme/httpkit v0.0.0-20260101000000-abcdef123456\n"
+
+    class _Proc:
+        returncode = 0
+        stdout = orphan + "@@" + "a" * 40 + "\n" + orphan
+        stderr = ""
+
+    monkeypatch.setattr(sp, "run", lambda *a, **k: _Proc())
+    edges = extract_from_mirror(tmp_path, "consumer")
+    assert len(edges) == 1
+    assert edges[0].consumer_sha == "a" * 40
+
+
+def test_the_repositorys_own_module_line_is_not_a_dependency_on_itself(tmp_path, monkeypatch):
+    import subprocess as sp
+
+    class _Proc:
+        returncode = 0
+        stderr = ""
+        stdout = ("@@" + "b" * 40 + "\n"
+                  "+module github.com/acme/httpkit v1.0.0\n"
+                  "+\tgithub.com/acme/telemetry v1.2.3\n")
+
+    monkeypatch.setattr(sp, "run", lambda *a, **k: _Proc())
+    edges = extract_from_mirror(tmp_path, "httpkit")
+    assert [e.dep_name for e in edges] == ["telemetry"]
+
+
+def test_declared_at_head_skips_the_repositorys_own_module_line(tmp_path):
+    mirror = _repo(tmp_path, {"go.mod": (
+        "module github.com/acme/httpkit\n"
+        "require (\n"
+        "\tgithub.com/acme/httpkit v1.0.0\n"
+        "\tgithub.com/acme/telemetry v2.0.0\n"
+        ")\n"
+    )})
+    names = [n for n, _ in declared_at_head(mirror, "httpkit", "go.mod", "go")]
+    assert names == ["telemetry"]
+
+
+def test_declared_modules_on_a_non_repository_is_empty(tmp_path):
+    empty = tmp_path / "notgit"
+    empty.mkdir()
+    assert declared_modules_at_head(empty, "anything", "go.mod") == []
+
+
+def test_a_module_replacing_itself_is_not_an_internal_edge(tmp_path):
+    """`replace` pointing a module at its own directory is a build directive, not
+    a dependency; counting it would make every module couple to itself."""
+    mirror = _repo(tmp_path, {
+        "gateway/go.mod": (
+            "module github.com/acme/mono/gateway\n"
+            "require github.com/acme/mono/gateway v0.0.0\n"
+            "require github.com/acme/mono/core v1.1.0\n"
+        ),
+    })
+    edges = declared_modules_at_head(mirror, "mono", "gateway/go.mod")
+    assert [dep for _, dep, _ in edges] == ["core"]
+
+
+def test_a_module_line_is_never_read_as_a_dependency_even_when_it_parses(tmp_path):
+    """A trailing comment gives the `module` line a token where a version would
+    be, so the path regex matches it. Only the explicit `module ` check stops the
+    repository from declaring a dependency on itself under a different name."""
+    mirror = _repo(tmp_path, {
+        "cmd/go.mod": (
+            "module github.com/acme/mono/gateway // moved, kept for tooling\n"
+            "require github.com/acme/mono/core v1.1.0\n"
+        ),
+    })
+    edges = declared_modules_at_head(mirror, "mono", "cmd/go.mod")
+    assert [dep for _, dep, _ in edges] == ["core"]
+
+
+def test_the_manifest_cap_stops_a_vendored_tree_that_slipped_the_filter(tmp_path,
+                                                                       monkeypatch):
+    """A repository with tens of thousands of go.mod files under an unfiltered
+    path would otherwise spawn a git invocation per manifest."""
+    import subprocess as sp
+
+    from git_synapse.analysis.depbump import MAX_MANIFESTS_PER_REPO
+
+    class _Proc:
+        returncode = 0
+        stdout = "\n".join(f"pkg{i}/go.mod" for i in range(MAX_MANIFESTS_PER_REPO + 50))
+
+    monkeypatch.setattr(sp, "run", lambda *a, **k: _Proc())
+    assert len(manifest_paths(tmp_path)) == MAX_MANIFESTS_PER_REPO

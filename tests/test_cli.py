@@ -503,3 +503,216 @@ def test_chains_renders_the_hop_path(db):
     r = runner.invoke(app, ["chains", row["name"], "-n", "3"])
     assert r.exit_code == 0, r.stdout
     assert row["name"] in r.stdout or "chain" in r.stdout.lower()
+
+
+# ------------------------------------------------- render paths on real rows
+#
+# Most CLI commands query, get nothing back from a test database, and print
+# "nothing found". The table-formatting code below that -- where a None median
+# lag, a missing name or a renamed key actually breaks -- never ran. These feed
+# each command synthetic rows so the formatting executes.
+
+
+class _Stats:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+def _any_repo_name():
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
+    if row is None:
+        pytest.skip("no repositories")
+    return row["name"]
+
+
+def test_aggregate_says_so_when_nothing_is_stale(monkeypatch):
+    monkeypatch.setattr("git_synapse.cli.repos_needing_aggregation", lambda: [])
+    r = runner.invoke(app, ["aggregate"])
+    assert r.exit_code == 0
+    assert "nothing to aggregate" in r.stdout
+
+
+def test_aggregate_reports_pair_counts_per_repo(monkeypatch):
+    monkeypatch.setattr("git_synapse.cli.repos_needing_aggregation", lambda: [7])
+    monkeypatch.setattr("git_synapse.cli.rebuild_repo",
+                        lambda rid: _Stats(file_pairs=12, dir_pairs=3))
+    monkeypatch.setattr("git_synapse.cli.score_repo", lambda rid: _Stats(file_pairs=12))
+    r = runner.invoke(app, ["aggregate"])
+    assert r.exit_code == 0
+    assert "repo 7" in r.stdout and "12 file pairs" in r.stdout
+    assert "scored 12" in r.stdout
+
+
+def test_aggregate_can_skip_scoring(monkeypatch):
+    monkeypatch.setattr("git_synapse.cli.rebuild_repo",
+                        lambda rid: _Stats(file_pairs=1, dir_pairs=0))
+    monkeypatch.setattr("git_synapse.cli.score_repo",
+                        lambda rid: pytest.fail("--no-rescore still scored"))
+    r = runner.invoke(app, ["aggregate", "--repo-id", "4", "--no-rescore"])
+    assert r.exit_code == 0
+    assert "scored" not in r.stdout
+
+
+def test_depbump_renders_the_propagation_lag_table(monkeypatch):
+    from git_synapse.analysis.depbump import BumpStats
+
+    monkeypatch.setattr("git_synapse.cli.depbump.rebuild",
+                        lambda force=False: BumpStats(repos_scanned=3, edges_found=9,
+                                                      edges_written=4, resolved_commits=8,
+                                                      duration_s=1.5))
+    monkeypatch.setattr("git_synapse.cli.depbump.propagation_lags", lambda limit=15: [
+        {"dep": "httpkit", "consumer": "console", "bumps": 6,
+         "median_lag_days": 2, "p90_lag_days": 9, "last_bump": "2026-08-01"},
+        # A dependency bumped exactly once has no lag distribution yet; the
+        # table must print a dash rather than formatting None.
+        {"dep": "telemetry", "consumer": "runtime", "bumps": 1,
+         "median_lag_days": None, "p90_lag_days": None, "last_bump": "2026-07-04"},
+    ])
+    r = runner.invoke(app, ["depbump"])
+    assert r.exit_code == 0, r.stdout
+    assert "httpkit" in r.stdout and "telemetry" in r.stdout
+
+
+def test_depbump_omits_the_lag_table_when_there_are_no_lags(monkeypatch):
+    from git_synapse.analysis.depbump import BumpStats
+
+    monkeypatch.setattr("git_synapse.cli.depbump.rebuild", lambda force=False: BumpStats())
+    monkeypatch.setattr("git_synapse.cli.depbump.propagation_lags", lambda limit=15: [])
+    r = runner.invoke(app, ["depbump", "--force"])
+    assert r.exit_code == 0
+    assert "propagation lag" not in r.stdout
+
+
+def _impact_rows():
+    return [
+        {"score": 0.91, "is_declared": True, "has_bump_history": True, "bump_count": 12,
+         "median_lag_days": 1.5, "name": "acme/httpkit"},
+        {"score": 0.40, "is_declared": False, "has_bump_history": True, "bump_count": 3,
+         "median_lag_days": None, "name": "acme/telemetry"},
+        {"score": 0.11, "is_declared": False, "has_bump_history": False, "bump_count": 0,
+         "median_lag_days": None, "name": "acme/runtime"},
+    ]
+
+
+@pytest.mark.parametrize(("direction", "patched"),
+                         [("upstream", "upstream_of"), ("downstream", "impact_for")])
+def test_impact_labels_each_evidence_tier(db, monkeypatch, direction, patched):
+    """declared / bumps / discovery must be visibly distinct -- acting on a
+    discovery-tier row as if it were declared is the expensive mistake."""
+    monkeypatch.setattr(f"git_synapse.cli.predict.{patched}",
+                        lambda rid, limit=15: _impact_rows())
+    repo = _any_repo_name()
+    r = runner.invoke(app, ["impact", repo, "--direction", direction])
+    assert r.exit_code == 0, r.stdout
+    for tier in ("declared", "bumps", "discovery"):
+        assert tier in r.stdout
+
+
+def test_validate_renders_the_measure_quality_table(db, monkeypatch):
+    class _Scored:
+        measure = "cosine"
+        auc = 0.8593
+        precision_at = {10: 0.7, 25: 0.6}
+        directional_accuracy = 0.71
+        n_true = 402
+        n_candidates = 75562
+
+    monkeypatch.setattr("git_synapse.analysis.validate.evaluate",
+                        lambda lag_bins=1, min_bumps=2: [_Scored()])
+    r = runner.invoke(app, ["validate"])
+    assert r.exit_code == 0, r.stdout
+    assert "cosine" in r.stdout and "0.8593" in r.stdout
+    assert "402" in r.stdout
+
+
+def test_validate_says_so_when_there_is_no_ground_truth(db, monkeypatch):
+    monkeypatch.setattr("git_synapse.analysis.validate.evaluate",
+                        lambda lag_bins=1, min_bumps=2: [])
+    r = runner.invoke(app, ["validate"])
+    assert r.exit_code == 0
+    assert "no ground truth" in r.stdout
+
+
+def test_chains_renders_a_multi_hop_path(db, monkeypatch):
+    monkeypatch.setattr("git_synapse.cli.q.repo_chains", lambda *a, **k: [
+        {"repo_names": ["httpkit", "telemetry", "console"], "hops": [0.8, 0.5],
+         "path_conf": 0.4, "depth": 2, "supports": [40, 12]},
+    ])
+    repo = _any_repo_name()
+    r = runner.invoke(app, ["chains", repo])
+    assert r.exit_code == 0, r.stdout
+    assert "httpkit" in r.stdout and "console" in r.stdout
+
+
+def test_reset_with_yes_truncates_only_the_atom_tables(monkeypatch):
+    """Runs against a recording stub: pointing this at the real database would
+    delete every ingested commit, which is exactly what it is meant to do."""
+    executed = []
+
+    class _Conn:
+        def execute(self, sql, *a):
+            executed.append(" ".join(str(sql).split()))
+
+    class _Ctx:
+        def __enter__(self):
+            return _Conn()
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr("git_synapse.cli.connection", lambda *a, **k: _Ctx())
+    r = runner.invoke(app, ["reset", "--yes"])
+    assert r.exit_code == 0, r.stdout
+    assert "all ingested data removed" in r.stdout
+    assert executed == ["TRUNCATE repo, author, ingest_run RESTART IDENTITY CASCADE"]
+
+
+def test_ingest_lists_the_failures_and_exits_nonzero_when_all_failed(monkeypatch):
+    """A run where every repository failed must not exit 0 -- the scheduler and
+    any wrapping script read that code."""
+    class _Fail:
+        def __init__(self, name):
+            self.full_name = name
+            self.error = "remote: Invalid username or token" * 20
+
+    monkeypatch.setattr("git_synapse.cli.pipeline.load_repo_records", lambda: ["x"])
+    monkeypatch.setattr("git_synapse.cli.pipeline.run_ingest", lambda **k: _Stats(
+        run_id=9, status="failed", duration_s=2.0, ok=[],
+        failed=[_Fail(f"acme/r{i}") for i in range(25)], commits_added=0))
+    r = runner.invoke(app, ["ingest"])
+    assert r.exit_code == 1
+    assert "failures" in r.stdout and "acme/r0" in r.stdout
+
+
+def test_ingest_exits_zero_when_some_repositories_succeeded(monkeypatch):
+    """Partial failure is the normal case across 272 repositories; failing the
+    whole run over one unreachable remote would stop every scheduled sync."""
+    class _Fail:
+        full_name = "acme/gone"
+        error = None
+
+    monkeypatch.setattr("git_synapse.cli.pipeline.load_repo_records", lambda: ["x"])
+    monkeypatch.setattr("git_synapse.cli.pipeline.run_ingest", lambda **k: _Stats(
+        run_id=9, status="partial", duration_s=1.0, ok=["a"],
+        failed=[_Fail()], commits_added=5))
+    r = runner.invoke(app, ["ingest"])
+    assert r.exit_code == 0
+    assert "1 ok" in r.stdout
+
+
+def test_score_recomputes_one_repo_or_every_repo(monkeypatch):
+    seen = []
+    monkeypatch.setattr("git_synapse.cli.score_repo",
+                        lambda rid: seen.append(rid) or _Stats(file_pairs=3, duration_s=0.1))
+    assert runner.invoke(app, ["score", "--repo-id", "11"]).exit_code == 0
+    assert seen == [11]
+
+    monkeypatch.setattr("git_synapse.cli.query",
+                        lambda *a, **k: [{"id": 2, "full_name": "s/a"},
+                                         {"id": 3, "full_name": "s/b"}])
+    r = runner.invoke(app, ["score"])
+    assert r.exit_code == 0
+    assert seen == [11, 2, 3]
+    assert "s/a: 3 pairs" in r.stdout
