@@ -511,12 +511,12 @@ def test_the_file_resolver_knows_paths_a_rename_left_behind(mined):
     from git_synapse.db.engine import connection, query_one
     from git_synapse.ingest.store import FileResolver
 
-    row = query_one("SELECT repo_id, id, path FROM file WHERE repo_id = %s LIMIT 1",
-                    (mined,))
+    row = query_one("SELECT repo_id, id, path FROM file WHERE repo_id = %s"
+                    " ORDER BY id LIMIT 1", (mined,))
     with connection() as conn:
         conn.execute(
             "INSERT INTO file_alias (repo_id, old_path, file_id) VALUES (%s,%s,%s)"
-            " ON CONFLICT DO NOTHING",
+            " ON CONFLICT (repo_id, old_path) DO UPDATE SET file_id = EXCLUDED.file_id",
             (mined, "old/name.py", row["id"]),
         )
         resolver = FileResolver(conn, mined)
@@ -750,3 +750,89 @@ def test_the_bump_scan_walks_the_manifest_history(manifests):
 
     stats = depbump.rebuild(force=True)
     assert stats.repos_scanned > 0
+
+
+def test_every_rebuild_also_accepts_the_callers_connection(manifests):
+    """The pipeline runs all of these inside one transaction so the derived
+    tables land with the run record; nothing had exercised that half."""
+    from git_synapse.analysis import aggregate, crossrepo, depbump, lagged, score
+    from git_synapse.db.engine import connection
+
+    with connection() as conn:
+        assert isinstance(aggregate.repos_needing_aggregation(conn), list)
+        assert isinstance(score.score_all(conn), list)
+        assert crossrepo.rebuild(conn=conn, force=True).duration_s >= 0
+        assert depbump.rebuild(conn=conn, force=True).duration_s >= 0
+        assert depbump.refresh_declared(conn=conn, force=True) >= 0
+        assert depbump.refresh_modules(conn=conn) >= 0
+        assert lagged.rebuild(conn=conn, force=True).duration_s >= 0
+
+
+def test_a_corpus_with_no_commits_scores_no_pairs(manifests, monkeypatch):
+    """`n_total <= 0` is not a corpus where everything scores zero -- every
+    measure divides by it."""
+    from git_synapse.analysis import crossrepo
+    from git_synapse.db.engine import connection
+
+    monkeypatch.setattr(crossrepo, "population", lambda conn: 0)
+    with connection() as conn:
+        assert crossrepo._score(conn, "file") == 0
+
+
+def test_no_unpartitioned_commits_means_no_new_change_sets(manifests, monkeypatch):
+    """The partition is the expensive half of the cross-repo pass; a tick that
+    added no commits must not pay for it."""
+    from git_synapse.analysis import crossrepo
+    from git_synapse.db.engine import connection
+
+    with connection() as conn:
+        crossrepo._build_change_sets(conn, crossrepo.CrossRepoStats(), force=True)
+        # Everything is partitioned now, so a second pass finds nothing to do.
+        assert crossrepo._build_change_sets(
+            conn, crossrepo.CrossRepoStats(), force=False) is False
+
+
+def test_an_event_matrix_over_an_empty_corpus_has_no_repositories(manifests,
+                                                                  monkeypatch):
+    """Not an error and not a matrix of zeroes: there is nothing to correlate."""
+    from git_synapse.analysis.lagged import _event_matrix
+    from git_synapse.db.engine import connection
+
+    class _Empty:
+        def fetchall(self):
+            return []
+
+    with connection() as conn:
+        monkeypatch.setattr(conn, "execute", lambda *a, **k: _Empty())
+        matrix, repo_ids, n_bins = _event_matrix(conn, 24)
+    assert matrix.shape == (0, 0)
+    assert repo_ids == [] and n_bins == 0
+
+
+def test_a_lag_where_only_self_pairs_survive_writes_nothing(manifests, monkeypatch):
+    """The joint matrix is symmetric and its diagonal is meaningless, so a lag
+    whose only co-occurrences are a repository with itself contributes nothing."""
+    import numpy as np
+
+    from git_synapse.analysis import lagged
+    from git_synapse.db.engine import connection
+
+    # One repository, active in one bin: at every lag the only non-zero cell of
+    # the joint matrix is the diagonal.
+    monkeypatch.setattr(
+        lagged, "_event_matrix",
+        lambda *a, **k: (np.ones((1, 3), dtype=np.float32), [1], 3),
+    )
+    with connection() as conn:
+        stats = lagged.rebuild(conn=conn, force=True)
+    assert stats.n_repos == 1
+    assert stats.rows_written == 0
+
+
+def test_asymmetry_returns_nothing_when_the_query_finds_no_row(manifests,
+                                                               monkeypatch):
+    from git_synapse.analysis import lagged
+    from git_synapse.db import engine
+
+    monkeypatch.setattr(engine, "query_one", lambda *a, **k: None)
+    assert lagged.asymmetry(1, 2, lag=1) is None

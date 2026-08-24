@@ -424,3 +424,52 @@ def test_commit_exists_is_false_for_an_empty_sha(tmp_path, remote, sha):
     dest = tmp_path / "mirror.git"
     clone_mirror(str(remote[1]), dest)
     assert commit_exists(dest, sha) is False
+
+
+def test_a_clone_that_fails_leaves_no_staging_directory_behind(tmp_path):
+    """The staging directory is the whole reason a failed clone does not destroy
+    the mirror it was replacing; leaving it would block every later attempt."""
+    dest = tmp_path / "mirror.git"
+    staging = dest.with_name(dest.name + ".incoming")
+
+    with pytest.raises(GitError):
+        clone_mirror(str(tmp_path / "does-not-exist"), dest)
+
+    assert not staging.exists()
+    assert not dest.exists()
+
+
+def test_a_failed_re_clone_leaves_the_previous_mirror_intact(tmp_path, remote):
+    """213 working mirrors were destroyed once by a re-clone that deleted first
+    and failed second."""
+    dest = tmp_path / "mirror.git"
+    clone_mirror(str(remote[1]), dest)
+    head_before = (dest / "HEAD").read_text()
+
+    with pytest.raises(GitError):
+        clone_mirror(str(tmp_path / "does-not-exist"), dest)
+
+    assert gitops.is_valid_mirror(dest)
+    assert (dest / "HEAD").read_text() == head_before
+
+
+def test_a_clone_that_fails_after_staging_exists_still_cleans_up(tmp_path, remote,
+                                                                 monkeypatch):
+    """The clone can succeed and the follow-up config still fail. Leaving the
+    staging directory behind would block every later attempt at this mirror."""
+    dest = tmp_path / "mirror.git"
+    staging = dest.with_name(dest.name + ".incoming")
+    real = gitops.run_git
+
+    def fail_on_config(args, **kwargs):
+        if args and args[0] == "config":
+            assert staging.exists(), "the clone should have produced a staging dir"
+            raise GitError(["git", "config"], 1, "git config exploded")
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(gitops, "run_git", fail_on_config)
+    with pytest.raises(GitError):
+        clone_mirror(str(remote[1]), dest)
+
+    assert not staging.exists()
+    assert not dest.exists()
