@@ -344,3 +344,95 @@ def test_a_failed_status_write_does_not_mask_the_original_failure(ingested,
     result = pipeline._sync_repo_once(_alpha(ingested))
     assert result.status == "failed"
     assert "parser fell over" in result.error
+
+
+# ------------------------------------------------------- mining on real pairs
+
+@pytest.fixture(scope="module")
+def mined(ingested, tmp_path_factory):
+    """A repository with a real three-file module plus an unrelated file.
+
+    Three, not two: synchronous label propagation oscillates on a lone edge --
+    each node keeps adopting the other's label -- so a two-file component never
+    settles into a cluster. Real modules are bigger than that, but a fixture has
+    to be too.
+    """
+    from git_synapse.ingest import pipeline
+
+    root = tmp_path_factory.mktemp("mine")
+    together = [{"x.py": f"x{i}", "y.py": f"y{i}", "z.py": f"z{i}"} for i in range(6)]
+    apart = [{"alone.py": f"q{i}"} for i in range(4)]
+    remote = _build_remote(root, "trio", together + apart)
+    record = RepoRecord(github_id=910003, owner="t", name="e2e-trio",
+                        full_name="t/e2e-trio", clone_url=str(remote),
+                        default_branch="main")
+    result = pipeline.sync_repo(record, force_full=True)
+    assert result.status != "failed", result.error
+
+    from git_synapse.analysis import aggregate, score
+    from git_synapse.db.engine import connection, query_one
+
+    repo_id = query_one("SELECT id FROM repo WHERE github_id = 910003")["id"]
+    with connection() as conn:
+        aggregate.rebuild_repo(repo_id, conn)
+    with connection() as conn:
+        score.score_repo(repo_id, conn)
+    return repo_id
+
+
+def test_mining_finds_the_module_the_coupled_files_form(mined):
+    """x, y and z always move together and alone.py never does, so label
+    propagation must put the first three in a cluster and leave the fourth out."""
+    from git_synapse.analysis import mining
+    from git_synapse.db.engine import query
+
+    repo_id = mined
+    stats = mining.rebuild(repo_id=repo_id, force=True)
+    assert stats.clustered_files >= 3
+
+    rows = query(
+        "SELECT f.path, c.cluster_id FROM file_cluster c"
+        " JOIN file f ON f.id = c.file_id WHERE c.repo_id = %s",
+        (repo_id,),
+    )
+    by_path = {r["path"]: r["cluster_id"] for r in rows}
+    assert by_path.get("x.py") is not None
+    assert by_path["x.py"] == by_path.get("y.py") == by_path.get("z.py")
+    assert "alone.py" not in by_path
+
+
+def test_mining_a_repository_with_no_coupled_pairs_writes_nothing(ingested):
+    """beta has five commits that never touch the same file twice."""
+    from git_synapse.analysis import mining
+    from git_synapse.db.engine import query_one
+
+    repo_id = ingested["e2e-beta"]
+    mining.rebuild(repo_id=repo_id, force=True)
+    assert query_one("SELECT count(*) AS n FROM file_cluster WHERE repo_id=%s",
+                     (repo_id,))["n"] == 0
+
+
+def test_a_second_mining_pass_over_unchanged_repositories_is_skipped(ingested):
+    """Mining was 129s of a 216s nightly run precisely because it ignored this."""
+    from git_synapse.analysis import mining
+
+    mining.rebuild(force=True)
+    again = mining.rebuild(force=False)
+    assert again.clustered_files == 0, "unchanged repositories were re-mined"
+
+
+def test_mining_can_run_inside_a_callers_transaction(mined):
+    from git_synapse.analysis import mining
+    from git_synapse.db.engine import connection
+
+    with connection() as conn:
+        stats = mining.rebuild(repo_id=mined, conn=conn, force=True)
+    assert stats.clustered_files >= 3
+
+
+def test_drifting_pairs_can_be_scoped_to_one_repository(ingested):
+    from git_synapse.analysis import mining
+
+    mining.rebuild(force=True)
+    scoped = mining.drifting_pairs(repo_id=ingested["e2e-alpha"], trend="emerging")
+    assert all(r["repo_id"] == ingested["e2e-alpha"] for r in scoped)

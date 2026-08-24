@@ -398,3 +398,117 @@ def test_lag_profile_rejects_an_unknown_measure(client, db):
     r = client.get(f"/api/repos/{row['a']}/lag-profile/{row['b']}",
                    params={"measure": "not_a_measure"})
     assert r.status_code in (400, 422)
+
+
+# --------------------------------------------------------- the guarded routes
+
+def test_health_reports_degraded_rather_than_raising(client, monkeypatch):
+    """A health endpoint that 500s tells a load balancer nothing it can act on."""
+    from git_synapse.api import routes
+
+    monkeypatch.setattr(routes, "scalar",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("no db")))
+    r = client.get("/api/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "degraded"
+    assert body["database"] is False
+    assert "no db" in body["error"]
+
+
+def test_looking_up_a_file_that_does_not_exist_is_a_404(client, db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
+    if row is None:
+        pytest.skip("no repositories")
+    r = client.get("/api/files/resolve", params={"repo": row["name"],
+                                                 "path": "no/such/file.go"})
+    assert r.status_code == 404
+
+
+def test_resolving_a_report_refuses_an_unknown_status(client):
+    r = client.post("/api/feedback/1/resolve", params={"status": "closed"})
+    assert r.status_code == 400
+
+
+def test_resolving_a_report_that_does_not_exist_is_a_404(client):
+    r = client.post("/api/feedback/999999999/resolve", params={"status": "fixed"})
+    assert r.status_code == 404
+
+
+def test_a_refresh_is_refused_while_a_run_is_already_in_progress(client,
+                                                                 monkeypatch):
+    """Two concurrent ingests fetch the same mirrors and redo the same global
+    rebuilds; the advisory lock catches it, but a 409 is the honest answer."""
+    import datetime as dt
+
+    from git_synapse.api import routes
+
+    monkeypatch.setattr(routes.pipeline, "active_run", lambda: {
+        "id": 7, "trigger": "schedule",
+        "started_at": dt.datetime(2026, 8, 26, 10, 0, tzinfo=dt.timezone.utc),
+    })
+    r = client.post("/api/ingest/refresh")
+    assert r.status_code == 409
+    assert "already in progress" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("params", [
+    {},
+    {"force_full": "true"},
+    {"skip_discovery": "true"},
+])
+def test_a_refresh_starts_in_the_background_and_returns_at_once(client,
+                                                                monkeypatch,
+                                                                params):
+    """A full ingest takes tens of minutes, far longer than any HTTP timeout."""
+    from git_synapse.api import routes
+
+    ran = {}
+    monkeypatch.setattr(routes.pipeline, "active_run", lambda: None)
+    monkeypatch.setattr(routes.pipeline, "load_repo_records", lambda: ["x"])
+    monkeypatch.setattr(routes.pipeline, "run_ingest",
+                        lambda **kw: ran.update(kw))
+    r = client.post("/api/ingest/refresh", params=params)
+    assert r.status_code == 200
+    assert r.json()["status"] == "started"
+    assert ran["trigger"] == "api"
+    assert ran["force_full"] is (params.get("force_full") == "true")
+    # Discovery is skipped by loading the known records instead of asking GitHub.
+    assert (ran["records"] is not None) is (params.get("skip_discovery") == "true")
+
+
+@pytest.mark.parametrize("path", ["/repos", "/graph", "/feedback/17",
+                                  "/repo/acme/telemetry"])
+def test_the_spa_serves_its_own_routes(client, path):
+    r = client.get(path)
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+
+
+@pytest.mark.parametrize("path", ["/definitely-not-a-route",
+                                  "/definitely-not-a-route/deeper"])
+def test_a_typo_is_a_404_rather_than_a_silently_rendered_shell(client, path):
+    """A catch-all would render the app shell for every typo, and the failure
+    would surface as a blank page instead of a 404."""
+    assert client.get(path).status_code == 404
+
+
+def test_the_favicon_is_served(client):
+    r = client.get("/favicon.svg")
+    assert r.status_code == 200
+
+
+def test_a_report_can_be_resolved_and_says_so(client, db):
+    """The one write an agent cannot make: closing its own report."""
+    from git_synapse.analysis import query as q
+
+    created = q.record_feedback(
+        kind="wrong_data", detail="coverage fixture: resolve round-trip",
+        severity="low",
+    )
+    r = client.post(f"/api/feedback/{created['id']}/resolve",
+                    params={"status": "wontfix", "resolution": "fixture"})
+    assert r.status_code == 200
+    assert r.json() == {"id": created["id"], "status": "wontfix"}

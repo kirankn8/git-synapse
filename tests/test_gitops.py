@@ -7,6 +7,7 @@ Everything here exists to keep that shape impossible.
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 import subprocess
 
@@ -318,3 +319,108 @@ def test_remove_mirror_reports_whether_there_was_one(tmp_path, remote, monkeypat
         assert gitops.remove_mirror("t/gone") is False
     finally:
         reset_config_cache()
+
+
+# ------------------------------------------------------- the leftover-state paths
+
+def test_a_stale_incoming_directory_is_cleared_before_cloning(tmp_path, remote):
+    """A clone killed mid-flight leaves `.incoming` behind. git refuses to clone
+    into a non-empty directory, so every later attempt would fail until someone
+    removed it by hand."""
+    dest = tmp_path / "mirror.git"
+    staging = dest.with_name(dest.name + ".incoming")
+    staging.mkdir(parents=True)
+    (staging / "junk").write_text("left over from a killed run")
+
+    clone_mirror(str(remote[1]), dest)
+    assert gitops.is_valid_mirror(dest)
+    assert not staging.exists()
+
+
+def test_a_stale_retired_directory_does_not_block_a_re_clone(tmp_path, remote):
+    """Same shape at the other end of the swap."""
+    dest = tmp_path / "mirror.git"
+    clone_mirror(str(remote[1]), dest)
+    retired = dest.with_name(dest.name + ".retired")
+    retired.mkdir(parents=True)
+    (retired / "junk").write_text("left over")
+
+    clone_mirror(str(remote[1]), dest)
+    assert gitops.is_valid_mirror(dest)
+
+
+def test_the_token_is_never_written_into_the_mirrors_config(tmp_path, remote):
+    """A mirror on disk outlives the token that created it, and anyone with read
+    access to the volume can read `config`."""
+    dest = tmp_path / "mirror.git"
+    clone_mirror(str(remote[1]), dest, public_url="https://github.com/t/w.git")
+    config = (dest / "config").read_text()
+    assert "https://github.com/t/w.git" in config
+    assert str(remote[1]) not in config
+
+
+def test_a_directory_that_is_not_a_repository_is_not_a_valid_mirror(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert gitops.is_valid_mirror(plain) is False
+
+
+def test_a_non_bare_repository_is_not_a_valid_mirror(tmp_path, remote):
+    work = tmp_path / "checkout"
+    subprocess.run(["git", "clone", "--quiet", str(remote[1]), str(work)], check=True)
+    assert gitops.is_valid_mirror(work) is False
+
+
+def test_a_git_that_will_not_run_reads_as_an_invalid_mirror(tmp_path, monkeypatch):
+    """Better to re-clone than to treat an unverifiable directory as sound."""
+    monkeypatch.setattr(gitops, "run_git",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("no git")))
+    assert gitops.is_valid_mirror(tmp_path) is False
+
+
+def test_a_blobless_fetch_asks_for_no_blobs(tmp_path, remote, monkeypatch):
+    """Losing the filter on fetch quietly re-downloads every blob the clone
+    deliberately skipped."""
+    dest = tmp_path / "mirror.git"
+    clone_mirror(str(remote[1]), dest, blobless=True)
+
+    seen = {}
+    real = gitops.run_git_network
+    monkeypatch.setattr(gitops, "run_git_network",
+                        lambda args, **k: seen.setdefault("args", args) or real(args, **k))
+    gitops.fetch_mirror(dest, str(remote[1]), blobless=True)
+    assert "--filter=blob:none" in seen["args"]
+
+
+def test_blobless_is_forced_when_configured_whatever_the_size(tmp_path):
+    from git_synapse.config import IngestConfig, get_config
+
+    cfg = get_config().ingest
+    forced = dataclasses.replace(cfg, force_blobless=True)
+    assert choose_clone_mode(1, cfg=forced) is True
+    assert choose_clone_mode(None, cfg=forced) is True
+    assert isinstance(forced, IngestConfig)
+
+
+def test_an_unknown_size_clones_in_full(tmp_path):
+    """GitHub omits the size for some repositories; guessing blobless there
+    trades a known cost for an unknown one."""
+    from git_synapse.config import get_config
+
+    cfg = dataclasses.replace(get_config().ingest, force_blobless=False)
+    assert choose_clone_mode(None, cfg=cfg) is False
+    assert choose_clone_mode(0, cfg=cfg) is False
+
+
+def test_ref_tips_on_a_directory_that_is_not_a_repository(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert gitops.ref_tips(plain) == []
+
+
+@pytest.mark.parametrize("sha", ["", None])
+def test_commit_exists_is_false_for_an_empty_sha(tmp_path, remote, sha):
+    """Asking git for `^<empty>` is a hard error that fails the repository."""
+    dest = tmp_path / "mirror.git"
+    clone_mirror(str(remote[1]), dest)
+    assert commit_exists(dest, sha) is False

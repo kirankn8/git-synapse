@@ -103,3 +103,115 @@ def test_auc_counts_a_tie_as_half_a_win():
 
     # One positive and one negative with identical scores: exactly a coin flip.
     assert _auc(np.array([0.5, 0.5]), np.array([1, 0])) == pytest.approx(0.5)
+
+
+# ------------------------------------------- the "should never happen" arguments
+
+@pytest.mark.parametrize("level", ["", "FILE", "repo", "module", None])
+def test_scoring_refuses_a_level_it_does_not_know(level):
+    """file and dir are the only two. A typo must not silently score the wrong
+    table -- the tables have different key columns, so it would half-work."""
+    from git_synapse.analysis.score import _level_sql
+
+    with pytest.raises(ValueError, match="unknown level"):
+        _level_sql(level)
+
+
+def test_scoring_knows_both_levels_it_claims_to():
+    from git_synapse.analysis.score import _level_sql
+
+    assert _level_sql("file")[0] == "file_pair"
+    assert _level_sql("dir")[0] == "dir_pair"
+
+
+@pytest.mark.parametrize("level", ["", "file_pair", "files", None])
+def test_the_crossrepo_writer_refuses_a_level_it_does_not_know(level, db):
+    from git_synapse.analysis import crossrepo
+    from git_synapse.db.engine import connection
+
+    with connection() as conn, pytest.raises(ValueError, match="unknown level"):
+        crossrepo._score(conn, level)
+
+
+def test_a_timestamp_github_did_not_send_is_none_not_an_error():
+    from git_synapse.ingest.github import _parse_ts
+
+    assert _parse_ts(None) is None
+    assert _parse_ts("") is None
+
+
+def test_a_timestamp_github_sent_wrong_is_none_not_an_error():
+    """One unparseable field must not lose the whole repository record."""
+    from git_synapse.ingest.github import _parse_ts
+
+    assert _parse_ts("not-a-timestamp") is None
+    assert _parse_ts("2026-13-45T99:00:00Z") is None
+
+
+def test_githubs_trailing_z_is_understood():
+    from git_synapse.ingest.github import _parse_ts
+
+    got = _parse_ts("2026-08-26T10:00:00Z")
+    assert got is not None and got.utcoffset().total_seconds() == 0
+
+
+@pytest.mark.parametrize(("headers", "expected"), [
+    ({"retry-after": "30"}, 30),
+    # Capped: a server that asks for an hour still gets retried within five
+    # minutes, because the run has other repositories to get to.
+    ({"retry-after": "99999"}, 300),
+    ({"retry-after": "soon"}, 60),
+    ({}, 60),
+])
+def test_a_rate_limited_request_waits_as_long_as_it_is_told_within_reason(headers,
+                                                                         expected):
+    from git_synapse.ingest.github import GitHubClient
+
+    class _Resp:
+        pass
+
+    resp = _Resp()
+    resp.headers = headers
+    assert GitHubClient._rate_limit_wait(resp) == expected
+
+
+@pytest.mark.parametrize(("delta", "expected"), [(120, 121), (-10, 60), (5000, 60)])
+def test_a_reset_timestamp_is_honoured_only_when_it_is_plausible(delta, expected):
+    """A clock-skewed or absurd reset header would otherwise stall the run."""
+    import time as _time
+
+    from git_synapse.ingest.github import GitHubClient
+
+    class _Resp:
+        pass
+
+    resp = _Resp()
+    resp.headers = {"x-ratelimit-reset": str(int(_time.time()) + delta)}
+    assert GitHubClient._rate_limit_wait(resp) == expected
+
+
+def test_a_contingency_table_with_a_collapsed_marginal_is_degenerate():
+    """A file present in every commit, or in none, collapses a marginal. Every
+    measure divides by one somewhere, so that is not a score of zero -- it is no
+    score at all."""
+    import numpy as np
+
+    from git_synapse.stats.contingency import Contingency
+
+    table = Contingency.from_counts(
+        n_ab=np.array([5, 5, 5, 10, 0]),
+        n_a=np.array([10, 0, 10, 100, 0]),
+        n_b=np.array([10, 10, 0, 10, 0]),
+        n_total=np.array([100, 100, 100, 100, 0]),
+    )
+    # Healthy; n_a collapsed; n_b collapsed; n_a fills every commit; empty.
+    assert list(table.is_degenerate()) == [False, True, True, True, True]
+
+
+def test_an_empty_record_is_ignored_by_the_commit_builder():
+    """git's stream contains empty records between commits."""
+    from git_synapse.ingest.parser import _CommitAssembler
+
+    assembler = _CommitAssembler()
+    assembler.feed("")
+    assert not assembler.raw and not assembler.numstat
