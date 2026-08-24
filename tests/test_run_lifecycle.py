@@ -14,14 +14,33 @@ from git_synapse.db.engine import connection, query_one
 from git_synapse.ingest import pipeline
 
 
-def test_a_skipped_run_creates_no_row_and_reports_itself(scratch_db):
-    before = query_one("SELECT count(*) AS n FROM ingest_run")["n"]
-    with connection() as holder:
-        holder.execute("SELECT pg_advisory_lock(%s)", (pipeline.INGEST_LOCK_KEY,))
+@pytest.fixture
+def held_lock():
+    """Take the ingest lock, or skip.
+
+    A real refresh runs every fifteen minutes against this server. Blocking on
+    the lock it already holds would hang the suite, and proceeding without it
+    would test something else -- so a test that needs the lock says so and
+    stands aside when it cannot have it.
+    """
+    from git_synapse.db.engine import connection
+
+    with connection() as conn:
+        got = conn.execute(
+            "SELECT pg_try_advisory_lock(%s)", (pipeline.INGEST_LOCK_KEY,)
+        ).fetchone()[0]
+        if not got:
+            pytest.skip("a real ingest holds the lock")
         try:
-            result = pipeline.run_ingest(records=[], trigger="test")
+            yield conn
         finally:
-            holder.execute("SELECT pg_advisory_unlock(%s)", (pipeline.INGEST_LOCK_KEY,))
+            conn.execute("SELECT pg_advisory_unlock(%s)", (pipeline.INGEST_LOCK_KEY,))
+
+
+
+def test_a_skipped_run_creates_no_row_and_reports_itself(scratch_db, held_lock):
+    before = query_one("SELECT count(*) AS n FROM ingest_run")["n"]
+    result = pipeline.run_ingest(records=[], trigger="test")
 
     assert result.status == "skipped"
     assert query_one("SELECT count(*) AS n FROM ingest_run")["n"] == before
@@ -66,14 +85,9 @@ def test_ingest_lock_is_released_when_the_run_raises(scratch_db):
     assert got, "the lock was still held after the run raised"
 
 
-def test_a_second_run_is_skipped_while_one_holds_the_lock(scratch_db):
+def test_a_second_run_is_skipped_while_one_holds_the_lock(scratch_db, held_lock):
     """Concurrent runs fetched the same mirrors and redid the same rebuilds."""
-    with connection() as holder:
-        holder.execute("SELECT pg_advisory_lock(%s)", (pipeline.INGEST_LOCK_KEY,))
-        try:
-            result = pipeline.run_ingest(records=[], trigger="test")
-        finally:
-            holder.execute("SELECT pg_advisory_unlock(%s)", (pipeline.INGEST_LOCK_KEY,))
+    result = pipeline.run_ingest(records=[], trigger="test")
 
     assert result.status == "skipped"
     assert result.run_id is None, "a skipped run must not create an ingest_run row"
@@ -98,7 +112,10 @@ def test_abandoned_runs_are_reconciled_and_stop_blocking(scratch_db):
 
     try:
         with connection() as live:
-            live.execute("SELECT pg_advisory_lock(%s)", (pipeline.INGEST_LOCK_KEY,))
+            if not live.execute(
+                "SELECT pg_try_advisory_lock(%s)", (pipeline.INGEST_LOCK_KEY,)
+            ).fetchone()[0]:
+                pytest.skip("a real ingest holds the lock")
             try:
                 assert pipeline.reconcile_stale_runs(max_age_hours=6) >= 1
 

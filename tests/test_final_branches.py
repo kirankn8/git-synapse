@@ -302,3 +302,78 @@ def test_asymmetry_on_an_unknown_pair_reports_no_evidence(db):
     # Either nothing, or a row whose ratio is undefined -- never a number
     # implying a direction that was never measured.
     assert out is None or out.get("ratio") is None
+
+
+# --------------------------------------------------------- run status wording
+
+def test_a_run_with_some_failures_is_partial_not_success(db, monkeypatch):
+    """"success" on a run where a quarter of the corpus failed is the kind of
+    green that stops anyone looking."""
+    from git_synapse.ingest import pipeline
+    from git_synapse.ingest.github import RepoRecord
+    from git_synapse.ingest.pipeline import RepoResult
+
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+    monkeypatch.setattr(pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
+
+    def half_fail(record, force_full=False):
+        ok = record.name.endswith("0")
+        return RepoResult(full_name=record.full_name,
+                          status="success" if ok else "failed",
+                          error=None if ok else "something specific")
+
+    monkeypatch.setattr(pipeline, "sync_repo", half_fail)
+    records = [
+        RepoRecord(github_id=i, owner="t", name=f"p{i}", full_name=f"t/p{i}",
+                   clone_url="", default_branch="main")
+        for i in range(4)
+    ]
+    result = pipeline.run_ingest(records=records, trigger="test")
+    assert result.status == "partial", result.status
+
+
+def test_a_run_where_everything_succeeds_is_success(db, monkeypatch):
+    from git_synapse.ingest import pipeline
+    from git_synapse.ingest.github import RepoRecord
+    from git_synapse.ingest.pipeline import RepoResult
+
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+    monkeypatch.setattr(pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
+    monkeypatch.setattr(
+        pipeline, "sync_repo",
+        lambda record, force_full=False: RepoResult(full_name=record.full_name, status="success"),
+    )
+    records = [
+        RepoRecord(github_id=i, owner="t", name=f"q{i}", full_name=f"t/q{i}",
+                   clone_url="", default_branch="main")
+        for i in range(3)
+    ]
+    assert pipeline.run_ingest(records=records, trigger="test").status == "success"
+
+
+def test_run_ingest_discovers_when_given_no_records(db, monkeypatch):
+    from git_synapse.ingest import pipeline
+
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+    monkeypatch.setattr(pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
+    called = []
+    monkeypatch.setattr(pipeline, "discover", lambda trigger: called.append(trigger) or [])
+
+    pipeline.run_ingest(records=None, trigger="test")
+    assert called == ["test"], "no records means discover, not do nothing"
+
+
+# ------------------------------------------------------------------ health
+
+def test_health_never_throws_even_when_the_database_is_unreachable(monkeypatch):
+    """The health endpoint is what a supervisor polls; it must report a problem
+    rather than become one."""
+    import git_synapse.api.routes as routes
+
+    def broken(*a, **kw):
+        raise RuntimeError("database gone")
+
+    monkeypatch.setattr(routes.q, "overview", broken, raising=False)
+    body = routes.health()
+    assert isinstance(body, dict)
+    assert body.get("database") not in (None, "ok")
