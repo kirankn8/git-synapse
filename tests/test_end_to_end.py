@@ -436,3 +436,317 @@ def test_drifting_pairs_can_be_scoped_to_one_repository(ingested):
     mining.rebuild(force=True)
     scoped = mining.drifting_pairs(repo_id=ingested["e2e-alpha"], trend="emerging")
     assert all(r["repo_id"] == ingested["e2e-alpha"] for r in scoped)
+
+
+# ------------------------------------------- the own-connection call shapes
+#
+# Every rebuild takes an optional connection: the pipeline passes its own so the
+# derived tables land in the same transaction, while the CLI and one-off scripts
+# pass nothing. Only the first shape was ever exercised.
+
+def test_the_rebuilds_all_work_without_a_connection_handed_to_them(mined):
+    from git_synapse.analysis import aggregate, crossrepo, depbump, lagged, score
+
+    assert isinstance(aggregate.repos_needing_aggregation(), list)
+    assert isinstance(score.score_all(), list)
+    assert crossrepo.rebuild(force=True).duration_s >= 0
+    assert depbump.rebuild(force=True).duration_s >= 0
+    assert depbump.refresh_declared(force=True) >= 0
+    assert depbump.refresh_modules() >= 0
+    assert lagged.rebuild(force=True).duration_s >= 0
+
+
+def test_scoring_every_repository_covers_every_repository(mined):
+    from git_synapse.analysis import score
+    from git_synapse.db.engine import query_one
+
+    enabled = query_one("SELECT count(*) AS n FROM repo WHERE is_enabled")["n"]
+    assert len(score.score_all()) == enabled
+
+
+def test_a_repository_upsert_without_a_connection_is_committed(mined):
+    """`git-synapse discover` writes repositories outside any transaction of its own."""
+    from git_synapse.db.engine import query_one
+    from git_synapse.ingest.store import upsert_repo
+
+    record = RepoRecord(github_id=910099, owner="t", name="e2e-standalone",
+                        full_name="t/e2e-standalone", clone_url="",
+                        default_branch="main")
+    repo_id = upsert_repo(record)
+    assert query_one("SELECT id FROM repo WHERE github_id = 910099")["id"] == repo_id
+    # Idempotent: discovery runs on every scheduled tick.
+    assert upsert_repo(record) == repo_id
+
+
+def test_reserving_no_ids_does_not_touch_the_sequence(mined):
+    """A commit that changed no files reserves zero file ids."""
+    from git_synapse.db.engine import connection
+    from git_synapse.ingest.store import reserve_ids
+
+    with connection() as conn:
+        assert reserve_ids(conn, "file_id_seq", 0) == []
+        assert reserve_ids(conn, "file_id_seq", -1) == []
+        got = reserve_ids(conn, "file_id_seq", 3)
+    assert len(got) == 3 and len(set(got)) == 3
+
+
+def test_an_author_connection_that_is_already_closed_closes_cleanly(mined):
+    """Closing must never mask the real error that ended the run."""
+    from git_synapse.db.engine import connection
+    from git_synapse.ingest.store import AuthorCache
+
+    with connection() as conn:
+        cache = AuthorCache(conn)
+        assert cache.resolve("", "nobody") is None
+        first = cache.resolve("Someone@Example.com", "Someone")
+        # Cached, and case-folded on the way in.
+        assert cache.resolve("someone@example.com", "Someone") == first
+        cache.close()
+        cache.close()
+
+
+def test_the_file_resolver_knows_paths_a_rename_left_behind(mined):
+    """A path that only exists as an alias must still resolve, or the file gets
+    a second identity and its history splits in two."""
+    from git_synapse.db.engine import connection, query_one
+    from git_synapse.ingest.store import FileResolver
+
+    row = query_one("SELECT repo_id, id, path FROM file WHERE repo_id = %s LIMIT 1",
+                    (mined,))
+    with connection() as conn:
+        conn.execute(
+            "INSERT INTO file_alias (repo_id, old_path, file_id) VALUES (%s,%s,%s)"
+            " ON CONFLICT DO NOTHING",
+            (mined, "old/name.py", row["id"]),
+        )
+        resolver = FileResolver(conn, mined)
+        assert resolver.resolve(row["path"]) == row["id"]
+        assert resolver.resolve("old/name.py") == row["id"]
+
+
+def test_a_mirror_that_cannot_be_read_does_not_mark_every_file_deleted(mined,
+                                                                       monkeypatch):
+    """None means "could not read", not "the tree is empty". Confusing the two
+    would tombstone every file in the repository on one bad git invocation."""
+    import subprocess as sp
+
+    from git_synapse.analysis.aggregate import _head_tree_paths
+    from git_synapse.db.engine import connection
+
+    with connection() as conn:
+        assert _head_tree_paths(conn, -1) is None
+
+        real = sp.run
+        monkeypatch.setattr(sp, "run",
+                            lambda *a, **k: (_ for _ in ()).throw(OSError("no git")))
+        assert _head_tree_paths(conn, mined) is None
+
+        class _Bad:
+            returncode = 128
+            stdout = ""
+            stderr = "fatal"
+
+        monkeypatch.setattr(sp, "run", lambda *a, **k: _Bad())
+        assert _head_tree_paths(conn, mined) is None
+
+        monkeypatch.setattr(sp, "run", real)
+        paths = _head_tree_paths(conn, mined)
+        assert paths and "x.py" in paths
+
+
+def test_a_repository_whose_mirror_is_gone_reads_as_unreadable(mined, monkeypatch):
+    from pathlib import Path
+
+    from git_synapse.analysis.aggregate import _head_tree_paths
+    from git_synapse.db.engine import connection
+    from git_synapse.ingest import gitops
+
+    monkeypatch.setattr(gitops, "mirror_path_for",
+                        lambda *a, **k: Path("/nonexistent/mirror.git"))
+    with connection() as conn:
+        assert _head_tree_paths(conn, mined) is None
+
+
+def test_a_crossrepo_rebuild_with_no_new_commits_keeps_what_it_has(mined, monkeypatch):
+    """The partition is expensive; redoing it over an unchanged corpus is pure
+    cost, and returning empty stats would look like the data had vanished."""
+    from git_synapse.analysis import crossrepo
+
+    crossrepo.rebuild(force=True)
+    monkeypatch.setattr(crossrepo, "_build_change_sets", lambda *a, **k: False)
+    again = crossrepo.rebuild(force=False)
+    # It reports what is already stored rather than zeroes -- empty stats here
+    # would read as "the cross-repo data vanished".
+    assert again.change_sets > 0
+    assert (again.repo_pairs, again.file_pairs) == (0, 0)
+    assert again.duration_s >= 0
+
+
+def test_the_lagged_rebuild_on_an_empty_corpus_writes_nothing(mined, monkeypatch):
+    """Injected rather than truncated: emptying `repo` would take the corpus
+    every other test in this module is built on with it."""
+    import numpy as np
+
+    from git_synapse.analysis import lagged
+
+    monkeypatch.setattr(
+        lagged, "_event_matrix",
+        lambda *a, **k: (np.zeros((0, 0), dtype=np.float32), [], 0),
+    )
+    stats = lagged.rebuild(force=True)
+    assert stats.n_repos == 0
+    assert stats.rows_written == 0
+
+
+def test_asymmetry_on_a_pair_with_no_lagged_row_carries_no_direction(mined):
+    """The ratio is the directional evidence. With nothing on either side there
+    is no ratio to report -- and 1.0 would read as "perfectly symmetric"."""
+    from git_synapse.analysis import lagged
+
+    row = lagged.asymmetry(-1, -2, lag=1)
+    assert row["forward"] is None and row["reverse"] is None
+    assert row["ratio"] is None
+    assert row["measure"] == "npmi" and row["lag_bins"] == 1
+
+
+def test_the_symmetric_comparison_says_nothing_without_ground_truth(mined):
+    """No manifest bumps means no directed edges to score against, and an
+    invented number here would be the one that justifies the whole construction."""
+    from git_synapse.analysis import validate
+
+    assert validate.compare_to_symmetric(min_bumps=99999) == {}
+
+
+def test_an_author_connection_that_refuses_to_close_is_logged_not_raised(mined,
+                                                                         monkeypatch):
+    """The close happens on the way out of a failing run. Raising here would
+    replace the error that actually ended it with one about cleanup."""
+    from git_synapse.db.engine import connection
+    from git_synapse.ingest.store import AuthorCache
+
+    with connection() as conn:
+        cache = AuthorCache(conn)
+        monkeypatch.setattr(cache._own, "close",
+                            lambda: (_ for _ in ()).throw(OSError("socket gone")))
+        cache.close()
+
+
+def test_the_declared_dependency_refresh_keeps_what_it_has_when_nothing_changed(
+    mined, monkeypatch
+):
+    """A repository whose manifests did not move must not lose its declared
+    edges -- `declared` is the tier agents are told to trust above all others."""
+    from git_synapse.analysis import depbump
+
+    depbump.refresh_declared(force=True)
+    kept = depbump.refresh_declared(force=False)
+    assert kept >= 0
+
+    again = depbump.refresh_declared(force=False)
+    assert again == kept
+
+
+def test_the_module_graph_is_rebuilt_from_the_mirrors_on_disk(mined):
+    """A monorepo declares its real dependencies in per-module manifests; reading
+    only the root hid 371 internal references across 29 repositories."""
+    from git_synapse.analysis import depbump
+
+    assert depbump.refresh_modules() >= 0
+
+
+# ------------------------------------------------- declared dependencies, for real
+
+@pytest.fixture(scope="module")
+def manifests(ingested, tmp_path_factory):
+    """A monorepo with per-module manifests plus the repository it depends on.
+
+    Reading only the root manifest was a real coverage gap: this organisation's
+    monorepos keep their real dependencies in per-module files, which hid 371
+    internal references across 29 repositories.
+    """
+    from git_synapse.db.engine import query_one
+    from git_synapse.ingest import pipeline
+
+    root = tmp_path_factory.mktemp("mani")
+    dep = _build_remote(root, "dep", [{"lib.go": "package lib\n"}])
+    mono = _build_remote(root, "mono", [{
+        "go.mod": (
+            "module github.com/acme/e2e-mono\n"
+            "require github.com/acme/e2e-dep v1.4.0\n"
+        ),
+        "core/go.mod": "module github.com/acme/e2e-mono/core\n",
+        "gateway/go.mod": (
+            "module github.com/acme/e2e-mono/gateway\n"
+            "require github.com/acme/e2e-mono/core v0.0.0\n"
+        ),
+        # Vendored manifests describe someone else's dependencies.
+        "vendor/other/go.mod": "module github.com/elsewhere/other\n",
+    }])
+
+    ids = {}
+    for gh, name, remote in ((910011, "e2e-dep", dep), (910012, "e2e-mono", mono)):
+        record = RepoRecord(github_id=gh, owner="acme", name=name,
+                            full_name=f"acme/{name}", clone_url=str(remote),
+                            default_branch="main")
+        result = pipeline.sync_repo(record, force_full=True)
+        assert result.status != "failed", result.error
+        ids[name] = query_one("SELECT id FROM repo WHERE github_id = %s", (gh,))["id"]
+    return ids
+
+
+def test_a_declared_dependency_is_recorded_from_the_manifest(manifests):
+    from git_synapse.analysis import depbump
+    from git_synapse.db.engine import query
+
+    assert depbump.refresh_declared(force=True) > 0
+    rows = query(
+        "SELECT dep_repo_id, dep_name, manifest FROM repo_dependency"
+        " WHERE consumer_repo_id = %s", (manifests["e2e-mono"],),
+    )
+    edge = next(r for r in rows if r["dep_name"] == "e2e-dep")
+    assert edge["dep_repo_id"] == manifests["e2e-dep"], "the name did not resolve"
+    assert edge["manifest"] == "go.mod"
+
+
+def test_the_internal_module_graph_is_recorded_per_manifest(manifests):
+    from git_synapse.analysis import depbump
+    from git_synapse.db.engine import query
+
+    assert depbump.refresh_modules() > 0
+    rows = query(
+        "SELECT consumer_module, dep_module, manifest FROM module_dependency"
+        " WHERE repo_id = %s", (manifests["e2e-mono"],),
+    )
+    pairs = {(r["consumer_module"], r["dep_module"]) for r in rows}
+    assert ("gateway", "core") in pairs
+
+
+def test_a_vendored_manifest_is_not_read_as_this_repositorys_dependency(manifests):
+    from git_synapse.analysis import depbump
+    from git_synapse.db.engine import query
+
+    depbump.refresh_declared(force=True)
+    manifest_paths = {
+        r["manifest"] for r in query(
+            "SELECT manifest FROM repo_dependency WHERE consumer_repo_id = %s",
+            (manifests["e2e-mono"],),
+        )
+    }
+    assert manifest_paths
+    assert not any(p.startswith("vendor/") for p in manifest_paths)
+
+
+def test_a_second_declared_refresh_keeps_the_edges_it_already_found(manifests):
+    """A repository whose manifests did not move must not lose its declared
+    edges: `declared` is the tier agents are told to trust above all others."""
+    from git_synapse.analysis import depbump
+
+    first = depbump.refresh_declared(force=True)
+    assert depbump.refresh_declared(force=False) == first
+
+
+def test_the_bump_scan_walks_the_manifest_history(manifests):
+    from git_synapse.analysis import depbump
+
+    stats = depbump.rebuild(force=True)
+    assert stats.repos_scanned > 0

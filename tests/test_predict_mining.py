@@ -169,7 +169,7 @@ def impact_corpus(scratch_db):
 
     with connection() as conn:
         conn.execute("TRUNCATE repo, dep_bump, repo_dependency, repo_lag_metric,"
-                     " repo_impact RESTART IDENTITY CASCADE")
+                     " repo_impact, repo_pair_metric RESTART IDENTITY CASCADE")
         ids = {}
         for n in range(64):
             ids[n] = conn.execute(
@@ -217,6 +217,14 @@ def impact_corpus(scratch_db):
             "INSERT INTO repo_dependency (consumer_repo_id, dep_repo_id, dep_name,"
             " manifest, ecosystem, observed_at) VALUES (%s,%s,'r60','go.mod','go',now())",
             (ids[61], ids[60]),
+        )
+        # The symmetric table's view of the same pair, identical in both
+        # directions -- the case the directional comparison has to score at 0.5.
+        conn.execute(
+            "INSERT INTO repo_pair_metric (repo_a_id, repo_b_id, n_ab, n_a, n_b,"
+            " n_total, confidence_ab, confidence_ba, npmi)"
+            " VALUES (%s,%s,5,10,10,100,0.5,0.5,0.4)",
+            (ids[62], ids[63]),
         )
         # A bump-backed edge, likewise with no statistics.
         conn.execute(
@@ -327,3 +335,15 @@ def test_chains_can_be_walked_through_discovery_hops_when_asked(impact_corpus):
                                      validated_only=False)
     assert len(everything) >= len(validated)
     assert not validated, "r0's edges are all discovery-tier"
+
+
+def test_a_symmetric_measure_that_cannot_tell_direction_scores_a_half(impact_corpus):
+    """This is the experiment that justifies the lagged construction. A measure
+    identical in both directions must score 0.5 -- rounding each tie to a win is
+    exactly how a symmetric measure comes out looking directional."""
+    from git_synapse.analysis import validate
+
+    result = validate.compare_to_symmetric(min_bumps=1, measure="npmi")
+    assert result, "the fixture's bump edges should be ground truth"
+    assert result["comparable_edges"] == 1
+    assert result["symmetric_directional_accuracy"] == pytest.approx(0.5)
