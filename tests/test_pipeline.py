@@ -290,3 +290,90 @@ def test_an_ordinary_failure_is_not_retried(db, monkeypatch):
                         clone_url="", default_branch="main")
     assert pipeline.sync_repo(record).status == "failed"
     assert attempts["n"] == 1
+
+
+# ------------------------------------------------------- the circuit breaker
+
+def test_a_run_gives_up_once_the_network_is_clearly_down(db, monkeypatch):
+    """Four retries at a two-minute timeout is nine minutes per repository, so
+    grinding the whole corpus took twenty-five minutes to accomplish nothing."""
+    from git_synapse.ingest import pipeline
+    from git_synapse.ingest.github import RepoRecord
+    from git_synapse.ingest.pipeline import NETWORK_FAILURE_ABORT, RepoResult
+
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+    monkeypatch.setattr(pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
+
+    attempted = {"n": 0}
+
+    def always_offline(record, force_full=False):
+        attempted["n"] += 1
+        return RepoResult(
+            full_name=record.full_name, status="failed",
+            error="fatal: unable to access: Failed to connect to github.com port 443",
+        )
+
+    monkeypatch.setattr(pipeline, "sync_repo", always_offline)
+    records = [
+        RepoRecord(github_id=i, owner="t", name=f"r{i}", full_name=f"t/r{i}",
+                   clone_url="", default_branch="main")
+        for i in range(NETWORK_FAILURE_ABORT * 3)
+    ]
+    pipeline.run_ingest(records=records, trigger="test")
+    assert attempted["n"] < len(records), (
+        "the run ground through every repository despite the network being down"
+    )
+
+
+def test_an_isolated_failure_does_not_trip_the_breaker(db, monkeypatch):
+    """A few bad repositories among good ones is normal, and must not abort."""
+    from git_synapse.ingest import pipeline
+    from git_synapse.ingest.github import RepoRecord
+    from git_synapse.ingest.pipeline import RepoResult
+
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+    monkeypatch.setattr(pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
+
+    seen = []
+
+    def mostly_fine(record, force_full=False):
+        seen.append(record.full_name)
+        if len(seen) % 5 == 0:
+            return RepoResult(full_name=record.full_name, status="failed",
+                              error="fatal: unable to access: Failed to connect")
+        return RepoResult(full_name=record.full_name, status="ok")
+
+    monkeypatch.setattr(pipeline, "sync_repo", mostly_fine)
+    records = [
+        RepoRecord(github_id=i, owner="t", name=f"s{i}", full_name=f"t/s{i}",
+                   clone_url="", default_branch="main")
+        for i in range(30)
+    ]
+    pipeline.run_ingest(records=records, trigger="test")
+    assert len(seen) == 30, "an occasional failure aborted the whole run"
+
+
+def test_one_repository_raising_does_not_kill_the_run(db, monkeypatch):
+    """sync_repo catches its own errors; this is the belt-and-braces path."""
+    from git_synapse.ingest import pipeline
+    from git_synapse.ingest.github import RepoRecord
+    from git_synapse.ingest.pipeline import RepoResult
+
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+    monkeypatch.setattr(pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
+
+    def explode_once(record, force_full=False):
+        if record.name == "boom":
+            raise RuntimeError("unexpected")
+        return RepoResult(full_name=record.full_name, status="ok")
+
+    monkeypatch.setattr(pipeline, "sync_repo", explode_once)
+    records = [
+        RepoRecord(github_id=1, owner="t", name="boom", full_name="t/boom",
+                   clone_url="", default_branch="main"),
+        RepoRecord(github_id=2, owner="t", name="fine", full_name="t/fine",
+                   clone_url="", default_branch="main"),
+    ]
+    result = pipeline.run_ingest(records=records, trigger="test")
+    assert len(result.repos) == 2
+    assert any(r.status == "failed" for r in result.repos)
