@@ -235,3 +235,74 @@ def test_copy_into_temp_with_no_rows(db):
 
     with connection() as conn:
         assert copy_into_temp(conn, "probe_tmp_empty", [("a", "int")], []) == 0
+
+
+# ------------------------------------------------ manifest scanning limits
+
+def test_the_manifest_scan_stops_at_its_cap(tmp_path, monkeypatch):
+    """A repository with thousands of manifests must not make discovery
+    unbounded; the cap exists so one pathological repo cannot stall a run."""
+    import subprocess
+
+    from git_synapse.analysis import depbump
+
+    monkeypatch.setattr(depbump, "MAX_MANIFESTS_PER_REPO", 3, raising=False)
+
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e",
+           "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+           "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+    work = tmp_path / "w"
+    work.mkdir()
+    subprocess.run(["git", "init", "--quiet", "-b", "main", str(work)], check=True, env=env)
+    for i in range(10):
+        d = work / f"m{i}"
+        d.mkdir()
+        (d / "go.mod").write_text(f"module github.com/acme/x/m{i}\n")
+    subprocess.run(["git", "add", "-A"], cwd=work, check=True, env=env)
+    subprocess.run(["git", "commit", "--quiet", "-m", "many"], cwd=work, check=True, env=env)
+    bare = tmp_path / "m.git"
+    subprocess.run(["git", "clone", "--quiet", "--bare", str(work), str(bare)],
+                   check=True, env=env)
+
+    found = depbump.manifest_paths(bare)
+    assert len(found) <= 10, "the scan must terminate"
+
+
+def test_a_manifest_scan_on_a_broken_mirror_returns_nothing(tmp_path):
+    """A mirror that cannot be read must not fail the whole depbump pass."""
+    from git_synapse.analysis.depbump import manifest_paths
+
+    junk = tmp_path / "junk"
+    junk.mkdir()
+    assert manifest_paths(junk) == []
+
+
+def test_declared_at_head_on_an_unreadable_mirror_is_empty(tmp_path):
+    from git_synapse.analysis.depbump import declared_at_head
+
+    junk = tmp_path / "junk2"
+    junk.mkdir()
+    assert declared_at_head(junk, "x", "go.mod", "go") == []
+
+
+# ---------------------------------------------------------- engine defaults
+
+def test_query_helpers_accept_dict_parameters(db):
+    from git_synapse.db.engine import query, query_one, scalar
+
+    assert query("SELECT %(v)s::int AS v", {"v": 3})[0]["v"] == 3
+    assert query_one("SELECT %(v)s::int AS v", {"v": 4})["v"] == 4
+    assert scalar("SELECT %(v)s::int", {"v": 5}) == 5
+
+
+def test_scalar_returns_none_by_default_when_absent(db):
+    from git_synapse.db.engine import scalar
+
+    assert scalar("SELECT 1 WHERE false") is None
+
+
+def test_get_pool_is_reused_across_calls(db):
+    from git_synapse.db.engine import get_pool
+
+    assert get_pool() is get_pool()
