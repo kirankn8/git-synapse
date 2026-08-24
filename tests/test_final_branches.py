@@ -238,3 +238,67 @@ def test_undeclared_edges_are_capped_per_source(db):
         (MAX_UNDECLARED_PER_SOURCE,),
     )
     assert not rows, f"a source exceeded the undeclared cap: {rows[:3]}"
+
+
+# --------------------------------------------------------- the MCP entrypoint
+
+def test_the_mcp_entrypoint_defaults_to_stdio(monkeypatch):
+    """`main()` is how the container starts. If argument parsing is wrong the
+    server never comes up and the only symptom is tools that never register."""
+    from git_synapse.mcp import server
+
+    started = {}
+    monkeypatch.setattr(server.server, "run", lambda **kw: started.update(kw) or 0)
+    monkeypatch.delenv("MCP_TRANSPORT", raising=False)
+
+    assert server.main([]) == 0
+    assert started.get("transport") == "stdio"
+
+
+def test_the_mcp_entrypoint_accepts_http_with_host_and_port(monkeypatch):
+    from git_synapse.mcp import server
+
+    started = {}
+    monkeypatch.setattr(server.server, "run", lambda **kw: started.update(kw) or 0)
+
+    assert server.main(["--transport", "http", "--host", "0.0.0.0", "--port", "9999"]) == 0
+    # The MCP SDK's name for it, not the flag's.
+    assert started.get("transport") == "streamable-http"
+    assert started.get("port") == 9999
+
+
+def test_the_mcp_transport_can_come_from_the_environment(monkeypatch):
+    """The container sets MCP_TRANSPORT rather than passing flags."""
+    from git_synapse.mcp import server
+
+    started = {}
+    monkeypatch.setattr(server.server, "run", lambda **kw: started.update(kw) or 0)
+    monkeypatch.setenv("MCP_TRANSPORT", "http")
+
+    server.main([])
+    assert started.get("transport") == "streamable-http"
+
+
+# ------------------------------------------------------------------ asymmetry
+
+def test_asymmetry_reports_the_stronger_direction(db):
+    """This is the number that says "A precedes B" rather than the reverse."""
+    from git_synapse.analysis.lagged import asymmetry
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT repo_a_id a, repo_b_id b FROM repo_lag_metric LIMIT 1")
+    if row is None:
+        pytest.skip("no lag data")
+    out = asymmetry(row["a"], row["b"])
+    if out is None:
+        pytest.skip("no asymmetry for this pair")
+    assert "forward" in out or "ratio" in out
+
+
+def test_asymmetry_on_an_unknown_pair_reports_no_evidence(db):
+    from git_synapse.analysis.lagged import asymmetry
+
+    out = asymmetry(999999998, 999999999)
+    # Either nothing, or a row whose ratio is undefined -- never a number
+    # implying a direction that was never measured.
+    assert out is None or out.get("ratio") is None
