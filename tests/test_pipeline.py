@@ -468,3 +468,112 @@ def test_the_derived_stages_are_skipped_when_nothing_changed(db, monkeypatch):
 
     result = pipeline.run_ingest(records=[], trigger="test", force_full=False)
     assert result.commits_added == 0
+
+
+# ---------------------------------------- the sweep with commits actually stored
+#
+# The branches above the cheap count gate had never run against a repository that
+# has any. 735 commits across 24 repositories survived a force-push this way,
+# inflating the N of every contingency table in those repos.
+
+@pytest.fixture()
+def swept_repo(scratch_db, tmp_path):
+    """A repo row whose stored commits outnumber what its mirror still reaches."""
+    from git_synapse.db.engine import connection
+
+    mirror = _commit_repo(tmp_path, 2)
+    reachable = subprocess.run(
+        ["git", "rev-list", "HEAD"], cwd=mirror, capture_output=True, text=True,
+        check=True,
+    ).stdout.split()
+
+    with connection() as conn:
+        conn.execute("TRUNCATE repo RESTART IDENTITY CASCADE")
+        repo_id = conn.execute(
+            "INSERT INTO repo (github_id, owner, name, full_name, clone_url,"
+            " default_branch) VALUES (1,'t','w','t/w','','main') RETURNING id"
+        ).fetchone()[0]
+        author_id = conn.execute(
+            "INSERT INTO author (email, display_name) VALUES ('t@e','t')"
+            " ON CONFLICT (email) DO UPDATE SET display_name = 't' RETURNING id"
+        ).fetchone()[0]
+        # Two commits git still reaches, plus two it does not.
+        for sha in [*reachable, "d" * 40, "e" * 40]:
+            conn.execute(
+                "INSERT INTO commit (repo_id, sha, author_id, committer_id,"
+                " authored_at, committed_at, subject) VALUES"
+                " (%s,%s,%s,%s,now(),now(),'x')",
+                (repo_id, sha, author_id, author_id),
+            )
+    return repo_id, mirror
+
+
+def test_the_sweep_removes_only_the_commits_git_no_longer_reaches(swept_repo):
+    from git_synapse.db.engine import query_one
+
+    repo_id, mirror = swept_repo
+    assert _drop_unreachable_commits(repo_id, mirror) == 2
+    left = query_one("SELECT count(*) AS n FROM commit WHERE repo_id = %s", (repo_id,))
+    assert left["n"] == 2
+    # Idempotent: a second sweep has nothing to do and must not pay for the walk.
+    assert _drop_unreachable_commits(repo_id, mirror) == 0
+
+
+@pytest.mark.parametrize("failing_call", [1, 2])
+def test_a_git_failure_during_the_sweep_deletes_nothing(swept_repo, monkeypatch,
+                                                        failing_call):
+    """Deleting commits on the strength of a failed reachability walk would
+    erase real history."""
+    from git_synapse.db.engine import query_one
+
+    repo_id, mirror = swept_repo
+    calls = {"n": 0}
+    real = subprocess.run
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == failing_call:
+            raise OSError("git not executable")
+        return real(*a, **k)
+
+    monkeypatch.setattr(subprocess, "run", flaky)
+    assert _drop_unreachable_commits(repo_id, mirror) == 0
+    assert query_one("SELECT count(*) AS n FROM commit WHERE repo_id = %s",
+                     (repo_id,))["n"] == 4
+
+
+def test_a_nonzero_rev_list_during_the_sweep_deletes_nothing(swept_repo, monkeypatch):
+    repo_id, mirror = swept_repo
+    calls = {"n": 0}
+    real = subprocess.run
+
+    class _Bad:
+        returncode = 1
+        stdout = ""
+        stderr = "fatal"
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k) if calls["n"] == 1 else _Bad()
+
+    monkeypatch.setattr(subprocess, "run", flaky)
+    assert _drop_unreachable_commits(repo_id, mirror) == 0
+
+
+def test_an_empty_reachable_set_deletes_nothing(swept_repo, monkeypatch):
+    """An empty walk means the mirror is broken, not that every commit is gone."""
+    repo_id, mirror = swept_repo
+    calls = {"n": 0}
+    real = subprocess.run
+
+    class _Empty:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k) if calls["n"] == 1 else _Empty()
+
+    monkeypatch.setattr(subprocess, "run", flaky)
+    assert _drop_unreachable_commits(repo_id, mirror) == 0

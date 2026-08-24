@@ -518,3 +518,194 @@ def test_a_directory_with_no_coupling_says_so_rather_than_returning_nothing(db):
     if "error" in out:
         pytest.skip("directory not indexed for coupling")
     assert out["summary"], "an empty result still needs a sentence"
+
+
+# ---------------------------------------------- the sentences an agent acts on
+#
+# These strings are the product. A number an agent misreads as strong evidence
+# costs more than a wrong number, because it is acted on with confidence.
+
+@pytest.mark.parametrize(("confidence", "n_ab", "must_contain"), [
+    (None, 100, "no directional signal"),
+    (0.0, 100, "no directional signal"),
+    (0.95, 2, "weak evidence"),
+    (0.95, 300, "very likely needs updating too"),
+    (0.95, 4, "may need updating too"),
+    (0.55, 300, "worth checking"),
+    (0.20, 300, "occasional"),
+    (0.20, 4, "provisional"),
+])
+def test_a_confidence_reads_differently_at_different_support(confidence, n_ab,
+                                                             must_contain):
+    """90% of three commits and 90% of three hundred used to read identically."""
+    assert must_contain in server._describe_confidence(confidence, n_ab)
+
+
+def test_thin_support_never_reads_as_a_strong_recommendation():
+    strong = server._describe_confidence(0.99, 400)
+    thin = server._describe_confidence(0.99, server.THIN_SUPPORT - 1)
+    assert "very likely" in strong
+    assert "very likely" not in thin
+
+
+def test_coupled_files_leads_with_the_sibling_variants_it_found(db, monkeypatch):
+    """Parallel copies of the same filename in another directory are the case
+    this tool finds that reading one file does not."""
+    monkeypatch.setattr(server.q, "coupled_files", lambda *a, **k: [
+        {"path": "b/handler.go", "n_ab": 40, "n_this": 50, "n_other": 45,
+         "score": 0.8, "confidence_out": 0.8, "confidence_in": 0.7,
+         "file_id": 1, "last_together": None, "repo": "t/x"},
+    ])
+    out = _coupled_on_any_file(monkeypatch)
+    assert "sibling variant" in (out.get("summary") or "")
+
+
+def test_coupled_files_warns_when_its_partners_are_all_noise(db, monkeypatch):
+    """Own tests and generated output co-change by construction and tell an
+    agent nothing its own reading did not."""
+    monkeypatch.setattr(server.q, "coupled_files", lambda *a, **k: [
+        {"path": "a/handler_test.go", "n_ab": 1, "n_this": 50, "n_other": 45,
+         "score": 0.8, "confidence_out": 0.8, "confidence_in": 0.7,
+         "file_id": 1, "last_together": None, "repo": "t/x"},
+    ])
+    out = _coupled_on_any_file(monkeypatch)
+    assert "informative: false" in (out.get("summary") or "")
+
+
+def _coupled_on_any_file(monkeypatch):
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        "SELECT r.name AS repo, f.path FROM file f JOIN repo r ON r.id = f.repo_id"
+        " WHERE f.path LIKE '%.go' LIMIT 1"
+    )
+    if row is None:
+        pytest.skip("no files")
+    monkeypatch.setattr(server.q, "resolve_file", lambda *a, **k: {
+        "id": 1, "repo": row["repo"], "path": "a/handler.go", "repo_id": 1,
+        "change_count": 50, "author_count": 3, "last_change_at": None,
+        "is_deleted": False, "pair_population": 120,
+    })
+    return server.coupled_files(repo=row["repo"], path=row["path"])
+
+
+def test_a_mock_file_is_labelled_generated_not_coupled_behaviour():
+    """A mock changes with the interface it mocks by construction."""
+    labels, informative = server._classify_partner("pkg/mock_client.go",
+                                                   "pkg/client.go", 40)
+    assert "generated" in labels
+
+
+def test_two_files_that_never_changed_together_say_so_rather_than_erroring(db,
+                                                                          monkeypatch):
+    """`coupled: false` with a reason is actionable; an error is not."""
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT r.name AS repo FROM repo r WHERE r.is_enabled LIMIT 1")
+    if row is None:
+        pytest.skip("no repositories")
+    monkeypatch.setattr(server.q, "resolve_file", lambda repo, path: {
+        "id": 1 if path == "a.go" else 2, "repo": repo, "path": path,
+        "repo_id": 1, "change_count": 5, "author_count": 1,
+        "last_change_at": None, "is_deleted": False,
+    })
+    monkeypatch.setattr(server.q, "pair_detail", lambda *a, **k: None)
+    out = server.explain_pair(repo=row["repo"], path_a="a.go", path_b="b.go")
+    assert out["coupled"] is False
+    assert "never changed in the same commit" in out["reason"]
+
+
+@pytest.mark.parametrize(("counts", "must_contain"), [
+    ({"total": 4, "validated": 0}, "none of this repository's 4"),
+    ({"total": 0, "validated": 0}, "no edges of any kind"),
+    ({"total": 4, "validated": 2}, "but none extends to a second hop"),
+])
+def test_an_empty_chain_explains_which_kind_of_empty_it_is(db, monkeypatch,
+                                                           counts, must_contain):
+    """"No chains" from an unvalidated corpus and "no chains" from a genuinely
+    flat one are different answers, and an agent acts differently on each."""
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
+    if row is None:
+        pytest.skip("no repositories")
+    monkeypatch.setattr(server.predict, "impact_chains", lambda *a, **k: [])
+    monkeypatch.setattr(server.q, "query_one", lambda *a, **k: counts)
+    out = server.coupling_chain(repo=row["name"], direction="downstream")
+    assert must_contain.lower() in out["explanation"].lower()
+
+
+def test_an_entirely_unvalidated_shortlist_says_so_before_anything_else(db):
+    """An agent that reads a discovery-tier rank as a probability acts on it."""
+    rows = [{"is_declared": False, "has_bump_history": False} for _ in range(5)]
+    note = server._evidence_guidance(rows, "upstream")
+    assert note.startswith("NONE")
+
+
+def test_an_empty_shortlist_is_described_not_left_blank():
+    assert "No upstream edges recorded" in server._evidence_guidance([], "upstream")
+
+
+def test_coupled_directories_refuses_a_measure_it_does_not_have(db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT r.name AS repo, f.path FROM file f"
+                    " JOIN repo r ON r.id = f.repo_id WHERE f.path LIKE '%/%' LIMIT 1")
+    if row is None:
+        pytest.skip("no files")
+    out = server.coupled_directories(repo=row["repo"], path=row["path"],
+                                     measure="not_a_measure")
+    assert "error" in out
+
+
+def test_module_context_calls_a_leaf_a_leaf(db, monkeypatch):
+    """Silence and "nothing depends on this" are different answers."""
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
+    if row is None:
+        pytest.skip("no repositories")
+    monkeypatch.setattr(server.q, "resolve_file", lambda repo, path: {
+        "id": 1, "repo": repo, "path": path, "repo_id": 1, "change_count": 1,
+        "author_count": 1, "last_change_at": None, "is_deleted": False,
+    })
+    monkeypatch.setattr(server.q, "module_context", lambda *a, **k: {
+        "owning_module": "gateway", "declares": [], "declared_by": [],
+        "modules": ["gateway", "core"], "manifest": "gateway/go.mod",
+    })
+    out = server.module_context(repo=row["name"], path="gateway/main.go")
+    assert "leaf" in out["guidance"]
+
+
+def test_search_files_refuses_a_repository_it_cannot_resolve(db):
+    out = server.search_files(term="handler", repo="definitely-not-a-repo")
+    assert "error" in out
+
+
+def test_search_files_scopes_to_a_repository_when_one_resolves(db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
+    if row is None:
+        pytest.skip("no repositories")
+    out = server.search_files(term="a", repo=row["name"], limit=3)
+    assert "error" not in out
+
+
+@pytest.mark.parametrize(("argv", "expected"), [
+    ([], {"transport": "stdio"}),
+    (["--transport", "sse", "--port", "9999"], {"transport": "sse", "port": 9999}),
+    (["--transport", "http", "--host", "0.0.0.0"], {"transport": "streamable-http"}),
+])
+def test_each_transport_starts_the_server_the_way_it_is_meant_to(monkeypatch, argv,
+                                                                expected):
+    """stdio speaks JSON-RPC on stdout; picking the wrong transport is a silent
+    protocol failure, not a crash."""
+    started = {}
+    monkeypatch.setattr(server, "wait_for_database", lambda *a, **k: None)
+    monkeypatch.setattr(server, "apply_schema", lambda *a, **k: None)
+    monkeypatch.setattr(server.server, "run",
+                        lambda **kw: started.update(kw))
+    assert server.main(argv) == 0
+    for key, value in expected.items():
+        assert started[key] == value

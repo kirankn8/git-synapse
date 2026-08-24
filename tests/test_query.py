@@ -298,3 +298,109 @@ def test_module_context_normalises_a_leading_slash_or_dot(db):
     plain = q.module_context(row["repo_id"], row["path"])
     for variant in (f"/{row['path']}", f"./{row['path']}", f"  {row['path']}  "):
         assert q.module_context(row["repo_id"], variant) == plain, variant
+
+
+# --------------------------------------------------- filters and edge branches
+
+def test_n_ab_is_accepted_as_an_order_even_though_it_is_not_a_measure(db):
+    """Seven endpoints order by raw support; their CTEs do not select a measure
+    column, so rejecting the key would break them."""
+    assert q._safe_order("n_ab") == "n_ab"
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"language": "Go"},
+    {"status": "ok"},
+    {"search": "a", "language": "Go", "status": "ok"},
+])
+def test_list_repos_accepts_every_filter_combination(db, kwargs):
+    rows = q.list_repos(limit=5, **kwargs)
+    assert isinstance(rows, list)
+    for row in rows:
+        if "language" in kwargs:
+            assert row["primary_language"] == kwargs["language"]
+
+
+def test_the_coupling_graph_can_be_centred_on_one_file(db):
+    """The product question is "given I am changing THIS", so the centred graph
+    is the one that gets asked for."""
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        "SELECT repo_id, file_a_id FROM file_pair_metric"
+        " WHERE n_ab > 3 ORDER BY n_ab DESC LIMIT 1"
+    )
+    if row is None:
+        pytest.skip("no file pairs")
+    centred = q.coupling_graph(row["repo_id"], center_file_id=row["file_a_id"],
+                               min_support=1, limit=50)
+    ids = {e["source"] for e in centred["edges"]} | {e["target"] for e in centred["edges"]}
+    assert centred["edges"], "the centred graph dropped its own centre"
+    assert row["file_a_id"] in ids
+    for edge in centred["edges"]:
+        assert row["file_a_id"] in (edge["source"], edge["target"])
+
+
+def test_the_coupling_graph_honours_a_score_floor(db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT repo_id FROM file_pair_metric LIMIT 1")
+    if row is None:
+        pytest.skip("no file pairs")
+    loose = q.coupling_graph(row["repo_id"], min_support=1, limit=200)
+    tight = q.coupling_graph(row["repo_id"], min_support=1, min_score=0.99, limit=200)
+    assert len(tight["edges"]) <= len(loose["edges"])
+
+
+def test_the_crossrepo_graph_can_be_centred_on_one_repository(db):
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT repo_a_id FROM repo_pair_metric ORDER BY n_ab DESC LIMIT 1")
+    if row is None:
+        pytest.skip("no repo pairs")
+    graph = q.crossrepo_graph(center_repo_id=row["repo_a_id"], min_support=1, limit=50)
+    for edge in graph["edges"]:
+        assert row["repo_a_id"] in (edge["source"], edge["target"])
+
+
+def test_top_crossrepo_pairs_answers_at_file_level_as_well_as_repo_level(db):
+    """Git Synapse answers at file level and no finer; both levels must work."""
+    at_repo = q.top_crossrepo_pairs(level="repo", limit=5)
+    at_file = q.top_crossrepo_pairs(level="file", limit=5)
+    assert isinstance(at_repo, list) and isinstance(at_file, list)
+    for row in at_file:
+        assert "path_a" in row and "path_b" in row
+
+
+@pytest.mark.parametrize("path", ["gateway/main.go", "./gateway/main.go",
+                                  "/gateway/main.go", "  gateway/main.go  "])
+def test_module_ownership_is_found_however_the_path_is_written(db, monkeypatch,
+                                                               path):
+    """An agent pastes a path from a diff, a log or a URL; a leading ./ or / must
+    not silently make the file belong to no module."""
+    monkeypatch.setattr(q, "query", lambda *a, **k: [
+        {"consumer_module": "gateway", "dep_module": "core"},
+        {"consumer_module": "", "dep_module": "gateway"},
+    ])
+    assert q.module_context(1, path)["owning_module"] == "gateway"
+
+
+def test_the_longest_matching_module_owns_the_file(db, monkeypatch):
+    """Nested modules: `a/b` owns `a/b/x.go`, not `a`."""
+    monkeypatch.setattr(q, "query", lambda *a, **k: [
+        {"consumer_module": "a", "dep_module": "a/b"},
+    ])
+    assert q.module_context(1, "a/b/x.go")["owning_module"] == "a/b"
+
+
+@pytest.mark.parametrize("severity", ["", "urgent", "LOW", None])
+def test_feedback_refuses_a_severity_it_does_not_know(db, severity):
+    with pytest.raises(ValueError, match="severity"):
+        q.record_feedback(kind="wrong_data", severity=severity,
+                          detail="something concrete")
+
+
+@pytest.mark.parametrize("status", ["", "closed", "OPEN", "done"])
+def test_resolving_feedback_refuses_an_unknown_status(db, status):
+    with pytest.raises(ValueError, match="status"):
+        q.resolve_feedback(1, status, "")

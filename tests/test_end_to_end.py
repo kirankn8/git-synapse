@@ -11,6 +11,7 @@ clones from.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
@@ -214,3 +215,132 @@ def test_a_second_ingest_with_no_new_commits_changes_nothing(ingested):
         ([v for v in ingested.values() if isinstance(v, int)],),
     )
     assert (after["c"], after["s"]) == (before["c"], before["s"])
+
+
+# ------------------------------------------------ watermarks that went wrong
+#
+# Everything below re-reads an already-ingested repository whose watermark is in
+# some damaged state. Each of these damaged a real sync once: the whole point of
+# the guards is that a rewritten history costs one repository a slow re-read, not
+# a failed run.
+
+def _alpha(ingested):
+    return RepoRecord(
+        github_id=910001, owner="t", name="e2e-alpha", full_name="t/e2e-alpha",
+        clone_url=ingested["_alpha_remote"], default_branch="main",
+    )
+
+
+def test_a_watermark_written_by_an_older_version_is_still_honoured(ingested):
+    """The watermark used to be a single SHA. A repository last synced by that
+    version must not re-read its whole history on the next tick."""
+    from git_synapse.db.engine import connection, query_one
+    from git_synapse.ingest import pipeline
+
+    repo_id = ingested["e2e-alpha"]
+    head = query_one("SELECT last_ingested_sha AS s FROM repo WHERE id=%s",
+                     (repo_id,))["s"]
+    with connection() as conn:
+        conn.execute("UPDATE repo SET last_ingested_refs = '[]'::jsonb"
+                     " WHERE id = %s", (repo_id,))
+
+    result = pipeline.sync_repo(_alpha(ingested))
+    assert result.status != "failed", result.error
+    assert result.commits_added == 0, "the legacy watermark was ignored"
+    assert head
+
+
+def test_a_force_pushed_away_ref_tip_does_not_fail_the_repository(ingested):
+    """Asking git for `^<missing>` is a hard error, so an orphaned tip has to be
+    dropped rather than passed through."""
+    from git_synapse.db.engine import connection
+    from git_synapse.ingest import pipeline
+
+    repo_id = ingested["e2e-alpha"]
+    with connection() as conn:
+        conn.execute(
+            "UPDATE repo SET last_ingested_refs = %s::jsonb WHERE id = %s",
+            (json.dumps(["f" * 40]), repo_id),
+        )
+    result = pipeline.sync_repo(_alpha(ingested))
+    assert result.status != "failed", result.error
+
+
+def test_a_rewritten_commit_is_swept_during_the_next_sync(ingested):
+    """Insert-only was the bug: 735 commits across 24 repositories outlived the
+    history they came from, inflating the N of every contingency table there."""
+    from git_synapse.db.engine import connection, query_one
+    from git_synapse.ingest import pipeline
+
+    repo_id = ingested["e2e-alpha"]
+    with connection() as conn:
+        author = conn.execute(
+            "INSERT INTO author (email, display_name) VALUES ('ghost@e','ghost')"
+            " ON CONFLICT (email) DO UPDATE SET display_name='ghost' RETURNING id"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO commit (repo_id, sha, author_id, committer_id,"
+            " authored_at, committed_at, subject)"
+            " VALUES (%s,%s,%s,%s,now(),now(),'rewritten away')",
+            (repo_id, "c" * 40, author, author),
+        )
+
+    result = pipeline.sync_repo(_alpha(ingested))
+    assert result.status != "failed", result.error
+    assert query_one(
+        "SELECT count(*) AS n FROM commit WHERE repo_id=%s AND sha=%s",
+        (repo_id, "c" * 40),
+    )["n"] == 0
+
+
+def test_a_repository_that_fails_mid_sync_records_why_on_the_row(ingested,
+                                                                 monkeypatch):
+    """`git-synapse status` reads ingest_error. Losing it means a repository that
+    silently stops updating looks identical to one that is simply quiet."""
+    from git_synapse.db.engine import connection, query_one
+    from git_synapse.ingest import pipeline
+
+    repo_id = ingested["e2e-alpha"]
+
+    def explode(*a, **k):
+        raise RuntimeError("parser fell over")
+
+    monkeypatch.setattr(pipeline, "iter_commits", explode)
+    result = pipeline._sync_repo_once(_alpha(ingested))
+    assert result.status == "failed"
+    assert "parser fell over" in result.error
+
+    row = query_one("SELECT ingest_status AS s, ingest_error AS e FROM repo"
+                    " WHERE id = %s", (repo_id,))
+    assert row["s"] == "failed"
+    assert "parser fell over" in row["e"]
+
+    with connection() as conn:
+        conn.execute("UPDATE repo SET ingest_status='ok', ingest_error=NULL"
+                     " WHERE id=%s", (repo_id,))
+
+
+def test_a_failed_status_write_does_not_mask_the_original_failure(ingested,
+                                                                  monkeypatch):
+    """Best-effort means best-effort: if the database is the thing that broke,
+    the caller must still learn what actually failed."""
+    from git_synapse.ingest import pipeline
+
+    broken = {"yet": False}
+    real_connection = pipeline.connection
+
+    def explode_then_break_the_database(*a, **k):
+        broken["yet"] = True
+        raise RuntimeError("parser fell over")
+
+    def no_database(*a, **k):
+        if broken["yet"]:
+            raise OSError("connection refused")
+        return real_connection(*a, **k)
+
+    explode = explode_then_break_the_database
+    monkeypatch.setattr(pipeline, "iter_commits", explode)
+    monkeypatch.setattr(pipeline, "connection", no_database)
+    result = pipeline._sync_repo_once(_alpha(ingested))
+    assert result.status == "failed"
+    assert "parser fell over" in result.error
