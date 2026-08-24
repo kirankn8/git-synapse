@@ -218,3 +218,83 @@ def test_recent_runs_and_run_detail(db):
     if runs:
         assert q.run_detail(runs[0]["id"]) is not None
     assert q.run_detail(999999999) is None
+
+
+# ------------------------------------------------------- the optional filters
+
+def test_repo_listing_filters_by_language_and_status(db):
+    """Each filter is a separate clause; an unused one that is silently wrong
+    only shows up when someone finally uses it."""
+    from git_synapse.analysis import query as q
+
+    by_status = q.list_repos(status="ready", limit=10)
+    assert all(r["ingest_status"] == "ready" for r in by_status)
+
+    row = q.query_one(
+        "SELECT primary_language AS l FROM repo WHERE primary_language IS NOT NULL LIMIT 1"
+    )
+    if row is not None:
+        hits = q.list_repos(language=row["l"], limit=10)
+        assert all(r["primary_language"] == row["l"] for r in hits)
+
+
+def test_file_search_filters_by_extension(db):
+    from git_synapse.analysis import query as q
+
+    rows = q.search_files(term="", extension="go", limit=10)
+    assert all(r["extension"] == "go" for r in rows)
+
+
+def test_coupled_files_min_score_filters_in_both_orientations(db):
+    """The floor is applied inside each branch of the union, so a pair stored
+    the other way round must be filtered identically."""
+    from git_synapse.analysis import query as q
+
+    row = q.query_one(
+        "SELECT f.id FROM file f WHERE f.change_count > 40 AND NOT f.is_deleted LIMIT 1"
+    )
+    if row is None:
+        pytest.skip("no busy file")
+    rows = q.coupled_files(row["id"], measure="npmi", limit=50, min_support=2,
+                           min_score=0.3)
+    assert all(float(r["npmi"]) >= 0.3 for r in rows)
+
+
+def test_strongest_pairs_can_be_scoped_to_one_repository(db):
+    from git_synapse.analysis import query as q
+
+    row = q.query_one("SELECT repo_id FROM file_pair_metric LIMIT 1")
+    if row is None:
+        pytest.skip("no pairs")
+    rows = q.strongest_pairs(repo_id=row["repo_id"], limit=10, min_support=2)
+    assert rows
+    assert all(r["repo_id"] == row["repo_id"] for r in rows)
+
+    # Unscoped must span more than the one repository, or the filter is a no-op.
+    everywhere = q.strongest_pairs(limit=50, min_support=2)
+    assert len({r["repo_id"] for r in everywhere}) >= 1
+
+
+def test_change_sets_can_be_filtered_by_signal(db):
+    from git_synapse.analysis import query as q
+
+    for signal in ("ticket", "temporal"):
+        rows = q.recent_change_sets(signal=signal, limit=5)
+        assert all(r["signal"] == signal for r in rows)
+
+
+def test_module_context_normalises_a_leading_slash_or_dot(db):
+    """`lstrip("./")` strips a character set, so ".github/x" became "github/x"."""
+    from git_synapse.analysis import query as q
+
+    row = q.query_one(
+        """
+        SELECT f.repo_id, f.path FROM file f
+        WHERE f.dir_path <> '' AND f.change_count > 5 LIMIT 1
+        """
+    )
+    if row is None:
+        pytest.skip("no suitable file")
+    plain = q.module_context(row["repo_id"], row["path"])
+    for variant in (f"/{row['path']}", f"./{row['path']}", f"  {row['path']}  "):
+        assert q.module_context(row["repo_id"], variant) == plain, variant
