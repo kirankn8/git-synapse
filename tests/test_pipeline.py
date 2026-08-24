@@ -390,3 +390,81 @@ def test_one_repository_raising_does_not_kill_the_run(db, monkeypatch):
     result = pipeline.run_ingest(records=records, trigger="test")
     assert len(result.repos) == 2
     assert any(r.status == "failed" for r in result.repos)
+
+
+# ------------------------------------------------- the global derived stages
+#
+# Six global rebuilds run after the per-repo fan-out. Each is wrapped in its own
+# try/except on purpose: the per-repo results are already committed, so one
+# global stage failing must not discard them or the other five. Nothing had ever
+# executed those except arms, which is precisely where that promise could be
+# broken by a re-raise or a mis-ordered dependency.
+
+_STAGES = [
+    ("git_synapse.analysis.crossrepo", "rebuild"),
+    ("git_synapse.analysis.depbump", "rebuild"),
+    ("git_synapse.analysis.depbump", "refresh_declared"),
+    ("git_synapse.analysis.depbump", "refresh_modules"),
+    ("git_synapse.analysis.lagged", "rebuild"),
+    ("git_synapse.analysis.predict", "rebuild"),
+    ("git_synapse.analysis.mining", "rebuild"),
+]
+
+
+class _Anything:
+    """Stands in for every stage's stats object: any attribute reads as 0."""
+
+    def __getattr__(self, name):
+        return 0
+
+
+def _stub_run(monkeypatch):
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+    monkeypatch.setattr(pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
+
+
+def test_every_derived_stage_runs_once_the_corpus_changed(db, monkeypatch):
+    _stub_run(monkeypatch)
+    called = []
+    for mod, fn in _STAGES:
+        monkeypatch.setattr(f"{mod}.{fn}",
+                            lambda *a, _n=f"{mod}.{fn}", **k: called.append(_n) or _Anything())
+
+    result = pipeline.run_ingest(records=[], trigger="test", force_full=True)
+    assert result.status in ("success", "partial")
+    assert called == [f"{m}.{f}" for m, f in _STAGES]
+
+
+def test_a_failing_derived_stage_does_not_stop_the_ones_after_it(db, monkeypatch):
+    """The whole reason each stage is guarded separately."""
+    _stub_run(monkeypatch)
+    reached = []
+
+    def boom(*a, **k):
+        raise RuntimeError("stage exploded")
+
+    for mod, fn in _STAGES:
+        monkeypatch.setattr(f"{mod}.{fn}", boom)
+        monkeypatch.setattr(f"{mod}.{fn}",
+                            lambda *a, _n=f"{mod}.{fn}", **k: reached.append(_n) or boom())
+
+    result = pipeline.run_ingest(records=[], trigger="test", force_full=True)
+    # Every guarded group was attempted and none of them escaped. refresh_modules
+    # is absent by design: it shares a try block with refresh_declared, so it is
+    # skipped when that one raises rather than running on a half-refreshed table.
+    assert reached == [f"{m}.{f}" for m, f in _STAGES
+                       if f != "refresh_modules"]
+    assert result.run_id is not None
+    assert result.status in ("success", "partial")
+
+
+def test_the_derived_stages_are_skipped_when_nothing_changed(db, monkeypatch):
+    """Six global rebuilds over the whole corpus are not free; a sync that added
+    no commits must not pay for them."""
+    _stub_run(monkeypatch)
+    for mod, fn in _STAGES:
+        monkeypatch.setattr(f"{mod}.{fn}",
+                            lambda *a, **k: pytest.fail(f"{mod}.{fn} ran with no new commits"))
+
+    result = pipeline.run_ingest(records=[], trigger="test", force_full=False)
+    assert result.commits_added == 0
