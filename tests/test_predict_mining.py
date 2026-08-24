@@ -145,3 +145,185 @@ def test_risky_files_are_ranked_and_bounded(db):
 def test_mining_readers_on_an_unknown_repo_return_empty(db, repo_id):
     assert mining.cross_directory_modules(repo_id, limit=5) == []
     assert mining.risky_files(repo_id, limit=5) == []
+
+
+# --------------------------------------------- impact rebuild on a known corpus
+#
+# A synthetic corpus in a throwaway database, small enough that every branch of
+# the ranking is reachable by construction: the two evidence tiers, an edge with
+# structural evidence but no statistics at all, and a hub with more strong
+# undeclared candidates than it is allowed to keep.
+
+
+@pytest.fixture()
+def impact_corpus(scratch_db):
+    """A corpus wired so each ranking branch has a witness.
+
+    Deliberately not tiny. The undeclared floor is a percentile of the
+    rank-normalised discovery score, so a handful of pairs puts everything in the
+    top few percent by construction and the filter cannot be observed at all. The
+    filler pairs exist to give that percentile something to mean.
+    """
+    from git_synapse.analysis import predict
+    from git_synapse.db.engine import connection
+
+    with connection() as conn:
+        conn.execute("TRUNCATE repo, dep_bump, repo_dependency, repo_lag_metric,"
+                     " repo_impact RESTART IDENTITY CASCADE")
+        ids = {}
+        for n in range(64):
+            ids[n] = conn.execute(
+                "INSERT INTO repo (github_id, owner, name, full_name, clone_url,"
+                " default_branch) VALUES (%s,'t',%s,%s,'',%s) RETURNING id",
+                (1000 + n, f"r{n}", f"t/r{n}", "main"),
+            ).fetchone()[0]
+
+        measures = list(dict.fromkeys(
+            predict.ENSEMBLE_MEASURES + predict.DISCOVERY_MEASURES))
+        cols = ", ".join(measures)
+        marks = ", ".join(["%s"] * len(measures))
+
+        def lag_row(a, b, value, n_ab, lag=1):
+            conn.execute(
+                f"INSERT INTO repo_lag_metric (repo_a_id, repo_b_id, lag_bins,"
+                f" bin_hours, n_ab, n_a, n_b, n_total, {cols})"
+                f" VALUES (%s,%s,%s,24,%s,50,50,1000,{marks})",
+                (ids[a], ids[b], lag, n_ab, *[value] * len(measures)),
+            )
+
+        # 400 weak pairs, so the top percentile is a small slice of a real
+        # population rather than the whole of a toy one.
+        for a in range(10, 50):
+            for b in range(50, 60):
+                lag_row(a, b, 0.01 + (a + b) / 10000.0, n_ab=2)
+
+        # r0 is a hub whose eight undeclared candidates all top the ranking:
+        # only the strongest few may be kept.
+        for b in range(1, 9):
+            lag_row(0, b, 0.9 + b / 1000.0, n_ab=predict.UNDECLARED_MIN_SUPPORT + b)
+        # Scores as highly as the hub's edges but is seen too few times to mean
+        # anything.
+        lag_row(1, 2, 0.999, n_ab=predict.UNDECLARED_MIN_SUPPORT - 1)
+        # A declared edge that also has lagged statistics.
+        lag_row(3, 4, 0.2, n_ab=30)
+        conn.execute(
+            "INSERT INTO repo_dependency (consumer_repo_id, dep_repo_id, dep_name,"
+            " manifest, ecosystem, observed_at) VALUES (%s,%s,'r3','go.mod','go',now())",
+            (ids[4], ids[3]),
+        )
+        # A declared edge with no lagged row at all: it must still be reported,
+        # ranked last on statistics but carrying its tier.
+        conn.execute(
+            "INSERT INTO repo_dependency (consumer_repo_id, dep_repo_id, dep_name,"
+            " manifest, ecosystem, observed_at) VALUES (%s,%s,'r60','go.mod','go',now())",
+            (ids[61], ids[60]),
+        )
+        # A bump-backed edge, likewise with no statistics.
+        conn.execute(
+            "INSERT INTO dep_bump (consumer_repo_id, consumer_sha, dep_repo_id,"
+            " dep_name, dep_version, manifest, bumped_at, lag_seconds)"
+            " VALUES (%s,'a',%s,'r62','v1','go.mod',now(),172800)",
+            (ids[63], ids[62]),
+        )
+    return ids
+
+
+def test_impact_reports_a_declared_edge_that_has_no_statistics(impact_corpus):
+    """The most expensive wrong answer this system can give is "no upstream" for
+    a repository whose manifest names one."""
+    from git_synapse.analysis import predict
+
+    predict.rebuild(force=True)
+    rows = predict.upstream_of(impact_corpus[61], limit=20)
+    assert [r["name"] for r in rows] == ["r60"]
+    assert rows[0]["is_declared"] is True
+
+
+def test_a_bump_backed_edge_carries_its_count_and_lag(impact_corpus):
+    from git_synapse.analysis import predict
+
+    predict.rebuild(force=True)
+    rows = predict.upstream_of(impact_corpus[63], limit=20)
+    assert [r["name"] for r in rows] == ["r62"]
+    assert rows[0]["is_declared"] is False
+    assert rows[0]["has_bump_history"] is True
+    assert rows[0]["bump_count"] == 1
+    assert rows[0]["median_lag_days"] == pytest.approx(2.0)
+
+
+def test_a_hub_cannot_flood_its_own_shortlist_with_undeclared_edges(impact_corpus):
+    from git_synapse.analysis import predict
+
+    predict.rebuild(force=True)
+    rows = predict.impact_for(impact_corpus[0], limit=50)
+    undeclared = [r for r in rows if not r["is_declared"] and not r["has_bump_history"]]
+    # Eight candidates cleared both floors; the cap is what stops all eight.
+    assert len(undeclared) == predict.MAX_UNDECLARED_PER_SOURCE
+
+
+def test_a_thinly_supported_pair_is_not_surfaced_however_high_it_scores(impact_corpus):
+    """Score alone is not evidence: a pair seen a handful of times can top every
+    measure by accident."""
+    from git_synapse.analysis import predict
+
+    predict.rebuild(force=True)
+    rows = predict.impact_for(impact_corpus[1], limit=50)
+    assert [r["name"] for r in rows if r["name"] == "r2"] == []
+
+
+def test_declared_only_filters_out_discovered_edges(impact_corpus):
+    from git_synapse.analysis import predict
+
+    predict.rebuild(force=True)
+    all_rows = predict.impact_for(impact_corpus[0], limit=50)
+    only = predict.impact_for(impact_corpus[0], limit=50, declared_only=True)
+    assert all_rows and not only
+
+
+def test_a_second_rebuild_is_skipped_when_no_input_changed(impact_corpus):
+    """Six global rebuilds run on every ingest tick; recomputing impact over an
+    unchanged corpus is pure cost."""
+    from git_synapse.analysis import predict
+
+    first = predict.rebuild(force=True)
+    second = predict.rebuild(force=False)
+    assert second.rows_written == first.rows_written
+    assert second.sources == 0, "the skip path recomputed the ranking"
+
+
+def test_a_rebuild_with_no_lagged_metrics_writes_nothing(scratch_db):
+    from git_synapse.analysis import predict
+    from git_synapse.db.engine import connection
+
+    with connection() as conn:
+        conn.execute("TRUNCATE repo, dep_bump, repo_dependency, repo_lag_metric,"
+                     " repo_impact RESTART IDENTITY CASCADE")
+    stats = predict.rebuild(force=True)
+    assert stats.rows_written == 0
+
+
+def test_a_rebuild_can_run_inside_a_callers_transaction(impact_corpus):
+    """The pipeline passes its own connection so the derived tables land in the
+    same transaction as the run record."""
+    from git_synapse.analysis import predict
+    from git_synapse.db.engine import connection
+
+    with connection() as conn:
+        stats = predict.rebuild(conn=conn, force=True)
+        assert stats.rows_written > 0
+        assert conn.execute("SELECT count(*) FROM repo_impact").fetchone()[0] == \
+            stats.rows_written
+
+
+def test_chains_can_be_walked_through_discovery_hops_when_asked(impact_corpus):
+    """Off by default because a discovery hop is scored on a different,
+    unvalidated scale -- chaining through one reads as coupling when it is
+    activity confounding."""
+    from git_synapse.analysis import predict
+
+    predict.rebuild(force=True)
+    validated = predict.impact_chains(impact_corpus[0], max_depth=2)
+    everything = predict.impact_chains(impact_corpus[0], max_depth=2,
+                                     validated_only=False)
+    assert len(everything) >= len(validated)
+    assert not validated, "r0's edges are all discovery-tier"

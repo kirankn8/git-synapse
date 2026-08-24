@@ -108,11 +108,10 @@ def _read(sql_text: str, params, mode: str, default=None):
             with conn.cursor(row_factory=factory) if factory else conn.cursor() as cur:
                 cur.execute(sql_text, params)
                 if mode == "all":
-                    return cur.fetchall()
-                row = cur.fetchone()
-                if mode == "one":
-                    return row
-                return default if row is None else row[0]
+                    result: Any = cur.fetchall()
+                else:
+                    row = cur.fetchone()
+                    result = row if mode == "one" else (default if row is None else row[0])
         except Exception as exc:
             if attempt == 1 and _is_stale_plan(exc):
                 log.warning("stale cached plan; discarding connection and retrying")
@@ -126,9 +125,11 @@ def _read(sql_text: str, params, mode: str, default=None):
                 continue
             conn_ctx.__exit__(type(exc), exc, exc.__traceback__)
             raise
-        else:
-            conn_ctx.__exit__(None, None, None)
-    raise RuntimeError("unreachable: read retry exhausted")
+        # Returning from inside the try would skip this and leave the connection
+        # to be released whenever the context object is collected.
+        conn_ctx.__exit__(None, None, None)
+        return result
+    raise RuntimeError("unreachable: read retry exhausted")  # pragma: no cover
 
 
 def query(sql_text: str, params: Sequence[Any] | dict[str, Any] | None = None) -> list[dict]:
