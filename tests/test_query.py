@@ -109,7 +109,33 @@ def test_co_change_commits_are_the_evidence_behind_the_score(db):
     )
     if row is None:
         pytest.skip("no supported pair")
-    commits = q.co_change_commits(row["a"], row["b"], limit=100)
+    # Both reads must see the same snapshot: a live refresh rebuilding this
+    # pair between them would change n_ab underneath the comparison, which made
+    # this fail about one run in five.
+    from git_synapse.db.engine import connection
+
+    with connection() as conn:
+        conn.execute("BEGIN ISOLATION LEVEL REPEATABLE READ")
+        row = conn.execute(
+            "SELECT file_a_id a, file_b_id b, n_ab FROM file_pair_metric"
+            " WHERE n_ab > 3 LIMIT 1"
+        ).fetchone()
+        if row is None:
+            pytest.skip("no supported pair")
+        pair_a, pair_b, n_ab = row
+        rows = conn.execute(
+            """
+            SELECT c.sha, c.pair_eligible AS counted
+            FROM commit c
+            JOIN commit_file cfa ON cfa.commit_id = c.id AND cfa.file_id = %s
+            JOIN commit_file cfb ON cfb.commit_id = c.id AND cfb.file_id = %s
+            """,
+            (pair_a, pair_b),
+        ).fetchall()
+        conn.execute("COMMIT")
+
+    commits = [{"sha": r[0], "counted": r[1]} for r in rows]
+    row = {"n_ab": n_ab}
     assert commits and all(c["sha"] for c in commits)
     # A commit above the fan-out cap changed both files but contributed to no
     # statistic; the evidence list marks it rather than quietly disagreeing
