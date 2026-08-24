@@ -133,3 +133,82 @@ def test_a_type_change_is_recorded(tmp_path):
 
     types = {f.path: f.change_type for c in iter_commits(bare) for f in c.files}
     assert types.get("thing") in ("T", "M"), types
+
+
+# -------------------------------------------------- the parser's own helpers
+
+@pytest.mark.parametrize("value", ["", "not-a-date", None, "2026-13-45T99:99:99"])
+def test_an_unparseable_commit_date_falls_back_to_the_epoch(value):
+    """A handful of commits in any large org carry corrupt dates. Losing the
+    whole repository over one of them would be the wrong trade."""
+    from git_synapse.ingest.parser import _parse_git_date
+
+    got = _parse_git_date(value)
+    assert got is not None
+    # The epoch, compared as an instant: in a negative-offset zone its local
+    # calendar year is 1969, which is the sort of thing that makes a date
+    # assertion pass in one timezone and fail in another.
+    assert got.timestamp() == 0
+
+
+def test_a_valid_iso_date_is_parsed_as_given():
+    from git_synapse.ingest.parser import _parse_git_date
+
+    got = _parse_git_date("2026-08-26T12:34:56+00:00")
+    assert (got.year, got.month, got.day) == (2026, 8, 26)
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("12", 12), ("0", 0), ("-", 0),
+                                               ("", 0), ("abc", 0)])
+def test_a_non_numeric_line_count_reads_as_zero(raw, expected):
+    """git writes "-" for a binary file's line counts."""
+    from git_synapse.ingest.parser import _safe_int
+
+    assert _safe_int(raw) == expected
+
+
+def test_a_malformed_commit_header_is_skipped_not_fatal():
+    """One corrupt record must not abort the walk over an entire repository."""
+    from git_synapse.ingest.parser import _parse_header
+
+    assert _parse_header("too\x1ffew\x1ffields") is None
+
+
+def test_a_header_without_a_body_still_parses():
+    from git_synapse.ingest.parser import FIELD_SEP, _parse_header
+
+    fields = ["a" * 40, "", "An", "an@e", "2026-01-01T00:00:00+00:00",
+              "Cn", "cn@e", "2026-01-01T00:00:00+00:00", "subject"]
+    commit = _parse_header(FIELD_SEP.join(fields))
+    assert commit is not None and commit.body == ""
+
+
+def test_the_record_stream_yields_a_trailing_record_without_a_separator():
+    """git's last record has no trailing NUL; dropping it would lose a commit."""
+    import io
+
+    from git_synapse.ingest.parser import _iter_records
+
+    data = b"one\x00two\x00three"
+    assert list(_iter_records(io.BytesIO(data))) == ["one", "two", "three"]
+
+
+def test_the_record_stream_survives_invalid_utf8():
+    """Commit messages are bytes, and not all of them are valid UTF-8."""
+    import io
+
+    from git_synapse.ingest.parser import _iter_records
+
+    out = list(_iter_records(io.BytesIO(b"ok\x00bad\xff\xfe\x00")))
+    assert out[0] == "ok"
+    assert len(out) == 2
+
+
+def test_ancestor_directories_are_enumerated_to_the_root():
+    from git_synapse.ingest.parser import ancestor_dirs
+
+    # The repository root is an ancestor too, and directory rollups depend on
+    # it being counted.
+    assert ancestor_dirs("a/b/c/file.go") == ["", "a", "a/b", "a/b/c"]
+    assert ancestor_dirs("file.go") == [""]
+    assert ancestor_dirs("a/b/c/file.go", max_depth=2) == ["", "a", "a/b"]
