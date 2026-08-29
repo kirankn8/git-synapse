@@ -165,3 +165,72 @@ def test_main_waits_for_the_database_before_scheduling(monkeypatch):
 
     sched_main.main()
     assert order[0] == "wait", order
+
+
+def test_a_disabled_scheduler_idles_instead_of_exiting(monkeypatch):
+    """The container must stay up with SCHEDULER_ENABLED=false. Exiting would
+    make the orchestrator restart it forever, and the logs would fill with
+    crash-loop noise rather than the one line saying it was turned off."""
+    import git_synapse.scheduler.main as sched_main
+    from git_synapse.config import get_config, reset_config_cache
+
+    paused = []
+    monkeypatch.setenv("SCHEDULER_ENABLED", "false")
+    reset_config_cache()
+    monkeypatch.setattr(sched_main.pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
+    monkeypatch.setattr(sched_main, "wait_for_database", lambda *a, **kw: None)
+    monkeypatch.setattr(sched_main, "apply_schema", lambda *a, **kw: None)
+    monkeypatch.setattr(sched_main.signal, "pause", lambda: paused.append(True))
+    monkeypatch.setattr(
+        sched_main, "BlockingScheduler",
+        lambda *a, **kw: pytest.fail("a disabled scheduler still built a scheduler"),
+        raising=False,
+    )
+    try:
+        assert sched_main.main() == 0
+        assert paused == [True]
+        assert get_config().schedule.enabled is False
+    finally:
+        reset_config_cache()
+
+
+def test_refresh_on_start_runs_one_immediately_without_blocking_startup(monkeypatch):
+    """A cold container would otherwise serve stale data until the next tick."""
+    import threading
+
+    import git_synapse.scheduler.main as sched_main
+    from git_synapse.config import reset_config_cache
+
+    started = []
+    monkeypatch.setenv("SCHEDULER_ENABLED", "true")
+    monkeypatch.setenv("REFRESH_ON_START", "true")
+    reset_config_cache()
+
+    class _FakeScheduler:
+        def __init__(self, *a, **kw):
+            pass
+
+        def add_job(self, *a, **kw):
+            pass
+
+        def start(self):
+            raise KeyboardInterrupt
+
+    class _FakeThread:
+        def __init__(self, target=None, args=(), daemon=False):
+            started.append((getattr(target, "__name__", target), args, daemon))
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(sched_main, "BlockingScheduler", _FakeScheduler, raising=False)
+    monkeypatch.setattr(sched_main.pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
+    monkeypatch.setattr(sched_main, "wait_for_database", lambda *a, **kw: None)
+    monkeypatch.setattr(sched_main, "apply_schema", lambda *a, **kw: None)
+    monkeypatch.setattr(threading, "Thread", _FakeThread)
+    try:
+        assert sched_main.main() == 0
+        assert started and started[0][1] == ("startup",)
+        assert started[0][2] is True, "a non-daemon thread would block shutdown"
+    finally:
+        reset_config_cache()
