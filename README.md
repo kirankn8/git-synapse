@@ -396,16 +396,16 @@ materialised cache. Consequences:
 erDiagram
     ACCOUNT ||--o{ REPO : discovers
     REPO    ||--o{ COMMIT : contains
+    REPO    ||--o{ COMMIT_PARENT : "the commit DAG"
     REPO    ||--o{ FILE : contains
-    COMMIT  ||--o{ COMMIT_FILE : "touched"
+    AUTHOR  ||--o{ COMMIT : "wrote / committed"
+    COMMIT  ||--o{ COMMIT_FILE : touched
     FILE    ||--o{ COMMIT_FILE : "was touched in"
     FILE    ||--o{ FILE_ALIAS : "known by old paths"
-    AUTHOR  ||--o{ COMMIT : wrote
-    FILE_PAIR }o--|| FILE : "file_a"
-    FILE_PAIR }o--|| FILE : "file_b"
 
     COMMIT {
         text sha
+        bool is_merge
         bool pair_eligible "excluded from pairing, auditably"
         timestamptz committed_at
     }
@@ -414,6 +414,7 @@ erDiagram
         int insertions
         int deletions
         text old_path "rename source"
+        smallint similarity "git rename score"
     }
     FILE {
         text path
@@ -421,9 +422,63 @@ erDiagram
         bigint pair_change_count "n_a over the pair-eligible population"
         bool is_deleted
     }
+    REPO {
+        text full_name
+        bigint commit_count
+        bigint pair_population "N -- NOT commit_count"
+    }
+    COMMIT_PARENT {
+        text child_sha
+        text parent_sha
+        smallint ordinal
+    }
+    FILE_ALIAS {
+        text old_path "resolves to the current file row"
+    }
+```
+
+Everything below is derived from those and can be dropped and rebuilt:
+
+```mermaid
+erDiagram
+    REPO      ||--o{ FILE_PAIR : scopes
+    FILE      ||--o{ FILE_PAIR : "as a or b"
+    REPO      ||--o{ DIRECTORY : contains
+    DIRECTORY ||--o{ FILE_DIRECTORY : "holds"
+    FILE      ||--o{ FILE_DIRECTORY : "belongs to (every ancestor)"
+    DIRECTORY ||--o{ DIR_PAIR : "as a or b"
+    REPO      ||--o{ AUTHOR_FILE : scopes
+    AUTHOR    ||--o{ AUTHOR_FILE : "has touched"
+    FILE      ||--o{ AUTHOR_FILE : "was touched by"
+
     FILE_PAIR {
         bigint n_ab "the ONLY count stored"
         float w_ab "recency-weighted"
+        int distinct_authors
+    }
+    FILE_PAIR_METRIC {
+        bigint n_ab "no FK: a pure cache, rebuilt by score"
+        bigint n_a
+        bigint n_b
+        bigint n_total
+        float confidence_ab "29 measures + 2 directional"
+    }
+    DIRECTORY {
+        text path
+        bigint change_count
+        bigint pair_change_count
+    }
+    DIR_PAIR {
+        bigint n_ab
+        float w_ab
+    }
+    DIR_PAIR_METRIC {
+        bigint n_ab "no FK: a pure cache, as above"
+        bigint n_total
+    }
+    AUTHOR_FILE {
+        bigint n_commits
+        timestamptz last_at "feeds ownership risk"
     }
 ```
 
@@ -436,6 +491,97 @@ erDiagram
   number in the UI traces back to four counts and then to actual commits.
 
 ### Cross-repository coupling: the change set
+
+The tables are separate from the within-repo ones, not the same ones widened.
+**Behavioural** — inferred from what moved together:
+
+```mermaid
+erDiagram
+    AUTHOR     ||--o{ CHANGE_SET : "opened, for temporal sets"
+    CHANGE_SET ||--o{ CHANGE_SET_COMMIT : groups
+    COMMIT     ||--o{ CHANGE_SET_COMMIT : "belongs to exactly one"
+    REPO       ||--o{ REPO_PAIR : "as a or b"
+    REPO       ||--o{ REPO_PAIR_METRIC : "as a or b"
+    REPO       ||--o{ XREPO_FILE_PAIR : "as a or b"
+    FILE       ||--o{ XREPO_FILE_PAIR : "as a or b"
+    FILE       ||--o{ XREPO_FILE_PAIR_METRIC : "as a or b"
+    REPO       ||--o{ REPO_LAG_METRIC : "as a or b"
+    REPO       ||--|| REPO_CHANGE_STATS : summarises
+
+    CHANGE_SET {
+        text key
+        text signal "ticket or temporal"
+        int n_repos
+        bool pair_eligible "single-repo sets are KEPT, or cells b and c vanish"
+    }
+    REPO_PAIR {
+        bigint n_ab "co-occurring change sets"
+        bigint n_ab_ticket "the ticket-linked subset"
+        float w_ab "recency-weighted"
+    }
+    XREPO_FILE_PAIR {
+        bigint file_a_id "a file in repo A"
+        bigint file_b_id "a file in repo B"
+        bigint n_ab
+    }
+    REPO_PAIR_METRIC {
+        bigint n_total "N = change sets, not commits"
+        float confidence_ab "the same 29 measures"
+    }
+    XREPO_FILE_PAIR_METRIC {
+        bigint n_ab
+        float confidence_ab
+    }
+    REPO_LAG_METRIC {
+        smallint lag_bins "A leads B by this many bins"
+        smallint bin_hours
+        bigint n_ab "genuinely directional: a-to-b differs from b-to-a"
+    }
+    REPO_CHANGE_STATS {
+        bigint change_set_count
+        bigint ticket_set_count
+    }
+```
+
+**Declared** — parsed from manifests, and where the two streams meet:
+
+```mermaid
+erDiagram
+    REPO   ||--o{ DEP_BUMP : "as consumer or dep"
+    COMMIT ||--o{ DEP_BUMP : "the exact upstream commit consumed"
+    REPO   ||--o{ REPO_DEPENDENCY : "as consumer or dep"
+    REPO   ||--o{ MODULE_DEPENDENCY : declares
+    REPO   ||--o{ REPO_IMPACT : "as source or target"
+
+    DEP_BUMP {
+        text consumer_sha "the commit that raised the version"
+        text dep_version "v3.0.0-20260626221153-5fc63d6f3055"
+        text dep_sha "extracted from the pseudo-version"
+        bigint dep_commit_id "resolved upstream commit: GROUND TRUTH"
+        bigint lag_seconds "observed propagation delay"
+    }
+    REPO_DEPENDENCY {
+        text dep_name "declared at HEAD"
+        text manifest
+        text ecosystem
+    }
+    MODULE_DEPENDENCY {
+        text consumer_module "intra-repo, e.g. gateway"
+        text dep_module "e.g. apis"
+    }
+    REPO_IMPACT {
+        float score
+        bool is_declared "inside the candidate set"
+        bool has_bump_history
+        float median_lag_days
+        jsonb features "so any score can be explained"
+    }
+```
+
+`DEP_BUMP.dep_commit_id` is the one edge in this schema that is **proven rather
+than inferred**: a Go pseudo-version embeds the upstream commit it was cut from,
+so the row states "this commit consumed that commit" as a fact, with a measured
+lag. Everything else here is a correlation.
 
 Two repositories never share a commit, so "changed together" needs a wider unit.
 Every pair-eligible commit lands in exactly one **change set**, which makes them a
@@ -534,6 +680,35 @@ normalised by both marginals) because the frequency-weighted measures are exactl
 what let a busy repository look coupled to everything.
 
 ### The mining layer
+
+```mermaid
+erDiagram
+    REPO ||--o{ FILE_CLUSTER : scopes
+    FILE ||--|| FILE_CLUSTER : "assigned to a de-facto module"
+    REPO ||--o{ PAIR_DRIFT : scopes
+    FILE ||--o{ PAIR_DRIFT : "as a or b"
+    REPO ||--o{ FILE_RISK : scopes
+    FILE ||--|| FILE_RISK : scored
+
+    FILE_CLUSTER {
+        int cluster_id "numbered per repo, so the key is (repo_id, cluster_id)"
+        int cluster_size
+        float cohesion
+        int dirs_spanned "a module that crosses directories"
+    }
+    PAIR_DRIFT {
+        int window_days
+        bigint n_ab_recent
+        bigint n_ab_historic
+        float npmi_recent "emerging vs decaying coupling"
+    }
+    FILE_RISK {
+        float churn_pct
+        float coupling_pct
+        float ownership_hhi "concentration of authorship"
+        int effective_authors
+    }
+```
 
 - **De-facto modules** — label propagation over the file-coupling graph. The
   valuable output is its *disagreement* with the directory tree: 1,389 clusters
@@ -825,6 +1000,43 @@ Two details worth knowing:
 
 Skip it for one commit with `GIT_SYNAPSE_NO_WEEKEND=1 git commit ...`, or turn it
 off entirely with `make hooks-uninstall`. Neither changes existing history.
+
+### Bookkeeping
+
+Four tables the analysis never reads, kept so a run is auditable:
+
+```mermaid
+erDiagram
+    INGEST_RUN ||--o{ INGEST_RUN_REPO : "one row per repository"
+    REPO       ||--o{ INGEST_RUN_REPO : "was processed in"
+
+    INGEST_RUN {
+        text kind
+        text trigger "manual, cron, api"
+        text status
+        float duration_s
+    }
+    INGEST_RUN_REPO {
+        text status
+        bigint commits_added
+        text error "kept per repo, so one failure is not a whole run"
+    }
+    FEEDBACK {
+        text kind "no FK, and read by no measure -- see below"
+        text severity
+        text tool
+        text resolution
+    }
+    META {
+        text key "schema_version and other single values"
+        jsonb value
+    }
+```
+
+**`feedback` is deliberately unreferenced.** Letting sessions write into the
+coupling data would close a confirmation loop — Git Synapse suggests a pair, the
+agent edits both files, the commit strengthens the pair — and the statistic would
+drift from measuring the codebase to measuring its own past advice.
 
 ## Configuration
 
