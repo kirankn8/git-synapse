@@ -2,7 +2,7 @@
 // route, asserting that each view actually renders content.
 import { JSDOM } from 'jsdom';
 
-const BASE = 'http://localhost:8080';
+const BASE = process.env.GIT_SYNAPSE_URL || 'http://localhost:8080';
 const errors = [];
 
 const html = await (await fetch(BASE + '/')).text();
@@ -89,6 +89,7 @@ const csId = (csList.change_sets[0] || {}).id;
 const routes = [
   ['#/',                                  'Overview'],
   ['#/repos',                             'Repositories'],
+  ['#/accounts',                          'Accounts'],
   [`#/repo/${repoId}`,                    'Repo overview'],
   [`#/repo/${repoId}?tab=pairs`,          'Repo pairs'],
   [`#/repo/${repoId}?tab=files`,          'Repo files'],

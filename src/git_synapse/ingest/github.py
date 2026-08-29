@@ -231,14 +231,19 @@ class GitHubClient:
         """Current rate-limit budget, surfaced in the UI's status panel."""
         return self._get("/rate_limit").json()
 
+    def list_account_repos(self, login: str | None = None, kind: str = "org") -> list[RepoRecord]:
+        """List every repository under an org or user that the token can see."""
+        login = login or self.cfg.org
+        path = f"/users/{login}/repos" if kind == "user" else f"/orgs/{login}/repos"
+        log.info("discovering repositories in %s %s", kind, login)
+        payloads = self._paginate(path, {"type": "all", "sort": "pushed"})
+        records = [RepoRecord.from_api(p) for p in payloads]
+        log.info("discovered %d repositories in %s", len(records), login)
+        return records
+
     def list_org_repos(self, org: str | None = None) -> list[RepoRecord]:
         """List every repository in the org that the token can see."""
-        org = org or self.cfg.org
-        log.info("discovering repositories in org %s", org)
-        payloads = self._paginate(f"/orgs/{org}/repos", {"type": "all", "sort": "pushed"})
-        records = [RepoRecord.from_api(p) for p in payloads]
-        log.info("discovered %d repositories in %s", len(records), org)
-        return records
+        return self.list_account_repos(org, kind="org")
 
     def fetch_languages(self, full_name: str) -> dict[str, int]:
         """Byte counts per language for one repo.

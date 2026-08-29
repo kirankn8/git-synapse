@@ -116,6 +116,26 @@ export const toast = (msg, isError = false) => {
 
 /* ---------------------------------------------------------------- api -- */
 
+/** Turn a failed response into an Error carrying the server's `detail`. */
+async function failure(res) {
+  let detail = `${res.status} ${res.statusText}`;
+  try {
+    const body = await res.json();
+    if (Array.isArray(body.detail)) {
+      // FastAPI validation errors arrive as a list of objects; String() on
+      // them renders "[object Object]", which tells the user nothing.
+      detail = body.detail
+        .map((e) => `${(e.loc || []).slice(1).join('.') || 'input'}: ${e.msg || 'invalid'}`)
+        .join('; ');
+    } else if (typeof body.detail === 'string') {
+      detail = body.detail;
+    } else if (body.detail) {
+      detail = JSON.stringify(body.detail);
+    }
+  } catch { /* non-JSON error body; keep the status line */ }
+  return new Error(detail);
+}
+
 /** Fetch JSON from the API, surfacing the server's `detail` on failure. */
 export async function api(path, params) {
   const url = new URL(path, window.location.origin);
@@ -123,25 +143,19 @@ export async function api(path, params) {
     if (v !== null && v !== undefined && v !== '') url.searchParams.set(k, v);
   }
   const res = await fetch(url, { headers: { Accept: 'application/json' } });
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const body = await res.json();
-      if (Array.isArray(body.detail)) {
-        // FastAPI validation errors arrive as a list of objects; String() on
-        // them renders "[object Object]", which tells the user nothing.
-        detail = body.detail
-          .map((e) => `${(e.loc || []).slice(1).join('.') || 'input'}: ${e.msg || 'invalid'}`)
-          .join('; ');
-      } else if (typeof body.detail === 'string') {
-        detail = body.detail;
-      } else if (body.detail) {
-        detail = JSON.stringify(body.detail);
-      }
-    } catch { /* non-JSON error body; keep the status line */ }
-    throw new Error(detail);
-  }
+  if (!res.ok) throw await failure(res);
   return res.json();
+}
+
+/** Send a mutating request. Same error surface as `api`. */
+export async function apiSend(method, path, body) {
+  const res = await fetch(new URL(path, window.location.origin), {
+    method,
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) throw await failure(res);
+  return res.status === 204 ? null : res.json();
 }
 
 /* -------------------------------------------------------------- state -- */
@@ -2362,6 +2376,152 @@ on('/validation', async (_args, params) => {
  * The occurrence count is the priority column, not the severity: a gap twenty
  * sessions hit matters more than one seen once, however it was graded.
  */
+/* ---------------------------------------------------------- accounts -- */
+
+/** A labelled control, stacked so the input gets the full column width. */
+const field = (label, control, hint) =>
+  h('div', { class: 'field-block' },
+    h('label', { class: 'field-label' }, label),
+    control,
+    hint ? h('div', { class: 'field-hint' }, hint) : null);
+
+/** A checkbox with its label, returned with the input exposed for reading. */
+function toggle(label, checked, hint) {
+  const input = h('input', { type: 'checkbox', id: `t-${label.replace(/\W/g, '')}` });
+  input.checked = checked;
+  const node = h('label', { class: 'toggle' }, input,
+    h('span', {}, h('span', { class: 'toggle-label' }, label),
+      hint ? h('span', { class: 'toggle-hint' }, hint) : null));
+  node.input = input;
+  return node;
+}
+
+on('/accounts', async () => {
+  const data = await api('/api/accounts');
+  const rows = data.accounts || [];
+  const wrap = h('div');
+
+  wrap.append(pageHead('Accounts',
+    'The organisations and users whose repositories get discovered and scanned. Changes take effect on the next discovery run — nothing needs redeploying.'));
+
+  const enabled = rows.filter((r) => r.enabled);
+  const discovered = rows.reduce((n, r) => n + Number(r.live_repo_count || 0), 0);
+  wrap.append(h('div', { class: 'grid grid-stats' },
+    statTile('Accounts', num(rows.length), `${num(enabled.length)} enabled`),
+    statTile('Repositories', num(discovered), 'discovered from these accounts', () => go('/repos')),
+    statTile('Never scanned', num(rows.filter((r) => !r.last_discovered_at).length), 'awaiting first discovery'),
+    statTile('Failing', num(rows.filter((r) => r.last_discover_error).length), 'last discovery errored')));
+
+  // ---- add form -----------------------------------------------------------
+  const login = h('input', { class: 'input', placeholder: 'e.g. kubernetes', autocomplete: 'off', spellcheck: 'false' });
+  const kind = h('select', { class: 'input' },
+    ...(data.kinds || ['org', 'user']).map((k) => h('option', { value: k }, k === 'org' ? 'Organisation' : 'User account')));
+  const only = h('input', { class: 'input', placeholder: 'blank = every repository', autocomplete: 'off' });
+  const skip = h('input', { class: 'input', placeholder: 'comma-separated names to ignore', autocomplete: 'off' });
+  const tForks = toggle('Include forks', true);
+  const tArchived = toggle('Include archived', true);
+  const tPrivate = toggle('Include private', true, 'needs a token with repo scope');
+  const submit = h('button', { class: 'btn primary' }, 'Add account');
+
+  const add = async () => {
+    const value = login.value.trim();
+    if (!value) { toast('Enter a login first', true); login.focus(); return; }
+    submit.disabled = true;
+    try {
+      await apiSend('POST', '/api/accounts', {
+        login: value,
+        kind: kind.value,
+        only_repos: only.value.split(',').map((x) => x.trim()).filter(Boolean),
+        skip_repos: skip.value.split(',').map((x) => x.trim()).filter(Boolean),
+        include_forks: tForks.input.checked,
+        include_archived: tArchived.input.checked,
+        include_private: tPrivate.input.checked,
+      });
+      toast(`${value} added — run a discovery to pick up its repositories`);
+      route();
+    } catch (err) {
+      toast(String(err.message || err), true);
+    } finally {
+      submit.disabled = false;
+    }
+  };
+  submit.onclick = add;
+  login.onkeydown = (e) => { if (e.key === 'Enter') add(); };
+
+  wrap.append(card('Add an account',
+    h('div', { class: 'form' },
+      h('div', { class: 'form-row two' },
+        field('Organisation or user', login, 'The login exactly as GitHub spells it.'),
+        field('Kind', kind, 'Organisations list via /orgs, users via /users.')),
+      h('div', { class: 'form-row two' },
+        field('Only these repositories', only, 'An allowlist. When set, it overrides every filter below.'),
+        field('Skip these repositories', skip, 'Applied after the include filters.')),
+      h('div', { class: 'form-row toggles' }, tForks, tArchived, tPrivate),
+      h('div', { class: 'form-actions' }, submit)),
+    'Discovery reads this list, so onboarding is a write rather than a redeploy'));
+
+  // ---- existing accounts --------------------------------------------------
+  const setEnabled = async (row, value) => {
+    try {
+      await apiSend('PATCH', `/api/accounts/${row.id}`, { enabled: value });
+      toast(`${row.login} ${value ? 'enabled' : 'disabled'}`);
+      route();
+    } catch (err) { toast(String(err.message || err), true); }
+  };
+
+  const remove = async (row) => {
+    if (!window.confirm(
+      `Stop scanning ${row.login}?\n\nIts ${num(row.live_repo_count)} repositories and everything mined from them are kept — they simply stop being refreshed.`
+    )) return;
+    try {
+      await apiSend('DELETE', `/api/accounts/${row.id}`);
+      toast(`${row.login} removed`);
+      route();
+    } catch (err) { toast(String(err.message || err), true); }
+  };
+
+  const filterCell = (r) => {
+    if (r.only_repos && r.only_repos.length) {
+      return h('span', { class: 'badge info', title: r.only_repos.join(', ') }, `only ${r.only_repos.length}`);
+    }
+    const off = [
+      !r.include_forks ? 'no forks' : null,
+      !r.include_archived ? 'no archived' : null,
+      !r.include_private ? 'no private' : null,
+      r.skip_repos && r.skip_repos.length ? `skip ${r.skip_repos.length}` : null,
+    ].filter(Boolean);
+    if (!off.length) return h('span', { class: 'muted-cell' }, 'everything');
+    return h('span', {}, ...off.map((t) => h('span', { class: 'badge muted' }, t)));
+  };
+
+  wrap.append(card(`${rows.length} configured`,
+    dataTable(rows, [
+      { key: 'login', label: 'Account', render: (r) => h('span', {},
+          h('strong', {}, r.login),
+          h('span', { class: 'badge muted', style: 'margin-left:6px' }, r.kind)) },
+      { key: 'live_repo_count', label: 'Repos', num: true,
+        title: 'Repositories currently attributed to this account.' },
+      { key: 'filters', label: 'Filters', sortable: false, render: filterCell },
+      { key: 'last_discovered_at', label: 'Last discovery', render: (r) => (
+          r.last_discover_error
+            ? h('span', { class: 'badge danger', title: r.last_discover_error }, 'failed')
+            : when(r.last_discovered_at) || h('span', { class: 'muted-cell' }, 'never')) },
+      { key: 'enabled', label: 'Scanning', render: (r) => h('button', {
+          class: `badge ${r.enabled ? 'ok' : 'muted'} clickable`,
+          onclick: (e) => { e.stopPropagation(); setEnabled(r, !r.enabled); },
+          title: r.enabled ? 'Click to pause scanning' : 'Click to resume scanning',
+        }, r.enabled ? 'on' : 'paused') },
+      { key: 'actions', label: '', sortable: false, render: (r) => h('button', {
+          class: 'btn sm danger-btn',
+          onclick: (e) => { e.stopPropagation(); remove(r); },
+        }, 'Remove') },
+    ], { initialSort: 'live_repo_count',
+         empty: 'No accounts yet. Add one above and run a discovery.' }),
+    'Removing an account keeps its repositories and their mined statistics'));
+
+  return wrap;
+});
+
 on('/feedback', async (_args, params) => {
   const status = params.status || 'open';
   const data = await api('/api/feedback', { status, limit: 300 });

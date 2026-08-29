@@ -32,7 +32,7 @@ from git_synapse.analysis.aggregate import rebuild_repo
 from git_synapse.analysis.score import score_repo
 from git_synapse.config import get_config
 from git_synapse.db.engine import connection, copy_rows
-from git_synapse.ingest import gitops
+from git_synapse.ingest import accounts, gitops
 from git_synapse.ingest.github import GitHubClient, RepoRecord, select_repos
 from git_synapse.ingest.parser import iter_commits
 from git_synapse.ingest.store import load_commits, upsert_repo
@@ -286,26 +286,49 @@ def verify_credentials() -> str:
 
 
 def discover(trigger: str = "manual") -> list[RepoRecord]:
-    """Fetch the org's repository list from GitHub and upsert every record.
+    """List every configured account's repositories and upsert every record.
 
     Returns the filtered set that ingestion should operate on.
     """
-    cfg = get_config().github
-    with GitHubClient(cfg) as client:
-        records = client.list_org_repos()
-    selected = select_repos(records, cfg)
-
-    # A discovery that collapses is a symptom, not a fact about the org. An
-    # unauthenticated request returns only public repositories -- 59 of 272 here
-    # -- with HTTP 200 and no error, and the run then quietly refreshes a
-    # fraction of the corpus. Refuse rather than narrow.
-    with connection() as conn:
-        known = int(
-            conn.execute(
-                "SELECT count(*) FROM repo WHERE is_enabled"
-            ).fetchone()[0]
+    accounts.seed_from_env()
+    configured = accounts.list_accounts(enabled_only=True)
+    if not configured:
+        raise AuthError(
+            "no accounts are configured. Add an organisation or user to scan "
+            "on the Accounts page, or with `git-synapse account add <login>`."
         )
-    if known and len(selected) < known * DISCOVERY_SHRINK_FLOOR:
+
+    selected: list[RepoRecord] = []
+    owners: dict[str, int] = {}
+    failures: list[str] = []
+    for account in configured:
+        try:
+            found = _discover_account(account)
+        except AuthError:
+            # A bad credential is not this account's fault and retrying the
+            # rest would repeat the same failure against every one of them.
+            raise
+        except Exception as exc:  # noqa: BLE001 - one bad account must not stop the rest
+            log.warning("discovery failed for %s: %s", account["login"], exc)
+            accounts.record_discovery(account["id"], 0, str(exc))
+            failures.append(f"{account['login']}: {exc}")
+            continue
+        accounts.record_discovery(account["id"], len(found))
+        for record in found:
+            owners[record.full_name] = account["id"]
+        selected.extend(found)
+
+    if not selected and failures:
+        raise AuthError("every configured account failed discovery: " + "; ".join(failures))
+
+    # A discovery that collapses is a symptom, not a fact about the accounts. An
+    # unauthenticated request returns only public repositories -- with HTTP 200
+    # and no error -- and the run then quietly refreshes a fraction of the
+    # corpus. Refuse rather than narrow. Skipped when an account errored, since
+    # then the shrinkage is explained and already reported.
+    with connection() as conn:
+        known = int(conn.execute("SELECT count(*) FROM repo WHERE is_enabled").fetchone()[0])
+    if not failures and known and len(selected) < known * DISCOVERY_SHRINK_FLOOR:
         raise AuthError(
             f"discovery returned {len(selected)} repositories but {known} are "
             "already known. That is the shape of an unauthenticated or partial "
@@ -315,9 +338,17 @@ def discover(trigger: str = "manual") -> list[RepoRecord]:
 
     with connection() as conn:
         for record in selected:
-            upsert_repo(record, conn)
-    log.info("discovery upserted %d repositories", len(selected))
+            upsert_repo(record, conn, account_id=owners.get(record.full_name))
+    log.info("discovery upserted %d repositories from %d accounts", len(selected), len(configured))
     return selected
+
+
+def _discover_account(account: dict) -> list[RepoRecord]:
+    """List and filter one account's repositories using its own settings."""
+    cfg = accounts.config_for(account)
+    with GitHubClient(cfg) as client:
+        records = client.list_account_repos(account["login"], account["kind"])
+    return select_repos(records, cfg)
 
 
 #: Attempts for a repository whose transaction lost a deadlock or serialization

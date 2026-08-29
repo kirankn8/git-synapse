@@ -112,7 +112,11 @@ class GitHubConfig:
             if value and _looks_like_token(value):
                 return value
         return self.token
-    org: str = field(default_factory=lambda: _env_str("GITHUB_ORG", "acme"))
+    #: Legacy single-org setting, seeded into the `account` table on first boot
+    #: and ignored thereafter. Empty by default: there is no sensible org to
+    #: guess, and a non-empty default cannot be switched off from the
+    #: environment because a blank value falls back to it.
+    org: str = field(default_factory=lambda: _env_str("GITHUB_ORG", ""))
     api_url: str = field(default_factory=lambda: _env_str("GITHUB_API_URL", "https://api.github.com"))
     #: Include repositories the token can see but that are private.
     include_private: bool = field(default_factory=lambda: _env_bool("INCLUDE_PRIVATE", True))
@@ -163,8 +167,8 @@ class IngestConfig:
     #: a blobless repo still produces complete and correct coupling statistics
     #: -- it just loses churn as an extra attribute.
     #:
-    #: Default 2 GiB, which in the acme org fully clones 269 of 270
-    #: repositories and spares only the 9.8 GB documentation monorepo.
+    #: Default 2 GiB, which on a 270-repository org fully clones all but the
+    #: largest documentation monorepo.
     blobless_threshold_kb: int = field(
         default_factory=lambda: _env_int("BLOBLESS_THRESHOLD_KB", 2 * 1024 * 1024)
     )

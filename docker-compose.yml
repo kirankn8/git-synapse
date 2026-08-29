@@ -21,7 +21,7 @@ x-app-env: &app-env
   # which the host keeps current and the code reads on every use.
   GITHUB_TOKEN: ${GITHUB_TOKEN:-${GH_TOKEN:-}}
   GITHUB_TOKEN_FILE: /run/git-synapse/github-token
-  GITHUB_ORG: ${GITHUB_ORG:-acme}
+  GITHUB_ORG: ${GITHUB_ORG:-}
   INCLUDE_PRIVATE: ${INCLUDE_PRIVATE:-true}
   INCLUDE_FORKS: ${INCLUDE_FORKS:-true}
   INCLUDE_ARCHIVED: ${INCLUDE_ARCHIVED:-true}

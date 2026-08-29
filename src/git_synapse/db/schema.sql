@@ -20,6 +20,41 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;   -- fast ILIKE path search
 CREATE EXTENSION IF NOT EXISTS btree_gin;
 
 -- ===========================================================================
+-- Accounts: the orgs and users whose repositories get discovered.
+-- ===========================================================================
+
+-- Discovery reads this table, so onboarding an account is a write rather than
+-- a redeploy. The filters live per account because the reason to skip forks in
+-- one org rarely applies to the next; the environment variables that used to
+-- carry them are seeded here once and then ignored.
+CREATE TABLE IF NOT EXISTS account (
+    id                  BIGSERIAL PRIMARY KEY,
+    -- The login exactly as GitHub spells it; lookups are case-insensitive.
+    login               TEXT        NOT NULL,
+    -- 'org' lists via /orgs/{login}/repos, 'user' via /users/{login}/repos.
+    kind                TEXT        NOT NULL DEFAULT 'org'
+                        CHECK (kind IN ('org', 'user')),
+    -- Set for GitHub Enterprise; NULL means the public API.
+    api_url             TEXT,
+    enabled             BOOLEAN     NOT NULL DEFAULT TRUE,
+    include_private     BOOLEAN     NOT NULL DEFAULT TRUE,
+    include_forks       BOOLEAN     NOT NULL DEFAULT TRUE,
+    include_archived    BOOLEAN     NOT NULL DEFAULT TRUE,
+    -- Allowlist. When non-empty it overrides every other filter for this account.
+    only_repos          TEXT[]      NOT NULL DEFAULT '{}',
+    skip_repos          TEXT[]      NOT NULL DEFAULT '{}',
+    last_discovered_at  TIMESTAMPTZ,
+    last_discover_error TEXT,
+    repo_count          BIGINT      NOT NULL DEFAULT 0,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Case-insensitive: GitHub treats logins that way, and two rows differing only
+-- in case would discover the same repositories twice.
+CREATE UNIQUE INDEX IF NOT EXISTS account_login_idx ON account (lower(login));
+
+-- ===========================================================================
 -- Repositories: the full GitHub record, plus ingest bookkeeping.
 -- ===========================================================================
 
@@ -751,7 +786,7 @@ ALTER TABLE file ADD COLUMN IF NOT EXISTS xrepo_change_count BIGINT NOT NULL DEF
 -- are different rows, and there is no a < b constraint. The lag is what makes
 -- direction meaningful -- "A changed, and B changed `lag_bins` later".
 --
--- See git_synapse/analysis/lagged.py for the construction. In short: time is binned,
+-- See git-synapse/analysis/lagged.py for the construction. In short: time is binned,
 -- each repo becomes a binary vector over bins, and the 2x2 table is formed
 -- between A's vector and B's vector shifted by `lag_bins`. All 29 measures then
 -- apply unchanged, but become directional.
@@ -812,7 +847,7 @@ CREATE INDEX IF NOT EXISTS rlm_lag_idx     ON repo_lag_metric (lag_bins);
 -- A Go pseudo-version embeds the upstream commit it was cut from:
 --     v3.0.0-20260626221153-5fc63d6f3055
 --                           ^^^^^^^^^^^^ upstream commit
--- so a go.mod diff raising github.com/acme/signer/v3 to that version is
+-- so a go.mod diff raising github.com/acme/signing/v3 to that version is
 -- a dated, DIRECTIONAL, provable statement: "this commit consumed that signer
 -- commit". These rows are ground truth, not inference, and exist to validate
 -- the statistical measures rather than to replace them.
@@ -1094,6 +1129,13 @@ ALTER TABLE repo ADD COLUMN IF NOT EXISTS last_declared_sha TEXT;
 -- while the run reported success. This lags until aggregation actually lands.
 ALTER TABLE repo ADD COLUMN IF NOT EXISTS last_aggregate_sha TEXT;
 
+-- Which account discovered this repository. Nullable because rows ingested
+-- before accounts existed have no owner to attribute, and ON DELETE SET NULL
+-- so removing an account never deletes the history mined from it.
+ALTER TABLE repo ADD COLUMN IF NOT EXISTS account_id BIGINT
+    REFERENCES account (id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS repo_account_idx ON repo (account_id);
+
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -1129,5 +1171,5 @@ CREATE TABLE IF NOT EXISTS meta (
 -- was not, so schema_is_current() was permanently false and every service boot
 -- re-ran the whole DDL, taking exactly the locks the fast path exists to avoid.
 INSERT INTO meta (key, value)
-VALUES ('schema_version', '14'::jsonb)
+VALUES ('schema_version', '15'::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();

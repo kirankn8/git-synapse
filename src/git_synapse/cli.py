@@ -19,7 +19,7 @@ from git_synapse.analysis.aggregate import rebuild_repo, repos_needing_aggregati
 from git_synapse.analysis.score import score_repo
 from git_synapse.config import get_config
 from git_synapse.db.engine import apply_schema, connection, query, wait_for_database
-from git_synapse.ingest import pipeline
+from git_synapse.ingest import accounts, pipeline
 from git_synapse.stats.registry import DEFAULT_MEASURE, families
 
 app = typer.Typer(
@@ -555,6 +555,98 @@ def reset(
             "TRUNCATE repo, author, ingest_run RESTART IDENTITY CASCADE"
         )
     console.print("[green]all ingested data removed[/green]")
+
+
+account_app = typer.Typer(name="account", help="Manage the orgs and users that get scanned.", no_args_is_help=True)
+app.add_typer(account_app)
+
+
+def _account_rows(rows: list[dict]) -> Table:
+    """Render accounts as a table, shared by add/list/remove."""
+    table = Table(box=None)
+    for col in ("id", "login", "kind", "enabled", "repos", "filters", "last discovered"):
+        table.add_column(col)
+    for r in rows:
+        filters = ", ".join(
+            name for name, on in (
+                ("no forks", not r["include_forks"]),
+                ("no archived", not r["include_archived"]),
+                ("no private", not r["include_private"]),
+            ) if on
+        )
+        if r["only_repos"]:
+            filters = f"only {len(r['only_repos'])}"
+        table.add_row(
+            str(r["id"]), r["login"], r["kind"],
+            "yes" if r["enabled"] else "no",
+            str(r.get("live_repo_count", r["repo_count"])),
+            filters or "-",
+            r["last_discovered_at"].strftime("%Y-%m-%d %H:%M") if r["last_discovered_at"] else "never",
+        )
+    return table
+
+
+@account_app.command("add")
+def account_add(
+    login: str = typer.Argument(..., help="GitHub org or user login."),
+    kind: str = typer.Option("org", "--kind", help="org or user."),
+    no_forks: bool = typer.Option(False, "--no-forks", help="Skip forked repositories."),
+    no_archived: bool = typer.Option(False, "--no-archived", help="Skip archived repositories."),
+    no_private: bool = typer.Option(False, "--no-private", help="Skip private repositories."),
+    only: str = typer.Option("", "--only", help="Comma-separated allowlist of repo names."),
+    skip: str = typer.Option("", "--skip", help="Comma-separated denylist of repo names."),
+) -> None:
+    """Add an organisation or user to scan."""
+    _setup()
+    try:
+        row = accounts.add_account(
+            login, kind=kind,
+            include_forks=not no_forks,
+            include_archived=not no_archived,
+            include_private=not no_private,
+            only_repos=only, skip_repos=skip,
+        )
+    except accounts.AccountError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(_account_rows([row]))
+    console.print("[green]added[/green] — run `git-synapse discover` to pick up its repositories")
+
+
+@account_app.command("list")
+def account_list() -> None:
+    """List every configured account."""
+    _setup()
+    rows = accounts.list_accounts()
+    if not rows:
+        console.print("[yellow]no accounts configured[/yellow] — add one with `git-synapse account add <login>`")
+        return
+    console.print(_account_rows(rows))
+
+
+@account_app.command("remove")
+def account_remove(account_id: int = typer.Argument(..., help="Account id, from `account list`.")) -> None:
+    """Stop scanning an account. Its repositories and statistics are kept."""
+    _setup()
+    if not accounts.remove_account(account_id):
+        console.print(f"[red]account {account_id} not found[/red]")
+        raise typer.Exit(1)
+    console.print("[green]removed[/green] — its repositories stay, but stop being refreshed")
+
+
+@account_app.command("enable")
+def account_enable(
+    account_id: int = typer.Argument(..., help="Account id, from `account list`."),
+    off: bool = typer.Option(False, "--off", help="Disable instead of enabling."),
+) -> None:
+    """Enable or disable an account without deleting it."""
+    _setup()
+    try:
+        row = accounts.update_account(account_id, enabled=not off)
+    except accounts.AccountError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(_account_rows([row]))
 
 
 if __name__ == "__main__":

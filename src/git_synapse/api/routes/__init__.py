@@ -6,12 +6,14 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from git_synapse.analysis import mining, predict
 from git_synapse.analysis import query as q
 from git_synapse.config import get_config
 from git_synapse.db.engine import query_one, scalar
-from git_synapse.ingest import pipeline
+from git_synapse.ingest import accounts, pipeline
+from git_synapse.ingest.accounts import AccountError
 from git_synapse.stats.registry import DEFAULT_MEASURE
 
 log = logging.getLogger(__name__)
@@ -56,7 +58,9 @@ def config() -> dict:
     """Effective tuning parameters, so the UI can explain what it is showing."""
     cfg = get_config()
     return {
-        "org": cfg.github.org,
+        # Accounts are configured in the database; this is only the seed value
+        # a fresh deployment adopts on its first discovery.
+        "default_org": cfg.github.org,
         "max_files_per_commit": cfg.ingest.max_files_per_commit,
         "min_pair_support": cfg.ingest.min_pair_support,
         "include_merges": cfg.ingest.include_merges,
@@ -75,6 +79,82 @@ def config() -> dict:
         "scheduler_timezone": cfg.schedule.timezone,
         "scheduler_enabled": cfg.schedule.enabled,
     }
+
+
+# ---------------------------------------------------------------------------
+# Accounts: the orgs and users whose repositories get scanned
+# ---------------------------------------------------------------------------
+
+
+class AccountIn(BaseModel):
+    """A new account to scan. Only the login is required."""
+
+    login: str = Field(min_length=1, max_length=39)
+    kind: str = "org"
+    api_url: str | None = None
+    enabled: bool = True
+    include_private: bool = True
+    include_forks: bool = True
+    include_archived: bool = True
+    only_repos: list[str] = Field(default_factory=list)
+    skip_repos: list[str] = Field(default_factory=list)
+
+
+class AccountPatch(BaseModel):
+    """Partial update. Unset fields are left as they are."""
+
+    login: str | None = None
+    kind: str | None = None
+    api_url: str | None = None
+    enabled: bool | None = None
+    include_private: bool | None = None
+    include_forks: bool | None = None
+    include_archived: bool | None = None
+    only_repos: list[str] | None = None
+    skip_repos: list[str] | None = None
+
+
+@router.get("/accounts", tags=["accounts"])
+def list_accounts(enabled_only: bool = False) -> dict:
+    """Every configured account, with how many repositories it has produced."""
+    rows = accounts.list_accounts(enabled_only)
+    return {"count": len(rows), "kinds": list(accounts.KINDS), "accounts": rows}
+
+
+@router.post("/accounts", tags=["accounts"], status_code=201)
+def create_account(body: AccountIn) -> dict:
+    """Add an organisation or user. Discovery picks it up on the next run."""
+    try:
+        return accounts.add_account(**body.model_dump())
+    except AccountError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.get("/accounts/{account_id}", tags=["accounts"])
+def get_account(account_id: int) -> dict:
+    row = accounts.get_account(account_id)
+    if row is None:
+        raise HTTPException(404, f"account {account_id} not found")
+    return row
+
+
+@router.patch("/accounts/{account_id}", tags=["accounts"])
+def patch_account(account_id: int, body: AccountPatch) -> dict:
+    """Update an account's login or filters."""
+    if accounts.get_account(account_id) is None:
+        raise HTTPException(404, f"account {account_id} not found")
+    try:
+        return accounts.update_account(account_id, **body.model_dump(exclude_unset=True))
+    except AccountError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.delete("/accounts/{account_id}", tags=["accounts"])
+def delete_account(account_id: int) -> dict:
+    """Stop scanning an account. Its repositories and statistics are kept."""
+    if not accounts.remove_account(account_id):
+        raise HTTPException(404, f"account {account_id} not found")
+    return {"deleted": account_id}
 
 
 # ---------------------------------------------------------------------------

@@ -156,6 +156,22 @@ def test_spa_routes_serve_the_shell_so_a_deep_link_survives_refresh(client):
         assert "<" in r.text
 
 
+def test_every_navigable_route_serves_the_shell(client):
+    """Derived from the nav rather than listed, so adding a view to the header
+    without registering its route fails here instead of 404ing for users."""
+    import re
+    from pathlib import Path
+
+    shell = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text()
+    nav = re.search(r'<nav class="mainnav".*?</nav>', shell, re.S)
+    assert nav, "the shell no longer has a main nav to derive routes from"
+
+    hrefs = [h for h in re.findall(r'href="(/[^"]*)"', nav.group(0)) if h != "/"]
+    assert len(hrefs) > 5, "suspiciously few nav links; the regex probably broke"
+    for href in hrefs:
+        assert client.get(href).status_code == 200, f"nav links to {href}, which 404s"
+
+
 def test_a_genuine_typo_still_404s(client):
     assert client.get("/definitely-not-a-route").status_code == 404
 
@@ -512,3 +528,95 @@ def test_a_report_can_be_resolved_and_says_so(client, db):
                     params={"status": "wontfix", "resolution": "fixture"})
     assert r.status_code == 200
     assert r.json() == {"id": created["id"], "status": "wontfix"}
+
+
+# ---------------------------------------------------------------- accounts
+
+@pytest.fixture()
+def no_accounts(client):
+    """An empty account table, restored to empty after the test."""
+    from git_synapse.db.engine import execute
+
+    execute("DELETE FROM account")
+    yield client
+    execute("DELETE FROM account")
+
+
+def test_accounts_listing_is_empty_not_an_error_before_onboarding(no_accounts):
+    body = no_accounts.get("/api/accounts").json()
+    assert body["count"] == 0 and body["accounts"] == []
+    assert "org" in body["kinds"], "the UI builds its kind picker from this"
+
+
+def test_an_account_can_be_created_and_read_back(no_accounts):
+    made = no_accounts.post("/api/accounts", json={"login": "kubernetes"})
+    assert made.status_code == 201
+    account_id = made.json()["id"]
+    assert no_accounts.get(f"/api/accounts/{account_id}").json()["login"] == "kubernetes"
+
+
+def test_creating_a_duplicate_is_refused_with_a_reason(no_accounts):
+    no_accounts.post("/api/accounts", json={"login": "kubernetes"})
+    clash = no_accounts.post("/api/accounts", json={"login": "kubernetes"})
+    assert clash.status_code == 409
+    assert "already configured" in clash.json()["detail"]
+
+
+def test_an_invalid_login_is_refused_rather_than_stored(no_accounts):
+    bad = no_accounts.post("/api/accounts", json={"login": "not a login"})
+    assert bad.status_code == 409
+    assert no_accounts.get("/api/accounts").json()["count"] == 0
+
+
+def test_a_missing_login_is_a_validation_error(no_accounts):
+    assert no_accounts.post("/api/accounts", json={}).status_code == 422
+
+
+def test_patching_leaves_unpassed_fields_alone(no_accounts):
+    made = no_accounts.post("/api/accounts", json={"login": "kubernetes"}).json()
+    patched = no_accounts.patch(f"/api/accounts/{made['id']}", json={"enabled": False}).json()
+    assert patched["enabled"] is False
+    assert patched["include_forks"] is True
+
+
+def test_patching_a_missing_account_is_404(no_accounts):
+    assert no_accounts.patch("/api/accounts/999999", json={"enabled": False}).status_code == 404
+
+
+def test_deleting_an_account_removes_it(no_accounts):
+    made = no_accounts.post("/api/accounts", json={"login": "kubernetes"}).json()
+    assert no_accounts.delete(f"/api/accounts/{made['id']}").status_code == 200
+    assert no_accounts.get(f"/api/accounts/{made['id']}").status_code == 404
+
+
+def test_deleting_a_missing_account_is_404(no_accounts):
+    assert no_accounts.delete("/api/accounts/999999").status_code == 404
+
+
+def test_a_deleted_account_keeps_its_repositories(no_accounts):
+    """The mined statistics are the expensive part; they must survive."""
+    from git_synapse.db.engine import connection, query_one
+    from git_synapse.ingest.github import RepoRecord
+    from git_synapse.ingest.store import upsert_repo
+
+    from git_synapse.db.engine import execute
+
+    made = no_accounts.post("/api/accounts", json={"login": "keepme"}).json()
+    record = RepoRecord.from_api({
+        "id": 424242, "name": "kept", "full_name": "keepme/kept",
+        "owner": {"login": "keepme"},
+    })
+    with connection() as conn:
+        repo_id = upsert_repo(record, conn, account_id=made["id"])
+
+    try:
+        no_accounts.delete(f"/api/accounts/{made['id']}")
+        still = query_one("SELECT account_id FROM repo WHERE id = %s", (repo_id,))
+        assert still is not None, "deleting an account must not delete its repositories"
+        assert still["account_id"] is None, "the link clears rather than cascading"
+    finally:
+        # This fixture runs against the shared corpus database, so a synthetic
+        # repository left behind is picked up by every later test that reads
+        # `repo` -- one of which dereferences clone_url and fails on the None
+        # this record has.
+        execute("DELETE FROM repo WHERE id = %s", (repo_id,))

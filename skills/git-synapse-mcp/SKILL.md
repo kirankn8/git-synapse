@@ -1,6 +1,6 @@
 ---
 name: git-synapse-mcp
-description: Use the Git Synapse MCP server to find what else has to change. Before editing a file, before fixing a bug, or when asked "what else does this affect" - Git Synapse computes change coupling from 298k commits across 272 acme repositories and answers both "which other files in this repo move with it" and "which other repository does this change really belong in". Also covers when NOT to act on a result, which is most of the value.
+description: Use the Git Synapse MCP server to find what else has to change. Before editing a file, before fixing a bug, or when asked "what else does this affect" - Git Synapse computes change coupling from the commit history of every repository in your configured organisations and answers both "which other files in this repo move with it" and "which other repository does this change really belong in". Also covers when NOT to act on a result, which is most of the value.
 ---
 
 # Git Synapse MCP: what else has to change
@@ -158,8 +158,8 @@ appeared in a list.
   migration. `http://git-synapse/insights?tab=drift` separates `emerging` from
   `decaying`; do not act on `decaying`.
 - **Absence of a result is not absence of coupling.** Coverage is the
-  `acme` organisation only, and declared-dependency evidence exists for
-  Go repositories.
+  the organisations configured on the Accounts page only, and
+  declared-dependency evidence exists for Go repositories.
 - **A deleted or decaying partner.** `currency` says so; do not spend a step
   confirming a file exists that the tool already told you does not.
 
