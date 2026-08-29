@@ -11,6 +11,7 @@
 ![Docker](https://img.shields.io/badge/Docker-compose-2496ED?style=flat-square&logo=docker&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-12%20tools-5eead4?style=flat-square)
 ![Measures](https://img.shields.io/badge/measures-29-a78bfa?style=flat-square)
+![Backtested](https://img.shields.io/badge/backtested-3.4x%20baseline-14b8a6?style=flat-square)
 
 </div>
 
@@ -84,8 +85,11 @@ fager                  ->   0.923  (n_ab=177)  go.sum <-> go.mod
 
 The first three show textbook **rare-item bias**: a pair seen twice, always
 together, maxes out any unpenalised measure. Log-likelihood and Fager — which
-weight evidence — find the real answer. The UI labels every biased measure, and
-`/validation` reports which ones actually predict reality.
+weight evidence — find the real answer. The UI labels every biased measure.
+
+Which of them actually predicts is not a matter of opinion here: the
+[backtest](#does-it-actually-help) measures it against history, and `P(B|A)`
+won every repository tested, which is why it is the default.
 
 ## Does it actually help?
 
@@ -123,18 +127,48 @@ The arrow only ever points forwards: commit *k* is scored before it is learned
 from, so no pair can vouch for itself.
 
 ```
+              backtest: 70,835 prompts over 17,332 commits (top-5)
  measure            hit rate       95% CI   lift  recall    MRR
- Most-changed          43.4%  35.5%-51.5%      -   0.146      -
+ Most-changed          14.8%  14.6%-15.1%      -   0.036      -
  files (baseline)
- confidence_ab         32.2%  25.1%-40.2%  0.74x   0.118  0.253
- jaccard               31.5%  24.4%-39.5%  0.73x   0.101  0.243
- npmi                  30.1%  23.2%-38.0%  0.69x   0.088  0.247
- association_stre…     28.7%  21.9%-36.6%  0.66x   0.082  0.200  rare-item bias
+ confidence_ab         49.8%  49.4%-50.2%  3.36x   0.234  0.379
+ log_likelihood_r…     48.6%  48.2%-49.0%  3.28x   0.233  0.372
+ jaccard               45.7%  45.4%-46.1%  3.08x   0.216  0.338
+ npmi                  40.0%  39.6%-40.3%  2.70x   0.190  0.293
+ association_stre…     30.9%  30.5%-31.2%  2.08x   0.144  0.195  rare-item bias
 ```
 
-**Read that carefully: on a small repository every measure loses to the
-baseline.** That is the tool being honest rather than flattering, and it is why
-three things are always reported next to the hit rate:
+### Measured result
+
+Backtested over **94,872 commits in six public repositories** — 168,620 prompts,
+every one scored only against earlier history:
+
+| Repository | Commits | Prompts | Baseline | `P(B\|A)` | Lift |
+|---|---:|---:|---:|---:|---:|
+| django | 33,992 | 70,835 | 14.8% | **49.8%** | **3.36x** |
+| scikit-learn | 30,873 | 52,475 | 14.2% | **55.1%** | **3.88x** |
+| pytest | 13,071 | 26,966 | 34.7% | **53.4%** | **1.54x** |
+| fastapi | 7,594 | 8,380 | 28.3% | **41.2%** | **1.45x** |
+| flask | 3,821 | 6,115 | 48.6% | **60.5%** | **1.24x** |
+| requests | 4,856 | 3,849 | 40.8% | **64.6%** | **1.58x** |
+
+**On django, naming five files gets at least one right half the time, against
+15% for guessing the busiest files.** Confidence intervals do not overlap in any
+repository, so these are differences the sample supports.
+
+Two things the benchmark settled that opinion had not:
+
+- **`P(B|A)` wins every repository**, which is why it is the default. It is the
+  quantity the question actually asks for — *given A changed, how often did B?*
+  The symmetric measures answer "is this association surprising", a better
+  question for discovery and a worse one for prediction. `npmi` was the previous
+  default and places fourth to ninth, losing outright on flask (0.84x).
+- **Lift grows with codebase size and modularity.** The smallest repository
+  (flask, 3.8k commits) gains least, and on a *tiny* repository every measure
+  loses to the baseline — where two files always move together, guessing wins.
+
+Three things are reported next to the hit rate, because recall alone is a vanity
+metric:
 
 | | Why it is there |
 |---|---|

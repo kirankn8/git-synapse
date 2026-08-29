@@ -627,7 +627,16 @@ CORE_KEYS: tuple[str, ...] = tuple(
 ALL_KEYS: tuple[str, ...] = tuple(spec.key for spec in MEASURES)
 
 #: Sensible default when a caller does not name a measure.
-DEFAULT_MEASURE = "npmi"
+#: Chosen by measurement, not taste. Backtested over 94,872 commits in six
+#: public repositories (168,620 prompts), P(B|A) ranked first in every one, at
+#: 1.24x-3.88x the popularity baseline; npmi, the previous default, came fourth
+#: to ninth and lost outright on flask (0.84x). See `git-synapse backtest`.
+#:
+#: The result is principled rather than lucky: "what else must change" asks for
+#: the probability B changes given A did, which is exactly what this computes.
+#: The symmetric measures answer "is this association surprising?" -- a better
+#: question for discovery, a worse one for prediction.
+DEFAULT_MEASURE = "confidence_ab"
 
 
 def resolve(key: str) -> MeasureSpec:
