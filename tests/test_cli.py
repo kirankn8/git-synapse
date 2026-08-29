@@ -716,3 +716,18 @@ def test_score_recomputes_one_repo_or_every_repo(monkeypatch):
     assert r.exit_code == 0
     assert seen == [11, 2, 3]
     assert "s/a: 3 pairs" in r.stdout
+
+
+def test_xcoupled_renders_its_table_including_the_ticket_backed_share(db,
+                                                                     monkeypatch):
+    """The None guards on score and confidence are the point: a pair with no
+    value for the chosen measure must print 0, not crash the command."""
+    monkeypatch.setattr("git_synapse.cli.q.repo_partners", lambda *a, **k: [
+        {"score": 0.62, "confidence_out": 0.5, "confidence_in": 0.3, "n_ab": 40,
+         "n_ab_ticket": 12, "ticket_ratio": 0.3, "name": "acme/console"},
+        {"score": None, "confidence_out": None, "confidence_in": None, "n_ab": 4,
+         "n_ab_ticket": 0, "ticket_ratio": None, "name": "acme/runtime"},
+    ])
+    r = runner.invoke(app, ["xcoupled", _any_repo_name()])
+    assert r.exit_code == 0, r.stdout
+    assert "console" in r.stdout and "runtime" in r.stdout
