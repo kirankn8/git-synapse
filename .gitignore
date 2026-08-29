@@ -22,3 +22,6 @@ tests/ui/package-lock.json
 .coverage
 coverage.xml
 htmlcov/
+
+# Local coding-standard doc, never published
+/config/CLAUDE.md
