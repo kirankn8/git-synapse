@@ -299,6 +299,59 @@ def impact_cmd(
     console.print(t)
 
 
+@app.command("backtest")
+def backtest_cmd(
+    repo: str = typer.Option("", "--repo", "-r", help="Restrict to one repository."),
+    measure: str = typer.Option("", "--measure", "-m", help="Comma-separated; default is the recommended set."),
+    k: int = typer.Option(5, "--top", "-k", help="How many suggestions the product may offer."),
+    min_support: int = typer.Option(2, "--min-support", help="Ignore pairs seen fewer times than this."),
+    limit: int = typer.Option(0, "--limit", help="Stop after this many commits."),
+) -> None:
+    """Replay history and measure whether the suggestions would have helped."""
+    _setup()
+    from git_synapse.analysis import backtest as bt
+    from git_synapse.stats.registry import MEASURES
+
+    repo_id = None
+    if repo:
+        row = query("SELECT id FROM repo WHERE full_name = %s OR name = %s", (repo, repo))
+        if not row:
+            console.print(f"[red]no repository {repo!r}[/red]")
+            raise typer.Exit(1)
+        repo_id = row[0]["id"]
+
+    keys = tuple(m.strip() for m in measure.split(",") if m.strip()) or \
+        tuple(m.key for m in MEASURES if m.recommended)
+    result = bt.run(repo_id, keys, k=k, min_support=min_support, limit=limit or None)
+
+    if not result.prompts:
+        console.print("[yellow]not enough history to replay; ingest more commits first[/yellow]")
+        return
+
+    t = Table(title=f"backtest: {result.prompts:,} prompts over {result.commits_scored:,} commits (top-{k})",
+              box=None, title_style="bold")
+    for c in ("measure", "hit rate", "95% CI", "lift", "recall", "MRR", ""):
+        t.add_column(c, justify="right" if c != "measure" else "left")
+    for s in [result.baseline] + result.scores:
+        base = s.measure == "popularity"
+        t.add_row(
+            s.label if base else s.measure,
+            f"{s.hit_rate:.1%}",
+            f"{s.ci_low:.1%}-{s.ci_high:.1%}",
+            "-" if base else f"{s.lift:.2f}x",
+            f"{s.recall_at_k:.3f}",
+            "-" if base else f"{s.mrr:.3f}",
+            "rare-item bias" if s.rare_item_bias else "",
+            style="dim" if base else None,
+        )
+    console.print(t)
+    console.print(f"[bold]{result.verdict}[/bold]")
+    if not result.conclusive:
+        console.print("[dim]hit rate = share of prompts where a correct file appeared "
+                      "in the top k. Intervals assume independent prompts; those from "
+                      "one commit are not, so the true interval is wider.[/dim]")
+
+
 @app.command("validate")
 def validate_cmd(
     lag: int = typer.Option(1, "--lag"),
