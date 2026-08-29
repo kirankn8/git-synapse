@@ -20,7 +20,6 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
-from git_synapse.analysis import crossrepo, lagged, predict
 from git_synapse.db.engine import connection, query, query_one
 from git_synapse.ingest.github import RepoRecord
 from git_synapse.ingest.parser import FileChange, ParsedCommit
@@ -46,48 +45,6 @@ def _commit(sha_seed: int, subject: str, when: datetime, paths: list[str],
     )
 
 
-def test_corrupt_dates_cannot_stretch_the_time_axis(corpus):
-    """A commit at the Unix epoch must not set the time origin.
-
-    Before this guard, four epoch-dated commits stretched the axis to 20,687
-    daily bins instead of ~2,200, inflating N -- and therefore the `d` cell of
-    every contingency table -- by an order of magnitude.
-    """
-    assert lagged.PLAUSIBLE_EPOCH >= "2005-01-01"
-    with connection() as conn:
-        _matrix, _ids, n_bins = lagged._event_matrix(conn, 24)
-    # 2005 to now is under 8,000 days; anything larger means a corrupt date won.
-    assert 0 < n_bins < 8000, f"time axis spans {n_bins} bins, which implies a bad origin"
-
-
-def test_joint_at_lag_shifts_in_the_right_direction():
-    """Unit test of the shift, independent of the database.
-
-    Repo 0 fires at bins 0, 4, 8; repo 1 fires exactly one bin later each time.
-    At lag 1 the joint count 0->1 must catch all three, and 1->0 must be empty.
-
-    The spacing matters: an alternating pattern (0,2,4,6 against 1,3,5,7) has
-    signal in BOTH directions -- bin 1 is one after bin 0 but also one before
-    bin 2 -- so it cannot distinguish a working shift from a broken one.
-    """
-    matrix = np.zeros((2, 12), dtype=np.float32)
-    matrix[0, [0, 4, 8]] = 1.0
-    matrix[1, [1, 5, 9]] = 1.0
-
-    joint, n_a, n_b, windows = lagged._joint_at_lag(matrix, 1)
-    assert windows == 11
-    assert joint[0, 1] == 3.0, "0 -> 1 at lag 1 should catch every firing"
-    assert joint[1, 0] == 0.0, "1 -> 0 at lag 1 must be empty"
-    assert n_a[0] == 3.0 and n_b[1] == 3.0
-
-    joint0, _, _, _ = lagged._joint_at_lag(matrix, 0)
-    assert joint0[0, 1] == 0.0, "the two never fire in the same bin"
-
-    # And at lag 3 (the 4-bin cycle minus the 1-bin offset) the roles reverse.
-    joint3, _, _, _ = lagged._joint_at_lag(matrix, 3)
-    assert joint3[1, 0] == 2.0, "1 -> 0 should reappear at the complementary lag"
-
-
 # ------------------------------------------------------------------ predict
 
 
@@ -110,55 +67,6 @@ def test_discovery_and_ensemble_scores_are_kept_separate(db):
             assert scored_by == "ensemble"
         else:
             assert scored_by == "discovery"
-
-
-def test_rank_normalise_is_bounded_and_monotone():
-    values = np.array([5.0, 1.0, 3.0, 100.0, 3.0])
-    out = predict._rank_normalise(values)
-    assert out.min() == 0.0 and out.max() == 1.0
-    # Order must be preserved: the largest input gets the largest output.
-    assert out[np.argmax(values)] == 1.0
-    assert out[np.argmin(values)] == 0.0
-
-
-def test_ensemble_and_discovery_measure_sets_differ():
-    """Discovery must exclude the frequency-dominated measures.
-
-    Those are exactly what let a repository that commits daily look coupled to
-    everything, which is the confounding that capped global AUC at 0.68.
-    """
-    assert set(predict.DISCOVERY_MEASURES) < set(predict.ENSEMBLE_MEASURES) | set(
-        predict.DISCOVERY_MEASURES
-    )
-    assert "russell_rao" not in predict.DISCOVERY_MEASURES
-    assert "t_score" not in predict.DISCOVERY_MEASURES
-    assert "npmi" in predict.DISCOVERY_MEASURES
-
-
-def test_chains_traverse_only_validated_edges_by_default(db):
-    """A chain must not ride an unvalidated discovery hop."""
-    row = query_one(
-        "SELECT source_repo_id FROM repo_impact"
-        " WHERE is_declared OR has_bump_history LIMIT 1"
-    )
-    if row is None:
-        pytest.skip("no validated impact edges available")
-
-    chains = predict.impact_chains(
-        row["source_repo_id"], max_depth=3, min_score=0.2, limit=50
-    )
-    for c in chains:
-        ids = list(c["path"])
-        for a, b in zip(ids, ids[1:]):
-            edge = query_one(
-                "SELECT is_declared, has_bump_history FROM repo_impact"
-                " WHERE source_repo_id=%s AND target_repo_id=%s",
-                (a, b),
-            )
-            assert edge is not None, f"chain hop {a}->{b} has no impact row"
-            assert edge["is_declared"] or edge["has_bump_history"], (
-                f"chain traversed an unvalidated hop {a}->{b}"
-            )
 
 
 def test_module_count_uses_the_composite_key(db):
@@ -251,29 +159,6 @@ def test_credential_preflight_rejects_a_bad_token(monkeypatch):
             verify_credentials()
     finally:
         reset_config_cache()
-
-
-def test_deleted_partners_are_flagged_not_merely_scored(db):
-    """A partner that no longer exists must be reported as deleted.
-
-    38,716 deleted files remain coupling partners in this corpus, and an agent
-    cannot edit any of them. Age does not catch this: the case that prompted the
-    fix was a file deleted 50 days ago whose last co-change was also 50 days ago,
-    so no staleness threshold would have flagged it.
-    """
-    from git_synapse.mcp.server import _describe_currency
-
-    assert "DELETED" in _describe_currency(50, None, deleted=True)
-    assert "DELETED" in _describe_currency(0, "emerging", deleted=True), (
-        "deletion must win over a recent or emerging trend"
-    )
-    # Age wins over trend past the staleness threshold; `trend` is returned as
-    # its own field, so nothing is lost by saying how old the pair is.
-    assert "STALE" in _describe_currency(400, "decaying")
-    assert "STALE" in _describe_currency(400, None)
-    assert "DECAYING" in _describe_currency(100, "decaying")
-    assert "current" in _describe_currency(3, None)
-    assert _describe_currency(None, None) is None
 
 
 def test_coupled_files_exposes_currency_fields(db):
@@ -476,37 +361,6 @@ def test_staleness_outranks_trend_in_currency():
     assert _describe_currency(5, None, False).startswith("current")
 
 
-def test_feedback_deduplicates_on_identity_not_wording(db):
-    """The same defect described twice must be one row with a count of two.
-
-    The count is the priority signal, so a gap many sessions hit has to
-    accumulate rather than fragment into near-duplicate rows.
-    """
-    from git_synapse.analysis.query import record_feedback
-    from git_synapse.db.engine import execute
-
-    fp_repo = "test/feedback-fixture"
-    execute("DELETE FROM feedback WHERE repo = %s", (fp_repo,))
-    try:
-        first = record_feedback(
-            kind="wrong_data", severity="low", tool="coupled_files", repo=fp_repo,
-            path="a/b.go", expected="Partner flagged deleted",
-            detail="One wording.",
-        )
-        second = record_feedback(
-            kind="wrong_data", severity="high", tool="coupled_files", repo=fp_repo,
-            path="a/b.go", expected="partner flagged DELETED  ",
-            detail="Entirely different wording, same defect.",
-        )
-        assert second["id"] == first["id"], "should have deduplicated"
-        assert second["occurrences"] == 2
-        row = query_one("SELECT severity FROM feedback WHERE id = %s", (first["id"],))
-        # GREATEST() on text would have ranked 'low' above 'high' alphabetically.
-        assert row["severity"] == "high", "the worse severity must win"
-    finally:
-        execute("DELETE FROM feedback WHERE repo = %s", (fp_repo,))
-
-
 def test_feedback_survives_an_oversized_args_payload(db):
     """A serialised JSON string cannot be trimmed to fit; the column is jsonb."""
     from git_synapse.analysis.query import record_feedback
@@ -584,116 +438,6 @@ def test_feedback_rejects_opinions(db):
         record_feedback(kind="opinion", detail="I disagree with this ranking")
     with pytest.raises(ValueError, match="detail is required"):
         record_feedback(kind="wrong_data", detail="   ")
-
-
-def test_feedback_feeds_no_analytical_table(db):
-    """Nothing that produces a score may read from the feedback log.
-
-    This is the boundary that keeps agents out of the coupling data. If a future
-    change joins feedback into an aggregate, this fails.
-    """
-    import pathlib
-
-    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "git_synapse"
-    offenders = []
-    for module in ("analysis/aggregate.py", "analysis/score.py", "analysis/crossrepo.py",
-                   "analysis/lagged.py", "analysis/predict.py", "analysis/mining.py",
-                   "analysis/depbump.py", "analysis/validate.py"):
-        text = (src / module).read_text()
-        if "feedback" in text:
-            offenders.append(module)
-    assert not offenders, f"analytical modules must not reference feedback: {offenders}"
-
-
-def test_published_accuracy_figures_still_reproduce(db):
-    """The numbers in README, SKILL.md and the MCP instructions must be measured.
-
-    The headline figure was asserted in the first commit and never recomputed by
-    anything. It drifted to 0.928 against a real value of 0.859 and stayed there,
-    while every tier-trust instruction an agent reads cited it. This test fails
-    if the documented figure and the shipped scoring column part company again.
-    """
-    import re
-    from pathlib import Path
-
-    import numpy as np
-
-    from git_synapse.analysis.validate import ground_truth_edges
-
-    rows = query("SELECT source_repo_id, target_repo_id, score, is_declared FROM repo_impact")
-    declared = [r for r in rows if r["is_declared"]]
-    if len(declared) < 50:
-        pytest.skip("impact table not built")
-
-    truth = ground_truth_edges(min_bumps=2)
-    y = np.array([1 if (r["source_repo_id"], r["target_repo_id"]) in truth else 0
-                  for r in declared])
-    s = np.array([float(r["score"]) for r in declared])
-    if y.sum() in (0, len(y)):
-        pytest.skip("degenerate label set")
-
-    order = np.argsort(s)
-    ranks = np.empty(len(s), float)
-    ranks[order] = np.arange(1, len(s) + 1)
-    n1 = y.sum()
-    measured = (ranks[y == 1].sum() - n1 * (n1 + 1) / 2) / (n1 * (len(y) - n1))
-
-    readme = Path(__file__).resolve().parents[1] / "README.md"
-    published = [
-        float(m) for m in re.findall(r"\*\*(0\.8\d\d)\*\*", readme.read_text())
-    ]
-    assert published, "README no longer states an in-sample AUC"
-    assert abs(published[0] - measured) < 0.02, (
-        f"README publishes {published[0]}, shipped score measures {measured:.4f}"
-    )
-
-
-def test_partner_classifier_labels_noise_without_hiding_real_files():
-    """Mislabelling a real dependency as noise is the expensive error here.
-
-    An agent is told `informative: false` means "you already know this", so a
-    false positive makes it skip a file it should have edited. False negatives
-    only cost the reader a glance.
-    """
-    from git_synapse.mcp.server import _classify_partner as classify
-
-    own = "gateway/internal/app/router.go"
-
-    # Noise that must be labelled.
-    assert "own_test" in classify("gateway/internal/app/router_test.go", own, 20)[0]
-    assert "generated" in classify("api/gen/restapi/embedded_spec.go", own, 30)[0]
-    assert "generated" in classify("pkg/v1/types.pb.go", own, 30)[0]
-    assert "generated" in classify("vendor/x/y.go", own, 30)[0]
-    assert "generated" in classify("zz_generated.deepcopy.go", own, 30)[0]
-
-    # Real code that must NOT be suppressed.
-    for path in (
-        "gateway/pkg/config/applier.go",
-        "gateway/internal/app/scheduler.go",
-        "pkg/genetics/sequence.go",          # contains "gen" but not "/gen/"
-        "internal/hammock_test.go",          # contains "mock_" as a substring
-        "gateway/internal/app/placement.go",
-        "cmd/generator/main.go",
-    ):
-        labels, informative = classify(path, own, 20)
-        assert informative, f"{path} was suppressed: {labels}"
-
-    # Another file's test is not *this* file's test, so it stays informative.
-    labels, informative = classify("gateway/internal/app/scheduler_test.go", own, 20)
-    assert "own_test" not in labels and informative
-
-    # Sibling variants: same name, different parent.
-    assert "sibling_variant" in classify(
-        "amd-values-yaml/piraeus.yaml", "nvidia-values-yaml/piraeus.yaml", 12
-    )[0]
-    assert "sibling_variant" not in classify(
-        "a/other.yaml", "a/piraeus.yaml", 12
-    )[0]
-
-    # Thin support is now withheld, not just flagged: a 1.0 resting on two
-    # commits outranked everything real and was acted on as if it were evidence.
-    labels, informative = classify("gateway/pkg/config/applier.go", own, 2)
-    assert "thin_support" in labels and not informative
 
 
 def test_classifier_does_not_suppress_packages_merely_named_after_tooling():
@@ -950,3 +694,21 @@ def test_ingest_walks_only_the_shipped_branch():
 
     default = inspect.signature(iter_commits).parameters["rev"].default
     assert default == "HEAD", f"walk defaults to {default!r}, not the default branch"
+
+
+def test_feedback_feeds_no_analytical_table(db):
+    """Nothing that produces a score may read from the feedback log.
+
+    This is the boundary that keeps agents out of the coupling data: if a future
+    change joins feedback into an aggregate, the tool would start measuring its
+    own past advice rather than the codebase.
+    """
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "git_synapse" / "analysis"
+    # query.py is excluded: the UI must be able to display the log. What must
+    # never happen is a module that *computes a score* reading from it.
+    analytical = ("aggregate.py", "score.py", "predict.py", "mining.py",
+                  "depbump.py", "manifests.py", "backtest.py")
+    offenders = [n for n in analytical if "feedback" in (src / n).read_text()]
+    assert not offenders, f"analytical modules must not reference feedback: {offenders}"

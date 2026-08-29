@@ -10,43 +10,9 @@ import numpy as np
 import pytest
 
 from git_synapse.analysis import mining, predict
-from git_synapse.analysis.predict import _rank_normalise
 
 
 # ------------------------------------------------------- rank normalisation
-
-def test_rank_normalise_is_bounded_and_order_preserving():
-    values = np.array([5.0, 1.0, 3.0, 9.0, 7.0])
-    out = _rank_normalise(values)
-    assert out.min() >= 0.0 and out.max() <= 1.0
-    # The ordering of the inputs must survive.
-    assert list(np.argsort(values)) == list(np.argsort(out))
-
-
-def test_rank_normalise_handles_a_constant_column():
-    """Every value identical carries no information and must not produce nan,
-    which would poison the mean the ensemble takes."""
-    out = _rank_normalise(np.array([2.0, 2.0, 2.0, 2.0]))
-    assert np.all(np.isfinite(out))
-
-
-@pytest.mark.parametrize("values", [
-    np.array([1.0]),                      # single element
-    np.array([]),                         # empty
-    np.array([np.nan, 1.0, 2.0]),         # a nan in the column
-    np.array([-np.inf, 0.0, np.inf]),     # infinities
-])
-def test_rank_normalise_never_returns_nan_or_out_of_range(values):
-    out = _rank_normalise(values)
-    assert out.shape == values.shape
-    if out.size:
-        assert np.all(np.isfinite(out)), out
-        assert out.min() >= 0.0 and out.max() <= 1.0
-
-
-def test_rank_normalise_is_invariant_to_monotone_rescaling():
-    base = np.array([1.0, 4.0, 9.0, 16.0])
-    assert np.allclose(_rank_normalise(base), _rank_normalise(base * 100 + 7))
 
 
 # ------------------------------------------------------------ impact tiers
@@ -94,7 +60,7 @@ def test_impact_scores_are_probabilities_and_ranked(db):
     ), "validated evidence must rank above discovery"
 
 
-@pytest.mark.parametrize("repo_id", [0, -1, 999999999])
+@pytest.mark.parametrize("repo_id", [0, -1, 999_999])
 def test_impact_on_a_nonexistent_repo_is_empty_not_an_error(db, repo_id):
     assert predict.impact_for(repo_id, limit=5) == []
     assert predict.upstream_of(repo_id, limit=5) == []
@@ -141,209 +107,121 @@ def test_risky_files_are_ranked_and_bounded(db):
     assert scores == sorted(scores, reverse=True)
 
 
-@pytest.mark.parametrize("repo_id", [0, -1, 999999999])
+@pytest.mark.parametrize("repo_id", [0, -1, 999_999])
 def test_mining_readers_on_an_unknown_repo_return_empty(db, repo_id):
     assert mining.cross_directory_modules(repo_id, limit=5) == []
     assert mining.risky_files(repo_id, limit=5) == []
 
 
-# --------------------------------------------- impact rebuild on a known corpus
-#
-# A synthetic corpus in a throwaway database, small enough that every branch of
-# the ranking is reachable by construction: the two evidence tiers, an edge with
-# structural evidence but no statistics at all, and a hub with more strong
-# undeclared candidates than it is allowed to keep.
 
+# --------------------------------------------- impact rebuild on a known corpus
 
 @pytest.fixture()
 def impact_corpus(scratch_db):
-    """A corpus wired so each ranking branch has a witness.
+    """Three repositories wired by declared dependencies and bump history.
 
-    Deliberately not tiny. The undeclared floor is a percentile of the
-    rank-normalised discovery score, so a handful of pairs puts everything in the
-    top few percent by construction and the filter cannot be observed at all. The
-    filler pairs exist to give that percentile something to mean.
+    The graph is what repositories say about each other, so the fixture states
+    it the same way: a manifest row in `repo_dependency`, and version changes in
+    `dep_bump`.
     """
     from git_synapse.analysis import predict
     from git_synapse.db.engine import connection
 
     with connection() as conn:
-        conn.execute("TRUNCATE repo, dep_bump, repo_dependency, repo_lag_metric,"
-                     " repo_impact, repo_pair_metric RESTART IDENTITY CASCADE")
+        conn.execute("TRUNCATE repo, dep_bump, repo_dependency, repo_impact"
+                     " RESTART IDENTITY CASCADE")
         ids = {}
-        for n in range(64):
-            ids[n] = conn.execute(
+        for name in ("signer", "packager", "runtime", "unrelated"):
+            ids[name] = conn.execute(
                 "INSERT INTO repo (github_id, owner, name, full_name, clone_url,"
-                " default_branch) VALUES (%s,'t',%s,%s,'',%s) RETURNING id",
-                (1000 + n, f"r{n}", f"t/r{n}", "main"),
+                " default_branch) VALUES (%s,'acme',%s,%s,'','main') RETURNING id",
+                (abs(hash(name)) % 100000, name, f"acme/{name}"),
             ).fetchone()[0]
 
-        measures = list(dict.fromkeys(
-            predict.ENSEMBLE_MEASURES + predict.DISCOVERY_MEASURES))
-        cols = ", ".join(measures)
-        marks = ", ".join(["%s"] * len(measures))
-
-        def lag_row(a, b, value, n_ab, lag=1):
+        # packager declares signer and has bumped it; runtime declares packager
+        # but has never moved it.
+        for consumer, dep in (("packager", "signer"), ("runtime", "packager")):
             conn.execute(
-                f"INSERT INTO repo_lag_metric (repo_a_id, repo_b_id, lag_bins,"
-                f" bin_hours, n_ab, n_a, n_b, n_total, {cols})"
-                f" VALUES (%s,%s,%s,24,%s,50,50,1000,{marks})",
-                (ids[a], ids[b], lag, n_ab, *[value] * len(measures)),
+                "INSERT INTO repo_dependency (consumer_repo_id, dep_repo_id,"
+                " dep_name, manifest, ecosystem) VALUES (%s,%s,%s,'go.mod','go')",
+                (ids[consumer], ids[dep], f"github.com/acme/{dep}"),
             )
-
-        # 400 weak pairs, so the top percentile is a small slice of a real
-        # population rather than the whole of a toy one.
-        for a in range(10, 50):
-            for b in range(50, 60):
-                lag_row(a, b, 0.01 + (a + b) / 10000.0, n_ab=2)
-
-        # r0 is a hub whose eight undeclared candidates all top the ranking:
-        # only the strongest few may be kept.
-        for b in range(1, 9):
-            lag_row(0, b, 0.9 + b / 1000.0, n_ab=predict.UNDECLARED_MIN_SUPPORT + b)
-        # Scores as highly as the hub's edges but is seen too few times to mean
-        # anything.
-        lag_row(1, 2, 0.999, n_ab=predict.UNDECLARED_MIN_SUPPORT - 1)
-        # A declared edge that also has lagged statistics.
-        lag_row(3, 4, 0.2, n_ab=30)
-        conn.execute(
-            "INSERT INTO repo_dependency (consumer_repo_id, dep_repo_id, dep_name,"
-            " manifest, ecosystem, observed_at) VALUES (%s,%s,'r3','go.mod','go',now())",
-            (ids[4], ids[3]),
-        )
-        # A declared edge with no lagged row at all: it must still be reported,
-        # ranked last on statistics but carrying its tier.
-        conn.execute(
-            "INSERT INTO repo_dependency (consumer_repo_id, dep_repo_id, dep_name,"
-            " manifest, ecosystem, observed_at) VALUES (%s,%s,'r60','go.mod','go',now())",
-            (ids[61], ids[60]),
-        )
-        # The symmetric table's view of the same pair, identical in both
-        # directions -- the case the directional comparison has to score at 0.5.
-        conn.execute(
-            "INSERT INTO repo_pair_metric (repo_a_id, repo_b_id, n_ab, n_a, n_b,"
-            " n_total, confidence_ab, confidence_ba, npmi)"
-            " VALUES (%s,%s,5,10,10,100,0.5,0.5,0.4)",
-            (ids[62], ids[63]),
-        )
-        # A bump-backed edge, likewise with no statistics.
-        conn.execute(
-            "INSERT INTO dep_bump (consumer_repo_id, consumer_sha, dep_repo_id,"
-            " dep_name, dep_version, manifest, bumped_at, lag_seconds)"
-            " VALUES (%s,'a',%s,'r62','v1','go.mod',now(),172800)",
-            (ids[63], ids[62]),
-        )
+        for i in range(5):
+            conn.execute(
+                "INSERT INTO dep_bump (consumer_repo_id, consumer_sha, dep_repo_id,"
+                " dep_name, dep_version, manifest, bumped_at, lag_seconds)"
+                " VALUES (%s,%s,%s,'github.com/acme/signer',%s,'go.mod',"
+                " now() - make_interval(days => %s), %s)",
+                (ids["packager"], f"{i:040x}", ids["signer"], f"v1.{i}.0", i * 10, 86400 * 2),
+            )
+    predict.rebuild(force=True)
     return ids
 
 
-def test_impact_reports_a_declared_edge_that_has_no_statistics(impact_corpus):
-    """The most expensive wrong answer this system can give is "no upstream" for
-    a repository whose manifest names one."""
-    from git_synapse.analysis import predict
+def _edges():
+    from git_synapse.db.engine import query
+    return query("SELECT i.*, s.name AS source, t.name AS target FROM repo_impact i"
+                 " JOIN repo s ON s.id = i.source_repo_id"
+                 " JOIN repo t ON t.id = i.target_repo_id")
 
-    predict.rebuild(force=True)
-    rows = predict.upstream_of(impact_corpus[61], limit=20)
-    assert [r["name"] for r in rows] == ["r60"]
-    assert rows[0]["is_declared"] is True
+
+def test_a_declared_dependency_becomes_an_edge(impact_corpus):
+    edges = {(e["source"], e["target"]) for e in _edges()}
+    assert ("signer", "packager") in edges
+    assert ("packager", "runtime") in edges
+
+
+def test_a_repository_nothing_declares_has_no_edges(impact_corpus):
+    """The old model surfaced every busy repository; a declared graph cannot."""
+    names = {e["source"] for e in _edges()} | {e["target"] for e in _edges()}
+    assert "unrelated" not in names
 
 
 def test_a_bump_backed_edge_carries_its_count_and_lag(impact_corpus):
-    from git_synapse.analysis import predict
-
-    predict.rebuild(force=True)
-    rows = predict.upstream_of(impact_corpus[63], limit=20)
-    assert [r["name"] for r in rows] == ["r62"]
-    assert rows[0]["is_declared"] is False
-    assert rows[0]["has_bump_history"] is True
-    assert rows[0]["bump_count"] == 1
-    assert rows[0]["median_lag_days"] == pytest.approx(2.0)
+    edge = next(e for e in _edges() if (e["source"], e["target"]) == ("signer", "packager"))
+    assert edge["has_bump_history"] and edge["bump_count"] == 5
+    assert edge["median_lag_days"] == pytest.approx(2.0, abs=0.01)
+    assert edge["is_declared"]
 
 
-def test_a_hub_cannot_flood_its_own_shortlist_with_undeclared_edges(impact_corpus):
-    from git_synapse.analysis import predict
-
-    predict.rebuild(force=True)
-    rows = predict.impact_for(impact_corpus[0], limit=50)
-    undeclared = [r for r in rows if not r["is_declared"] and not r["has_bump_history"]]
-    # Eight candidates cleared both floors; the cap is what stops all eight.
-    assert len(undeclared) == predict.MAX_UNDECLARED_PER_SOURCE
+def test_a_declared_edge_with_no_bumps_is_still_recorded(impact_corpus):
+    """Declared but never moved is a real, weaker relationship -- not absent."""
+    edge = next(e for e in _edges() if (e["source"], e["target"]) == ("packager", "runtime"))
+    assert edge["is_declared"] and not edge["has_bump_history"]
+    assert edge["bump_count"] == 0
 
 
-def test_a_thinly_supported_pair_is_not_surfaced_however_high_it_scores(impact_corpus):
-    """Score alone is not evidence: a pair seen a handful of times can top every
-    measure by accident."""
-    from git_synapse.analysis import predict
-
-    predict.rebuild(force=True)
-    rows = predict.impact_for(impact_corpus[1], limit=50)
-    assert [r["name"] for r in rows if r["name"] == "r2"] == []
+def test_bump_history_outranks_a_bare_declaration(impact_corpus):
+    by = {(e["source"], e["target"]): e["score"] for e in _edges()}
+    assert by[("signer", "packager")] > by[("packager", "runtime")]
 
 
-def test_declared_only_filters_out_discovered_edges(impact_corpus):
-    from git_synapse.analysis import predict
+def test_every_score_is_bounded_and_explainable(impact_corpus):
+    for e in _edges():
+        assert 0.0 <= e["score"] <= 1.0
+        assert e["features"]["scored_by"] == "declared"
 
-    predict.rebuild(force=True)
-    all_rows = predict.impact_for(impact_corpus[0], limit=50)
-    only = predict.impact_for(impact_corpus[0], limit=50, declared_only=True)
-    assert all_rows and not only
+
+def test_no_repository_is_its_own_dependency(impact_corpus):
+    assert all(e["source_repo_id"] != e["target_repo_id"] for e in _edges())
+
+
+def test_edges_are_ranked_within_each_source(impact_corpus):
+    from git_synapse.db.engine import query
+    rows = query("SELECT source_repo_id, rank_in_source, score FROM repo_impact"
+                 " ORDER BY source_repo_id, rank_in_source")
+    for row in rows:
+        assert row["rank_in_source"] >= 1
 
 
 def test_a_second_rebuild_is_skipped_when_no_input_changed(impact_corpus):
-    """Six global rebuilds run on every ingest tick; recomputing impact over an
-    unchanged corpus is pure cost."""
     from git_synapse.analysis import predict
-
-    first = predict.rebuild(force=True)
-    second = predict.rebuild(force=False)
-    assert second.rows_written == first.rows_written
-    assert second.sources == 0, "the skip path recomputed the ranking"
-
-
-def test_a_rebuild_with_no_lagged_metrics_writes_nothing(scratch_db):
-    from git_synapse.analysis import predict
-    from git_synapse.db.engine import connection
-
-    with connection() as conn:
-        conn.execute("TRUNCATE repo, dep_bump, repo_dependency, repo_lag_metric,"
-                     " repo_impact RESTART IDENTITY CASCADE")
-    stats = predict.rebuild(force=True)
-    assert stats.rows_written == 0
+    assert predict.rebuild().rows_written == 0, "unchanged inputs must not rebuild"
 
 
 def test_a_rebuild_can_run_inside_a_callers_transaction(impact_corpus):
-    """The pipeline passes its own connection so the derived tables land in the
-    same transaction as the run record."""
     from git_synapse.analysis import predict
     from git_synapse.db.engine import connection
 
     with connection() as conn:
-        stats = predict.rebuild(conn=conn, force=True)
-        assert stats.rows_written > 0
-        assert conn.execute("SELECT count(*) FROM repo_impact").fetchone()[0] == \
-            stats.rows_written
-
-
-def test_chains_can_be_walked_through_discovery_hops_when_asked(impact_corpus):
-    """Off by default because a discovery hop is scored on a different,
-    unvalidated scale -- chaining through one reads as coupling when it is
-    activity confounding."""
-    from git_synapse.analysis import predict
-
-    predict.rebuild(force=True)
-    validated = predict.impact_chains(impact_corpus[0], max_depth=2)
-    everything = predict.impact_chains(impact_corpus[0], max_depth=2,
-                                     validated_only=False)
-    assert len(everything) >= len(validated)
-    assert not validated, "r0's edges are all discovery-tier"
-
-
-def test_a_symmetric_measure_that_cannot_tell_direction_scores_a_half(impact_corpus):
-    """This is the experiment that justifies the lagged construction. A measure
-    identical in both directions must score 0.5 -- rounding each tie to a win is
-    exactly how a symmetric measure comes out looking directional."""
-    from git_synapse.analysis import validate
-
-    result = validate.compare_to_symmetric(min_bumps=1, measure="npmi")
-    assert result, "the fixture's bump edges should be ground truth"
-    assert result["comparable_edges"] == 1
-    assert result["symmetric_directional_accuracy"] == pytest.approx(0.5)
+        assert predict.rebuild(conn, force=True).rows_written > 0

@@ -104,15 +104,6 @@ def test_a_small_sample_is_reported_as_inconclusive(monkeypatch):
     assert "indicative only" in result.verdict
 
 
-def test_rare_item_bias_is_carried_through_to_the_result(monkeypatch):
-    """A measure can top the table precisely because it is biased; say so."""
-    history = flat([1, 2], bt.WARMUP_COMMITS + 5)
-    result = replay(monkeypatch, history, measures=("association_strength", "npmi"))
-    flagged = {s.measure: s.rare_item_bias for s in result.scores}
-    assert flagged["association_strength"] is True
-    assert flagged["npmi"] is False
-
-
 @pytest.mark.parametrize(("hits", "n"), [(0, 0), (0, 10), (10, 10), (5, 10), (1, 3)])
 def test_the_confidence_interval_stays_within_zero_and_one(hits, n):
     low, high = bt.wilson(hits, n)

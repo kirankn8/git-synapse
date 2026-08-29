@@ -401,11 +401,9 @@ def test_one_repository_raising_does_not_kill_the_run(db, monkeypatch):
 # broken by a re-raise or a mis-ordered dependency.
 
 _STAGES = [
-    ("git_synapse.analysis.crossrepo", "rebuild"),
     ("git_synapse.analysis.depbump", "rebuild"),
     ("git_synapse.analysis.depbump", "refresh_declared"),
     ("git_synapse.analysis.depbump", "refresh_modules"),
-    ("git_synapse.analysis.lagged", "rebuild"),
     ("git_synapse.analysis.predict", "rebuild"),
     ("git_synapse.analysis.mining", "rebuild"),
 ]

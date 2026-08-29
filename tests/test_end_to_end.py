@@ -62,7 +62,7 @@ def ingested(scratch_db, tmp_path_factory):
     os.environ["MIRROR_ROOT"] = str(root / "mirrors")
     reset_config_cache()
 
-    from git_synapse.analysis import aggregate, crossrepo, score
+    from git_synapse.analysis import aggregate, score
     from git_synapse.db.engine import connection
     from git_synapse.ingest import pipeline
 
@@ -94,7 +94,6 @@ def ingested(scratch_db, tmp_path_factory):
     with connection() as conn:
         for rid in ids.values():
             score.score_repo(rid, conn)
-    crossrepo.rebuild(force=True)
     ids["_alpha_remote"] = str(alpha)
     try:
         yield ids
@@ -444,17 +443,6 @@ def test_drifting_pairs_can_be_scoped_to_one_repository(ingested):
 # derived tables land in the same transaction, while the CLI and one-off scripts
 # pass nothing. Only the first shape was ever exercised.
 
-def test_the_rebuilds_all_work_without_a_connection_handed_to_them(mined):
-    from git_synapse.analysis import aggregate, crossrepo, depbump, lagged, score
-
-    assert isinstance(aggregate.repos_needing_aggregation(), list)
-    assert isinstance(score.score_all(), list)
-    assert crossrepo.rebuild(force=True).duration_s >= 0
-    assert depbump.rebuild(force=True).duration_s >= 0
-    assert depbump.refresh_declared(force=True) >= 0
-    assert depbump.refresh_modules() >= 0
-    assert lagged.rebuild(force=True).duration_s >= 0
-
 
 def test_scoring_every_repository_covers_every_repository(mined):
     from git_synapse.analysis import score
@@ -565,56 +553,6 @@ def test_a_repository_whose_mirror_is_gone_reads_as_unreadable(mined, monkeypatc
                         lambda *a, **k: Path("/nonexistent/mirror.git"))
     with connection() as conn:
         assert _head_tree_paths(conn, mined) is None
-
-
-def test_a_crossrepo_rebuild_with_no_new_commits_keeps_what_it_has(mined, monkeypatch):
-    """The partition is expensive; redoing it over an unchanged corpus is pure
-    cost, and returning empty stats would look like the data had vanished."""
-    from git_synapse.analysis import crossrepo
-
-    crossrepo.rebuild(force=True)
-    monkeypatch.setattr(crossrepo, "_build_change_sets", lambda *a, **k: False)
-    again = crossrepo.rebuild(force=False)
-    # It reports what is already stored rather than zeroes -- empty stats here
-    # would read as "the cross-repo data vanished".
-    assert again.change_sets > 0
-    assert (again.repo_pairs, again.file_pairs) == (0, 0)
-    assert again.duration_s >= 0
-
-
-def test_the_lagged_rebuild_on_an_empty_corpus_writes_nothing(mined, monkeypatch):
-    """Injected rather than truncated: emptying `repo` would take the corpus
-    every other test in this module is built on with it."""
-    import numpy as np
-
-    from git_synapse.analysis import lagged
-
-    monkeypatch.setattr(
-        lagged, "_event_matrix",
-        lambda *a, **k: (np.zeros((0, 0), dtype=np.float32), [], 0),
-    )
-    stats = lagged.rebuild(force=True)
-    assert stats.n_repos == 0
-    assert stats.rows_written == 0
-
-
-def test_asymmetry_on_a_pair_with_no_lagged_row_carries_no_direction(mined):
-    """The ratio is the directional evidence. With nothing on either side there
-    is no ratio to report -- and 1.0 would read as "perfectly symmetric"."""
-    from git_synapse.analysis import lagged
-
-    row = lagged.asymmetry(-1, -2, lag=1)
-    assert row["forward"] is None and row["reverse"] is None
-    assert row["ratio"] is None
-    assert row["measure"] == "npmi" and row["lag_bins"] == 1
-
-
-def test_the_symmetric_comparison_says_nothing_without_ground_truth(mined):
-    """No manifest bumps means no directed edges to score against, and an
-    invented number here would be the one that justifies the whole construction."""
-    from git_synapse.analysis import validate
-
-    assert validate.compare_to_symmetric(min_bumps=99999) == {}
 
 
 def test_an_author_connection_that_refuses_to_close_is_logged_not_raised(mined,
@@ -753,87 +691,3 @@ def test_the_bump_scan_walks_the_manifest_history(manifests):
     assert stats.repos_scanned > 0
 
 
-def test_every_rebuild_also_accepts_the_callers_connection(manifests):
-    """The pipeline runs all of these inside one transaction so the derived
-    tables land with the run record; nothing had exercised that half."""
-    from git_synapse.analysis import aggregate, crossrepo, depbump, lagged, score
-    from git_synapse.db.engine import connection
-
-    with connection() as conn:
-        assert isinstance(aggregate.repos_needing_aggregation(conn), list)
-        assert isinstance(score.score_all(conn), list)
-        assert crossrepo.rebuild(conn=conn, force=True).duration_s >= 0
-        assert depbump.rebuild(conn=conn, force=True).duration_s >= 0
-        assert depbump.refresh_declared(conn=conn, force=True) >= 0
-        assert depbump.refresh_modules(conn=conn) >= 0
-        assert lagged.rebuild(conn=conn, force=True).duration_s >= 0
-
-
-def test_a_corpus_with_no_commits_scores_no_pairs(manifests, monkeypatch):
-    """`n_total <= 0` is not a corpus where everything scores zero -- every
-    measure divides by it."""
-    from git_synapse.analysis import crossrepo
-    from git_synapse.db.engine import connection
-
-    monkeypatch.setattr(crossrepo, "population", lambda conn: 0)
-    with connection() as conn:
-        assert crossrepo._score(conn, "file") == 0
-
-
-def test_no_unpartitioned_commits_means_no_new_change_sets(manifests, monkeypatch):
-    """The partition is the expensive half of the cross-repo pass; a tick that
-    added no commits must not pay for it."""
-    from git_synapse.analysis import crossrepo
-    from git_synapse.db.engine import connection
-
-    with connection() as conn:
-        crossrepo._build_change_sets(conn, crossrepo.CrossRepoStats(), force=True)
-        # Everything is partitioned now, so a second pass finds nothing to do.
-        assert crossrepo._build_change_sets(
-            conn, crossrepo.CrossRepoStats(), force=False) is False
-
-
-def test_an_event_matrix_over_an_empty_corpus_has_no_repositories(manifests,
-                                                                  monkeypatch):
-    """Not an error and not a matrix of zeroes: there is nothing to correlate."""
-    from git_synapse.analysis.lagged import _event_matrix
-    from git_synapse.db.engine import connection
-
-    class _Empty:
-        def fetchall(self):
-            return []
-
-    with connection() as conn:
-        monkeypatch.setattr(conn, "execute", lambda *a, **k: _Empty())
-        matrix, repo_ids, n_bins = _event_matrix(conn, 24)
-    assert matrix.shape == (0, 0)
-    assert repo_ids == [] and n_bins == 0
-
-
-def test_a_lag_where_only_self_pairs_survive_writes_nothing(manifests, monkeypatch):
-    """The joint matrix is symmetric and its diagonal is meaningless, so a lag
-    whose only co-occurrences are a repository with itself contributes nothing."""
-    import numpy as np
-
-    from git_synapse.analysis import lagged
-    from git_synapse.db.engine import connection
-
-    # One repository, active in one bin: at every lag the only non-zero cell of
-    # the joint matrix is the diagonal.
-    monkeypatch.setattr(
-        lagged, "_event_matrix",
-        lambda *a, **k: (np.ones((1, 3), dtype=np.float32), [1], 3),
-    )
-    with connection() as conn:
-        stats = lagged.rebuild(conn=conn, force=True)
-    assert stats.n_repos == 1
-    assert stats.rows_written == 0
-
-
-def test_asymmetry_returns_nothing_when_the_query_finds_no_row(manifests,
-                                                               monkeypatch):
-    from git_synapse.analysis import lagged
-    from git_synapse.db import engine
-
-    monkeypatch.setattr(engine, "query_one", lambda *a, **k: None)
-    assert lagged.asymmetry(1, 2, lag=1) is None

@@ -36,6 +36,7 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from git_synapse.config import IngestConfig, get_config
@@ -486,6 +487,52 @@ def ref_tips(path: Path) -> list[str]:
         tip for tip in (line.strip() for line in proc.stdout.splitlines())
         if len(tip) == 40 and all(c in "0123456789abcdef" for c in tip)
     ]
+
+
+@dataclass(frozen=True)
+class Tag:
+    """One release tag, already peeled to the commit it names."""
+
+    name: str
+    commit_sha: str
+    tagged_at: datetime | None
+    annotated: bool
+
+
+def read_tags(path: Path) -> list[Tag]:
+    """Every tag in a mirror, peeled, in one git call.
+
+    An annotated tag points at a tag *object* which points at the commit, so
+    `%(objectname)` is the wrong field for half of them; `%(*objectname)` is the
+    peeled target and is empty for lightweight tags. Asking git to do the
+    peeling avoids a `rev-parse` per tag, and its date is the tagger's for an
+    annotated tag and the committer's otherwise -- which is the date a release
+    was actually cut.
+    """
+    proc = run_git(
+        ["for-each-ref", "--format=%(refname:short)\t%(objecttype)\t%(objectname)"
+         "\t%(*objectname)\t%(creatordate:iso-strict)", "refs/tags"],
+        cwd=path, check=False, timeout=300,
+    )
+    if proc.returncode != 0:
+        return []
+
+    tags: list[Tag] = []
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 5:
+            continue
+        name, kind, obj, peeled, when = parts
+        sha = peeled or obj
+        if len(sha) != 40 or not all(c in "0123456789abcdef" for c in sha):
+            continue
+        try:
+            tagged_at = datetime.fromisoformat(when) if when else None
+        except ValueError:
+            tagged_at = None
+        tags.append(Tag(name=name, commit_sha=sha, tagged_at=tagged_at,
+                        annotated=(kind == "tag")))
+    return tags
 
 
 def commit_exists(path: Path, sha: str) -> bool:

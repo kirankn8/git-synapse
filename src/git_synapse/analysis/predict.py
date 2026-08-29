@@ -1,103 +1,42 @@
 """Impact prediction: the ranked answer to "I am changing X, what else?".
 
-This module is where the measured findings become a product surface. Three
-results from :mod:`git_synapse.analysis.validate`, all on this corpus, drive its
-design:
+Built entirely from what repositories **declare** about each other. A manifest
+naming a dependency is dated, directional and provable; it needs no statistical
+argument and cannot produce an edge between codebases that share no code.
 
-1. **Statistics alone cannot tell direction.** Ranking all ~74,000 ordered
-   repository pairs by a single lagged measure reaches AUC 0.80 at best (lag 0,
-   where a symmetric measure is 0.50 directional by construction; the best
-   directional accuracy anywhere is 0.63 at lag 4, where AUC is 0.74)
-   (``russell_rao`` at lag 0) -- but its directional accuracy is only ~0.63.
-   That combination is the tell: ``russell_rao`` is ``a / N``, pure joint
-   frequency, so it scores well by ranking *both repos are busy* and is close to
-   a coin flip on which way the arrow points. A high AUC here is not the same as
-   a useful answer.
+This used to rank an ensemble of 29 measures over a time-binned, directed
+co-change table. That table was measured and found unsound: two of the public
+repositories in the test corpus, sharing no code at all, scored G2 = 570 against
+each other, because two busy repositories occupy the same time bins whatever
+they contain. Correlation over calendar time cannot tell propagation from a
+shared release era, so it is gone.
 
-2. **Structure is a decisive prior.** Restricting candidates to *declared*
-   dependencies raises the base rate from 0.23% to 82% -- a ~350x lift -- before a
-   single measure is evaluated. But structure alone is not enough either: of
-   telemetry's 9 declared internal dependencies, 1 has never once co-changed.
+What ranks an edge now
+----------------------
+Only facts, in order of weight:
 
-3. **Together they reach AUC 0.88 in sample** (measured 0.884 over the shipped
-   `repo_impact.score`, restricted to declared candidates). Held out in time --
-   features from before 2025-01-01, labels from after -- it is 0.69. Treat 0.86
-   as the optimistic bound and 0.69 as the honest one. No cross-validation
-   figure is quoted: the ensemble has no fitted parameters, so folds train
-   nothing and their spread is subsample noise. That is the configuration this
-   module implements.
+* **declared** -- the consumer's manifest names the dependency at HEAD.
+* **bump history** -- how many times the consumer has actually raised the
+  version. A dependency bumped forty times is a live relationship; one declared
+  and never moved is inert.
+* **recency** -- when it was last bumped.
+* **observed lag** -- the median delay between an upstream commit and the
+  consumer picking it up, where a version resolved to one.
 
-The ensemble
-------------
-An **unweighted rank-average** of the lagged measures, each taken at its best
-lag per pair. Deliberately unweighted: with only 133 labelled candidate edges,
-fitting weights would overfit, and the unweighted average already scores within
-noise of the best label-selected combination (0.9289 vs 0.9320, where the latter
-is inflated by selecting features on the evaluation labels).
-
-Taking the best lag per pair matters because propagation delay varies by an
-order of magnitude across the org -- ``contracts -> telemetry`` has a median lag of
-0.0 days while ``gomi -> runtime`` has 4.8 days -- so a single fixed lag
-systematically misses one regime or the other.
+Every one of those is auditable back to a line in a file in a commit.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from dataclasses import dataclass
 
-import numpy as np
 import psycopg
 
-from git_synapse.config import get_config
-from git_synapse.db.engine import connection, copy_rows, get_watermark, set_watermark
-from git_synapse.stats.registry import ALL_KEYS
+from git_synapse.db.engine import connection, get_watermark, set_watermark
 
 log = logging.getLogger(__name__)
-
-#: Measures entering the ensemble. Chosen for construction diversity rather than
-#: measured performance: one directional conditional, one significance test, one
-#: frequency term, two similarity coefficients and one normalised information
-#: measure. Selecting on measured AUC would leak the evaluation labels.
-ENSEMBLE_MEASURES: tuple[str, ...] = (
-    "confidence_ab",          # directional: P(target changes | source changed)
-    "log_likelihood_ratio",   # significance, well-behaved on rare events
-    "russell_rao",            # raw joint frequency
-    "ochiai",                 # similarity, robust to unbalanced marginals
-    "t_score",                # frequency-weighted confidence
-    "npmi",                   # bounded information-theoretic association
-)
-
-#: Measures used for DISCOVERY of undeclared coupling, deliberately different
-#: from ENSEMBLE_MEASURES above.
-#:
-#: The ensemble was validated *within* the declared candidate set, where the base
-#: rate is 82%. Applying it to all ~26,000 ordered pairs reintroduces the
-#: activity confounding: measures with a raw frequency term (russell_rao,
-#: t_score) rank a repository that commits every day as coupled to everything.
-#: On this corpus that put `teams`, `nickfury` and `mural` above `signer` for
-#: runtime, which is simply wrong -- and note russell_rao still scores the highest
-#: GLOBAL AUC (0.80) while managing only 0.63 directional accuracy, so ranking
-#: quality on a label set is no substitute for getting the direction right.
-#:
-#: Discovery therefore uses only measures normalised by both marginals, so a
-#: high base rate cannot manufacture a score. NPMI divides by the joint
-#: self-information; phi is a correlation coefficient; both are bounded and
-#: signed.
-DISCOVERY_MEASURES: tuple[str, ...] = ("npmi", "phi", "ochiai")
-
-#: Percentile floor for an undeclared pair to be surfaced at all.
-UNDECLARED_FLOOR = 0.97
-
-#: Minimum co-occurring bins before an undeclared pair is trusted. Without this
-#: the discovery measures happily award a perfect NPMI to a pair seen twice.
-UNDECLARED_MIN_SUPPORT = 12
-
-#: Hard cap on undeclared suggestions per source repository, so a hub repo that
-#: correlates with everything cannot flood its own shortlist.
-MAX_UNDECLARED_PER_SOURCE = 6
 
 
 @dataclass
@@ -107,46 +46,27 @@ class PredictStats:
     sources: int = 0
     rows_written: int = 0
     declared_edges: int = 0
-    undeclared_surfaced: int = 0
-    bin_hours: int = 0
+    bumped_edges: int = 0
     duration_s: float = 0.0
 
 
-def _rank_normalise(values: np.ndarray) -> np.ndarray:
-    """Map values to [0, 1] by rank, so incomparable scales can be averaged.
-
-    Rank-normalising rather than z-scoring is deliberate: several measures are
-    heavy-tailed (chi-square, log-likelihood, association strength are unbounded
-    above), and a single outlier pair would otherwise dominate the mean.
-    """
-    n = len(values)
-    if n <= 1:
-        return np.zeros(n)
-    order = np.argsort(np.argsort(values, kind="mergesort"), kind="mergesort")
-    return order / (n - 1)
-
-
 def _input_fingerprint(conn: psycopg.Connection) -> str:
-    """Fingerprint of the three tables impact is derived from."""
+    """Cheap signature of the inputs, so an unchanged graph is not rebuilt."""
     row = conn.execute(
         """
-        SELECT (SELECT count(*) FROM repo_lag_metric),
-               (SELECT COALESCE(max(computed_at)::text,'') FROM repo_lag_metric),
-               (SELECT count(*) FROM repo_dependency),
-               (SELECT count(*) FROM dep_bump)
+        SELECT (SELECT count(*) FROM repo_dependency),
+               (SELECT count(*) FROM dep_bump),
+               (SELECT COALESCE(max(bumped_at)::text, '') FROM dep_bump)
         """
     ).fetchone()
-    return ":".join(str(x) for x in row)
+    return "|".join(str(v) for v in row)
 
 
-def rebuild(
-    conn: psycopg.Connection | None = None, force: bool = False
-) -> PredictStats:
-    """Recompute ``repo_impact`` for every repository.
+def rebuild(conn: psycopg.Connection | None = None, force: bool = False) -> PredictStats:
+    """Recompute ``repo_impact`` from the declared dependency graph.
 
-    Requires ``repo_lag_metric`` (from :mod:`git_synapse.analysis.lagged`),
-    ``repo_dependency`` and ``dep_bump`` (from :mod:`git_synapse.analysis.depbump`).
-    Skipped when none of those three has changed.
+    One row per declared ``(dependency -> consumer)`` edge. Skipped when neither
+    ``repo_dependency`` nor ``dep_bump`` has changed since the last run.
     """
 
     def _run(c: psycopg.Connection) -> PredictStats:
@@ -154,185 +74,91 @@ def rebuild(
         stats = PredictStats()
 
         fingerprint = _input_fingerprint(c)
-        if not force and get_watermark("impact") == fingerprint:
-            existing = c.execute("SELECT count(*) FROM repo_impact").fetchone()[0]
-            log.info("impact: inputs unchanged; keeping %d edges", existing)
-            stats.rows_written = int(existing)
-            stats.duration_s = time.monotonic() - started
+        if not force and get_watermark("predict_inputs") == fingerprint:
+            log.debug("impact inputs unchanged; skipping rebuild")
             return stats
-
-        all_keys = tuple(dict.fromkeys(ENSEMBLE_MEASURES + DISCOVERY_MEASURES))
-        cols = ", ".join(all_keys)
-        rows = c.execute(
-            f"""
-            SELECT repo_a_id, repo_b_id, lag_bins, bin_hours, n_ab, {cols}
-            FROM repo_lag_metric
-            """
-        ).fetchall()
-        if not rows:
-            log.warning("no lagged metrics; run `git-synapse lagged` first")
-            return stats
-
-        n_measures = len(all_keys)
-        # Best value per (pair, measure) across all lags, plus the lag at which
-        # the directional confidence peaked -- that is the propagation delay the
-        # data actually supports for this pair.
-        best: dict[tuple[int, int], list[float]] = {}
-        best_lag: dict[tuple[int, int], int] = {}
-        support: dict[tuple[int, int], int] = {}
-        bin_hours = int(rows[0][3])
-
-        for r in rows:
-            pair = (int(r[0]), int(r[1]))
-            slot = best.get(pair)
-            if slot is None:
-                slot = best[pair] = [0.0] * n_measures
-            for i in range(n_measures):
-                value = r[5 + i]
-                if value is not None and float(value) > slot[i]:
-                    slot[i] = float(value)
-                    if i == 0:  # confidence_ab defines the characteristic lag
-                        best_lag[pair] = int(r[2])
-            support[pair] = max(support.get(pair, 0), int(r[4] or 0))
-
-        declared = {
-            (int(r[0]), int(r[1]))
-            for r in c.execute(
-                "SELECT dep_repo_id, consumer_repo_id FROM repo_dependency"
-                " WHERE dep_repo_id IS NOT NULL"
-            ).fetchall()
-        }
-        bumps = {
-            (int(r[0]), int(r[1])): (int(r[2]), float(r[3]) if r[3] is not None else None)
-            for r in c.execute(
-                """
-                SELECT dep_repo_id, consumer_repo_id, count(*),
-                       percentile_cont(0.5) WITHIN GROUP (ORDER BY lag_seconds) / 86400.0
-                FROM dep_bump
-                WHERE dep_repo_id IS NOT NULL AND dep_repo_id <> consumer_repo_id
-                GROUP BY 1, 2
-                """
-            ).fetchall()
-        }
-
-        # A declared or bump-backed edge is structural evidence in its own right,
-        # so it has to be a candidate even with no lagged row. Joint support below
-        # `lag_min_support` used to drop it before scoring, and `upstream_repos`
-        # then reported nothing at all for a repository whose manifest names an
-        # upstream -- the most expensive wrong answer this system can give. They
-        # enter with a zero feature vector, which ranks them last on statistics
-        # while keeping their tier.
-        for pair in (declared | set(bumps)):
-            if pair not in best and pair[0] != pair[1]:
-                best[pair] = [0.0] * n_measures
-
-        pairs = list(best.keys())
-        matrix = np.array([best[p] for p in pairs], dtype=np.float64)
-        matrix = np.where(np.isfinite(matrix), matrix, 0.0)
-
-        # Rank-normalise every measure once, then build two ensembles from the
-        # same columns: the validated one for structural candidates, and a
-        # confounder-resistant one for discovery.
-        col = {key: _rank_normalise(matrix[:, i]) for i, key in enumerate(all_keys)}
-        ensemble = np.mean([col[k] for k in ENSEMBLE_MEASURES], axis=0)
-        discovery = np.mean([col[k] for k in DISCOVERY_MEASURES], axis=0)
-
-        # Declared and bump-backed edges are always kept: they carry structural
-        # or ground-truth evidence regardless of score. Undeclared candidates are
-        # kept only in the top percentile AND only the strongest few per source,
-        # so a hub repository cannot flood its own shortlist.
-        keep: list[int] = []
-        undeclared_by_source: dict[int, list[tuple[float, int]]] = {}
-        for i, pair in enumerate(pairs):
-            if pair in declared or pair in bumps:
-                keep.append(i)
-            elif (
-                discovery[i] >= UNDECLARED_FLOOR
-                and support.get(pair, 0) >= UNDECLARED_MIN_SUPPORT
-            ):
-                undeclared_by_source.setdefault(pair[0], []).append((discovery[i], i))
-
-        for candidates in undeclared_by_source.values():
-            candidates.sort(reverse=True)
-            keep.extend(i for _, i in candidates[:MAX_UNDECLARED_PER_SOURCE])
-
-        # Rank within each source repository: the product question is always
-        # "given I am changing THIS, what else?", never a global ordering.
-        by_source: dict[int, list[int]] = {}
-        for i in keep:
-            by_source.setdefault(pairs[i][0], []).append(i)
-
-        payload = []
-        for source, indices in by_source.items():
-            # Structural evidence outranks statistical discovery, then score.
-            indices.sort(
-                key=lambda i: (
-                    0 if (pairs[i] in declared or pairs[i] in bumps) else 1,
-                    -(ensemble[i] if (pairs[i] in declared or pairs[i] in bumps)
-                      else discovery[i]),
-                )
-            )
-            for rank, i in enumerate(indices, start=1):
-                pair = pairs[i]
-                bump_count, median_lag = bumps.get(pair, (0, None))
-                is_declared = pair in declared
-                if is_declared:
-                    stats.declared_edges += 1
-                elif bump_count == 0:
-                    stats.undeclared_surfaced += 1
-                # A declared or bump-backed edge is scored by the validated
-                # ensemble; a discovered one by the confounder-resistant score.
-                # Mixing them in one column would misrepresent confidence.
-                scored_by_ensemble = is_declared or bump_count > 0
-                payload.append(
-                    (
-                        pair[0],
-                        pair[1],
-                        float(ensemble[i] if scored_by_ensemble else discovery[i]),
-                        rank,
-                        is_declared,
-                        bump_count > 0,
-                        bump_count,
-                        median_lag,
-                        best_lag.get(pair),
-                        bin_hours,
-                        json.dumps(
-                            {
-                                **{
-                                    key: round(float(matrix[i, j]), 6)
-                                    for j, key in enumerate(all_keys)
-                                },
-                                "support_bins": support.get(pair, 0),
-                                "ensemble": round(float(ensemble[i]), 6),
-                                "discovery": round(float(discovery[i]), 6),
-                                "scored_by": "ensemble" if scored_by_ensemble else "discovery",
-                            }
-                        ),
-                    )
-                )
 
         c.execute("TRUNCATE repo_impact")
-        stats.rows_written = copy_rows(
-            "repo_impact",
-            [
-                "source_repo_id", "target_repo_id", "score", "rank_in_source",
-                "is_declared", "has_bump_history", "bump_count", "median_lag_days",
-                "best_lag_bins", "bin_hours", "features",
-            ],
-            payload,
-            conn=c,
+        c.execute(
+            """
+            WITH bumps AS (
+                SELECT dep_repo_id, consumer_repo_id,
+                       count(*)                       AS bump_count,
+                       max(bumped_at)                 AS last_bump,
+                       percentile_cont(0.5) WITHIN GROUP (
+                           ORDER BY lag_seconds) / 86400.0 AS median_lag_days
+                  FROM dep_bump
+                 WHERE dep_repo_id IS NOT NULL
+              GROUP BY dep_repo_id, consumer_repo_id
+            ),
+            edges AS (
+                SELECT d.dep_repo_id      AS source_repo_id,
+                       d.consumer_repo_id AS target_repo_id,
+                       TRUE               AS is_declared,
+                       COALESCE(b.bump_count, 0) AS bump_count,
+                       b.last_bump, b.median_lag_days
+                  FROM repo_dependency d
+             LEFT JOIN bumps b ON b.dep_repo_id = d.dep_repo_id
+                              AND b.consumer_repo_id = d.consumer_repo_id
+                 WHERE d.dep_repo_id IS NOT NULL
+                   AND d.dep_repo_id <> d.consumer_repo_id
+              GROUP BY 1, 2, 3, 4, b.last_bump, b.median_lag_days
+                UNION
+                -- A dependency dropped from the manifest but bumped in the past
+                -- is still a real historical relationship.
+                SELECT b.dep_repo_id, b.consumer_repo_id, FALSE,
+                       b.bump_count, b.last_bump, b.median_lag_days
+                  FROM bumps b
+                 WHERE b.dep_repo_id <> b.consumer_repo_id
+                   AND NOT EXISTS (
+                       SELECT 1 FROM repo_dependency d
+                        WHERE d.dep_repo_id = b.dep_repo_id
+                          AND d.consumer_repo_id = b.consumer_repo_id)
+            ),
+            scored AS (
+                SELECT *,
+                       -- Declared is the strong signal; bumps show the edge is
+                       -- live; recency breaks ties. Bounded to [0, 1] so the
+                       -- number is comparable across repositories.
+                       LEAST(1.0,
+                             (CASE WHEN is_declared THEN 0.5 ELSE 0.2 END)
+                           + LEAST(0.3, bump_count * 0.02)
+                           + CASE
+                               WHEN last_bump IS NULL THEN 0.0
+                               WHEN last_bump > now() - interval '90 days'  THEN 0.2
+                               WHEN last_bump > now() - interval '365 days' THEN 0.1
+                               ELSE 0.0
+                             END
+                       ) AS score
+                  FROM edges
+            )
+            INSERT INTO repo_impact (
+                source_repo_id, target_repo_id, score, rank_in_source,
+                is_declared, has_bump_history, bump_count, median_lag_days, features)
+            SELECT source_repo_id, target_repo_id, score,
+                   row_number() OVER (PARTITION BY source_repo_id ORDER BY score DESC),
+                   is_declared, bump_count > 0, bump_count, median_lag_days,
+                   jsonb_build_object(
+                       'scored_by', 'declared',
+                       'bump_count', bump_count,
+                       'last_bump', last_bump)
+              FROM scored
+            """
         )
-        stats.sources = len(by_source)
-        stats.bin_hours = bin_hours
-        set_watermark("impact", fingerprint, conn=c)
+        row = c.execute(
+            """
+            SELECT count(*), count(DISTINCT source_repo_id),
+                   count(*) FILTER (WHERE is_declared),
+                   count(*) FILTER (WHERE has_bump_history)
+              FROM repo_impact
+            """
+        ).fetchone()
+        stats.rows_written, stats.sources = int(row[0]), int(row[1])
+        stats.declared_edges, stats.bumped_edges = int(row[2]), int(row[3])
+        set_watermark("predict_inputs", fingerprint, c)
         stats.duration_s = time.monotonic() - started
-
-        log.info(
-            "impact: %d rows across %d source repos (%d declared, %d undeclared "
-            "above %.2f) in %.1fs",
-            stats.rows_written, stats.sources, stats.declared_edges,
-            stats.undeclared_surfaced, UNDECLARED_FLOOR, stats.duration_s,
-        )
+        log.info("impact: %d edges over %d repositories in %.1fs",
+                 stats.rows_written, stats.sources, stats.duration_s)
         return stats
 
     if conn is not None:

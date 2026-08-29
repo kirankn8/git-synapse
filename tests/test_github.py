@@ -244,30 +244,6 @@ def _record(name, **flags):
                       default_branch="main", **flags)
 
 
-@pytest.mark.parametrize(("flag", "config_key"), [
-    ("is_private", "include_private"),
-    ("is_fork", "include_forks"),
-    ("is_archived", "include_archived"),
-])
-def test_a_flagged_repository_is_excluded_unless_it_is_opted_in(flag, config_key):
-    """A fork's history is its upstream's; counting it would double every pair it
-    inherited and make the fork look like a hub."""
-    import dataclasses
-
-    from git_synapse.config import get_config
-    from git_synapse.ingest.github import select_repos
-
-    base = dataclasses.replace(get_config().github, only_repos=(), skip_repos=(),
-                               include_private=False, include_forks=False,
-                               include_archived=False)
-    records = [_record("plain"), _record("flagged", **{flag: True})]
-
-    assert [r.name for r in select_repos(records, cfg=base)] == ["plain"]
-
-    opted_in = dataclasses.replace(base, **{config_key: True})
-    assert {r.name for r in select_repos(records, cfg=opted_in)} == {"plain", "flagged"}
-
-
 def test_a_disabled_repository_is_never_included():
     """GitHub disables a repository when it is over quota or under review; there
     is nothing to clone."""

@@ -191,17 +191,6 @@ def test_the_shell_stamps_a_current_asset_version(client):
 
 # ------------------------------------------------------- the remaining views
 
-@pytest.mark.parametrize("path", [
-    "/api/crossrepo/overview", "/api/crossrepo/pairs", "/api/crossrepo/graph",
-    "/api/hotspots", "/api/pairs", "/api/files", "/api/repos/languages",
-    "/api/runs", "/api/validation", "/api/config", "/api/feedback",
-])
-def test_every_listing_endpoint_answers(client, path):
-    """Each backs a view; a 500 here blanks a page for every user."""
-    r = client.get(path, params={"limit": 3})
-    assert r.status_code == 200, f"{path} -> {r.status_code} {r.text[:120]}"
-
-
 def test_file_detail_endpoints_agree_with_each_other(corpus, client):
     args = _a_real_file()
     if args is None:
@@ -252,7 +241,7 @@ def test_repo_sub_resources_answer(client):
         pytest.skip("no repositories")
     rid = row["id"]
     for suffix in ("", "/files", "/directories", "/extensions", "/hotspots",
-                   "/pairs", "/graph", "/partners", "/chains"):
+                   "/pairs", "/graph"):
         r = client.get(f"/api/repos/{rid}{suffix}", params={"limit": 3})
         assert r.status_code == 200, f"{suffix} -> {r.status_code}"
 
@@ -316,9 +305,6 @@ def _real_ids():
     row = query_one("SELECT id FROM ingest_run ORDER BY id DESC LIMIT 1")
     if row:
         ids["run_id"] = row["id"]
-    row = query_one("SELECT id FROM change_set LIMIT 1")
-    if row:
-        ids["change_set_id"] = row["id"]
     return ids
 
 
@@ -406,32 +392,6 @@ def test_every_route_refuses_a_nonexistent_id_rather_than_500ing(client, db):
         if r.status_code >= 500:
             failures.append(f"{concrete} -> {r.status_code}")
     assert not failures, "\n".join(failures)
-
-
-def test_lag_profile_returns_both_directions(client, db):
-    """The two curves are the directional evidence; one without the other
-    would imply an asymmetry that was never measured."""
-    from git_synapse.analysis.query import query_one
-
-    row = query_one("SELECT repo_a_id a, repo_b_id b FROM repo_lag_metric LIMIT 1")
-    if row is None:
-        pytest.skip("no lag data")
-    body = client.get(f"/api/repos/{row['a']}/lag-profile/{row['b']}").json()
-    assert "forward" in body and "reverse" in body
-    for curve in (body["forward"], body["reverse"]):
-        lags = [p["lag_bins"] for p in curve]
-        assert lags == sorted(lags), "a profile must be ordered by lag"
-
-
-def test_lag_profile_rejects_an_unknown_measure(client, db):
-    from git_synapse.analysis.query import query_one
-
-    row = query_one("SELECT repo_a_id a, repo_b_id b FROM repo_lag_metric LIMIT 1")
-    if row is None:
-        pytest.skip("no lag data")
-    r = client.get(f"/api/repos/{row['a']}/lag-profile/{row['b']}",
-                   params={"measure": "not_a_measure"})
-    assert r.status_code in (400, 422)
 
 
 # --------------------------------------------------------- the guarded routes

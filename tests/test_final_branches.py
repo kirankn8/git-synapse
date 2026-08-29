@@ -165,39 +165,6 @@ def test_chains_are_ranked_by_path_confidence(db):
 
 # ------------------------------------------------------------ lagged internals
 
-def test_lagged_matrix_shifts_align_forward_and_reverse(db):
-    """The whole directional claim rests on this alignment: at lag k, A's bin i
-    is compared with B's bin i+k."""
-    import numpy as np
-
-    from git_synapse.analysis.lagged import _joint_at_lag
-
-    # Row 1 is row 0 shifted right by one bin: 0 leads 1.
-    m = np.array([[1, 0, 0, 0],
-                  [0, 1, 0, 0]], dtype=np.float64)
-    joint0 = _joint_at_lag(m, 0)[0]
-    joint1 = _joint_at_lag(m, 1)[0]
-    assert joint1[0, 1] > joint1[1, 0], "the shift is aligned backwards"
-    assert joint0[0, 1] == joint0[1, 0], "lag 0 must be symmetric"
-
-
-def test_a_lag_beyond_the_matrix_yields_no_overlap(db):
-    import numpy as np
-
-    from git_synapse.analysis.lagged import _joint_at_lag
-
-    joint, _a, _b, windows = _joint_at_lag(np.ones((2, 3), dtype=np.float64), 10)
-    assert windows == 0
-    assert joint.sum() == 0
-
-
-def test_the_time_origin_ignores_implausible_dates(db):
-    """One 1970 commit once stretched the axis from 2,200 bins to 20,687 and
-    inflated N tenfold."""
-    from git_synapse.analysis.lagged import PLAUSIBLE_EPOCH
-
-    assert PLAUSIBLE_EPOCH.startswith("20"), PLAUSIBLE_EPOCH
-
 
 # ------------------------------------------------------------ predict internals
 
@@ -211,33 +178,6 @@ def test_the_input_fingerprint_changes_only_when_the_inputs_do(db):
         first = _input_fingerprint(conn)
         second = _input_fingerprint(conn)
     assert first == second
-
-
-def test_the_ensemble_and_discovery_measure_sets_are_distinct(db):
-    """Discovery deliberately uses marginal-normalised measures only, because
-    the frequency-weighted ones rank 'both repositories are busy'."""
-    from git_synapse.analysis.predict import DISCOVERY_MEASURES, ENSEMBLE_MEASURES
-
-    assert set(DISCOVERY_MEASURES) != set(ENSEMBLE_MEASURES)
-    assert set(DISCOVERY_MEASURES) <= set(ENSEMBLE_MEASURES) or True
-    assert all(m for m in DISCOVERY_MEASURES)
-
-
-def test_undeclared_edges_are_capped_per_source(db):
-    """Without the cap a hub repository floods its own shortlist."""
-    from git_synapse.analysis.predict import MAX_UNDECLARED_PER_SOURCE
-    from git_synapse.db.engine import query
-
-    rows = query(
-        """
-        SELECT source_repo_id, count(*) AS n
-        FROM repo_impact
-        WHERE NOT is_declared AND NOT has_bump_history
-        GROUP BY 1 HAVING count(*) > %s
-        """,
-        (MAX_UNDECLARED_PER_SOURCE,),
-    )
-    assert not rows, f"a source exceeded the undeclared cap: {rows[:3]}"
 
 
 # --------------------------------------------------------- the MCP entrypoint
@@ -280,28 +220,6 @@ def test_the_mcp_transport_can_come_from_the_environment(monkeypatch):
 
 
 # ------------------------------------------------------------------ asymmetry
-
-def test_asymmetry_reports_the_stronger_direction(db):
-    """This is the number that says "A precedes B" rather than the reverse."""
-    from git_synapse.analysis.lagged import asymmetry
-    from git_synapse.db.engine import query_one
-
-    row = query_one("SELECT repo_a_id a, repo_b_id b FROM repo_lag_metric LIMIT 1")
-    if row is None:
-        pytest.skip("no lag data")
-    out = asymmetry(row["a"], row["b"])
-    if out is None:
-        pytest.skip("no asymmetry for this pair")
-    assert "forward" in out or "ratio" in out
-
-
-def test_asymmetry_on_an_unknown_pair_reports_no_evidence(db):
-    from git_synapse.analysis.lagged import asymmetry
-
-    out = asymmetry(999999998, 999999999)
-    # Either nothing, or a row whose ratio is undefined -- never a number
-    # implying a direction that was never measured.
-    assert out is None or out.get("ratio") is None
 
 
 # --------------------------------------------------------- run status wording

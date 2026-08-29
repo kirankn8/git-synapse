@@ -48,6 +48,29 @@ log = logging.getLogger(__name__)
 COMMIT_FLUSH_SIZE = 5000
 
 
+def load_tags(repo_id: int, tags: list, conn: psycopg.Connection) -> int:
+    """Replace a repository's tag index, resolving each to an ingested commit.
+
+    Replaced wholesale rather than merged: a tag can be deleted or force-moved
+    upstream, and a stale row would resolve a version to a commit that release
+    no longer names.
+    """
+    conn.execute("DELETE FROM ref_tag WHERE repo_id = %s", (repo_id,))
+    if not tags:
+        return 0
+    conn.executemany(
+        """
+        INSERT INTO ref_tag (repo_id, name, commit_sha, tagged_at, annotated, commit_id)
+        VALUES (%s, %s, %s, %s, %s,
+                (SELECT id FROM commit WHERE repo_id = %s AND sha = %s))
+        ON CONFLICT (repo_id, name) DO NOTHING
+        """,
+        [(repo_id, t.name, t.commit_sha, t.tagged_at, t.annotated, repo_id, t.commit_sha)
+         for t in tags],
+    )
+    return len(tags)
+
+
 def upsert_repo(record: RepoRecord, conn: psycopg.Connection | None = None, account_id: int | None = None) -> int:
     """Insert or update a repository row and return its id.
 

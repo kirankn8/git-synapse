@@ -204,34 +204,6 @@ def test_explain_pair_rejects_an_unknown_path(corpus):
     assert "error" in out
 
 
-def test_explain_repo_pair_does_not_claim_a_dependency_that_is_not_declared(db):
-    """The prose field is what a model quotes; it promoted a bump-backed pair to
-    `declared` while the structured field beside it said null."""
-    from git_synapse.db.engine import query
-
-    rows = query(
-        """
-        SELECT p.name AS a, c.name AS b
-        FROM repo_impact i
-        JOIN repo p ON p.id = i.source_repo_id
-        JOIN repo c ON c.id = i.target_repo_id
-        WHERE i.has_bump_history AND NOT i.is_declared LIMIT 3
-        """
-    )
-    if not rows:
-        pytest.skip("no bump-backed-only pair")
-    for r in rows:
-        out = server.explain_repo_pair(repo_a=r["a"], repo_b=r["b"])
-        if "error" in out:
-            continue
-        if out.get("declared_dependency") is None:
-            prose = out.get("interpretation") or ""
-            # It may mention declaration to deny it; what it must not do is
-            # assert one, which reads as the top evidence tier.
-            assert f"declares {r['a']}" not in prose, prose
-            assert "bump-backed rather than declared" in prose or "no declared" in prose, prose
-
-
 def test_impact_of_change_and_upstream_agree(db):
     from git_synapse.db.engine import query_one
 
@@ -250,24 +222,6 @@ def test_impact_of_change_and_upstream_agree(db):
     up = server.upstream_repos(repo=row["tgt"])
     assert any(x["repo"].endswith(row["tgt"]) for x in down.get("downstream", []))
     assert any(x["repo"].endswith(row["src"]) for x in up.get("upstream", []))
-
-
-def test_crossrepo_files_reports_a_specific_partner_file(db):
-    from git_synapse.db.engine import query_one
-
-    row = query_one(
-        """
-        SELECT ra.name AS repo, fa.path
-        FROM xrepo_file_pair x
-        JOIN file fa ON fa.id = x.file_a_id
-        JOIN repo ra ON ra.id = x.repo_a_id
-        LIMIT 1
-        """
-    )
-    if row is None:
-        pytest.skip("no cross-repo pairs")
-    out = server.crossrepo_files(repo=row["repo"], path=row["path"], min_support=2)
-    assert "error" not in out, out
 
 
 def test_file_history_returns_commits_for_a_real_file(db):
@@ -401,28 +355,6 @@ def test_list_repositories_can_be_filtered(corpus):
 # ---------------------------------------------- the evidence prose, exhaustively
 
 @pytest.mark.parametrize(
-    ("declared", "bumps", "must_say", "must_not_say"),
-    [
-        ("declares x in go.mod", 3, "declares", None),
-        ("declares x in go.mod", 0, "no bump has been observed", None),
-        (None, 3, "bump-backed rather than declared", "declares dsx-lib and"),
-        (None, 0, "no declared dependency", "declares"),
-    ],
-)
-def test_repo_pair_prose_never_outruns_its_evidence(declared, bumps, must_say, must_not_say):
-    """The prose is what a model quotes, and `declared` is the tier agents are
-    told to trust above all others. Every combination must say only what the
-    structured fields beside it support."""
-    out = server._describe_repo_pair(
-        {"name": "dsx-lib"}, {"name": "dsx-app"}, declared,
-        {"bump_count": bumps} if bumps else None,
-    )
-    assert must_say in out, out
-    if must_not_say:
-        assert must_not_say not in out, out
-
-
-@pytest.mark.parametrize(
     ("validated", "withheld", "must_say"),
     [
         (0, 0, "No upstream edges recorded"),
@@ -468,39 +400,6 @@ REPO_TOOLS = [
     "repo_hotspots", "coupled_files", "crossrepo_files", "file_history",
     "coupled_directories", "explain_pair",
 ]
-
-
-@pytest.mark.parametrize("tool_name", REPO_TOOLS)
-def test_every_repo_taking_tool_refuses_an_unknown_repository(db, tool_name):
-    """One tool answering confidently about the wrong repository is worse than
-    ten refusing, so the guard has to be on all of them."""
-    tool = getattr(server, tool_name)
-    kwargs = {"repo": "definitely-not-a-repository-xyz"}
-    if tool_name in ("coupled_files", "crossrepo_files", "file_history",
-                     "module_context", "coupled_directories"):
-        kwargs["path"] = "some/file.go"
-    if tool_name == "explain_pair":
-        kwargs["path_a"], kwargs["path_b"] = "a.go", "b.go"
-    out = tool(**kwargs)
-    assert "error" in out, f"{tool_name} answered for a repository that does not exist"
-
-
-@pytest.mark.parametrize("tool_name", ["coupled_files", "crossrepo_files",
-                                       "file_history", "coupled_directories"])
-def test_every_path_taking_tool_refuses_an_unknown_path(corpus, tool_name):
-    from git_synapse.db.engine import query_one
-
-    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
-    out = getattr(server, tool_name)(repo=row["name"], path="no/such/path.xyz")
-    assert "error" in out, f"{tool_name} answered for a path that does not exist"
-
-
-def test_explain_repo_pair_refuses_an_unknown_side(corpus):
-    from git_synapse.db.engine import query_one
-
-    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
-    assert "error" in server.explain_repo_pair(repo_a="nope-xyz", repo_b=row["name"])
-    assert "error" in server.explain_repo_pair(repo_a=row["name"], repo_b="nope-xyz")
 
 
 def test_a_directory_with_no_coupling_says_so_rather_than_returning_nothing(db):

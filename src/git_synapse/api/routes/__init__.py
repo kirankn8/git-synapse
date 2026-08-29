@@ -68,13 +68,8 @@ def config() -> dict:
         "blobless_threshold_kb": cfg.ingest.blobless_threshold_kb,
         "recency_half_life_days": cfg.analysis.recency_half_life_days,
         "crossrepo_enabled": cfg.crossrepo.enabled,
-        "session_gap_hours": cfg.crossrepo.session_gap_hours,
-        "max_repos_per_changeset": cfg.crossrepo.max_repos_per_changeset,
-        "max_files_per_repo_per_changeset": cfg.crossrepo.max_files_per_repo_per_changeset,
-        "min_xrepo_support": cfg.crossrepo.min_support,
         "chain_min_confidence": cfg.crossrepo.chain_min_confidence,
         "chain_max_depth": cfg.crossrepo.chain_max_depth,
-        "ticket_pattern": cfg.crossrepo.ticket_pattern,
         "refresh_cron": cfg.schedule.cron,
         "scheduler_timezone": cfg.schedule.timezone,
         "scheduler_enabled": cfg.schedule.enabled,
@@ -358,139 +353,6 @@ def hotspots(repo_id: int | None = None, limit: int = Query(25, ge=1, le=200)) -
 
 
 # ---------------------------------------------------------------------------
-# Cross-repository coupling
-# ---------------------------------------------------------------------------
-
-
-@router.get("/crossrepo/overview", tags=["crossrepo"])
-def crossrepo_overview() -> dict:
-    """Change-set counts and cross-repo pair counts."""
-    return q.crossrepo_overview()
-
-
-@router.get("/crossrepo/pairs", tags=["crossrepo"])
-def crossrepo_pairs(
-    measure: str = DEFAULT_MEASURE,
-    level: str = Query("repo", pattern="^(repo|file)$"),
-    limit: int = Query(50, ge=1, le=1000),
-    min_support: int = Query(5, ge=1),
-) -> dict:
-    """Strongest cross-repository couplings, at repo or file granularity."""
-    return {
-        "measure": measure,
-        "level": level,
-        "pairs": q.top_crossrepo_pairs(measure, limit, min_support, level),
-    }
-
-
-@router.get("/crossrepo/graph", tags=["crossrepo"])
-def crossrepo_graph(
-    measure: str = DEFAULT_MEASURE,
-    limit: int = Query(200, ge=1, le=2000),
-    min_support: int = Query(5, ge=1),
-    center_repo_id: int | None = None,
-) -> dict:
-    """Repo-level node/edge graph of cross-repository coupling."""
-    return q.crossrepo_graph(measure, limit, min_support, center_repo_id)
-
-
-@router.get("/repos/{repo_id}/partners", tags=["crossrepo"])
-def repo_partners(
-    repo_id: int,
-    measure: str = DEFAULT_MEASURE,
-    limit: int = Query(25, ge=1, le=500),
-    min_support: int = Query(2, ge=1),
-) -> dict:
-    """Other repositories that change together with this one."""
-    if q.get_repo(repo_id) is None:
-        raise HTTPException(404, f"repository {repo_id} not found")
-    return {
-        "repo_id": repo_id,
-        "measure": measure,
-        "partners": q.repo_partners(repo_id, measure, limit, min_support),
-    }
-
-
-@router.get("/repos/{repo_id}/chains", tags=["crossrepo"])
-def repo_chains(
-    repo_id: int,
-    max_depth: int = Query(3, ge=1, le=5),
-    min_confidence: float = Query(0.15, ge=0.0, le=1.0),
-    min_support: int = Query(3, ge=1),
-    limit: int = Query(40, ge=1, le=200),
-) -> dict:
-    """Transitive coupling chains: changing this repo implies B implies C.
-
-    Path confidence is the product of the per-hop conditional probabilities, so
-    a weak hop can only weaken a chain.
-    """
-    if q.get_repo(repo_id) is None:
-        raise HTTPException(404, f"repository {repo_id} not found")
-    chains = q.repo_chains(repo_id, max_depth, min_confidence, limit, min_support)
-    return {
-        "repo_id": repo_id,
-        "max_depth": max_depth,
-        "min_confidence": min_confidence,
-        "count": len(chains),
-        "chains": [
-            {
-                "depth": c["depth"],
-                "path_confidence": float(c["path_conf"]),
-                "repo_ids": list(c["path"]),
-                "repos": list(c["repo_names"] or []),
-                "hop_confidences": [float(h) for h in c["hops"]],
-                "hop_supports": list(c["supports"]),
-            }
-            for c in chains
-        ],
-    }
-
-
-@router.get("/repos/{repo_a_id}/partners/{repo_b_id}/change-sets", tags=["crossrepo"])
-def pair_change_sets(
-    repo_a_id: int, repo_b_id: int, limit: int = Query(25, ge=1, le=200)
-) -> dict:
-    """The change sets in which both repositories changed -- the evidence."""
-    return {"change_sets": q.change_sets_for_pair(repo_a_id, repo_b_id, limit)}
-
-
-@router.get("/files/{file_id}/coupled-crossrepo", tags=["crossrepo"])
-def file_crossrepo(
-    file_id: int,
-    measure: str = DEFAULT_MEASURE,
-    limit: int = Query(25, ge=1, le=500),
-    min_support: int = Query(2, ge=1),
-) -> dict:
-    """Files in *other* repositories that change together with this file."""
-    if q.get_file(file_id) is None:
-        raise HTTPException(404, f"file {file_id} not found")
-    return {
-        "file_id": file_id,
-        "measure": measure,
-        "partners": q.crossrepo_file_partners(file_id, measure, limit, min_support),
-    }
-
-
-@router.get("/change-sets", tags=["crossrepo"])
-def change_sets(
-    signal: str | None = Query(None, pattern="^(ticket|temporal)$"),
-    multi_repo_only: bool = True,
-    limit: int = Query(50, ge=1, le=500),
-) -> dict:
-    """Recent change sets -- the raw units cross-repo coupling is computed over."""
-    return {"change_sets": q.recent_change_sets(signal, multi_repo_only, limit)}
-
-
-@router.get("/change-sets/{change_set_id}", tags=["crossrepo"])
-def change_set_detail(change_set_id: int) -> dict:
-    """One change set with all its commits, grouped by repository."""
-    row = q.change_set_detail(change_set_id)
-    if row is None:
-        raise HTTPException(404, f"change set {change_set_id} not found")
-    return row
-
-
-# ---------------------------------------------------------------------------
 # Impact prediction
 # ---------------------------------------------------------------------------
 
@@ -623,32 +485,6 @@ def repo_dependencies(repo_id: int) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/repos/{repo_a_id}/lag-profile/{repo_b_id}", tags=["impact"])
-def lag_profile(repo_a_id: int, repo_b_id: int, measure: str = "confidence_ab") -> dict:
-    """Association versus lag, in both directions.
-
-    The shape of these two curves is the directional evidence: if A precedes B,
-    the forward curve peaks at a positive lag and sits above the reverse one.
-    """
-    from git_synapse.db.engine import query as raw
-    from git_synapse.stats.registry import resolve
-
-    key = resolve(measure).key
-    rows = raw(
-        f"""
-        SELECT lag_bins, bin_hours, repo_a_id, repo_b_id, n_ab, {key} AS value
-        FROM repo_lag_metric
-        WHERE (repo_a_id = %(a)s AND repo_b_id = %(b)s)
-           OR (repo_a_id = %(b)s AND repo_b_id = %(a)s)
-        ORDER BY lag_bins
-        """,
-        {"a": repo_a_id, "b": repo_b_id},
-    )
-    forward = [r for r in rows if r["repo_a_id"] == repo_a_id]
-    reverse = [r for r in rows if r["repo_a_id"] == repo_b_id]
-    return {"measure": key, "forward": forward, "reverse": reverse}
-
-
 # ---------------------------------------------------------------------------
 # Mining: modules, drift, risk
 # ---------------------------------------------------------------------------
@@ -702,61 +538,9 @@ def mining_overview() -> dict:
           (SELECT count(*) FROM repo_impact WHERE has_bump_history)      AS bump_edges,
           (SELECT count(*) FROM dep_bump)                                AS dep_bumps,
           (SELECT count(*) FROM repo_dependency
-            WHERE dep_repo_id IS NOT NULL)                               AS declared_deps,
-          (SELECT count(*) FROM repo_lag_metric)                         AS lagged_rows
+            WHERE dep_repo_id IS NOT NULL)                               AS declared_deps
         """
     ) or {}
-
-
-# ---------------------------------------------------------------------------
-# Validation
-# ---------------------------------------------------------------------------
-
-
-@router.get("/validation", tags=["mining"])
-def validation(
-    lag_bins: int = Query(1, ge=0, le=100),
-    min_bumps: int = Query(2, ge=1),
-    limit: int = Query(35, ge=1, le=40),
-) -> dict:
-    """How well each measure predicts real dependency propagation.
-
-    Ranks every measure by AUC against the manifest-bump ground truth. This is
-    the page that says which numbers to trust, and it is computed rather than
-    asserted.
-    """
-    from git_synapse.analysis.validate import evaluate
-
-    scored = evaluate(lag_bins=lag_bins, min_bumps=min_bumps)[:limit]
-    return {
-        "lag_bins": lag_bins,
-        "min_bumps": min_bumps,
-        "candidates": scored[0].n_candidates if scored else 0,
-        "true_edges": scored[0].n_true if scored else 0,
-        "note": (
-            "AUC here is measured over ALL ordered repository pairs. Note that a "
-            "high AUC is not the same as a useful answer: russell_rao tops this "
-            "table while managing only ~0.63 directional accuracy, because it is "
-            "pure joint frequency and mostly ranks 'both repos are busy'. "
-            "Restricting "
-            "candidates to declared dependencies raises it to 0.88 in sample "
-            "(0.69 held out in time), "
-            "which is why the impact view ranks within that structural set."
-        ),
-        "measures": [
-            {
-                "measure": s.measure,
-                "auc": None if s.auc != s.auc else round(s.auc, 4),
-                "precision_at": {str(k): round(v, 3) for k, v in s.precision_at.items()},
-                "directional_accuracy": (
-                    round(s.directional_accuracy, 4)
-                    if s.directional_accuracy is not None else None
-                ),
-            }
-            for s in scored
-        ],
-    }
-
 
 # ---------------------------------------------------------------------------
 # Feedback: defects in Git Synapse reported by the sessions using it

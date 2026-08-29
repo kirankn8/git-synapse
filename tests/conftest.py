@@ -119,7 +119,7 @@ def corpus(scratch_db, tmp_path_factory):
     os.environ["MIRROR_ROOT"] = str(root / "mirrors")
     reset_config_cache()
 
-    from git_synapse.analysis import aggregate, crossrepo, depbump, lagged, mining, predict, score
+    from git_synapse.analysis import aggregate, depbump, mining, predict, score
     from git_synapse.db.engine import connection
     from git_synapse.ingest import pipeline
 
@@ -167,11 +167,9 @@ def corpus(scratch_db, tmp_path_factory):
             score.score_repo(rid, conn)
 
     # Every global stage, in the order the pipeline runs them.
-    crossrepo.rebuild(force=True)
     depbump.rebuild(force=True)
     depbump.refresh_declared(force=True)
     depbump.refresh_modules()
-    lagged.rebuild(force=True)
     predict.rebuild(force=True)
     mining.rebuild(force=True)
 

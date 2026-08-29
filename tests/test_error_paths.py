@@ -41,13 +41,6 @@ def test_mining_an_empty_corpus_is_a_no_op(scratch_db):
     assert stats is not None
 
 
-def test_lagged_rebuild_on_an_empty_corpus_is_a_no_op(scratch_db):
-    from git_synapse.analysis import lagged
-
-    stats = lagged.rebuild(force=True)
-    assert stats is not None
-
-
 def test_predict_rebuild_on_an_empty_corpus_is_a_no_op(scratch_db):
     from git_synapse.analysis import predict
 
@@ -55,22 +48,7 @@ def test_predict_rebuild_on_an_empty_corpus_is_a_no_op(scratch_db):
     assert stats is not None
 
 
-def test_crossrepo_rebuild_on_an_empty_corpus_is_a_no_op(scratch_db):
-    from git_synapse.analysis import crossrepo
-
-    stats = crossrepo.rebuild(force=True)
-    assert stats is not None
-
-
 # --------------------------------------------------------------- watermarks
-
-def test_a_rebuild_skips_when_its_inputs_have_not_changed(scratch_db):
-    """The fingerprint is what keeps the fifteen-minute tick cheap."""
-    from git_synapse.analysis import lagged
-
-    first = lagged.rebuild(force=True)
-    second = lagged.rebuild(force=False)
-    assert second.n_bins == 0 or second.rows_written == first.rows_written
 
 
 # ------------------------------------------------------------------ parser
