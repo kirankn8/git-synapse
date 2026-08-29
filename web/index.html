@@ -11,11 +11,17 @@
   <div id="app">
     <header class="topbar">
       <a class="brand" href="/" data-nav>
-        <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
-          <circle cx="6" cy="6" r="2.6"/><circle cx="18" cy="7" r="2.2"/>
-          <circle cx="12" cy="14" r="3"/><circle cx="5" cy="18" r="2"/>
-          <circle cx="19" cy="18" r="1.8"/>
-          <path d="M6 6 L12 14 M18 7 L12 14 M12 14 L5 18 M12 14 L19 18 M6 6 L18 7"/>
+        <!-- A commit branch whose connection is a synaptic cleft. The gap is
+             the point: two things that must fire together, signal crossing. -->
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <g class="bm-arc">
+            <path d="M8 24 C 8 18.5, 9.5 15.5, 12 13.6"/>
+            <path d="M20 18.4 C 22.5 16.5, 24 13.5, 24 8"/>
+          </g>
+          <circle class="bm-spark bm-spark-1" cx="14.6" cy="15.1" r="1.15"/>
+          <circle class="bm-spark bm-spark-2" cx="17.4" cy="16.9" r="1.15"/>
+          <circle class="bm-node" cx="8" cy="24" r="2.6"/>
+          <circle class="bm-node" cx="24" cy="8" r="2.6"/>
         </svg>
         <span class="brand-text">Git Synapse</span>
       </a>
