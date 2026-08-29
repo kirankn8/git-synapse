@@ -234,3 +234,64 @@ def test_fetch_languages_degrades_to_empty_rather_than_failing(monkeypatch):
 
     with _client(handler) as c:
         assert c.fetch_languages("acme/x") == {}
+
+
+# ------------------------------------------------------------- the repo filters
+
+def _record(name, **flags):
+    return RepoRecord(github_id=hash(name) % 10**6, owner="acme", name=name,
+                      full_name=f"acme/{name}", clone_url="",
+                      default_branch="main", **flags)
+
+
+@pytest.mark.parametrize(("flag", "config_key"), [
+    ("is_private", "include_private"),
+    ("is_fork", "include_forks"),
+    ("is_archived", "include_archived"),
+])
+def test_a_flagged_repository_is_excluded_unless_it_is_opted_in(flag, config_key):
+    """A fork's history is its upstream's; counting it would double every pair it
+    inherited and make the fork look like a hub."""
+    import dataclasses
+
+    from git_synapse.config import get_config
+    from git_synapse.ingest.github import select_repos
+
+    base = dataclasses.replace(get_config().github, only_repos=(), skip_repos=(),
+                               include_private=False, include_forks=False,
+                               include_archived=False)
+    records = [_record("plain"), _record("flagged", **{flag: True})]
+
+    assert [r.name for r in select_repos(records, cfg=base)] == ["plain"]
+
+    opted_in = dataclasses.replace(base, **{config_key: True})
+    assert {r.name for r in select_repos(records, cfg=opted_in)} == {"plain", "flagged"}
+
+
+def test_a_disabled_repository_is_never_included():
+    """GitHub disables a repository when it is over quota or under review; there
+    is nothing to clone."""
+    import dataclasses
+
+    from git_synapse.config import get_config
+    from git_synapse.ingest.github import select_repos
+
+    cfg = dataclasses.replace(get_config().github, only_repos=(), skip_repos=(),
+                              include_private=True, include_forks=True,
+                              include_archived=True)
+    records = [_record("plain"), _record("dead", is_disabled=True)]
+    assert [r.name for r in select_repos(records, cfg=cfg)] == ["plain"]
+
+
+def test_skip_repos_matches_a_bare_name_or_a_full_name():
+    import dataclasses
+
+    from git_synapse.config import get_config
+    from git_synapse.ingest.github import select_repos
+
+    base = dataclasses.replace(get_config().github, only_repos=())
+    records = [_record("keep"), _record("byname"), _record("byfullname")]
+
+    cfg = dataclasses.replace(
+        base, skip_repos=("ByName", "acme/byfullname"))
+    assert [r.name for r in select_repos(records, cfg=cfg)] == ["keep"]

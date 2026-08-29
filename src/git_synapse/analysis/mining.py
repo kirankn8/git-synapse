@@ -186,9 +186,9 @@ def _cluster_repo(conn: psycopg.Connection, repo_id: int, stats: MiningStats) ->
         n = len(nodes)
         keys = np.concatenate([dst * n + labels[src], src * n + labels[dst]])
         weights = np.concatenate([weight, weight])
+        # minlength is n*n and n >= 1 here (the edge list is non-empty), so the
+        # reshape below is always well-formed.
         totals = np.bincount(keys, weights=weights, minlength=n * n)
-        if totals.size == 0:
-            break
         reshaped = totals.reshape(n, n)
         best = reshaped.argmax(axis=1)
         # Only move a node that actually has an incident edge.
