@@ -703,8 +703,9 @@ def test_a_declared_dependency_is_recorded_from_the_manifest(manifests):
         "SELECT dep_repo_id, dep_name, manifest FROM repo_dependency"
         " WHERE consumer_repo_id = %s", (manifests["e2e-mono"],),
     )
-    edge = next(r for r in rows if r["dep_name"] == "e2e-dep")
-    assert edge["dep_repo_id"] == manifests["e2e-dep"], "the name did not resolve"
+    # Stored as the manifest wrote it, so the owner is available at resolution.
+    edge = next(r for r in rows if r["dep_name"] == "github.com/acme/e2e-dep")
+    assert edge["dep_repo_id"] == manifests["e2e-dep"], "the reference did not resolve"
     assert edge["manifest"] == "go.mod"
 
 

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import pytest
 
-from git_synapse.analysis.depbump import patterns_for
 from git_synapse.db.engine import query_one
 from git_synapse.ingest import accounts
 from git_synapse.ingest.accounts import AccountError
@@ -225,33 +224,7 @@ def test_seeding_survives_an_invalid_env_org(clean, monkeypatch):
         reset_config_cache()
 
 
-# ------------------------------------------------- owner-driven bump patterns
-
-def test_no_owners_matches_nothing_rather_than_everything():
-    """An empty owner list must not compile to a pattern that claims every dep."""
-    pats = patterns_for(())
-    assert pats.module.search("github.com/anyone/thing v1.0.0") is None
-    assert pats.npm.search('"@anyone/thing": "1.0.0"') is None
-
-
-def test_patterns_match_the_configured_owner_and_no_other():
-    pats = patterns_for(("acme",))
-    assert pats.module.search("github.com/acme/thing v1.0.0").group(1) == "thing"
-    assert pats.module.search("github.com/other/thing v1.0.0") is None
-
-
-def test_patterns_cover_every_configured_owner():
-    pats = patterns_for(("acme", "beta-co"))
-    assert pats.module.search("github.com/beta-co/thing v1.0.0").group(1) == "thing"
-    assert pats.npm.search('"@acme/design": "1.0.0"').group(1) == "design"
-
-
-def test_an_owner_with_regex_characters_is_escaped():
-    """A login is data, not a pattern; an unescaped one would match wrongly."""
-    pats = patterns_for(("a.c",))
-    assert pats.module.search("github.com/abc/thing v1.0.0") is None
-    assert pats.module.search("github.com/a.c/thing v1.0.0") is not None
-
+# ---------------------------------------------- owner-driven resolution
 
 def test_owners_are_read_from_ingested_repos_not_configured_accounts(clean):
     """Removing an account must not reclassify what it already mined."""
@@ -266,10 +239,6 @@ def test_owners_are_read_from_ingested_repos_not_configured_accounts(clean):
 
     with connection() as conn:
         upsert_repo(with_owner, conn)
-    assert "acme-owner" in accounts_owner_set()
-
-
-def accounts_owner_set() -> set[str]:
-    from git_synapse.analysis.depbump import internal_owners
-
-    return set(internal_owners())
+    from git_synapse.db.engine import query
+    owners = {r["owner"].lower() for r in query("SELECT owner FROM repo")}
+    assert "acme-owner" in owners
