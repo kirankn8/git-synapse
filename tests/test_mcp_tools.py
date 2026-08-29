@@ -34,7 +34,7 @@ def test_real_names_full_names_and_case_all_resolve(db):
 
 # ---------------------------------------------------------- coupled_files
 
-def test_coupled_files_rejects_an_unknown_path_with_a_hint(db):
+def test_coupled_files_rejects_an_unknown_path_with_a_hint(corpus):
     from git_synapse.db.engine import query_one
 
     row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
@@ -64,7 +64,7 @@ def test_coupled_files_shape_is_stable(db):
         assert 0.0 <= p["probability_also_changes"] <= 1.0
 
 
-def test_an_unknown_measure_is_refused(db):
+def test_an_unknown_measure_is_refused(corpus):
     from git_synapse.db.engine import query_one
 
     row = query_one(
@@ -100,7 +100,7 @@ def test_currency_is_absent_when_recency_is_unknown():
 
 # ------------------------------------------------------------- module tools
 
-def test_module_context_rejects_a_path_that_does_not_exist(db):
+def test_module_context_rejects_a_path_that_does_not_exist(corpus):
     from git_synapse.db.engine import query_one
 
     row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
@@ -134,7 +134,7 @@ def test_list_measures_describes_every_measure(db):
     assert all(m.get("key") and m.get("label") for m in measures)
 
 
-def test_list_repositories_returns_usable_names(db):
+def test_list_repositories_returns_usable_names(corpus):
     out = server.list_repositories(limit=5)
     repos = out["repositories"] if isinstance(out, dict) else out
     assert repos
@@ -194,7 +194,7 @@ def test_explain_pair_answers_in_the_callers_argument_order(db):
     assert fwd["measures"]["confidence_ab"] == rev["measures"]["confidence_ba"]
 
 
-def test_explain_pair_rejects_an_unknown_path(db):
+def test_explain_pair_rejects_an_unknown_path(corpus):
     from git_synapse.db.engine import query_one
 
     row = query_one(
@@ -287,7 +287,7 @@ def test_file_history_returns_commits_for_a_real_file(db):
     assert out["total_changes"] >= len(out["recent_commits"])
 
 
-def test_repo_hotspots_are_ranked(db):
+def test_repo_hotspots_are_ranked(corpus):
     from git_synapse.db.engine import query_one
 
     row = query_one("SELECT name FROM repo WHERE is_enabled ORDER BY commit_count DESC LIMIT 1")
@@ -297,7 +297,7 @@ def test_repo_hotspots_are_ranked(db):
     assert counts == sorted(counts, reverse=True)
 
 
-def test_coupling_chain_direction_is_honoured(db):
+def test_coupling_chain_direction_is_honoured(corpus):
     from git_synapse.db.engine import query_one
 
     row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
@@ -371,7 +371,7 @@ def test_module_context_says_so_for_a_single_module_repository(db):
     assert "single-module" in (out.get("note") or "")
 
 
-def test_search_files_scoped_to_a_repository_stays_in_it(db):
+def test_search_files_scoped_to_a_repository_stays_in_it(corpus):
     from git_synapse.db.engine import query_one
 
     row = query_one("SELECT name FROM repo WHERE is_enabled ORDER BY commit_count DESC LIMIT 1")
@@ -387,7 +387,7 @@ def test_search_files_with_no_match_is_an_empty_list_not_an_error(db):
     assert files == []
 
 
-def test_list_repositories_can_be_filtered(db):
+def test_list_repositories_can_be_filtered(corpus):
     from git_synapse.db.engine import query_one
 
     row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
@@ -487,7 +487,7 @@ def test_every_repo_taking_tool_refuses_an_unknown_repository(db, tool_name):
 
 @pytest.mark.parametrize("tool_name", ["coupled_files", "crossrepo_files",
                                        "file_history", "coupled_directories"])
-def test_every_path_taking_tool_refuses_an_unknown_path(db, tool_name):
+def test_every_path_taking_tool_refuses_an_unknown_path(corpus, tool_name):
     from git_synapse.db.engine import query_one
 
     row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
@@ -495,7 +495,7 @@ def test_every_path_taking_tool_refuses_an_unknown_path(db, tool_name):
     assert "error" in out, f"{tool_name} answered for a path that does not exist"
 
 
-def test_explain_repo_pair_refuses_an_unknown_side(db):
+def test_explain_repo_pair_refuses_an_unknown_side(corpus):
     from git_synapse.db.engine import query_one
 
     row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")

@@ -83,19 +83,21 @@ def test_non_numeric_repo_id_is_refused(client, bad):
     assert client.get(f"/api/repos/{bad}").status_code in (404, 422)
 
 
-def test_repo_zero_is_not_treated_as_unset(client):
+def test_repo_zero_is_not_treated_as_unset(corpus, client):
     """`if repo_id:` made 0 mean "no filter" and returned the whole corpus
     dressed as one repository's data."""
     scoped = client.get("/api/repos/0/hotspots", params={"limit": 2}).json()
-    corpus = client.get("/api/hotspots", params={"limit": 2}).json()
-    assert scoped != corpus
+    everything = client.get("/api/hotspots", params={"limit": 2}).json()
+    assert scoped != everything
 
 
 # --------------------------------------------------------------- coupling
 
-def test_coupled_partners_are_oriented_and_ranked(client):
-    f = client.get("/api/files/resolve",
-                   params={"repo": "acme/runtime", "path": "go.mod"})
+def test_coupled_partners_are_oriented_and_ranked(corpus, client):
+    args = _a_real_file()
+    if args is None:
+        pytest.skip("no files indexed")
+    f = client.get("/api/files/resolve", params=args)
     if f.status_code != 200:
         pytest.skip("fixture file not indexed")
     fid = f.json().get("file_id") or f.json().get("id")
@@ -200,9 +202,11 @@ def test_every_listing_endpoint_answers(client, path):
     assert r.status_code == 200, f"{path} -> {r.status_code} {r.text[:120]}"
 
 
-def test_file_detail_endpoints_agree_with_each_other(client):
-    f = client.get("/api/files/resolve",
-                   params={"repo": "acme/runtime", "path": "go.mod"})
+def test_file_detail_endpoints_agree_with_each_other(corpus, client):
+    args = _a_real_file()
+    if args is None:
+        pytest.skip("no files indexed")
+    f = client.get("/api/files/resolve", params=args)
     if f.status_code != 200:
         pytest.skip("fixture file not indexed")
     fid = f.json().get("file_id") or f.json().get("id")
@@ -319,13 +323,25 @@ def _real_ids():
 
 
 #: Endpoints whose required query arguments the sweep cannot guess. None means
-#: "cannot be swept generically"; a dict is the arguments to pass.
+#: "cannot be swept generically"; a callable is given the ids and returns the
+#: arguments, so nothing here names a repository that has to pre-exist.
 REQUIRED_QUERY: dict[str, dict | None] = {
-    "/api/files/resolve": {"repo": "acme/runtime", "path": "go.mod"},
+    "/api/files/resolve": None,
 }
 
 
-def test_every_get_route_answers_with_real_arguments(client, db):
+def _a_real_file() -> dict | None:
+    """A `(repo, path)` pair that exists, for the resolve endpoint."""
+    from git_synapse.analysis.query import query_one
+
+    row = query_one(
+        "SELECT r.full_name AS repo, f.path FROM file f"
+        " JOIN repo r ON r.id = f.repo_id LIMIT 1"
+    )
+    return {"repo": row["repo"], "path": row["path"]} if row else None
+
+
+def test_every_get_route_answers_with_real_arguments(corpus, client):
     """A sweep over the routes the app actually declares.
 
     Enumerating them from the app rather than a hand-written list means a new
@@ -356,6 +372,8 @@ def test_every_get_route_answers_with_real_arguments(client, db):
         # A few endpoints take required query arguments; give them real ones
         # rather than letting the sweep report a 422 as a fault.
         extra = REQUIRED_QUERY.get(path, {})
+        if path == "/api/files/resolve":
+            extra = _a_real_file()
         if extra is None:
             skipped.append(path)
             continue
