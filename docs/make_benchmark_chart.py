@@ -3,7 +3,7 @@ import pathlib
 
 # repo, commits, baseline %, P(B|A) %, lift
 DATA = [
-    ("google (38 repos)", 89121, 9.0, 61.3, 6.84),
+    ("google (38 repos)", 89121, 38.0, 61.7, 1.62),
     ("scikit-learn", 30873, 14.2, 55.1, 3.88),
     ("django",       33992, 14.8, 49.8, 3.36),
     ("requests",      4856, 40.8, 64.6, 1.58),

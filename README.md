@@ -11,7 +11,7 @@
 ![Docker](https://img.shields.io/badge/Docker-compose-2496ED?style=flat-square&logo=docker&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-12%20tools-5eead4?style=flat-square)
 ![Measures](https://img.shields.io/badge/measures-29-a78bfa?style=flat-square)
-![Backtested](https://img.shields.io/badge/backtested-6.8x%20baseline-14b8a6?style=flat-square)
+![Backtested](https://img.shields.io/badge/backtested-1.6--3.9x%20baseline-14b8a6?style=flat-square)
 
 </div>
 
@@ -149,12 +149,12 @@ from, so no pair can vouch for itself.
 
 ### Measured result
 
-Backtested over **184,000 commits** — 411,944 prompts, every one scored only
+Backtested over **184,000 commits** — 409,354 prompts, every one scored only
 against earlier history ([chart above](#git-synapse)):
 
 | Corpus | Commits | Prompts | Baseline | `P(B\|A)` | Lift |
 |---|---:|---:|---:|---:|---:|
-| **38 repos from the `google` org** | 89,121 | 243,324 | 9.0% | **61.3%** | **6.84x** |
+| **38 repos from the `google` org** | 89,121 | 240,734 | 38.0% | **61.7%** | **1.62x** |
 | django | 33,992 | 70,835 | 14.8% | **49.8%** | **3.36x** |
 | scikit-learn | 30,873 | 52,475 | 14.2% | **55.1%** | **3.88x** |
 | pytest | 13,071 | 26,966 | 34.7% | **53.4%** | **1.54x** |
@@ -162,9 +162,14 @@ against earlier history ([chart above](#git-synapse)):
 | flask | 3,821 | 6,115 | 48.6% | **60.5%** | **1.24x** |
 | requests | 4,856 | 3,849 | 40.8% | **64.6%** | **1.58x** |
 
-**Across 38 Google repositories, naming five files gets at least one right 61%
-of the time, against 9% for guessing the busiest files.** The pattern is
-consistent: lift grows with the size and modularity of the codebase. Confidence intervals do not overlap in any
+**Across 38 Google repositories, naming five files gets at least one right 62%
+of the time, against 38% for guessing that repository's busiest files.**
+
+Counts are kept per repository, never pooled. Two files in different
+repositories cannot co-occur, so a shared population hands the baseline
+candidates it can never hit — which does not weaken the baseline honestly, it
+breaks it. Pooling the same 38 repositories drove the baseline to 9% and
+reported 6.84x, four times the real figure. Confidence intervals do not overlap in any
 repository, so these are differences the sample supports.
 
 Two things the benchmark settled that opinion had not:
