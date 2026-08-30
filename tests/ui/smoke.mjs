@@ -75,51 +75,49 @@ const files = await (await fetch(`${BASE}/api/repos/${repoId}/hotspots?limit=1`)
 const fileId = files.hotspots[0].id;
 const coupled = await (await fetch(`${BASE}/api/files/${fileId}/coupled?limit=1&min_support=2`)).json();
 const otherId = coupled.partners[0]?.other_id;
-const dirs = await (await fetch(`${BASE}/api/repos/${repoId}/directories?limit=1`)).json();
-const dirId = dirs.directories[0].id;
+const filePath = files.hotspots[0].path;
+const tree = await (await fetch(`${BASE}/api/repos/${repoId}/tree`)).json();
+const dirPath = (tree.directories[0] || {}).path || '';
 const runs = await (await fetch(BASE + '/api/runs?limit=1')).json();
 const runId = runs.runs[0].id;
 
+// Edges are {source, target}; reading source_repo_id here quietly fell back to
+// a self-edge, so the impact routes rendered an empty page and asserted nothing.
 const repoWithImpact = await (await fetch(BASE + '/api/impact/graph?limit=5')).json();
-const impactRepoId = (repoWithImpact.edges[0] || {}).target_repo_id || repoId;
-const impactSrcId = (repoWithImpact.edges[0] || {}).source_repo_id || repoId;
+const bumped = repoWithImpact.edges.find((e) => e.bump_count > 0) || repoWithImpact.edges[0] || {};
+const impactSrcId = bumped.source ?? repoId;
+const impactRepoId = bumped.target ?? repoId;
 
 const routes = [
-  ['#/',                                  'Overview'],
-  ['#/repos',                             'Repositories'],
-  ['#/accounts',                          'Accounts'],
+  ['#/',                                   'Overview'],
+  ['#/repos',                              'Repositories'],
+  ['#/accounts',                           'Accounts'],
   [`#/repos/${repoId}`,                    'Repo (lands on files)'],
   [`#/repos/${repoId}?tab=overview`,       'Repo overview'],
   [`#/repos/${repoId}?tab=pairs`,          'Repo pairs'],
-  [`#/repos/${repoId}?tab=files`,          'Repo files'],
-  ['#/insights?tab=files&repo=5',         'Insights files'],
-  [`#/repos/${repoId}?tab=dirs`,           'Repo dirs'],
-  [`#/repos/${impactRepoId}?tab=impact`,  'Repo cross-repo impact'],
-  [`#/repos/${repoId}?tab=modules`,        'Repo de-facto modules'],
-  [`#/repos/${repoId}?tab=risk`,           'Repo risk'],
   [`#/repos/${repoId}?tab=meta`,           'Repo metadata'],
-  [`#/repos/${repoId}/files/${fileId}`,                    'File coupled'],
-  [`#/repos/${repoId}/files/${fileId}?tab=history`,        'File history'],
-  [`#/repos/${repoId}/files/${fileId}?tab=authors`,        'File authors'],
+  [`#/repos/${repoId}?tab=files&f=test`,   'Repo file search'],
+  dirPath ? [`#/repos/${repoId}/tree/${dirPath}`, 'Folder'] : null,
+  [`#/repos/${repoId}/files/${filePath}`,             'File coupled'],
+  [`#/repos/${repoId}/files/${filePath}?tab=history`, 'File history'],
+  [`#/repos/${repoId}/files/${filePath}?tab=authors`, 'File authors'],
   otherId ? [`#/repos/${repoId}/pairs/${fileId}/${otherId}`, 'Pair detail'] : null,
-  [`#/repos/${repoId}/dirs/${dirId}`,     'Directory coupling'],
-  ['#/impact',                            'Impact (org-wide)'],
-  [`#/impact?repo=${impactRepoId}&dir=upstream`,   'Impact upstream'],
-  [`#/impact?repo=${impactSrcId}&dir=downstream`,  'Impact downstream'],
-  [`#/impact/${impactSrcId}/${impactRepoId}`,    'Repo pair detail'],
-  ['#/insights?tab=risk',                 'Insights risk'],
-  ['#/insights?tab=drift',                'Insights drift (emerging)'],
-  ['#/insights?tab=drift&trend=decaying', 'Insights drift (decaying)'],
-  [`#/insights?tab=modules&repo=${repoId}`, 'Insights modules'],
-  ['#/explore',                           'Explore (default)'],
-  ['#/explore?q=Dockerfile',              'Explore (search)'],
-  [`#/graph?repo=${repoId}&limit=60&min=5`, 'Graph (files)'],
-  ['#/graph?mode=repos&min=0.4',          'Graph (repositories)'],
-  ['#/measures',                          'Measures catalogue'],
-  ['#/jobs',                              'Jobs'],
+  [`#/repos/${repoId}/graph?limit=60&min=5`,          'Coupling graph'],
+  ['#/insights',                           'Insights (redirects to impact)'],
+  ['#/insights/impact',                    'Impact (pick a repository)'],
+  [`#/insights/impact?repo=${impactRepoId}&dir=upstream`,   'Impact upstream'],
+  [`#/insights/impact?repo=${impactSrcId}&dir=downstream`,  'Impact downstream'],
+  [`#/insights/impact/${impactSrcId}/${impactRepoId}`,      'Impact edge detail'],
+  ['#/insights/impact/graph?min=0.4',      'Repository graph'],
+  ['#/insights/risk',                      'Insights risk'],
+  ['#/insights/drift',                     'Insights drift (emerging)'],
+  ['#/insights/drift?trend=decaying',      'Insights drift (decaying)'],
+  [`#/insights/modules?repo=${repoId}`,    'Insights modules'],
+  ['#/measures',                           'Measures catalogue'],
+  ['#/jobs',                               'Jobs'],
   [`#/jobs/${runId}`,                      'Run detail'],
-  ['#/feedback',                          'Feedback (open)'],
-  ['#/feedback?status=all',               'Feedback (all)'],
+  ['#/feedback',                           'Feedback (open)'],
+  ['#/feedback?status=all',                'Feedback (all)'],
 ].filter(Boolean);
 
 console.log('\n=== driving every route ===');
@@ -144,10 +142,13 @@ for (const [hash, label] of routes) {
 console.log('\n=== drill-down trail ===');
 for (const [path, label, expect] of [
   ['/repos/5', 'repository', ['Accounts', 'google']],
-  ['/repos/3/dirs/1', 'directory',  ['Accounts', 'google', 'brotli']],
-  ['/insights?repo=5', 'scoped insights', ['Accounts', 'google', 'guava', 'Insights']],
-  ['/impact?repo=5',   'scoped impact',   ['Accounts', 'google', 'guava', 'Impact']],
-  ['/graph?repo=5',    'scoped graph',    ['Accounts', 'google', 'guava']],
+  [`/repos/${repoId}/tree/${dirPath}`, 'folder',
+   ['Accounts', ...dirPath.split('/')]],
+  [`/repos/${repoId}/files/${filePath}`, 'file',
+   ['Accounts', filePath.split('/').pop()]],
+  ['/insights/risk?repo=5', 'scoped insights', ['Accounts', 'google', 'guava', 'Insights']],
+  ['/insights/impact?repo=5', 'scoped impact',  ['Accounts', 'google', 'guava', 'Insights']],
+  ['/repos/5/graph',   'scoped graph',    ['Accounts', 'google', 'guava']],
 ]) {
   window.history.pushState({}, '', path);
   window.dispatchEvent(new window.PopStateEvent('popstate'));
@@ -162,23 +163,23 @@ for (const [path, label, expect] of [
   report(`${label} trail`, !missing.length, trail || 'no breadcrumb');
 }
 
-// Opening a repository lands on its files, with the scope already applied and
-// the Files tab in focus -- not a page the reader has to configure first.
-window.history.pushState({}, '', '/insights?tab=files&repo=5');
+// Opening a repository lands on its files, with the Files tab in focus -- not
+// a page the reader has to configure first.
+window.history.pushState({}, '', '/repos/5');
 window.dispatchEvent(new window.PopStateEvent('popstate'));
 {
-  let rows = 0, scoped = '', active = '';
+  let rows = 0, active = '', folders = 0;
   for (let i = 0; i < 60; i++) {
     await sleep(120);
     rows = window.document.querySelectorAll('#view table tbody tr').length;
-    const sel = window.document.querySelector('.toolbar select');
-    scoped = sel ? sel.options[sel.selectedIndex]?.text || '' : '';
+    folders = [...window.document.querySelectorAll('#view table tbody tr')]
+      .filter((tr) => tr.textContent.includes('\u{1F4C1}')).length;
     const tab = window.document.querySelector('.tab.active');
     active = tab ? tab.textContent.trim() : '';
     if (rows) break;
   }
-  report('files open scoped and focused', rows > 0 && scoped === 'guava' && active === 'Files',
-         `${rows} rows, scope "${scoped}", tab "${active}"`);
+  report('repository opens on its files', rows > 0 && active === 'Files' && folders > 0,
+         `${rows} rows (${folders} folders), tab "${active}"`);
 }
 
 console.log('\n=== interaction ===');
@@ -237,14 +238,14 @@ const results = $('#omnibox-results');
 report('omnibox returns results', !results.hidden && results.children.length > 1,
        `${results.children.length} nodes`);
 
+// Reported, not exited on: the checks below are the ones this restructure was
+// for, and stopping here would hide them behind an unrelated failure.
 console.log('\n=== JS errors ===');
 if (errors.length) {
   for (const e of errors.slice(0, 12)) console.log('  ' + String(e).slice(0, 220));
-  console.log(`\nRESULT: ${errors.length} problem(s)`);
-  process.exit(1);
+} else {
+  console.log('  none');
 }
-console.log('  none');
-console.log('\nRESULT: UI renders every route with no JS errors');
 
 // Every deep view names its place. A path like /file/584531 says nothing about
 // which repository the file is in, so a link cannot be read, shared or trusted.
@@ -253,10 +254,12 @@ console.log('\n=== canonical paths ===');
   const cases = [
     ['/accounts/7',                     'account'],
     ['/repos/5',                        'repository'],
-    [`/repos/999/files/${fileId}`,      'file (wrong repo corrects itself)'],
-    [`/repos/${repoId}/dirs/${dirId}`,  'directory'],
+    [`/repos/${repoId}/files/${filePath}`,      'file'],
+    dirPath ? [`/repos/${repoId}/tree/${dirPath}`, 'folder'] : null,
+    ['/insights',                       'insights (redirects)'],
+    ['/insights/impact/graph',          'repository graph'],
     ['/jobs',                           'jobs'],
-  ];
+  ].filter(Boolean);
   for (const [path, label] of cases) {
     window.history.pushState({}, '', path);
     window.dispatchEvent(new window.PopStateEvent('popstate'));
@@ -273,3 +276,72 @@ console.log('\n=== canonical paths ===');
            `${path}${landed === path ? '' : ' → ' + landed}`);
   }
 }
+
+/* The complaint this restructure came from: clicking down the hierarchy jumped
+   sideways, so the address stopped describing where you were. Walking it by
+   clicking -- never by pushing a URL -- is the only way to catch that, and it
+   is what the route-driving loop above cannot see. */
+console.log('\n=== click walk: account -> repo -> folder -> file ===');
+{
+  const settle = async () => {
+    for (let i = 0; i < 60; i++) {
+      await sleep(120);
+      const t = view().textContent || '';
+      if (!t.includes('Loading\u2026') && t.trim().length > 40) return;
+    }
+  };
+  const crumbCount = () => {
+    const el = window.document.querySelector('.crumbs');
+    return el ? el.textContent.split('/').filter((x) => x.trim()).length : 0;
+  };
+  const clickRow = async (match) => {
+    const rows = [...view().querySelectorAll('table.data tbody tr')];
+    const row = match ? rows.find((r) => match(r)) : rows[0];
+    if (!row) return false;
+    row.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await settle();
+    return true;
+  };
+
+  window.history.pushState({}, '', '/accounts');
+  window.dispatchEvent(new window.PopStateEvent('popstate'));
+  await settle();
+
+  const steps = [];
+  const step = (label, passed) => steps.push([label, passed, window.location.pathname]);
+
+  let ok = await clickRow();
+  step('account row opens an account', ok && /^\/accounts\/\d+$/.test(window.location.pathname));
+
+  ok = await clickRow();
+  step('repository row opens the repository',
+       ok && /^\/repos\/\d+$/.test(window.location.pathname));
+
+  const depthAtRepo = crumbCount();
+  ok = await clickRow((r) => r.textContent.includes('\u{1F4C1}'));
+  step('folder row descends into the folder',
+       ok && /^\/repos\/\d+\/tree\//.test(window.location.pathname)
+          && crumbCount() > depthAtRepo);
+
+  const depthAtFolder = crumbCount();
+  // Descend until a level with files in it, so the walk works on any corpus.
+  for (let i = 0; i < 6; i++) {
+    if (view().querySelector('table.data tbody tr td')?.textContent.includes('\u{1F4C4}')) break;
+    if (![...view().querySelectorAll('table.data tbody tr')]
+          .some((r) => r.textContent.includes('\u{1F4C4}'))) {
+      if (!(await clickRow((r) => r.textContent.includes('\u{1F4C1}')))) break;
+    } else break;
+  }
+  ok = await clickRow((r) => r.textContent.includes('\u{1F4C4}'));
+  step('file row opens the file, still under its repository',
+       ok && /^\/repos\/\d+\/files\//.test(window.location.pathname)
+          && crumbCount() >= depthAtFolder);
+
+  for (const [label, passed, where] of steps) report(label, passed, where);
+}
+
+if (errors.length) {
+  console.log(`\nRESULT: ${errors.length} problem(s)`);
+  process.exit(1);
+}
+console.log('\nRESULT: every route renders, every link resolves, the walk holds');

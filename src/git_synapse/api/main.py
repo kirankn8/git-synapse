@@ -138,8 +138,7 @@ if _web_root.is_dir():
     #: Every deeper view lives under the tab that owns it -- a file is
     #: /repos/{id}/files/{id}, not /file/{id} -- so this is exactly the nav.
     SPA_ROUTES = (
-        "accounts", "repos", "insights", "impact", "explore",
-        "graph", "measures", "jobs", "feedback",
+        "accounts", "repos", "insights", "measures", "jobs", "feedback",
     )
 
     @app.get("/{segment}", include_in_schema=False)

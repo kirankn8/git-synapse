@@ -74,6 +74,58 @@ def test_repos_listing_and_pagination(client):
     assert len(rows) <= 3
 
 
+def test_the_tree_route_walks_a_repository_one_level_at_a_time(corpus, client):
+    """The folder page is the whole point of addressing files by path, so this
+    covers the round trip: root, descend, and the file resolving back."""
+    repos = client.get("/api/repos", params={"limit": 50}).json()["repos"]
+    for repo in repos:
+        root = client.get(f"/api/repos/{repo['id']}/tree").json()
+        if root["directories"]:
+            break
+    else:
+        pytest.skip("no repository with directories")
+
+    assert root["path"] == "" and root["directory"] is None
+    top = root["directories"][0]["path"]
+
+    child = client.get(f"/api/repos/{repo['id']}/tree", params={"path": top})
+    assert child.status_code == 200
+    assert child.json()["directory"]["path"] == top
+
+    # A leading or trailing slash is how a hand-typed URL arrives.
+    assert client.get(f"/api/repos/{repo['id']}/tree",
+                      params={"path": f"/{top}/"}).json()["directory"]["path"] == top
+
+
+def test_the_tree_route_404s_for_a_path_that_is_not_in_the_repository(corpus, client):
+    repos = client.get("/api/repos", params={"limit": 1}).json()["repos"]
+    if not repos:
+        pytest.skip("no repositories")
+    r = client.get(f"/api/repos/{repos[0]['id']}/tree", params={"path": "no/such/dir"})
+    assert r.status_code == 404
+    assert client.get("/api/repos/999999999/tree").status_code == 404
+
+
+def test_resolving_a_file_needs_exactly_one_way_to_name_the_repository(client):
+    """Both, or neither, is a caller bug; answering it anyway would silently
+    ignore one of them."""
+    assert client.get("/api/files/resolve", params={"path": "x"}).status_code == 400
+    assert client.get("/api/files/resolve",
+                      params={"path": "x", "repo": "a", "repo_id": 1}).status_code == 400
+
+
+def test_a_file_resolves_by_repo_id_and_reports_a_miss(corpus, client):
+    files = client.get("/api/files", params={"limit": 1}).json()["files"]
+    if not files:
+        pytest.skip("no files")
+    f = files[0]
+    got = client.get("/api/files/resolve",
+                     params={"path": f["path"], "repo_id": f["repo_id"]})
+    assert got.status_code == 200 and got.json()["id"] == f["id"]
+    assert client.get("/api/files/resolve",
+                      params={"path": "nope.xyz", "repo_id": f["repo_id"]}).status_code == 404
+
+
 def test_unknown_repo_id_is_a_404_not_an_empty_success(client):
     assert client.get("/api/repos/999999999").status_code == 404
 
@@ -152,7 +204,7 @@ def test_feedback_status_filter(client):
 # -------------------------------------------------------------- the shell
 
 def test_spa_routes_serve_the_shell_so_a_deep_link_survives_refresh(client):
-    for path in ("/repos", "/impact", "/insights", "/feedback"):
+    for path in ("/repos", "/insights", "/measures", "/feedback"):
         r = client.get(path)
         assert r.status_code == 200
         assert "<" in r.text
@@ -473,8 +525,9 @@ def test_a_refresh_starts_in_the_background_and_returns_at_once(client,
     assert (ran["records"] is not None) is (params.get("skip_discovery") == "true")
 
 
-@pytest.mark.parametrize("path", ["/repos", "/graph", "/feedback/17",
-                                  "/repos/5/files/17"])
+@pytest.mark.parametrize("path", ["/repos", "/jobs", "/feedback/17",
+                                  "/repos/5/files/src/main/Cache.java",
+                                  "/insights/impact/graph"])
 def test_the_spa_serves_its_own_routes(client, path):
     r = client.get(path)
     assert r.status_code == 200

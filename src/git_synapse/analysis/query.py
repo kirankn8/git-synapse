@@ -189,29 +189,37 @@ def get_file(file_id: int) -> dict | None:
     )
 
 
-def resolve_file(repo: str, path: str) -> dict | None:
-    """Find a file by repository name and path, following renames.
+def resolve_file(repo: str | None, path: str, repo_id: int | None = None) -> dict | None:
+    """Find a file by repository and path, following renames.
 
-    Accepts a bare repo name or ``owner/name``, and falls back to the alias
-    table so a caller using a path that has since been renamed still resolves.
+    The repository is named either way round: ``repo`` takes a bare name or
+    ``owner/name``, ``repo_id`` takes the id. The id form exists because the UI
+    addresses files by path -- ids renumber on a re-ingest, so a pasted link
+    keyed on one silently comes to mean a different file.
+
+    Falls back to the alias table, so a path that has since been renamed still
+    resolves to the file it became.
     """
+    match = "r.id = %(repo_id)s" if repo_id is not None else \
+            "(r.full_name = %(repo)s OR r.name = %(repo)s)"
+    params = {"repo": repo, "repo_id": repo_id, "path": path}
     row = query_one(
-        """
+        f"""
         SELECT f.id FROM file f JOIN repo r ON r.id = f.repo_id
-        WHERE (r.full_name = %(repo)s OR r.name = %(repo)s) AND f.path = %(path)s
+        WHERE {match} AND f.path = %(path)s
         LIMIT 1
         """,
-        {"repo": repo, "path": path},
+        params,
     )
     if row is None:
         row = query_one(
-            """
+            f"""
             SELECT fa.file_id AS id FROM file_alias fa
             JOIN repo r ON r.id = fa.repo_id
-            WHERE (r.full_name = %(repo)s OR r.name = %(repo)s) AND fa.old_path = %(path)s
+            WHERE {match} AND fa.old_path = %(path)s
             LIMIT 1
             """,
-            {"repo": repo, "path": path},
+            params,
         )
     return get_file(int(row["id"])) if row else None
 
@@ -637,6 +645,68 @@ def directories(repo_id: int, limit: int = 200) -> list[dict]:
         """,
         {"repo_id": repo_id, "limit": _clamp_limit(limit)},
     )
+
+
+def directory_tree(repo_id: int, path: str = "", limit: int = 1000) -> dict:
+    """The immediate children of one directory: subdirectories, then files.
+
+    A repository is browsed the way it is laid out, one level at a time, so
+    this deliberately does not recurse. Both halves carry the same rollup
+    columns, which lets folders and files be rows of a single table.
+
+    ``path`` is the empty string at the root, matching how the rollup stores
+    it. Returns ``directory`` as None when the path names nothing, which the
+    route turns into a 404 rather than an empty-looking folder.
+    """
+    params: dict[str, Any] = {
+        "repo_id": repo_id,
+        "path": path,
+        # Only the level below, hence depth + 1 and a prefix rather than a
+        # recursive walk. At the root every top-level directory is depth 1 and
+        # no prefix applies, so the clause degrades to the depth test alone.
+        "depth": (0 if path == "" else len(path.split("/"))) + 1,
+        "prefix": f"{path}/%" if path else None,
+        "limit": _clamp_limit(limit),
+    }
+    directory = None if path == "" else query_one(
+        """
+        SELECT id, path, depth, file_count, change_count, pair_change_count,
+               insertions, deletions, first_change_at, last_change_at
+        FROM directory WHERE repo_id = %(repo_id)s AND path = %(path)s
+        """,
+        params,
+    )
+    if path != "" and directory is None:
+        return {"path": path, "directory": None, "directories": [], "files": []}
+
+    dirs = query(
+        """
+        SELECT id, path, depth, file_count, change_count, pair_change_count,
+               insertions, deletions, first_change_at, last_change_at
+        FROM directory
+        WHERE repo_id = %(repo_id)s AND depth = %(depth)s
+          -- Cast, or Postgres cannot infer the type of the NULL that
+          -- stands for "at the root, no prefix applies".
+          AND (%(prefix)s::text IS NULL OR path LIKE %(prefix)s::text)
+        ORDER BY change_count DESC, path
+        LIMIT %(limit)s
+        """,
+        params,
+    )
+    files = query(
+        """
+        SELECT f.id, f.repo_id, r.full_name AS repo, f.path, f.dir_path, f.basename,
+               f.extension, f.depth, f.is_deleted, f.change_count, f.pair_change_count,
+               f.insertions, f.deletions, f.author_count, f.first_change_at,
+               f.last_change_at
+        FROM file f JOIN repo r ON r.id = f.repo_id
+        WHERE f.repo_id = %(repo_id)s AND f.dir_path = %(path)s
+        ORDER BY f.change_count DESC, f.path
+        LIMIT %(limit)s
+        """,
+        params,
+    )
+    return {"path": path, "directory": directory, "directories": dirs, "files": files}
 
 
 def recent_runs(limit: int = 20) -> list[dict]:

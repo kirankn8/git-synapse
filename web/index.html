@@ -29,16 +29,13 @@
       <nav class="mainnav" id="mainnav">
         <a href="/" data-nav data-route="overview">Overview</a>
 
-        <!-- The drill-down, in order: an account owns repositories, a
-             repository owns files, and impact is what crosses between them. -->
+        <!-- Two tabs carry the whole application, split on something the
+             reader can check: Repositories holds the things -- repositories,
+             folders, files, pairs -- and Insights holds every analysis derived
+             from them. Nothing appears under both. -->
         <a href="/accounts" data-nav data-route="accounts">Accounts</a>
         <a href="/repos" data-nav data-route="repos">Repositories</a>
         <a href="/insights" data-nav data-route="insights">Insights</a>
-        <a href="/impact" data-nav data-route="impact">Impact</a>
-
-        <!-- Ways across the corpus rather than down it. -->
-        <a href="/explore" data-nav data-route="explore">Explore</a>
-        <a href="/graph" data-nav data-route="graph">Graph</a>
 
         <!-- Reference and operations. -->
         <a href="/measures" data-nav data-route="measures">Measures</a>
