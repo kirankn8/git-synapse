@@ -783,3 +783,9 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 }
 .explainer[open] > summary::before { transform: rotate(90deg); }
 .explainer > summary:hover { color: var(--text); }
+
+/* One editable setting: what it is, the control, and the shortcuts. */
+.setting-row { padding: 14px 0; border-bottom: 1px solid var(--border); }
+.setting-row:last-child { border-bottom: 0; padding-bottom: 0; }
+.setting-row:first-child { padding-top: 0; }
+.setting-row > * + * { margin-top: 9px; }

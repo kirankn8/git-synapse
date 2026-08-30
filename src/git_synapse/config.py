@@ -247,7 +247,10 @@ class ScheduleConfig:
     """
 
     enabled: bool = field(default_factory=lambda: _env_bool("SCHEDULER_ENABLED", True))
-    #: Fast refresh of already-known repositories. Five-field cron, in ``timezone``.
+    #: Fast refresh of already-known repositories. Five-field cron, in
+    #: ``timezone``. This is the *seed*: a value stored from the UI overrides it,
+    #: the way GITHUB_ORG seeds the account table. Read the value in force with
+    #: :func:`live_cron`, never straight off this field.
     cron: str = field(default_factory=lambda: _env_str("REFRESH_CRON", DEFAULT_REFRESH_CRON))
     #: Slower pass that re-discovers the organisation from the GitHub API.
     discover_cron: str = field(default_factory=lambda: _env_str("DISCOVER_CRON", "0 3 * * *"))
@@ -255,6 +258,21 @@ class ScheduleConfig:
     #: Kick off a refresh as soon as the scheduler boots, rather than waiting
     #: for the first cron tick. Useful on a fresh deployment.
     run_on_start: bool = field(default_factory=lambda: _env_bool("REFRESH_ON_START", False))
+
+
+
+def live_cron(which: str = "refresh") -> str:
+    """The schedule actually in force: a stored override, else the environment.
+
+    Imported lazily so ``config`` keeps no dependency on the database -- it is
+    read during startup, before a connection exists.
+    """
+    from git_synapse.analysis import settings
+
+    cfg = get_config().schedule
+    if which == "discover":
+        return settings.effective("discover_cron", cfg.discover_cron)
+    return settings.effective("refresh_cron", cfg.cron)
 
 
 @dataclass(frozen=True)

@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from git_synapse.config import get_config
+from git_synapse.config import get_config, live_cron
 from git_synapse.db.engine import apply_schema, wait_for_database
 from git_synapse.ingest import pipeline
 
@@ -59,6 +59,36 @@ def refresh(trigger: str = "schedule", discover: bool = False) -> None:
         _run_lock.release()
 
 
+def _follow_stored_schedule(scheduler, timezone: str) -> None:
+    """Re-schedule a job whose stored cron no longer matches the running one.
+
+    Changing the schedule from the UI should take effect in about a minute, not
+    on the next restart -- a deployment that has to be restarted to be slowed
+    down will simply not be slowed down. One small query a minute is cheaper
+    than the surprise.
+    """
+    for job_id, which in (("fast-refresh", "refresh"), ("discovery-refresh", "discover")):
+        job = scheduler.get_job(job_id)
+        if job is None:      # pragma: no cover - only if a job failed to register
+            continue
+        wanted = live_cron(which)
+        try:
+            trigger = CronTrigger.from_crontab(wanted, timezone=timezone)
+        except ValueError:
+            # Stored by hand, or by a future version with a different grammar.
+            # Keep running on the last good schedule rather than stopping.
+            log.warning("stored %s cron %r does not parse; keeping %s",
+                        which, wanted, job.trigger)
+            continue
+        if str(trigger) == str(job.trigger):
+            continue
+        log.info("%s cron changed to %r; rescheduling", which, wanted)
+        # reschedule_job replaces the trigger and recomputes the next fire time;
+        # modify_job alone would leave the old one standing.
+        scheduler.reschedule_job(job_id, trigger=trigger)
+        scheduler.modify_job(job_id, misfire_grace_time=_grace_for(trigger, timezone))
+
+
 def _grace_for(trigger, timezone: str, floor: int = 600) -> int:
     """How late a tick may be and still be worth running.
 
@@ -97,7 +127,7 @@ def main() -> int:
 
     scheduler = BlockingScheduler(timezone=cfg.schedule.timezone)
 
-    fast = CronTrigger.from_crontab(cfg.schedule.cron, timezone=cfg.schedule.timezone)
+    fast = CronTrigger.from_crontab(live_cron("refresh"), timezone=cfg.schedule.timezone)
     scheduler.add_job(
         refresh,
         trigger=fast,
@@ -110,7 +140,7 @@ def main() -> int:
     )
 
     slow = CronTrigger.from_crontab(
-        cfg.schedule.discover_cron, timezone=cfg.schedule.timezone
+        live_cron("discover"), timezone=cfg.schedule.timezone
     )
     scheduler.add_job(
         refresh,
@@ -121,6 +151,19 @@ def main() -> int:
         max_instances=1,
         coalesce=True,
         misfire_grace_time=3600,
+    )
+
+    # A minute is fast enough that a change made in the UI feels applied, and
+    # slow enough that the query is free.
+    scheduler.add_job(
+        _follow_stored_schedule,
+        trigger="interval",
+        seconds=60,
+        args=[scheduler, cfg.schedule.timezone],
+        id="schedule-watch",
+        name="follow a schedule changed from the UI",
+        max_instances=1,
+        coalesce=True,
     )
 
     # get_next_fire_time needs a concrete "now"; passing None for both
