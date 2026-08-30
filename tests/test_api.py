@@ -617,3 +617,21 @@ def test_updating_an_account_to_a_taken_login_is_a_conflict(client):
 
 def test_a_run_that_does_not_exist_is_a_404(client):
     assert client.get("/api/runs/-1").status_code == 404
+
+
+def test_a_run_that_exists_is_returned(client):
+    from git_synapse.db.engine import connection, query_one
+
+    with connection() as conn:
+        run_id = conn.execute(
+            "INSERT INTO ingest_run (kind, trigger, status) "
+            "VALUES ('fast','manual','success') RETURNING id").fetchone()[0]
+        conn.commit()
+    try:
+        r = client.get(f"/api/runs/{run_id}")
+        assert r.status_code == 200
+        assert r.json()["id"] == run_id
+    finally:
+        with connection() as conn:
+            conn.execute("DELETE FROM ingest_run WHERE id = %s", (run_id,))
+            conn.commit()

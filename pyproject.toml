@@ -41,6 +41,10 @@ line-length = 100
 target-version = "py311"
 
 [tool.coverage.report]
+# Reaching 100% cost real bugs found -- a tag naming a blob indexed as a
+# release, a sweep deleting every commit the tag walk had just read, stubs that
+# had rotted because their tests never ran. The gate is here so it stays there.
+fail_under = 100
 exclude_lines = [
     "pragma: no cover",
     'if __name__ == "__main__":',

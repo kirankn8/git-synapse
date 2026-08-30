@@ -285,3 +285,18 @@ def test_a_disabled_repository_is_never_selected():
                       is_disabled=True)
     kept = {r.name for r in select_repos([live, dead], cfg)}
     assert kept == {"live"}
+
+
+def test_a_private_repository_is_excluded_unless_asked_for():
+    """Cloning it needs a credential, so selecting it when private access was
+    not requested turns one setting into a clone failure."""
+    from git_synapse.ingest.github import RepoRecord, select_repos
+    from git_synapse.config import GitHubConfig
+
+    public = RepoRecord(github_id=1, owner="acme", name="open", full_name="acme/open")
+    secret = RepoRecord(github_id=2, owner="acme", name="shut", full_name="acme/shut",
+                        is_private=True)
+    assert {r.name for r in select_repos([public, secret],
+                                         GitHubConfig(org="acme", include_private=False))} == {"open"}
+    assert {r.name for r in select_repos([public, secret],
+                                         GitHubConfig(org="acme", include_private=True))} == {"open", "shut"}

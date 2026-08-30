@@ -667,3 +667,52 @@ def test_a_module_naming_itself_is_not_a_dependency(tmp_path):
     repo = _repo(tmp_path, {
         "go.mod": "module github.com/acme/app\n\nrequire github.com/acme/app v1.0.0\n"})
     assert extract_from_mirror(repo, "app", "go.mod", "go") == []
+
+
+@pytest.mark.parametrize(("key", "expected"), [
+    ("2.10", (2, 10)),
+    ("2.9", (2, 9)),
+    ("1-rc1", None),        # a prerelease has no place in "newest below"
+    (None, None),
+    ("", None),
+])
+def test_a_version_key_orders_only_when_it_is_a_release(key, expected):
+    """`1.10` sorts below `1.9` as text, which is why the ceiling search orders
+    in Python. A prerelease is excluded rather than guessed at."""
+    from git_synapse.analysis.depbump import _ordinal
+
+    assert _ordinal(key) == expected
+
+
+def test_a_version_key_with_a_non_numeric_segment_does_not_order():
+    """`1.x` reaches here only if a wildcard slipped the earlier cleaning; it
+    must decline rather than raise mid-resolution."""
+    from git_synapse.analysis.depbump import _ordinal
+
+    assert _ordinal("1.x") is None
+
+
+def test_resolution_opens_its_own_connection_when_given_none(db):
+    """The pipeline passes one; the scheduler and the CLI do not."""
+    from git_synapse.analysis import depbump
+
+    assert isinstance(depbump.resolve_bumps(), int)
+
+
+def test_only_the_line_that_moved_is_recorded_as_a_bump(tmp_path):
+    """A manifest commit usually changes one dependency and leaves the rest
+    alone. Recording all of them would credit every untouched line with a
+    decision nobody made."""
+    from git_synapse.analysis.depbump import extract_from_mirror
+
+    repo = _history_repo(tmp_path, [
+        {"go.mod": "module github.com/acme/app\n\nrequire (\n"
+                   "\tgithub.com/acme/one v1.0.0\n\tgithub.com/acme/two v2.0.0\n)\n"},
+        {"go.mod": "module github.com/acme/app\n\nrequire (\n"
+                   "\tgithub.com/acme/one v1.1.0\n\tgithub.com/acme/two v2.0.0\n)\n"},
+    ])
+    edges = extract_from_mirror(repo, "app", "go.mod", "go")
+    moved = [(e.dep_name.rsplit("/", 1)[-1], e.dep_version) for e in edges]
+    assert ("one", "v1.1.0") in moved
+    assert ("two", "v2.0.0") in moved          # its first sighting
+    assert moved.count(("two", "v2.0.0")) == 1, "an unchanged line is not a second bump"

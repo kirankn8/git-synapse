@@ -799,3 +799,66 @@ def test_a_tag_whose_merge_base_cannot_be_computed_is_left_unanchored(tmp_path, 
     monkeypatch.setattr(gitops, "run_git", _fail_merge_base)
     tags = {t.name: t for t in gitops.read_tags(work, "main")}
     assert tags["v1.0.0"].main_sha is None
+
+
+def test_a_tag_with_an_unreadable_date_keeps_its_commit(tmp_path, monkeypatch):
+    """The date says when a release was cut; the commit is the release. Losing
+    the second because the first was malformed would drop a real version."""
+    work = worktree(tmp_path, "baddate2")
+    g(work, "tag", "v1.0.0")
+    real = gitops.run_git
+
+    def _mangle(args, **kw):
+        proc = real(args, **kw)
+        if args and args[0] == "for-each-ref" and "creatordate" in " ".join(args):
+            parts = proc.stdout.rstrip("\n").split("\t")
+            parts[-1] = "not-a-date"
+            proc.stdout = "\t".join(parts) + "\n"
+        return proc
+
+    monkeypatch.setattr(gitops, "run_git", _mangle)
+    tags = gitops.read_tags(work, "main")
+    assert [t.name for t in tags] == ["v1.0.0"]
+    assert tags[0].tagged_at is None
+    assert len(tags[0].commit_sha) == 40
+
+
+def test_one_tag_that_cannot_be_compared_does_not_stop_the_others(tmp_path, monkeypatch):
+    """Replay detection runs per tag, so a single failing comparison must cost
+    only that tag's result."""
+    work = worktree(tmp_path, "onefails")
+    g(work, "checkout", "-q", "-b", "rel")
+    add_commit(work, "r.txt", "r")
+    g(work, "tag", "v1.0.0")
+    g(work, "checkout", "-q", "main")
+    real = gitops.run_git
+    calls = {"n": 0}
+
+    def _fail_first_rev_list(args, **kw):
+        if args and args[0] == "rev-list" and "--cherry-mark" in args:
+            calls["n"] += 1
+            return real(["rev-parse", "--verify", "nope"], **kw)
+        return real(args, **kw)
+
+    monkeypatch.setattr(gitops, "run_git", _fail_first_rev_list)
+    assert gitops.replayed_commits(work, "main") == set()
+    assert calls["n"] >= 1, "the comparison must have been attempted"
+
+
+def test_a_ref_naming_something_that_is_not_an_object_id_is_skipped(tmp_path, monkeypatch):
+    """Belt to the object-type check's braces. A truncated or corrupted
+    `for-each-ref` line would otherwise put a non-sha in the version index,
+    where every later lookup has to fail on it."""
+    work = worktree(tmp_path, "badsha")
+    g(work, "tag", "v1.0.0")
+    real = gitops.run_git
+
+    def _corrupt(args, **kw):
+        proc = real(args, **kw)
+        if args and args[0] == "for-each-ref" and "refname:short" in " ".join(args):
+            proc.stdout = ("broken\tcommit\tnot-a-sha\t\tcommit\t2024-01-01T00:00:00+00:00\n"
+                           + proc.stdout)
+        return proc
+
+    monkeypatch.setattr(gitops, "run_git", _corrupt)
+    assert [t.name for t in gitops.read_tags(work, "main")] == ["v1.0.0"]
