@@ -256,6 +256,12 @@ def backtest_cmd(
     k: int = typer.Option(5, "--top", "-k", help="How many suggestions the product may offer."),
     min_support: int = typer.Option(2, "--min-support", help="Ignore pairs seen fewer times than this."),
     limit: int = typer.Option(0, "--limit", help="Stop after this many commits."),
+    seeding: str = typer.Option("all", "--seeding",
+        help="all: every changed file takes a turn as the seed. "
+             "obscure: one prompt per commit, seeded with its least-changed "
+             "file -- no hub to make the rest easy."),
+    grep_sample: int = typer.Option(0, "--grep-sample",
+        help="Also score a content-grep baseline on this many sampled prompts."),
 ) -> None:
     """Replay history and measure whether the suggestions would have helped."""
     _setup()
@@ -272,24 +278,26 @@ def backtest_cmd(
 
     keys = tuple(m.strip() for m in measure.split(",") if m.strip()) or \
         tuple(m.key for m in MEASURES if m.recommended)
-    result = bt.run(repo_id, keys, k=k, min_support=min_support, limit=limit or None)
+    result = bt.run(repo_id, keys, k=k, min_support=min_support,
+                    limit=limit or None, grep_sample=grep_sample, seeding=seeding)
 
     if not result.prompts:
         console.print("[yellow]not enough history to replay; ingest more commits first[/yellow]")
         return
 
-    t = Table(title=f"backtest: {result.prompts:,} prompts over {result.commits_scored:,} commits (top-{k})",
+    seeded = "" if result.seeding == "all" else f", {result.seeding} seeds"
+    t = Table(title=f"backtest: {result.prompts:,} prompts over {result.commits_scored:,} commits (top-{k}{seeded})",
               box=None, title_style="bold")
-    for c in ("measure", "hit rate", "95% CI", "lift", "recall", "MRR", ""):
+    for c in ("measure", "hit rate", "95% CI", "lift", "unsolved", "MRR", ""):
         t.add_column(c, justify="right" if c != "measure" else "left")
-    for s in [result.baseline] + result.scores:
-        base = s.measure == "popularity"
+    for s in result.baselines + result.scores:
+        base = s in result.baselines
         t.add_row(
             s.label if base else s.measure,
             f"{s.hit_rate:.1%}",
             f"{s.ci_low:.1%}-{s.ci_high:.1%}",
             "-" if base else f"{s.lift:.2f}x",
-            f"{s.recall_at_k:.3f}",
+            "-" if base else f"{s.hard_hit_rate:.1%}",
             "-" if base else f"{s.mrr:.3f}",
             "rare-item bias" if s.rare_item_bias else "",
             style="dim" if base else None,
