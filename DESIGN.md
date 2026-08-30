@@ -514,6 +514,14 @@ of one release. `-rc1` and `-beta` are separate releases with their own tags and
 their own commits, and collapsing them would resolve a release candidate to the
 final release while looking successful. `-SNAPSHOT` was never tagged at all.
 
+**A name is only a repository where the ecosystem says so.** A Go module path is
+host/owner/repo and an action is owner/repo, so reading a repository out of the
+name is reading what it says. A registry coordinate is not: npm's `uuid` resolved
+to google/uuid, a Go library, and npm's `bytes` to tokio-rs/bytes, a Rust crate,
+until the fallback was scoped. Those showed up as *unresolved* rather than wrong
+only because the versions could never match -- luck, not a guard. Everywhere
+outside those ecosystems, a repository has to claim the name.
+
 **A coordinate never crosses ecosystems.** `illuminate/events` is a PHP package
 published by laravel/framework; `events` is an unrelated npm one. Both the full
 coordinate and its last segment are indexed, because a consumer writes either --
@@ -542,12 +550,12 @@ What that comes to, on dependencies between repositories in the corpus:
 
 | Ecosystem | Bumps | Resolved | Why it lands where it does |
 |---|---:|---:|---|
-| Go | 2,031 | 96.4% | a pseudo-version *is* a commit id |
-| Java | 365 | 95.1% | Maven names an artifact; the tag has to be found |
-| Rust | 625 | 92.2% | `Cargo.lock` pins exactly, then tag lookup |
-| JS/TS | 2,225 | 88.0% | lockfile pins exactly; `package.json` alone is a range |
+| Go | 2,554 | 96.7% | a pseudo-version *is* a commit id |
+| Java | 433 | 95.6% | Maven names an artifact; the tag has to be found |
+| Rust | 863 | 92.4% | `Cargo.lock` pins exactly, then tag lookup |
+| JS/TS | 2,302 | 90.0% | lockfile pins exactly; `package.json` alone is a range |
 | PHP | 642 | 79.3% | Composer writes wildcards constantly, and old branches are deleted |
-| Python | 14 | 100% | libraries declare a floor and almost never edit it, so there is little to record |
+| Python | 70 | 100% | libraries declare a floor and almost never edit it, so there is little to record |
 
 Python's fourteen rows are the honest finding rather than a gap: a library
 declares `Werkzeug>=3.0` and leaves it alone for years, so nothing is recorded --

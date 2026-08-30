@@ -11,9 +11,9 @@
 ![Docker](https://img.shields.io/badge/Docker-compose-2496ED?style=flat-square&logo=docker&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-12%20tools-5eead4?style=flat-square)
 ![Measures](https://img.shields.io/badge/measures-29-a78bfa?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-1%2C142-3fb950?style=flat-square)
-![Coverage](https://img.shields.io/badge/coverage-100%25-3fb950?style=flat-square)
-![Backtested](https://img.shields.io/badge/backtested-472k%20predictions-14b8a6?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-1%2C150-3fb950?style=flat-square)
+![Coverage](https://img.shields.io/badge/backend%20coverage-100%25-3fb950?style=flat-square)
+![Backtested](https://img.shields.io/badge/backtested-769k%20predictions-14b8a6?style=flat-square)
 
 </div>
 
@@ -167,17 +167,17 @@ The arrow only ever points forwards: commit *k* is scored before it is learned
 from, so no pair can vouch for itself.
 
 ```
-              backtest: 471,972 prompts over 105,986 commits (top-5)
+              backtest: 769,484 prompts over 173,034 commits (top-5)
  measure                        hit rate       95% CI   lift  unsolved    MRR
- Apprentice -- the file's          53.4%  53.2%-53.5%      -         -      -
+ Apprentice -- the file's          53.0%  52.9%-53.1%      -         -      -
  test, then its folder
- Intern -- the file's              43.0%  42.9%-43.1%      -         -      -
+ Intern -- the file's              45.2%  45.0%-45.3%      -         -      -
  folder-mates, busiest first
- New Hire -- greps names and       42.0%  37.3%-46.9%      -         -      -
+ New Hire -- greps names and       41.5%  36.8%-46.4%      -         -      -
  bodies, follows leads (n=400)
- Tourist -- the repository's       38.6%  38.5%-38.8%      -         -      -
+ Tourist -- the repository's       40.6%  40.5%-40.7%      -         -      -
  busiest files
- confidence_ab                     63.2%  63.0%-63.3%  1.18x     47.5%  0.520
+ confidence_ab                     61.6%  61.5%-61.7%  1.16x     45.9%  0.508
 ```
 
 ### What it is measured against
@@ -205,22 +205,31 @@ is being asked to predict. [How it works, and what it still cannot do](DESIGN.md
 
 ### Measured result
 
-Replayed over **105,986 commits** — 471,972 predictions across six organisations
-and six languages, every one scored only against earlier history
-([chart above](#git-synapse)):
+Replayed over **173,034 commits** — 769,484 predictions across 163 repositories,
+six organisations and eight languages, every one scored only against earlier
+history ([chart above](#git-synapse)):
 
-| Repository | Language | Apprentice | `P(B\|A)` | Lift | Recovers what the Apprentice missed |
-|---|---|---:|---:|---:|---:|
-| laravel/framework | PHP | 34.8% | **55.5%** | **1.60x** | 47.7% |
-| pytype | Python | 46.7% | **65.5%** | **1.40x** | 52.6% |
-| flatbuffers | C++ | 42.3% | **62.9%** | **1.36x** | 58.4% |
-| tokio | Rust | 37.2% | **57.8%** | **1.35x** | 52.6% |
-| prometheus | Go | 52.7% | **68.1%** | **1.29x** | 52.3% |
-| vuejs/core | TypeScript | 57.0% | **70.4%** | **1.23x** | 53.2% |
-| closure-compiler | Java | 54.6% | **65.8%** | **1.21x** | 47.8% |
-| flask | Python | 46.7% | **63.4%** | **1.21x** | 52.6% |
-| go-github | Go | 77.0% | 73.0% | 0.95x | 44.6% |
-| guava | Java | 77.3% | 65.5% | **0.85x** | 34.6% |
+| Repository | Language | Hardest free baseline | `P(B\|A)` | Lift | Recovers what it missed |
+|---|---|---|---:|---:|---:|
+| laravel/framework | PHP | Apprentice 34.8% | **55.5%** | **1.60x** | 47.7% |
+| pytype | Python | Apprentice 46.7% | **65.5%** | **1.40x** | 52.6% |
+| flatbuffers | C++ | Intern 46.1% | **62.9%** | **1.36x** | 58.4% |
+| tokio | Rust | Intern 42.9% | **57.8%** | **1.35x** | 52.6% |
+| prometheus | Go | Intern 52.8% | **68.1%** | **1.29x** | 52.3% |
+| vuejs/core | TypeScript | Apprentice 57.0% | **70.4%** | **1.24x** | 53.2% |
+| closure-compiler | JavaScript | Apprentice 54.6% | **65.8%** | **1.21x** | 47.8% |
+| googletest | C++ | Apprentice 57.8% | **69.8%** | **1.21x** | 54.4% |
+| flask | Python | Tourist 52.3% | **63.4%** | **1.21x** | 52.6% |
+| cadvisor | Go | Apprentice 50.5% | **59.0%** | **1.17x** | 41.3% |
+| go-github | Go | Apprentice 77.0% | 73.0% | 0.95x | 44.6% |
+| zx | JavaScript | Tourist 78.9% | 73.2% | 0.93x | 58.4% |
+| brotli | TypeScript | Apprentice 70.2% | 60.0% | **0.86x** | 27.5% |
+| guava | Java | Apprentice 77.3% | 65.5% | **0.85x** | 34.6% |
+
+The baseline column names **whichever free rule scored highest**, because that is
+what lift divides by. It is usually the Apprentice, but not always: on small
+repositories where a handful of files carry most of the churn, naming the busiest
+files wins outright — the Tourist takes `zx` at 78.9%.
 
 **The honest claim is narrower than a lift column suggests.** An agent that knows
 a file's test lives beside it already answers most prompts, and on a meticulously
@@ -238,12 +247,12 @@ history is most of the answer.
 Where it earns its place is the last column: **the prompts where the file that
 had to change shares no name, no folder and no visible mention with the file you
 are editing.** There is nothing to grep for, and history is the only thing left.
-Across the corpus that is 220,018 of 471,972 prompts, and `P(B|A)` answers 47.5%
+Across the corpus that is 361,413 of 769,484 prompts, and `P(B|A)` answers 45.9%
 of them.
 
 Hold the New Hire to the same test and the picture is the same. Of 400 uniformly
-sampled prompts, **145 were solved by neither the free rules nor the search**, and
-`P(B|A)` answered 44.1% of those (36.3%-52.3%). That is the residue this product
+sampled prompts, **141 were solved by neither the free rules nor the search**, and
+`P(B|A)` answered 49.6% of those (41.5%-57.8%). That is the residue this product
 exists for: prompts where reading the code, however well, surfaces nothing.
 
 Counts are kept per repository, never pooled. Two files in different repositories

@@ -11,14 +11,14 @@ import pathlib
 #: the Apprentice missed that P(B|A) recovered. Every figure measured over all
 #: prompts -- none of these columns is sampled.
 DATA = [
-    ("six organisations", "mixed",      105_986, 53.4, 47.5),
-    ("laravel/framework", "PHP",         43_984, 34.8, 47.7),
-    ("tokio",             "Rust",         4_449, 37.2, 52.6),
-    ("flatbuffers",       "C++",          3_147, 42.3, 58.4),
-    ("pytype",            "Python",       6_184, 46.7, 52.6),
-    ("vuejs/core",        "TypeScript",   7_135, 57.0, 53.2),
-    ("prometheus",        "Go",          13_756, 52.7, 52.3),
-    ("guava",             "Java",         7_954, 77.3, 34.6),
+    ("163 repositories",  "six orgs",    173_034, 53.0, 45.9),
+    ("laravel/framework", "PHP",          43_984, 34.8, 47.7),
+    ("tokio",             "Rust",          4_449, 42.9, 52.6),
+    ("flatbuffers",       "C++",           3_147, 46.1, 58.4),
+    ("pytype",            "Python",        6_184, 46.7, 52.6),
+    ("vuejs/core",        "TypeScript",    7_135, 57.0, 53.2),
+    ("prometheus",        "Go",           13_756, 52.8, 52.3),
+    ("guava",             "Java",          7_954, 77.3, 34.6),
 ]
 
 THEMES = {
@@ -47,7 +47,7 @@ def build(t):
              'Every prediction scored only against the commits that preceded it</text>')
     o.append(f'<rect x="0" y="56" width="10" height="10" rx="2" fill="{t["base"]}"/>'
              f'<text x="16" y="65" font-size="11.5" fill="{t["dim"]}">'
-             'Apprentice &#8212; the file&#8217;s test, then its folder</text>')
+             'the hardest rule that needs no history</text>')
     o.append(f'<rect x="310" y="56" width="10" height="10" rx="2" fill="{t["ours"]}"/>'
              f'<text x="326" y="65" font-size="11.5" fill="{t["dim"]}">'
              'recovered by Git Synapse from history</text>')
