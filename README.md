@@ -26,6 +26,14 @@ It never parses your code. The atomic fact is *this commit touched this file*, a
 everything else is derived from it — which is why it works on any language, in any
 repository, with no per-language support to add.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmark-dark.svg">
+  <img alt="Backtest results across six public repositories" src="docs/benchmark-light.svg" width="100%">
+</picture>
+
+<div align="center"><sub><b>Backtested, not asserted.</b> Every prediction scored against
+only the commits that preceded it — <a href="#does-it-actually-help">how this is measured</a>.</sub></div>
+
 ### Contents
 
 | | |
@@ -141,7 +149,7 @@ from, so no pair can vouch for itself.
 ### Measured result
 
 Backtested over **94,872 commits in six public repositories** — 168,620 prompts,
-every one scored only against earlier history:
+every one scored only against earlier history ([chart above](#git-synapse)):
 
 | Repository | Commits | Prompts | Baseline | `P(B\|A)` | Lift |
 |---|---:|---:|---:|---:|---:|
