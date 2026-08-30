@@ -35,7 +35,7 @@ import os
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -506,9 +506,13 @@ class Tag:
     commit_sha: str
     tagged_at: datetime | None
     annotated: bool
+    #: The commit on the shipping branch this release was cut from. Equal to
+    #: ``commit_sha`` when the tag sits on that branch; the merge-base when it
+    #: sits on a release branch; None when the histories are unrelated.
+    main_sha: str | None = None
 
 
-def read_tags(path: Path) -> list[Tag]:
+def read_tags(path: Path, default_branch: str | None = None) -> list[Tag]:
     """Every tag in a mirror, peeled, in one git call.
 
     An annotated tag points at a tag *object* which points at the commit, so
@@ -541,7 +545,55 @@ def read_tags(path: Path) -> list[Tag]:
             tagged_at = None
         tags.append(Tag(name=name, commit_sha=sha, tagged_at=tagged_at,
                         annotated=(kind == "tag")))
-    return tags
+    return _anchor_to_branch(path, tags, default_branch)
+
+
+def _anchor_to_branch(path: Path, tags: list[Tag], branch: str | None) -> list[Tag]:
+    """Give every tag a commit on the shipping branch.
+
+    Projects that cut a release branch tag *on that branch*, so the tagged
+    commit is never walked and resolves to nothing: 116 of guava's 123 tags
+    point off the branch that ships. The merge-base is the commit the release
+    was cut from, which is on the branch and therefore already ingested.
+
+    One `rev-list` establishes what is on the branch, so `merge-base` runs only
+    for the tags that actually need it.
+    """
+    if not branch or not tags:
+        return tags
+    proc = run_git(["rev-list", branch], cwd=path, check=False, timeout=300)
+    if proc.returncode != 0:
+        return tags
+    on_branch = set(proc.stdout.split())
+
+    anchored: list[Tag] = []
+    for tag in tags:
+        if tag.commit_sha in on_branch:
+            anchored.append(replace(tag, main_sha=tag.commit_sha))
+            continue
+        mb = run_git(["merge-base", branch, tag.commit_sha],
+                     cwd=path, check=False, timeout=60)
+        # No merge-base means unrelated histories -- an imported tree or an
+        # orphan branch. Left None rather than anchored to something arbitrary.
+        found = mb.stdout.strip() if mb.returncode == 0 else ""
+        anchored.append(replace(tag, main_sha=_first_real_commit(path, found)))
+    return anchored
+
+
+def _first_real_commit(path: Path, sha: str) -> str | None:
+    """`sha` itself, or the newest non-merge commit before it on the same line.
+
+    The walk skips merges, because a merge restates its parents' changes. A
+    merge-base often *is* a merge, and anchoring to one names a commit that was
+    deliberately never stored -- 27 of auto's tags landed exactly there.
+    Following first parents keeps to the branch's own line of development
+    rather than wandering into a side branch that was merged in.
+    """
+    if not sha:
+        return None
+    proc = run_git(["rev-list", "--first-parent", "--no-merges", "-n", "1", sha],
+                   cwd=path, check=False, timeout=60)
+    return (proc.stdout.strip() or sha) if proc.returncode == 0 else sha
 
 
 def commit_exists(path: Path, sha: str) -> bool:

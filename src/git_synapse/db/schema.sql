@@ -285,6 +285,12 @@ CREATE TABLE IF NOT EXISTS ref_tag (
     -- Resolved once the commit is ingested. Nullable because a tag can point at
     -- a commit outside the branch that ships, which the walk never reads.
     commit_id   BIGINT      REFERENCES commit (id) ON DELETE SET NULL,
+    -- The commit on the shipping branch this release was cut from: the tag's
+    -- own commit when it sits on that branch, the merge-base when it sits on a
+    -- release branch. Without it a release tagged off-branch resolves to
+    -- nothing, which is 116 of guava's 123 tags.
+    main_sha        TEXT,
+    main_commit_id  BIGINT  REFERENCES commit (id) ON DELETE SET NULL,
     PRIMARY KEY (repo_id, name)
 );
 
@@ -896,6 +902,13 @@ ALTER TABLE repo ADD COLUMN IF NOT EXISTS account_id BIGINT
     REFERENCES account (id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS repo_account_idx ON repo (account_id);
 
+-- The shipping-branch anchor for a tag. Added to existing databases, where
+-- CREATE TABLE IF NOT EXISTS above is a no-op.
+ALTER TABLE ref_tag ADD COLUMN IF NOT EXISTS main_sha TEXT;
+ALTER TABLE ref_tag ADD COLUMN IF NOT EXISTS main_commit_id BIGINT
+    REFERENCES commit (id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS ref_tag_main_commit_idx ON ref_tag (main_commit_id);
+
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -931,5 +944,5 @@ CREATE TABLE IF NOT EXISTS meta (
 -- was not, so schema_is_current() was permanently false and every service boot
 -- re-ran the whole DDL, taking exactly the locks the fast path exists to avoid.
 INSERT INTO meta (key, value)
-VALUES ('schema_version', '18'::jsonb)
+VALUES ('schema_version', '19'::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
