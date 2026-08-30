@@ -30,7 +30,9 @@ from mcp.server.mcpserver import MCPServer
 from git_synapse.analysis import predict
 from git_synapse.analysis import query as q
 from git_synapse.db.engine import apply_schema, wait_for_database
-from git_synapse.stats.registry import BY_KEY, DEFAULT_MEASURE, MEASURES
+from git_synapse.stats.registry import (
+    BY_KEY, DEFAULT_MEASURE, FREE_LOOKUP_HIT_RATE, MEASURED_ON, MEASURES,
+)
 
 log = logging.getLogger("git_synapse.mcp")
 
@@ -1169,9 +1171,19 @@ def report_gap(
     ),
 )
 def list_measures() -> dict:
-    """Return the measure catalogue with guidance."""
+    """Return the measure catalogue, with what each one measured.
+
+    No measure is recommended. Which question you want asked depends on what you
+    are doing, and only you know that: predicting what else must change is a
+    different question from finding out what a codebase is shaped like. What is
+    reported instead is how each fared at the first of those, next to what the
+    same corpus yields with no history at all -- so a measure that does worse
+    than looking at the file's test is visible as such.
+    """
     return {
         "default": DEFAULT_MEASURE,
+        "measured_on": MEASURED_ON,
+        "free_lookup_hit_rate": FREE_LOOKUP_HIT_RATE,
         "measures": [
             {
                 "key": s.key,
@@ -1179,7 +1191,7 @@ def list_measures() -> dict:
                 "family": s.family,
                 "formula": s.formula,
                 "summary": s.summary,
-                "recommended": s.recommended,
+                "hit_rate": s.hit_rate,
                 "caveat": (
                     "biased toward rarely-changed files; pair with a support threshold"
                     if s.rare_item_bias

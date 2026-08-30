@@ -677,7 +677,7 @@ def measure_catalog() -> list[dict]:
             "is_significance": s.is_significance,
             "rare_item_bias": s.rare_item_bias,
             "saturates_on_sparse": s.saturates_on_sparse,
-            "recommended": s.recommended,
+            "hit_rate": s.hit_rate,
             "aliases": list(s.aliases),
         }
         for s in MEASURES
