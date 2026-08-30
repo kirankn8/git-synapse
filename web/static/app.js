@@ -909,8 +909,7 @@ const impactTable = (rows, otherKey, selfId) =>
 /** Repository-level impact graph: nodes are repos, edges are validated impact. */
 async function repoImpactGraphView(params) {
   const minScore = Number(params.min || 0.4);
-  const validated = params.all !== '1';
-  const data = await api('/api/impact/graph', { min_score: minScore, validated_only: validated, limit: 600 });
+  const data = await api('/api/impact/graph', { min_score: minScore, limit: 600 });
 
   // The same frame as every other Insights section, so the tab bar does not
   // vanish when the graph switches from files to repositories.
@@ -930,30 +929,12 @@ async function repoImpactGraphView(params) {
   const scoreInput = h('input', { class: 'input', type: 'range', min: '0', max: '0.95', step: '0.05', value: String(minScore), style: 'width:150px' });
   const scoreLabel = h('span', { class: 'card-sub', style: 'min-width:76px' }, `min ${minScore.toFixed(2)}`);
   scoreInput.addEventListener('input', () => (scoreLabel.textContent = `min ${Number(scoreInput.value).toFixed(2)}`));
-  scoreInput.addEventListener('change', () => go(`/insights/graph?mode=repos&min=${scoreInput.value}&all=${validated ? '0' : '1'}`));
+  scoreInput.addEventListener('change', () => go(`/insights/graph?mode=repos&min=${scoreInput.value}`));
 
   wrap.append(h('div', { class: 'toolbar' },
     h('div', { class: 'field' }, h('label', {}, 'Min score'), scoreInput, scoreLabel),
-    h('div', { class: 'field' }, h('label', {}, 'Edges'),
-      h('button', { class: `btn${validated ? ' primary' : ''}`,
-        title: 'Only edges backed by a dependency declared in a manifest, or by an observed version bump',
-        onclick: () => go(`/insights/graph?mode=repos&min=${minScore}&all=0`) }, 'With evidence'),
-      h('button', { class: `btn${validated ? '' : ' primary'}`,
-        title: 'Also edges inferred from co-change statistics alone, with nothing in any manifest to back them',
-        onclick: () => go(`/insights/graph?mode=repos&min=${minScore}&all=1`) }, 'Also inferred')),
     h('span', { class: 'spacer' }),
     h('span', { class: 'card-sub' }, `${data.stats.node_count} repos, ${data.stats.edge_count} edges`)));
-
-  wrap.append(explainer('What the two edge filters mean',
-    h('strong', {}, 'With evidence'),
-    ' draws only the edges something outside this tool can vouch for: a dependency ',
-    'declared in a manifest, or a version bump actually observed and resolved to the ',
-    'upstream commit it consumed. ',
-    h('strong', {}, 'Also inferred'),
-    ' adds edges guessed from co-change statistics alone. Those were measured and are ',
-    'kept only for exploration: they scored AUC 0.80 overall but 0.63 on which way the ',
-    'arrow points, and a baseline ignoring coupling entirely matched them — they rank ',
-    '“both repositories are busy”, not “one depends on the other”.'));
 
   if (!data.nodes.length) {
     wrap.append(h('div', { class: 'empty' }, h('strong', {}, 'Nothing to draw'), 'Lower the minimum score.'));
@@ -970,9 +951,8 @@ async function repoImpactGraphView(params) {
   }));
   wrap.append(h('div', { class: 'help', style: 'margin-top:13px' },
     'Click a repository to open its impact view; shift-click for its detail page. ',
-    validated
-      ? 'Every edge here is backed by a declared dependency or an observed version bump.'
-      : 'Inferred edges included: statistical only, and they favour busy repositories.'));
+    'Every edge is backed by a dependency declared in a manifest or by an observed ',
+    'version bump — there is no inferred tier to filter out.'));
   return wrap;
 }
 
@@ -1938,11 +1918,11 @@ boot();
 /**
  * Render the evidence tier for a cross-repo edge.
  *
- * This is the most important piece of presentation in the app. Declared and
- * bump-backed edges were measured at AUC 0.88 in sample against real dependency
- * propagation; discovery edges are statistical only and unvalidated, and skew
- * toward merely busy repositories. Showing them identically would be
- * misleading, so tier is always rendered, never inferred from the score.
+ * Both tiers are evidence: a dependency declared in a manifest, or a version
+ * bump observed and resolved to the upstream commit it consumed. They were
+ * measured at AUC 0.88 in sample against real dependency propagation. Tier is
+ * always rendered rather than inferred from the score, because the score mixes
+ * both and a reader cannot recover which from a number.
  */
 const tierBadge = (row) => {
   if (row.is_declared)
@@ -1951,8 +1931,10 @@ const tierBadge = (row) => {
   if (row.has_bump_history)
     return h('span', { class: 'tier tier-bump', title: 'Observed manifest bumps — ground truth' },
       h('i', { class: 'dot' }), 'bump-backed');
-  return h('span', { class: 'tier tier-discovery', title: 'Statistical only — unvalidated, verify before acting' },
-    h('i', { class: 'dot' }), 'discovery');
+  // Unreachable: every edge is written from a declared dependency or a bump.
+  // Rendered rather than thrown so a stale row is visible, not silently blank.
+  return h('span', { class: 'tier', title: 'No evidence recorded — this should not occur' },
+    h('i', { class: 'dot' }), 'no evidence');
 };
 
 const adoptedAfter = (d) => (d === null || d === undefined ? '—' : `${Number(d).toFixed(1)}d`);
@@ -2115,7 +2097,8 @@ on('/insights/impact/:a/:b', async ({ a, b }) => {
   if (edge) {
     wrap.append(h('div', { class: 'grid grid-stats' },
       statTile('Impact score', fx(edge.score, 3), 'rank-averaged ensemble'),
-      statTile('Evidence', edge.is_declared ? 'declared' : (edge.has_bump_history ? 'bump-backed' : 'discovery'), edge.is_declared ? 'validated tier' : 'see note'),
+      statTile('Evidence', edge.is_declared ? 'declared' : 'bump-backed',
+               edge.is_declared ? 'from a manifest' : 'from an observed bump'),
       statTile('Manifest bumps', num(edge.bump_count), 'observed propagation'),
       statTile('Adopted after', adoptedAfter(edge.median_adoption_days), 'median, upstream commit to bump'),
       statTile('Rank', `#${edge.rank_in_source}`, `within ${repoA.name}`)));

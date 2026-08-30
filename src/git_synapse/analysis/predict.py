@@ -220,7 +220,6 @@ def impact_chains(
     max_depth: int = 3,
     min_score: float = 0.5,
     limit: int = 40,
-    validated_only: bool = True,
 ) -> list[dict]:
     """Transitive impact paths over the prediction graph.
 
@@ -233,15 +232,16 @@ def impact_chains(
         max_depth: maximum hops; 2 gives A -> B -> C.
         min_score: per-hop floor.
         limit: maximum paths returned.
-        validated_only: traverse only declared or bump-backed hops. **On by
-            default and rarely worth turning off**: discovery edges are scored on
-            a different, unvalidated scale, and chaining through them produced
-            paths like ``signer -> runtime -> teams`` where the second hop is
-            activity confounding rather than coupling.
+
+    Every hop carries evidence: ``rebuild`` writes an edge only from a declared
+    dependency or an observed version bump, so there is no unvalidated tier to
+    exclude. The statistical discovery path was removed after it scored AUC 0.63
+    on which way the arrow points -- chaining through it produced paths like
+    ``signer -> runtime -> teams``, where the second hop is activity confounding
+    rather than coupling.
     """
     from git_synapse.db.engine import query
 
-    hop_filter = "AND (i.is_declared OR i.has_bump_history)" if validated_only else ""
     return query(
         f"""
         WITH RECURSIVE walk AS (
@@ -254,7 +254,6 @@ def impact_chains(
             FROM repo_impact i
             WHERE i.source_repo_id = %(repo_id)s
               AND i.score >= %(min_score)s
-              {hop_filter}
 
             UNION ALL
 
@@ -269,7 +268,6 @@ def impact_chains(
             WHERE w.depth < %(depth)s
               AND i.score >= %(min_score)s
               AND NOT i.target_repo_id = ANY(w.path)
-              {hop_filter}
         )
         SELECT w.depth, w.path_score, w.path, w.hops, w.declared, w.lags,
                (SELECT array_agg(r.name ORDER BY ord)

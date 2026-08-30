@@ -105,6 +105,7 @@ const routes = [
   [`#/insights/graph?repo=${repoId}&limit=60&min=5`,  'Map (one repository\u2019s files)'],
   ['#/insights/graph',                                'Map (all repositories)'],
   ['#/insights/graph?mode=repos&min=0.4',             'Map (explicit repos mode)'],
+  ['#/insights/graph?mode=repos&all=1',               'Map (stale all= is ignored)'],
   ['#/insights/graph?mode=files',                     'Map (files, nothing scoped)'],
   ['#/insights',                           'Insights (lands on the map)'],
   ['#/insights/impact',                    'Impact (pick a repository)'],
