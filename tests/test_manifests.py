@@ -151,3 +151,58 @@ def test_a_lockfile_is_registered_before_the_manifest_beside_it():
     assert order.index("package-lock.json") < order.index("package.json")
     assert order.index("composer.lock") < order.index("composer.json")
     assert order.index("Gemfile.lock") < order.index("Gemfile")
+
+
+# ------------------------------------------------- matching a version to a tag
+
+@pytest.mark.parametrize(("declared", "tag"), [
+    ("33.4.0-jre",     "v33.4.0"),      # Maven classifier vs git tag
+    ("33.4.0-android", "v33.4.0"),      # the other build of the same release
+    ("33.4.0",         "guava-33.4.0"), # monorepo component prefix
+    ("7.0.0",          "@babel/core@7.0.0"),
+    ("1.2.0",          "sub/v1.2.0"),   # Go submodule tag
+    ("1.2",            "v1.2.0"),       # trailing zeros are not a difference
+    ("1.12.1",         "release-1.12.1"),
+    ("2.0a1",          "v2.0.0a1"),     # PEP 440, no separator
+    ("1.0.0-rc1",      "v1.0.0-rc1"),   # a prerelease matches its own tag
+    ("0.10",           "release_0_10"), # older Java: underscores, not dots
+    ("1.2.3",          "VERSION_1_2_3"),
+    ("1.2.3",          "R_1_2_3"),      # autotools
+])
+def test_a_declared_version_matches_the_tag_that_shipped_it(declared, tag):
+    """A manifest names versions in the registry's namespace and git names them
+    in the repository's, so the two are never equal as strings."""
+    assert M.version_key(declared) == M.version_key(tag)
+
+
+@pytest.mark.parametrize(("a", "b"), [
+    ("1.0.0-rc1", "1.0.0"),    # a release candidate is a different commit
+    ("1.0.0-beta", "1.0.0"),
+    ("33.5.0-SNAPSHOT", "33.5.0"),   # an unreleased build was never tagged
+    ("1.10", "1.1"),
+    ("2.0", "2.0.1"),
+])
+def test_versions_that_are_not_the_same_release_never_collapse(a, b):
+    """Stripping every suffix would resolve a release candidate to the final
+    release while looking perfectly successful."""
+    assert M.version_key(a) != M.version_key(b)
+
+
+@pytest.mark.parametrize("raw", ["*", "latest", "", "   ", "not-a-version"])
+def test_a_string_with_no_version_has_no_key(raw):
+    assert M.version_key(raw) is None
+
+
+@pytest.mark.parametrize(("raw", "floor", "ceiling"), [
+    ("^4.17.21", "4.17.21", None),
+    ("~1.2.3",   "1.2.3",   None),
+    ("~> 7.0",   "7.0",     None),
+    (">=2,<3",   "2",       "3"),
+    ("<3.0",     None,      "3.0"),
+    (">1.0",     "1.0",     None),
+    ("4.17.21",  "4.17.21", None),
+    ("*",        None,      None),
+])
+def test_a_range_declares_its_own_bounds(raw, floor, ceiling):
+    """The floor is parsed, never guessed: `^4.17.21` states 4.17.21 itself."""
+    assert M.bounds(raw) == (floor, ceiling)

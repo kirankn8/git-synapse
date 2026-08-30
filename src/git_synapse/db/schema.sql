@@ -909,6 +909,18 @@ ALTER TABLE ref_tag ADD COLUMN IF NOT EXISTS main_commit_id BIGINT
     REFERENCES commit (id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS ref_tag_main_commit_idx ON ref_tag (main_commit_id);
 
+-- Canonical form of a version, computed identically for a tag name and for a
+-- declared version, so matching one to the other is an indexed join rather
+-- than a pile of string transformations at lookup time.
+ALTER TABLE ref_tag  ADD COLUMN IF NOT EXISTS version_key TEXT;
+ALTER TABLE dep_bump ADD COLUMN IF NOT EXISTS version_key TEXT;
+CREATE INDEX IF NOT EXISTS ref_tag_version_key_idx  ON ref_tag  (repo_id, version_key);
+CREATE INDEX IF NOT EXISTS dep_bump_version_key_idx ON dep_bump (dep_repo_id, version_key);
+
+-- How the upstream commit was arrived at, so a floor -- which says only "at
+-- least these commits arrived" -- is never read as an exact answer.
+ALTER TABLE dep_bump ADD COLUMN IF NOT EXISTS resolution TEXT;
+
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -944,5 +956,5 @@ CREATE TABLE IF NOT EXISTS meta (
 -- was not, so schema_is_current() was permanently false and every service boot
 -- re-ran the whole DDL, taking exactly the locks the fast path exists to avoid.
 INSERT INTO meta (key, value)
-VALUES ('schema_version', '19'::jsonb)
+VALUES ('schema_version', '20'::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();

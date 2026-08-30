@@ -37,6 +37,7 @@ from typing import Any
 
 import psycopg
 
+from git_synapse.analysis.manifests import version_key
 from git_synapse.config import get_config
 from git_synapse.db.engine import connection, copy_rows
 from git_synapse.ingest.github import RepoRecord
@@ -63,15 +64,17 @@ def load_tags(repo_id: int, tags: list, conn: psycopg.Connection) -> int:
         cur.executemany(
             """
             INSERT INTO ref_tag (repo_id, name, commit_sha, tagged_at, annotated,
-                                 commit_id, main_sha, main_commit_id)
+                                 commit_id, main_sha, main_commit_id, version_key)
             VALUES (%s, %s, %s, %s, %s,
                     (SELECT id FROM commit WHERE repo_id = %s AND sha = %s),
                     %s,
-                    (SELECT id FROM commit WHERE repo_id = %s AND sha = %s))
+                    (SELECT id FROM commit WHERE repo_id = %s AND sha = %s),
+                    %s)
             ON CONFLICT (repo_id, name) DO NOTHING
             """,
             [(repo_id, t.name, t.commit_sha, t.tagged_at, t.annotated,
-              repo_id, t.commit_sha, t.main_sha, repo_id, t.main_sha)
+              repo_id, t.commit_sha, t.main_sha, repo_id, t.main_sha,
+              version_key(t.name))
              for t in tags],
         )
     return len(tags)

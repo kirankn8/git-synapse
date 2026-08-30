@@ -10,6 +10,7 @@ import subprocess
 
 import pytest
 
+from git_synapse.analysis import depbump
 from git_synapse.analysis.manifests import _PSEUDO
 from git_synapse.analysis.depbump import (
     declared_at_head,
@@ -348,3 +349,135 @@ def test_documentation_is_not_scanned_for_dependencies(tmp_path, monkeypatch):
     monkeypatch.setattr(sp, "run", lambda *a, **k: _Proc())
     found = [p for p, _ in depbump.manifest_paths(tmp_path)]
     assert found == ["requirements.txt"]
+
+
+# ------------------------------------------------------- resolution tiers
+#
+# These build the rows directly rather than ingesting a repository, because what
+# is under test is the *matching* -- a declared version against a tag name --
+# and a real repository would only obscure which spelling each case exercises.
+
+
+@pytest.fixture
+def bump_env(db):
+    """An open transaction holding two repositories, rolled back afterwards."""
+    from git_synapse.db.engine import connection
+
+    with connection() as conn:
+        repo = conn.execute(
+            "INSERT INTO repo (full_name, name, owner) VALUES "
+            "('acme/consumer','consumer','acme') RETURNING id").fetchone()[0]
+        dep = conn.execute(
+            "INSERT INTO repo (full_name, name, owner) VALUES "
+            "('acme/library','library','acme') RETURNING id").fetchone()[0]
+        yield conn, repo, dep
+        conn.rollback()
+
+
+def _commit(conn, repo_id, sha, when):
+    return conn.execute(
+        "INSERT INTO commit (repo_id, sha, authored_at, committed_at) "
+        "VALUES (%s, %s, %s, %s) RETURNING id", (repo_id, sha, when, when)).fetchone()[0]
+
+
+def _tag(conn, repo_id, name, commit_id, main_commit_id, key, at="2024-01-01"):
+    conn.execute(
+        "INSERT INTO ref_tag (repo_id, name, commit_sha, tagged_at, annotated, "
+        "commit_id, main_commit_id, version_key) "
+        "VALUES (%s, %s, %s, %s, FALSE, %s, %s, %s)",
+        (repo_id, name, "0" * 40, at, commit_id, main_commit_id, key))
+
+
+def _bump(conn, repo_id, dep_repo_id, version, at):
+    sha = f"{abs(hash((version, at))):040x}"[:40]
+    _commit(conn, repo_id, sha, at)
+    return conn.execute(
+        "INSERT INTO dep_bump (consumer_repo_id, consumer_sha, dep_repo_id, "
+        "dep_name, dep_version, manifest, bumped_at) "
+        "VALUES (%s, %s, %s, 'library', %s, 'pom.xml', %s) RETURNING id",
+        (repo_id, sha, dep_repo_id, version, at)).fetchone()[0]
+
+
+def _resolved(conn, bump_id):
+    return tuple(conn.execute(
+        "SELECT dep_commit_id, resolution FROM dep_bump WHERE id = %s",
+        (bump_id,)).fetchone())
+
+
+def test_a_declared_version_resolves_through_the_shipping_branch_anchor(bump_env):
+    """The whole point of the anchor: guava tags on a release branch, so the
+    tagged commit was never walked and only the merge-base exists."""
+    conn, repo, dep = bump_env
+    anchor = _commit(conn, dep, "aa" * 20, "2024-01-01")
+    _tag(conn, dep, "v33.4.0", commit_id=None, main_commit_id=anchor, key="33.4")
+    row = _bump(conn, repo, dep, version="33.4.0-jre", at="2024-02-01")
+
+    depbump.resolve_bumps(conn)
+    assert _resolved(conn, row) == (anchor, "tag")
+
+
+def test_a_range_resolves_to_its_declared_floor(bump_env):
+    """`^4.17.21` states 4.17.21 as its own lower bound, so that is the version
+    taken -- and it is recorded as a floor, not as an exact answer."""
+    conn, repo, dep = bump_env
+    c = _commit(conn, dep, "bb" * 20, "2024-01-01")
+    _tag(conn, dep, "v4.17.21", commit_id=c, main_commit_id=c, key="4.17.21")
+    row = _bump(conn, repo, dep, version="^4.17.21", at="2024-02-01")
+
+    depbump.resolve_bumps(conn)
+    assert _resolved(conn, row) == (c, "floor")
+
+
+def test_an_upper_bound_resolves_to_the_newest_release_beneath_it(bump_env):
+    """`<3.0` names no version that was used, so the answer is the newest one
+    that existed and was permitted."""
+    conn, repo, dep = bump_env
+    old = _commit(conn, dep, "c1" * 20, "2023-01-01")
+    new = _commit(conn, dep, "c2" * 20, "2023-06-01")
+    over = _commit(conn, dep, "c3" * 20, "2023-07-01")
+    _tag(conn, dep, "v2.9", commit_id=old, main_commit_id=old, key="2.9", at="2023-01-02")
+    _tag(conn, dep, "v2.10", commit_id=new, main_commit_id=new, key="2.10", at="2023-06-02")
+    _tag(conn, dep, "v3.0", commit_id=over, main_commit_id=over, key="3", at="2023-07-02")
+    row = _bump(conn, repo, dep, version="<3.0", at="2024-01-01")
+
+    depbump.resolve_bumps(conn)
+    # 2.10 is newer than 2.9 as a version, though lower as text.
+    assert _resolved(conn, row) == (new, "ceiling")
+
+
+def test_a_release_published_after_the_bump_is_not_a_candidate(bump_env):
+    """Bounded by the bump's own date, so the answer cannot drift as later tags
+    arrive."""
+    conn, repo, dep = bump_env
+    early = _commit(conn, dep, "d1" * 20, "2023-01-01")
+    later = _commit(conn, dep, "d2" * 20, "2025-01-01")
+    _tag(conn, dep, "v2.1", commit_id=early, main_commit_id=early, key="2.1", at="2023-01-02")
+    _tag(conn, dep, "v2.9", commit_id=later, main_commit_id=later, key="2.9", at="2025-01-02")
+    row = _bump(conn, repo, dep, version="<3.0", at="2024-01-01")
+
+    depbump.resolve_bumps(conn)
+    assert _resolved(conn, row) == (early, "ceiling")
+
+
+def test_a_prerelease_never_matches_the_release_it_precedes(bump_env):
+    """Collapsing `-rc1` onto the final release resolves to the wrong commit
+    while looking perfectly successful."""
+    conn, repo, dep = bump_env
+    final = _commit(conn, dep, "ee" * 20, "2024-01-01")
+    _tag(conn, dep, "v1.0.0", commit_id=final, main_commit_id=final, key="1")
+    row = _bump(conn, repo, dep, version="1.0.0-rc1", at="2024-02-01")
+
+    depbump.resolve_bumps(conn)
+    assert _resolved(conn, row) == (None, None)
+
+
+def test_a_commit_written_after_the_bump_is_rejected(bump_env):
+    """Nothing can depend on a commit that does not exist yet, so a match that
+    claims otherwise is proof the match is wrong."""
+    conn, repo, dep = bump_env
+    future = _commit(conn, dep, "ff" * 20, "2025-01-01")
+    _tag(conn, dep, "v1.0.0", commit_id=future, main_commit_id=future, key="1")
+    row = _bump(conn, repo, dep, version="1.0.0", at="2024-01-01")
+
+    depbump.resolve_bumps(conn)
+    assert _resolved(conn, row) == (None, None)
