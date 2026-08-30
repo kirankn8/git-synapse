@@ -71,6 +71,56 @@ def test_sweep_tolerates_a_missing_mirror(tmp_path):
     assert _drop_unreachable_commits(repo_id=-1, mirror=tmp_path / "absent.git") == 0
 
 
+def test_a_commit_reachable_only_from_a_tag_is_not_unreachable(tmp_path, db):
+    """The sweep must measure over exactly the refs the ingest walks. Measuring
+    from the branch alone deleted every commit the tag walk had just inserted,
+    and did it silently -- the run reports what the loader wrote, not what
+    survived. It is self-triggering too: the new commits push the stored count
+    above the branch count, which is the condition that runs the sweep."""
+    from git_synapse.db.engine import connection
+
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e",
+           "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
+    work = tmp_path / "tagged"
+    work.mkdir()
+    subprocess.run(["git", "init", "--quiet", "-b", "main", str(work)], check=True)
+
+    def commit(name):
+        (work / name).write_text(name)
+        subprocess.run(["git", "add", "-A"], cwd=work, check=True, env=env)
+        subprocess.run(["git", "commit", "--quiet", "-m", name], cwd=work, check=True, env=env)
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=work, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    on_branch = commit("a.txt")
+    subprocess.run(["git", "checkout", "-q", "-b", "release"], cwd=work, check=True, env=env)
+    tagged_only = commit("release.txt")          # never merges back
+    subprocess.run(["git", "tag", "v1.0.0"], cwd=work, check=True, env=env)
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=work, check=True, env=env)
+
+    bare = tmp_path / "m.git"
+    subprocess.run(["git", "clone", "--quiet", "--bare", str(work), str(bare)], check=True)
+
+    with connection() as conn:
+        repo_id = conn.execute(
+            "INSERT INTO repo (full_name, name, owner) VALUES "
+            "('acme/tagged','tagged','acme') RETURNING id").fetchone()[0]
+        for sha in (on_branch, tagged_only):
+            conn.execute(
+                "INSERT INTO commit (repo_id, sha, authored_at, committed_at) "
+                "VALUES (%s, %s, now(), now())", (repo_id, sha))
+        conn.commit()
+        try:
+            assert _drop_unreachable_commits(repo_id, bare) == 0
+            survived = {r[0] for r in conn.execute(
+                "SELECT sha FROM commit WHERE repo_id = %s", (repo_id,)).fetchall()}
+            assert tagged_only in survived, "a release commit is not unreachable"
+        finally:
+            conn.execute("DELETE FROM repo WHERE id = %s", (repo_id,))
+            conn.commit()
+
+
 # ------------------------------------------------------------ discovery guard
 
 def test_discovery_refuses_a_collapsed_listing(db, monkeypatch):
