@@ -538,6 +538,21 @@ Ranges with an upper bound and no floor are four rows in twenty thousand;
 `*` and `latest` produce none at all, because a line that never changes never
 bumps.
 
+What that comes to, on dependencies between repositories in the corpus:
+
+| Ecosystem | Bumps | Resolved | Why it lands where it does |
+|---|---:|---:|---|
+| Go | 2,031 | 96.4% | a pseudo-version *is* a commit id |
+| Java | 365 | 95.1% | Maven names an artifact; the tag has to be found |
+| Rust | 625 | 92.2% | `Cargo.lock` pins exactly, then tag lookup |
+| JS/TS | 2,225 | 88.0% | lockfile pins exactly; `package.json` alone is a range |
+| PHP | 642 | 79.3% | Composer writes wildcards constantly, and old branches are deleted |
+| Python | 14 | 100% | libraries declare a floor and almost never edit it, so there is little to record |
+
+Python's fourteen rows are the honest finding rather than a gap: a library
+declares `Werkzeug>=3.0` and leaves it alone for years, so nothing is recorded --
+and by the floor argument above, nothing needed to adapt either.
+
 ---
 
 ### What the backtest is measured against

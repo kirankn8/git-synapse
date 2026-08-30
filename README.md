@@ -11,7 +11,9 @@
 ![Docker](https://img.shields.io/badge/Docker-compose-2496ED?style=flat-square&logo=docker&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-12%20tools-5eead4?style=flat-square)
 ![Measures](https://img.shields.io/badge/measures-29-a78bfa?style=flat-square)
-![Backtested](https://img.shields.io/badge/backtested-240k%20predictions-14b8a6?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-1%2C142-3fb950?style=flat-square)
+![Coverage](https://img.shields.io/badge/coverage-100%25-3fb950?style=flat-square)
+![Backtested](https://img.shields.io/badge/backtested-472k%20predictions-14b8a6?style=flat-square)
 
 </div>
 
@@ -28,7 +30,7 @@ repository, with no per-language support to add.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/benchmark-dark.svg">
-  <img alt="What history adds over what an agent finds for free, across seven public corpora" src="docs/benchmark-light.svg" width="100%">
+  <img alt="What history adds over what an agent finds for free, across six languages" src="docs/benchmark-light.svg" width="100%">
 </picture>
 
 <div align="center"><sub><b>Backtested, not asserted.</b> Every prediction scored against
@@ -49,7 +51,8 @@ only the commits that preceded it — <a href="#does-it-actually-help">how this 
 
 ## What it does
 
-Git Synapse mirrors every repository in a GitHub organisation, reduces their histories
+Git Synapse mirrors every repository in one or more GitHub organisations, reduces
+their histories
 to a single atomic fact table — *this commit touched this file* — and derives
 coupling at three levels:
 
@@ -58,6 +61,34 @@ coupling at three levels:
 | **File** | "I'm editing `auth.go`, what else?" | the same commit |
 | **Cross-repo** | "I'm changing `runtime`, where does this really belong?" | a declared dependency |
 | **Transitive** | "does `signer` reach `runtime`, and how?" | composed path over declared edges |
+
+Commits come from the branch that ships **and from every release tag**, because a
+release is usually cut on a branch that never merges back — so its commits were
+otherwise never read, and the range between two releases was uncomputable. A
+change replayed onto a release branch is stored but not counted: a fix
+cherry-picked onto three branches is one decision repeated, not three
+observations. Git decides which is which, by patch id.
+
+### Turning a declared version into a commit
+
+A manifest names versions in the package registry's namespace and git names them
+in the repository's, so `33.4.0-jre` and `v33.4.0` are never equal as strings.
+Both reduce to one canonical key, and a release tagged off the shipping branch
+resolves through the commit it was cut from. Across six ecosystems, on
+dependencies between repositories in the corpus:
+
+| Ecosystem | Bumps | Resolved to a commit |
+|---|---:|---:|
+| Go | 2,031 | **96.4%** |
+| Java (Maven) | 365 | **95.1%** |
+| Rust (Cargo) | 625 | **92.2%** |
+| JS/TS (npm) | 2,225 | **88.0%** |
+| PHP (Composer) | 642 | **79.3%** |
+| Python | 14 | 100% |
+
+Go and PHP bracket the range for a structural reason: a Go pseudo-version *is* a
+commit id, while Composer and Maven name a registry artifact that records no
+commit at all, so the link has to be reconstructed from a tag.
 
 ### The 29 measures
 
@@ -136,17 +167,17 @@ The arrow only ever points forwards: commit *k* is scored before it is learned
 from, so no pair can vouch for itself.
 
 ```
-              backtest: 240,734 prompts over 53,034 commits (top-5)
+              backtest: 471,972 prompts over 105,986 commits (top-5)
  measure                        hit rate       95% CI   lift  unsolved    MRR
- Apprentice -- the file's          56.9%  56.7%-57.1%      -         -      -
+ Apprentice -- the file's          53.4%  53.2%-53.5%      -         -      -
  test, then its folder
- New Hire -- greps names and       42.5%  37.7%-47.4%      -         -      -
- bodies, follows leads (n=400)
- Intern -- the file's              41.8%  41.6%-42.0%      -         -      -
+ Intern -- the file's              43.0%  42.9%-43.1%      -         -      -
  folder-mates, busiest first
- Tourist -- the repository's       38.0%  37.8%-38.2%      -         -      -
+ New Hire -- greps names and       42.0%  37.3%-46.9%      -         -      -
+ bodies, follows leads (n=400)
+ Tourist -- the repository's       38.6%  38.5%-38.8%      -         -      -
  busiest files
- confidence_ab                     61.7%  61.5%-61.9%  1.08x     43.3%  0.506
+ confidence_ab                     63.2%  63.0%-63.3%  1.18x     47.5%  0.520
 ```
 
 ### What it is measured against
@@ -174,36 +205,46 @@ is being asked to predict. [How it works, and what it still cannot do](DESIGN.md
 
 ### Measured result
 
-Replayed over **89,121 commits** — 240,734 predictions, every one scored only
-against earlier history ([chart above](#git-synapse)):
+Replayed over **105,986 commits** — 471,972 predictions across six organisations
+and six languages, every one scored only against earlier history
+([chart above](#git-synapse)):
 
-| Corpus | Language | Apprentice | `P(B\|A)` | Lift | Recovers what the Apprentice missed |
+| Repository | Language | Apprentice | `P(B\|A)` | Lift | Recovers what the Apprentice missed |
 |---|---|---:|---:|---:|---:|
-| **38 repos from the `google` org** | mixed | 56.9% | **61.7%** | 1.08x | **43.3%** |
-| flatbuffers | C++ | 43.8% | **62.9%** | **1.36x** | 57.8% |
-| pytype | Python | 47.3% | **65.5%** | **1.38x** | 51.9% |
-| osv-scanner | Go | 47.7% | **61.1%** | **1.19x** | 50.8% |
-| closure-compiler | Java | 54.4% | **65.6%** | **1.21x** | 47.7% |
-| go-github | Go | 76.8% | 73.0% | 0.95x | 44.3% |
-| guava | Java | 76.6% | 64.4% | **0.84x** | 34.5% |
+| laravel/framework | PHP | 34.8% | **55.5%** | **1.60x** | 47.7% |
+| pytype | Python | 46.7% | **65.5%** | **1.40x** | 52.6% |
+| flatbuffers | C++ | 42.3% | **62.9%** | **1.36x** | 58.4% |
+| tokio | Rust | 37.2% | **57.8%** | **1.35x** | 52.6% |
+| prometheus | Go | 52.7% | **68.1%** | **1.29x** | 52.3% |
+| vuejs/core | TypeScript | 57.0% | **70.4%** | **1.23x** | 53.2% |
+| closure-compiler | Java | 54.6% | **65.8%** | **1.21x** | 47.8% |
+| flask | Python | 46.7% | **63.4%** | **1.21x** | 52.6% |
+| go-github | Go | 77.0% | 73.0% | 0.95x | 44.6% |
+| guava | Java | 77.3% | 65.5% | **0.85x** | 34.6% |
 
 **The honest claim is narrower than a lift column suggests.** An agent that knows
 a file's test lives beside it already answers most prompts, and on a meticulously
 organised codebase it answers nearly all of them. On **guava, Git Synapse loses
-outright** — 0.84x, and under `--seeding obscure` it falls to 0.73x. That result
+outright** — 0.85x, and under `--seeding obscure` it falls further. That result
 stays in this table because it is the clearest statement of when this tool is not
 worth querying.
+
+**What decides the lift is the discipline of the codebase, not the language.**
+The two repositories where history loses — guava and go-github — are the two most
+convention-regular here, and their Apprentice scores 77%. Where layout has
+drifted from naming, as in laravel and tokio, the Apprentice manages 35-37% and
+history is most of the answer.
 
 Where it earns its place is the last column: **the prompts where the file that
 had to change shares no name, no folder and no visible mention with the file you
 are editing.** There is nothing to grep for, and history is the only thing left.
-Across the corpus that is 103,690 of 240,734 prompts, and `P(B|A)` answers 43.3%
-of them — between a third and two thirds, depending on the repository.
+Across the corpus that is 220,018 of 471,972 prompts, and `P(B|A)` answers 47.5%
+of them.
 
 Hold the New Hire to the same test and the picture is the same. Of 400 uniformly
-sampled prompts, **134 were solved by neither the free rules nor the search**, and
-`P(B|A)` answered 36.6% of those. That is the residue this product exists for:
-prompts where reading the code, however well, surfaces nothing.
+sampled prompts, **145 were solved by neither the free rules nor the search**, and
+`P(B|A)` answered 44.1% of those (36.3%-52.3%). That is the residue this product
+exists for: prompts where reading the code, however well, surfaces nothing.
 
 Counts are kept per repository, never pooled. Two files in different repositories
 cannot co-occur, so a shared population hands a baseline candidates it can never
@@ -340,14 +381,14 @@ Set `REFRESH_CRON=*/5 * * * *` for near-real-time, or `0 * * * *` to be gentler.
 | Atomic `(commit × file)` facts | 4,274,784 |
 | Files tracked | 1,177,848 (124,774 renames followed) |
 | File coupling pairs scored | 1,629,560 × 31 measures |
-|||| Manifest-bump ground truth | 6,388 edges, 4,074 resolved to an exact commit |
+| Manifest-bump ground truth | 6,388 edges, 4,074 resolved to an exact commit |
 | Declared dependency edges | 532 across 29 ecosystems |
-|| De-facto modules | 4,394 (1,389 cross-directory) |
+| De-facto modules | 4,394 (1,389 cross-directory) |
 | Risk-scored files | 1,147,836 |
 | Mirrors on disk | 11.1 GB |
 | Database | 8.5 GB |
 | API latency | 10–70 ms typical, 220 ms worst |
-|
+
 ---
 
 ## How it works

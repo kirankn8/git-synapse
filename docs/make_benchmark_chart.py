@@ -11,13 +11,14 @@ import pathlib
 #: the Apprentice missed that P(B|A) recovered. Every figure measured over all
 #: prompts -- none of these columns is sampled.
 DATA = [
-    ("google (38 repos)", "mixed",  89_121, 56.9, 43.3),
-    ("flatbuffers",       "C++",     3_147, 43.8, 57.8),
-    ("pytype",            "Python",  6_184, 47.3, 51.9),
-    ("osv-scanner",       "Go",      2_005, 47.7, 50.8),
-    ("closure-compiler",  "Java",   20_399, 54.4, 47.7),
-    ("go-github",         "Go",      3_000, 76.8, 44.3),
-    ("guava",             "Java",    7_501, 76.6, 34.5),
+    ("six organisations", "mixed",      105_986, 53.4, 47.5),
+    ("laravel/framework", "PHP",         43_984, 34.8, 47.7),
+    ("tokio",             "Rust",         4_449, 37.2, 52.6),
+    ("flatbuffers",       "C++",          3_147, 42.3, 58.4),
+    ("pytype",            "Python",       6_184, 46.7, 52.6),
+    ("vuejs/core",        "TypeScript",   7_135, 57.0, 53.2),
+    ("prometheus",        "Go",          13_756, 52.7, 52.3),
+    ("guava",             "Java",         7_954, 77.3, 34.6),
 ]
 
 THEMES = {
