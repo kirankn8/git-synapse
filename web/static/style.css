@@ -747,3 +747,25 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 .badge.clickable { cursor: pointer; font: inherit; font-size: 11px; }
 .badge.clickable:hover { filter: brightness(1.25); }
 .btn.danger-btn:hover { border-color: var(--danger); color: var(--danger); }
+
+/* ---- file tree -------------------------------------------------------- */
+/* A repository is a tree of directories; a flat list of paths hides that.
+   Indentation comes from nesting rather than from a computed depth, so the
+   markup stays the shape of the data. */
+.tree { font-size: 13px; }
+.tree-children { margin-left: 16px; border-left: 1px solid var(--border); padding-left: 10px; }
+.tree-dir > summary {
+  cursor: pointer;
+  padding: 3px 4px;
+  border-radius: 4px;
+  list-style: none;
+  user-select: none;
+}
+.tree-dir > summary::-webkit-details-marker { display: none; }
+.tree-dir > summary::before { content: "▸"; display: inline-block; width: 14px; color: var(--muted); }
+.tree-dir[open] > summary::before { content: "▾"; }
+.tree-dir > summary:hover { background: var(--surface-2); }
+.tree-file { padding: 3px 4px 3px 18px; border-radius: 4px; }
+.tree-file:hover { background: var(--surface-2); }
+.tree-file a { text-decoration: none; }
+.tree-file a:hover { text-decoration: underline; }

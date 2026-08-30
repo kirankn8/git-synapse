@@ -90,7 +90,8 @@ const routes = [
   ['#/accounts',                          'Accounts'],
   [`#/repo/${repoId}`,                    'Repo overview'],
   [`#/repo/${repoId}?tab=pairs`,          'Repo pairs'],
-  [`#/repo/${repoId}?tab=files`,          'Repo files'],
+  [`#/repo/${repoId}?tab=files`,          'Repo files (tree)'],
+  [`#/repo/${repoId}?tab=files&view=table`, 'Repo files (table)'],
   [`#/repo/${repoId}?tab=dirs`,           'Repo dirs'],
   [`#/repo/${impactRepoId}?tab=impact`,   'Repo cross-repo impact'],
   [`#/repo/${repoId}?tab=modules`,        'Repo de-facto modules'],
@@ -143,6 +144,9 @@ console.log('\n=== drill-down trail ===');
 for (const [path, label, expect] of [
   ['/repo/5',  'repository', ['Accounts', 'google']],
   ['/dir/1',   'directory',  ['Accounts', 'google', 'brotli']],
+  ['/insights?repo=5', 'scoped insights', ['Accounts', 'google', 'guava', 'Insights']],
+  ['/impact?repo=5',   'scoped impact',   ['Accounts', 'google', 'guava', 'Impact']],
+  ['/graph?repo=5',    'scoped graph',    ['Accounts', 'google', 'guava']],
 ]) {
   window.history.pushState({}, '', path);
   window.dispatchEvent(new window.PopStateEvent('popstate'));
@@ -155,6 +159,21 @@ for (const [path, label, expect] of [
   }
   const missing = expect.filter((w) => !trail.includes(w));
   report(`${label} trail`, !missing.length, trail || 'no breadcrumb');
+}
+
+// The tree is the point of the files tab: a flat list hides the structure.
+window.history.pushState({}, '', `/repo/${repoId}?tab=files`);
+window.dispatchEvent(new window.PopStateEvent('popstate'));
+{
+  let dirs = 0, leaves = 0;
+  for (let i = 0; i < 60; i++) {
+    await sleep(120);
+    dirs = window.document.querySelectorAll('.tree-dir').length;
+    leaves = window.document.querySelectorAll('.tree-file').length;
+    if (dirs || leaves) break;
+  }
+  report('files render as a tree', dirs > 0 && leaves > 0,
+         `${dirs} folders, ${leaves} files`);
 }
 
 console.log('\n=== interaction ===');
