@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+#
+# Refuse a push that would break the build.
+#
+# Both halves run, because both have been broken before and neither would have
+# been noticed: the backend suite guards a coverage gate that has caught real
+# defects, and the UI smoke test spent months crashing on its first request --
+# reporting nothing, and so catching nothing, while six pages rendered errors.
+#
+# Docker first, because that is how this project actually runs its tests; a
+# local .venv and node are used when they exist. A check that cannot run is
+# reported loudly rather than passed over quietly: a hook that skips everything
+# is worse than no hook, because it reads as approval.
+set -uo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+cd "$root" || exit 1
+fail=0
+ran=0
+
+say()  { printf '\033[1mpre-push:\033[0m %s\n' "$1"; }
+warn() { printf '\033[33mpre-push: %s\033[0m\n' "$1"; }
+
+# Ask docker rather than guessing the project name: compose keeps hyphens that
+# a naive slug would strip, and the network simply would not be found.
+compose_net="$(docker network ls --format '{{.Name}}' 2>/dev/null \
+    | grep -E "_default$" | grep -F "$(basename "$root")" | head -1)"
+[ -n "$compose_net" ] || compose_net="$(basename "$root")_default"
+
+# --- backend -----------------------------------------------------------------
+# Against a throwaway database, never the running one. Two reasons, both found
+# the hard way: the scheduler holds the ingest advisory lock, so every pipeline
+# test is skipped and reports as a failure; and the suite writes repositories
+# and accounts, which has no business happening in a live corpus.
+#
+# `--cov` makes this fail on a coverage drop too, since the gate is in pyproject.
+if command -v docker >/dev/null 2>&1 && docker image inspect git-synapse-test >/dev/null 2>&1; then
+    say "backend suite (docker, throwaway database)"
+    net="prepush-$$"
+    db="prepush-db-$$"
+    docker network create "$net" >/dev/null 2>&1
+    docker run -d --name "$db" --network "$net" \
+        -e POSTGRES_USER=git_synapse -e POSTGRES_PASSWORD=git_synapse \
+        -e POSTGRES_DB=git_synapse postgres:16-alpine >/dev/null 2>&1
+    # Wait for it rather than sleeping a guessed interval.
+    for _ in $(seq 1 30); do
+        docker exec "$db" pg_isready -U git_synapse >/dev/null 2>&1 && break
+        sleep 1
+    done
+    docker run --rm --network "$net" -v "$root":/work -w /work -u root \
+        -e POSTGRES_HOST="$db" -e POSTGRES_PORT=5432 \
+        -e POSTGRES_USER=git_synapse -e POSTGRES_PASSWORD=git_synapse \
+        -e POSTGRES_DB=git_synapse -e PYTHONPATH=/work/src \
+        git-synapse-test \
+        sh -c 'pip install -q pytest pytest-cov PyYAML 2>/dev/null;
+               python -m pytest -q -p no:cacheprovider --cov=git_synapse' || fail=1
+    docker rm -f "$db" >/dev/null 2>&1
+    docker network rm "$net" >/dev/null 2>&1
+    ran=1
+elif [ -x .venv/bin/python ]; then
+    warn "backend suite: using the local venv and whatever database it points at;"
+    warn "  a running scheduler will hold the ingest lock and fail the pipeline tests."
+    POSTGRES_HOST=127.0.0.1 POSTGRES_PORT="${POSTGRES_PUBLISHED_PORT:-55432}" \
+        PYTHONPATH=src .venv/bin/python -m pytest -q --cov=git_synapse || fail=1
+    ran=1
+else
+    warn "backend suite NOT RUN: no git-synapse-test image and no .venv"
+fi
+
+# --- frontend ----------------------------------------------------------------
+# Needs a live API: the bundle is fetched from it rather than read off disk, so
+# the test exercises what is actually served.
+ui() {  # $1 = base url, then the runner
+    (cd tests/ui && GIT_SYNAPSE_URL="$1" node build-bundle.mjs >/dev/null \
+        && GIT_SYNAPSE_URL="$1" node smoke.mjs)
+}
+
+if command -v node >/dev/null 2>&1 \
+   && curl -fsS -o /dev/null --max-time 3 "${GIT_SYNAPSE_URL:-http://localhost:8080}/api/overview" 2>/dev/null; then
+    say "UI smoke test (local node)"
+    ui "${GIT_SYNAPSE_URL:-http://localhost:8080}" || fail=1
+    ran=1
+elif command -v docker >/dev/null 2>&1 \
+     && docker run --rm --network "$compose_net" curlimages/curl:latest \
+          -fsS -o /dev/null --max-time 3 http://api:8000/api/overview >/dev/null 2>&1; then
+    say "UI smoke test (docker)"
+    docker run --rm --network "$compose_net" -v "$root":/work -w /work/tests/ui \
+        -e GIT_SYNAPSE_URL=http://api:8000 node:22-alpine \
+        sh -c 'node build-bundle.mjs >/dev/null && node smoke.mjs' || fail=1
+    ran=1
+else
+    warn "UI smoke test NOT RUN: no API reachable; start it with make up"
+fi
+
+if [ "$fail" -ne 0 ]; then
+    say "push refused. Override with --no-verify if you are certain."
+    exit 1
+fi
+if [ "$ran" -eq 0 ]; then
+    warn "nothing could be run, so nothing was verified."
+fi
+say "done"
+exit 0
