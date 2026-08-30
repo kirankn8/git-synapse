@@ -659,3 +659,29 @@ def test_an_unambiguous_suffix_resolves_but_an_ambiguous_one_does_not(monkeypatc
 def test_resolving_an_unknown_repository_returns_nothing(monkeypatch):
     monkeypatch.setattr(server.q, "list_repos", lambda **k: [])
     assert server._resolve_repo("nope") is None
+
+
+def test_explain_repo_pair_reports_every_kind_of_evidence(monkeypatch):
+    """The whole point of this tool is that a declaration, an observed bump and
+    a reverse edge are different claims. Collapsing them would let an agent act
+    on a coincidence as though it were proven."""
+    a = {"id": 1, "name": "lib", "full_name": "acme/lib"}
+    b = {"id": 2, "name": "app", "full_name": "acme/app"}
+    monkeypatch.setattr(server, "_resolve_repo", lambda name: a if "lib" in name else b)
+
+    impact = {"score": 0.8, "bump_count": 3, "is_declared": True,
+              "median_lag_days": 4.0, "rank_in_source": 1}
+    monkeypatch.setattr("git_synapse.db.engine.query_one", lambda sql, *ar, **kw: (
+        impact if "repo_impact" in sql and "%s" in sql else
+        {"dep_name": "lib", "dep_version": "1.2.3", "manifest": "pom.xml"}))
+    monkeypatch.setattr("git_synapse.db.engine.query", lambda sql, *ar, **kw: [
+        {"consumer_sha": "a" * 40, "dep_version": "1.2.3", "dep_sha": "b" * 12,
+         "bumped_at": None, "lag_days": 4.0}])
+
+    out = server.explain_repo_pair("acme/lib", "acme/app")
+    assert out.get("error") is None
+    assert out["repo_a"] == "acme/lib" and out["repo_b"] == "acme/app"
+    assert "pom.xml" in out["declared_dependency"]
+    # The forward edge carries its own evidence tier, so an agent can tell a
+    # declaration from a coincidence without reading the score.
+    assert out["forward"]["evidence"] == "declared"

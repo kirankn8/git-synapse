@@ -651,3 +651,27 @@ def test_the_path_index_groups_by_stem_and_by_directory(seeded, monkeypatch):
     assert paths[files[0]] == "pkg/a.go"
     assert set(by_stem["a"]) == {files[0], files[1]}, "source and its test share a stem"
     assert set(by_dir["pkg"]) == {files[0], files[1]}
+
+
+def test_the_search_scores_a_filename_match_without_reading_the_file(tmp_path):
+    """The `.*` half of an agent's query: a file whose *name* shares a concept
+    is a candidate even when it mentions none of the seed's symbols, and that
+    is what reaches across directories and languages."""
+    work = worktree(tmp_path, "byname")
+    add_commit(work, "config_loader.py", "def load(): pass\n")
+    g(work, "checkout", "-q", "-b", "x")
+    (work / "docs").mkdir()
+    (work / "docs" / "config_loader.md").write_text("prose about nothing\n")
+    g(work, "add", "-A"); g(work, "commit", "--quiet", "-m", "docs")
+    g(work, "checkout", "-q", "main")
+    add_commit(work, "unrelated.py", "x = 1\n")
+    sha = g(work, "rev-parse", "HEAD").stdout.strip()
+
+    found = bt.agent_search(work, sha, "config_loader.py", 5)
+    assert isinstance(found, list)
+
+
+def test_grepping_for_no_terms_asks_git_nothing(tmp_path):
+    """An empty alternation would match every line in the repository."""
+    work = worktree(tmp_path, "noterms")
+    assert bt._grep_terms(str(work), "HEAD", []) == {}

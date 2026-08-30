@@ -289,3 +289,19 @@ def test_no_orphaned_metric_rows_exist(db):
     assert row["n"] == 0, f"{row['n']} metric rows have no matching pair"
 
 
+
+
+# ------------------------------------------- direction-aware ordering columns
+
+@pytest.mark.parametrize(("measure", "expected"), [
+    ("confidence_ab", ("confidence_out", "confidence_ab", "confidence_ba")),
+    ("confidence_ba", ("confidence_in", "confidence_ba", "confidence_ab")),
+    ("jaccard", ("jaccard", "jaccard", "jaccard")),
+])
+def test_the_conditional_measures_order_by_direction(measure, expected):
+    """`P(B|A)` and `P(A|B)` are the same pair read from opposite ends, so the
+    A-side and B-side of the query must not use the same column -- doing so
+    reported the partner's confidence as the file's own."""
+    from git_synapse.analysis.query import _oriented_order
+
+    assert _oriented_order(measure) == expected

@@ -128,3 +128,21 @@ def test_the_dsn_contains_every_part_it_needs():
     dsn = get_config().db.dsn
     for part in ("host=", "port=", "user=", "dbname="):
         assert part in dsn
+
+
+# ------------------------------------------------------------ configuration
+
+def test_a_numeric_setting_that_is_not_a_number_names_itself(monkeypatch):
+    """A typo in one environment variable should say which one, not fail later
+    inside whatever first used the value."""
+    from git_synapse.config import _env_float
+
+    monkeypatch.delenv("GS_RATIO", raising=False)
+    assert _env_float("GS_RATIO", 0.25) == 0.25          # unset falls back
+
+    monkeypatch.setenv("GS_RATIO", "0.5")
+    assert _env_float("GS_RATIO", 0.25) == 0.5
+
+    monkeypatch.setenv("GS_RATIO", "half")
+    with pytest.raises(ValueError, match="GS_RATIO"):
+        _env_float("GS_RATIO", 0.25)
