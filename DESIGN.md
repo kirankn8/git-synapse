@@ -10,13 +10,14 @@ database table and the decisions that materially change the numbers.
 
 | | |
 |---|---|
-| [Every table at a glance](#every-table-at-a-glance) | all 34, one line each |
+| [Every table at a glance](#every-table-at-a-glance) | all 28, one line each |
 | [How it works](#how-it-works) | the pipeline, end to end |
 | [Store the atom, derive the rest](#store-the-atom-derive-the-rest) | the schema's one rule, and every core table |
 | [Cross-repository coupling](#cross-repository-coupling-what-repositories-declare) | why co-change cannot span repositories, and what does |
 | [Ground truth](#ground-truth-and-what-it-revealed) | the one thing here that is proven, not inferred |
 | [The mining layer](#the-mining-layer) | de-facto modules, drift, risk |
 | [Choices that affect the numbers](#choices-that-materially-affect-the-numbers) | where a default changes the answer |
+| [**From a declared version to a commit**](#from-a-declared-version-to-a-commit) | the four tiers, and what each is allowed to claim |
 | [**What the backtest is measured against**](#what-the-backtest-is-measured-against) | the baselines, and why a weak one is worse than none |
 | [What is incremental](#what-is-incremental-and-what-isnt) | what a refresh actually redoes |
 | [Bookkeeping](#bookkeeping) · [Portability](#portability) · [Layout](#layout) | operations and structure |
@@ -26,7 +27,7 @@ database table and the decisions that materially change the numbers.
 
 ## Every table at a glance
 
-Thirty-four tables. The first group is the only one that cannot be recomputed;
+Twenty-eight tables. The first group is the only one that cannot be recomputed;
 everything after it is a materialised cache.
 
 **Identity and the atom** — the source of truth
@@ -58,8 +59,9 @@ everything after it is a materialised cache.
 
 | Table | What it holds |
 |---|---|
-| `ref_tag` | Every release tag, peeled to its commit. The bridge from a declared version to a SHA; without it, `v1.2.3` resolves to nothing in every ecosystem that pins by version rather than by commit. |
-| `dep_bump` | One version change recorded in a manifest, resolved where possible to the exact upstream commit it consumed, with the observed lag. Ground truth rather than correlation. |
+| `ref_tag` | Every release tag, peeled to its commit, carrying a canonical `version_key` and the shipping-branch commit it was cut from. Without the latter a release tagged on a release branch resolves to nothing, which was 116 of guava's 123 tags. |
+| `dep_bump` | One version change recorded in a manifest, resolved where possible to the upstream commit it consumed, with the tier that resolution came from. Ground truth rather than correlation. |
+| `repo_package` | What each repository publishes, read from its own manifests. Answers "which repository *is* `com.google.guava:guava`?" from a declaration rather than from whether the strings agree. |
 | `repo_dependency` | What each repository declares at HEAD. **This is the answer to "which repositories depend on each other".** |
 | `module_dependency` | The intra-repository module graph, for monorepos whose real structure lives in submodules rather than cross-repo edges. |
 | `repo_impact` | The ranked answer to "I am changing X, what else?", carrying the evidence behind each score so any number can be explained. |
@@ -459,6 +461,54 @@ erDiagram
   aggregation yields things like φ = −7.9.
 - **Corrupt commit dates cannot set the time origin.** Four epoch-dated commits
   once stretched the lag axis from 2,200 bins to 20,687, inflating `N` tenfold.
+
+---
+
+### From a declared version to a commit
+
+A manifest names versions in the package registry's namespace and git names them
+in the repository's, so the two are never equal as strings: `33.4.0-jre` against
+`v33.4.0`. Nothing records the link — a maintainer builds from a tag and
+publishes an artifact, and no field anywhere says which commit that artifact came
+from. Except in Go, where the module *is* the git tag, and in a submodule, where
+a gitlink is a commit outright.
+
+So resolution is a reconstruction, and it is done in tiers that say what each is
+allowed to claim:
+
+| Tier | How the commit was arrived at | Claims |
+|---|---|---|
+| `sha` | the manifest named it | this commit |
+| `tag` | an exact version matched a tag | this commit |
+| `floor` | a range's declared lower bound matched a tag | *at least* these commits arrived |
+| `ceiling` | an upper bound with no floor, resolved to the newest release beneath it | the newest release that was permitted |
+
+**Matching is a join on a canonical key**, computed by one parser for both a tag
+name and a declared version. Trailing zeros are dropped so `1.2` and `1.2.0`
+agree. A `v` prefix goes, and so does a component prefix — taken by reading the
+version at the *end* of the string, which absorbs `guava-33.4.0`, `sub/v1.2.0`
+and `@babel/core@7.0.0` without needing the package's name. Underscores separate
+numbers as well as dots, because older Java and autotools tag `release_0_10`.
+
+**Suffixes are an allowlist, not a strip.** `-jre` and `-android` are two builds
+of one release. `-rc1` and `-beta` are separate releases with their own tags and
+their own commits, and collapsing them would resolve a release candidate to the
+final release while looking successful. `-SNAPSHOT` was never tagged at all.
+
+**A range resolves to its declared floor**, which is parsed rather than guessed:
+`^4.17.21` states 4.17.21 as its own lower bound. What was installed may have
+drifted higher, but a manifest nobody edited is one where nothing had to adapt,
+so the floor is the last version anyone made a decision about. A range that never
+changes produces no bump, which makes silent drift invisible by construction —
+correctly, since it required no adaptation.
+
+**One guard covers every tier**: a commit written after the bump that consumed it
+is impossible, so such a match is undone rather than reported. It catches a bad
+key, a bad repository mapping and a moved tag without knowing which occurred.
+
+Ranges with an upper bound and no floor are four rows in twenty thousand;
+`*` and `latest` produce none at all, because a line that never changes never
+bumps.
 
 ---
 
