@@ -608,3 +608,54 @@ def test_each_transport_starts_the_server_the_way_it_is_meant_to(monkeypatch, ar
     assert server.main(argv) == 0
     for key, value in expected.items():
         assert started[key] == value
+
+
+# ----------------------------------------------- explaining a repository pair
+
+def test_explain_repo_pair_names_the_repository_it_cannot_find(monkeypatch):
+    """Two unknown names would otherwise produce an empty explanation that
+    reads as 'these are unrelated' rather than 'I do not know them'."""
+    monkeypatch.setattr(server, "_resolve_repo", lambda name: None)
+    out = server.explain_repo_pair("acme/one", "acme/two")
+    assert "unknown repository" in out["error"]
+
+
+@pytest.mark.parametrize(("declared", "impact", "expected"), [
+    ("declared", {"bump_count": 4}, "bumped it 4 times"),
+    ("declared", {"bump_count": 0}, "no bump has been observed"),
+    (None, {"bump_count": 3}, "bumped"),
+    (None, None, "no declared dependency"),
+])
+def test_a_repository_pair_is_described_by_its_evidence(declared, impact, expected):
+    """Each tier reads differently on purpose: a declaration and an observed
+    bump are not the same claim, and an agent acts on the difference."""
+    a = {"name": "lib", "full_name": "acme/lib"}
+    b = {"name": "app", "full_name": "acme/app"}
+    assert expected in server._describe_repo_pair(a, b, declared, impact)
+
+
+def test_resolving_a_repository_accepts_either_spelling(monkeypatch):
+    """Agents pass whichever they have -- `guava` or `google/guava` -- and
+    failing on one of them would look like the repository is not indexed."""
+    rows = [{"id": 1, "name": "lib", "full_name": "acme/lib"}]
+    monkeypatch.setattr(server.q, "list_repos", lambda **k: rows)
+    assert server._resolve_repo("lib")["id"] == 1
+    assert server._resolve_repo("acme/lib")["id"] == 1
+
+
+def test_an_unambiguous_suffix_resolves_but_an_ambiguous_one_does_not(monkeypatch):
+    """A substring match is not a resolution: answering confidently about the
+    wrong repository is worse than saying the name was not found."""
+    monkeypatch.setattr(server.q, "list_repos", lambda **k: [
+        {"id": 1, "name": "core", "full_name": "acme/core"}])
+    assert server._resolve_repo("core")["id"] == 1
+
+    monkeypatch.setattr(server.q, "list_repos", lambda **k: [
+        {"id": 1, "name": "core", "full_name": "acme/core"},
+        {"id": 2, "name": "core", "full_name": "other/core"}])
+    assert server._resolve_repo("kernel/core") is None
+
+
+def test_resolving_an_unknown_repository_returns_nothing(monkeypatch):
+    monkeypatch.setattr(server.q, "list_repos", lambda **k: [])
+    assert server._resolve_repo("nope") is None

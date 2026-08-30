@@ -211,3 +211,78 @@ def test_a_string_with_no_version_has_no_key(raw):
 def test_a_range_declares_its_own_bounds(raw, floor, ceiling):
     """The floor is parsed, never guessed: `^4.17.21` states 4.17.21 itself."""
     assert M.bounds(raw) == (floor, ceiling)
+
+
+# ------------------------------------------------- parsers with no coverage
+
+def _with_parser(monkeypatch, parse):
+    """Swap the parser for `package.json`. `Ecosystem` is frozen, so the whole
+    record is replaced rather than one of its fields."""
+    import dataclasses
+    eco = dataclasses.replace(M.ecosystem_for("package.json"), parse=parse)
+    monkeypatch.setattr(M, "ecosystem_for", lambda path: eco)
+
+def test_a_gemfile_lock_yields_both_gems_and_git_pins():
+    """A Gemfile.lock records ordinary gems by version and git dependencies by
+    revision, and dropping either loses half the file."""
+    lock = """GIT
+  remote: https://github.com/acme/widget.git
+  revision: a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0
+  specs:
+    widget (1.2.3)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    rails (7.0.4)
+    rack (2.2.6)
+"""
+    pairs = M.parse_gemfile_lock(lock)
+    assert ("rails", "7.0.4") in pairs and ("rack", "2.2.6") in pairs
+    # A git dependency is listed twice: once by revision, once by version in
+    # `specs:`. Both are emitted, and the revision comes first, so the stronger
+    # evidence is what survives deduplication.
+    assert any(n == "widget" and v.startswith("a1b2c3d4") for n, v in pairs)
+    widget = [r for r in M.references("Gemfile.lock", lock) if r.name == "widget"]
+    assert widget and widget[0].kind == "commit"
+
+
+def test_a_manifest_whose_parser_raises_is_skipped_not_fatal(monkeypatch):
+    """One unreadable manifest in a monorepo must not end the scan for the
+    other two hundred."""
+    def _explode(_text):
+        raise ValueError("malformed")
+
+    _with_parser(monkeypatch, _explode)
+    assert M.references("package.json", "{}") == []
+
+
+def test_a_path_that_is_not_a_manifest_yields_nothing():
+    assert M.references("README.md", "# hello") == []
+
+
+@pytest.mark.parametrize("name", ["Setup uv", "a" * 201])
+def test_a_name_that_cannot_be_a_package_is_dropped(name, monkeypatch):
+    """A walker that wanders into a CI step title produces things like
+    "Setup uv" -- no package name contains whitespace, and none is 200 long."""
+    _with_parser(monkeypatch, lambda _t: [(name, "1.0.0")])
+    assert M.references("package.json", "{}") == []
+
+
+def test_a_block_name_is_not_a_dependency(monkeypatch):
+    """`dependencies` is the block holding them, not one of them."""
+    _with_parser(monkeypatch, lambda _t: [("dependencies", "1.0.0")])
+    assert M.references("package.json", "{}") == []
+
+
+def test_a_bazel_stanza_pins_a_repository_to_a_ref():
+    """Bazel, Dockerfiles and deps.edn share no syntax, but each puts a name
+    and a hash in one stanza."""
+    text = '''
+http_archive(
+    name = "com_google_absl",
+    sha256 = "0123456789abcdef0123456789abcdef01234567",
+)
+'''
+    got = M.parse_pinned_refs(text)
+    assert any(name == "com_google_absl" for name, _ in got)
