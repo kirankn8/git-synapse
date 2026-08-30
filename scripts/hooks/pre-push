@@ -92,6 +92,25 @@ else
     warn "UI smoke test NOT RUN: no API reachable; start it with make up"
 fi
 
+# --- layout --------------------------------------------------------------
+# jsdom does no layout and loads no stylesheet, so the smoke test cannot see a
+# component sitting flush against the next one, or an element whose `hidden`
+# attribute is beaten by an author `display` rule. Both shipped. Real Chrome,
+# real boxes.
+if command -v docker >/dev/null 2>&1 \
+   && docker image inspect zenika/alpine-chrome:with-puppeteer >/dev/null 2>&1 \
+   && docker run --rm --network "$compose_net" curlimages/curl:latest \
+        -fsS -o /dev/null --max-time 3 http://api:8000/api/overview >/dev/null 2>&1; then
+    say "layout checks (headless Chrome)"
+    docker run --rm --network "$compose_net" -v "$root":/work \
+        -e GIT_SYNAPSE_URL=http://api:8000 -w /usr/src/app \
+        --entrypoint sh zenika/alpine-chrome:with-puppeteer \
+        -c 'cp /work/tests/ui/layout.mjs . && node layout.mjs' || fail=1
+    ran=1
+else
+    warn "layout checks NOT RUN: needs the zenika/alpine-chrome:with-puppeteer image and a live API"
+fi
+
 if [ "$fail" -ne 0 ]; then
     say "push refused. Override with --no-verify if you are certain."
     exit 1

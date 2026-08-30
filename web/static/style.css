@@ -320,9 +320,23 @@ a:hover { text-decoration: underline; }
 /* ---------------------------------------------------------------- cards -- */
 
 .grid { display: grid; gap: 14px; }
+.grid > .card, .grid > .grid { margin-bottom: 0; }
 .grid-stats { grid-template-columns: repeat(auto-fit, minmax(158px, 1fr)); }
 .grid-2 { grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
 .grid-3 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+
+/* One vertical rhythm for everything a view stacks. #view is a block, so
+   adjacent margins collapse and a card after a toolbar keeps a single gap
+   rather than the sum -- but a card with no margin at all sits flush against
+   the next one, which is what made the pages look glued together. */
+.card,
+.grid,
+.graph-shell,
+.empty,
+.stat-strip {
+  margin-bottom: 16px;
+}
+.view > :last-child { margin-bottom: 0; }
 
 .card {
   background: var(--bg-panel);
@@ -456,8 +470,8 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 .input:focus { outline: none; border-color: var(--accent-dim); box-shadow: 0 0 0 3px var(--accent-bg); }
 
 .toolbar {
-  display: flex; align-items: center; gap: 9px;
-  flex-wrap: wrap; margin-bottom: 13px;
+  display: flex; align-items: center; gap: 10px;
+  flex-wrap: wrap; margin-bottom: 16px; row-gap: 9px;
 }
 .toolbar .spacer { flex: 1; }
 .field { display: flex; align-items: center; gap: 6px; }
@@ -606,7 +620,7 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 
 .section-title {
   font-size: 11px; text-transform: uppercase; letter-spacing: .07em;
-  color: var(--text-faint); font-weight: 650; margin: 22px 0 9px;
+  color: var(--text-faint); font-weight: 650; margin: 24px 0 10px;
 }
 
 .toast-stack {
@@ -637,7 +651,7 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 }
 .footer-links { display: flex; gap: 14px; }
 
-.tabs { display: flex; gap: 3px; border-bottom: 1px solid var(--border); margin-bottom: 15px; }
+.tabs { display: flex; gap: 3px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
 .tab {
   padding: 7px 14px;
   background: transparent; border: none;
@@ -653,7 +667,7 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
   background: var(--bg-hover);
   border-left: 2px solid var(--info);
   padding: 9px 12px; border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  margin-bottom: 13px; line-height: 1.5;
+  margin-bottom: 16px; line-height: 1.5;
 }
 
 .pillrow { display: flex; gap: 5px; flex-wrap: wrap; }
@@ -757,7 +771,7 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 
 /* A long explanation, folded away until wanted. Above the thing it explains it
    is a wall; one line with a disclosure triangle costs the reader nothing. */
-.explainer { margin-bottom: 13px; }
+.explainer { margin-bottom: 16px; }
 .explainer > summary {
   cursor: pointer; font-size: 12px; color: var(--text-dim);
   padding: 5px 0; list-style: none; user-select: none;
