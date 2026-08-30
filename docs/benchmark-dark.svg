@@ -1,16 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="820" height="432" viewBox="0 0 820 432" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">
 <text x="0" y="20" font-size="15" font-weight="700" fill="#e6edf3">What history adds to what an agent already finds for free</text>
 <text x="0" y="40" font-size="12" fill="#9198a1">Every prediction scored only against the commits that preceded it</text>
-<rect x="0" y="56" width="10" height="10" rx="2" fill="#30363d"/><text x="16" y="65" font-size="11.5" fill="#9198a1">Apprentice &#8212; the file&#8217;s test, then its folder</text>
+<rect x="0" y="56" width="10" height="10" rx="2" fill="#30363d"/><text x="16" y="65" font-size="11.5" fill="#9198a1">the hardest rule that needs no history</text>
 <rect x="310" y="56" width="10" height="10" rx="2" fill="#2dd4bf"/><text x="326" y="65" font-size="11.5" fill="#9198a1">recovered by Git Synapse from history</text>
 <line x1="0" y1="70" x2="820" y2="70" stroke="#30363d" stroke-width="1"/>
-<text x="0" y="87" font-size="12.5" font-weight="600" fill="#e6edf3">six organisations</text>
-<text x="0" y="101" font-size="10" fill="#6e7681">mixed &#183; 105,986 commits</text>
-<rect x="168" y="78" width="308.7" height="18" rx="3" fill="#30363d"/>
-<rect x="476.7" y="78" width="127.9" height="18" fill="#2dd4bf"/>
-<text x="175" y="91" font-size="10.5" fill="#9198a1">53.4%</text>
-<text x="481.7" y="91" font-size="10.5" font-weight="700" fill="#ffffff">+22.1</text>
-<text x="816" y="92" font-size="14.5" font-weight="700" text-anchor="end" fill="#2dd4bf">75.5%</text>
+<text x="0" y="87" font-size="12.5" font-weight="600" fill="#e6edf3">163 repositories</text>
+<text x="0" y="101" font-size="10" fill="#6e7681">six orgs &#183; 173,034 commits</text>
+<rect x="168" y="78" width="306.3" height="18" rx="3" fill="#30363d"/>
+<rect x="474.3" y="78" width="124.7" height="18" fill="#2dd4bf"/>
+<text x="175" y="91" font-size="10.5" fill="#9198a1">53.0%</text>
+<text x="479.3" y="91" font-size="10.5" font-weight="700" fill="#ffffff">+21.6</text>
+<text x="816" y="92" font-size="14.5" font-weight="700" text-anchor="end" fill="#2dd4bf">74.6%</text>
 <line x1="0" y1="110" x2="820" y2="110" stroke="#30363d" stroke-width="1"/>
 <text x="0" y="127" font-size="12.5" font-weight="600" fill="#e6edf3">laravel/framework</text>
 <text x="0" y="141" font-size="10" fill="#6e7681">PHP &#183; 43,984 commits</text>
@@ -22,19 +22,19 @@
 <line x1="0" y1="150" x2="820" y2="150" stroke="#30363d" stroke-width="1"/>
 <text x="0" y="167" font-size="12.5" font-weight="600" fill="#e6edf3">tokio</text>
 <text x="0" y="181" font-size="10" fill="#6e7681">Rust &#183; 4,449 commits</text>
-<rect x="168" y="158" width="215.0" height="18" rx="3" fill="#30363d"/>
-<rect x="383.0" y="158" width="190.9" height="18" fill="#2dd4bf"/>
-<text x="175" y="171" font-size="10.5" fill="#9198a1">37.2%</text>
-<text x="388.0" y="171" font-size="10.5" font-weight="700" fill="#ffffff">+33.0</text>
-<text x="816" y="172" font-size="14.5" font-weight="700" text-anchor="end" fill="#2dd4bf">70.2%</text>
+<rect x="168" y="158" width="248.0" height="18" rx="3" fill="#30363d"/>
+<rect x="416.0" y="158" width="173.6" height="18" fill="#2dd4bf"/>
+<text x="175" y="171" font-size="10.5" fill="#9198a1">42.9%</text>
+<text x="421.0" y="171" font-size="10.5" font-weight="700" fill="#ffffff">+30.0</text>
+<text x="816" y="172" font-size="14.5" font-weight="700" text-anchor="end" fill="#2dd4bf">72.9%</text>
 <line x1="0" y1="190" x2="820" y2="190" stroke="#30363d" stroke-width="1"/>
 <text x="0" y="207" font-size="12.5" font-weight="600" fill="#e6edf3">flatbuffers</text>
 <text x="0" y="221" font-size="10" fill="#6e7681">C++ &#183; 3,147 commits</text>
-<rect x="168" y="198" width="244.5" height="18" rx="3" fill="#30363d"/>
-<rect x="412.5" y="198" width="194.8" height="18" fill="#2dd4bf"/>
-<text x="175" y="211" font-size="10.5" fill="#9198a1">42.3%</text>
-<text x="417.5" y="211" font-size="10.5" font-weight="700" fill="#ffffff">+33.7</text>
-<text x="816" y="212" font-size="14.5" font-weight="700" text-anchor="end" fill="#2dd4bf">76.0%</text>
+<rect x="168" y="198" width="266.5" height="18" rx="3" fill="#30363d"/>
+<rect x="434.5" y="198" width="181.9" height="18" fill="#2dd4bf"/>
+<text x="175" y="211" font-size="10.5" fill="#9198a1">46.1%</text>
+<text x="439.5" y="211" font-size="10.5" font-weight="700" fill="#ffffff">+31.5</text>
+<text x="816" y="212" font-size="14.5" font-weight="700" text-anchor="end" fill="#2dd4bf">77.6%</text>
 <line x1="0" y1="230" x2="820" y2="230" stroke="#30363d" stroke-width="1"/>
 <text x="0" y="247" font-size="12.5" font-weight="600" fill="#e6edf3">pytype</text>
 <text x="0" y="261" font-size="10" fill="#6e7681">Python &#183; 6,184 commits</text>
@@ -54,11 +54,11 @@
 <line x1="0" y1="310" x2="820" y2="310" stroke="#30363d" stroke-width="1"/>
 <text x="0" y="327" font-size="12.5" font-weight="600" fill="#e6edf3">prometheus</text>
 <text x="0" y="341" font-size="10" fill="#6e7681">Go &#183; 13,756 commits</text>
-<rect x="168" y="318" width="304.6" height="18" rx="3" fill="#30363d"/>
-<rect x="472.6" y="318" width="143.0" height="18" fill="#2dd4bf"/>
-<text x="175" y="331" font-size="10.5" fill="#9198a1">52.7%</text>
-<text x="477.6" y="331" font-size="10.5" font-weight="700" fill="#ffffff">+24.7</text>
-<text x="816" y="332" font-size="14.5" font-weight="700" text-anchor="end" fill="#2dd4bf">77.4%</text>
+<rect x="168" y="318" width="305.2" height="18" rx="3" fill="#30363d"/>
+<rect x="473.2" y="318" width="142.7" height="18" fill="#2dd4bf"/>
+<text x="175" y="331" font-size="10.5" fill="#9198a1">52.8%</text>
+<text x="478.2" y="331" font-size="10.5" font-weight="700" fill="#ffffff">+24.7</text>
+<text x="816" y="332" font-size="14.5" font-weight="700" text-anchor="end" fill="#2dd4bf">77.5%</text>
 <line x1="0" y1="350" x2="820" y2="350" stroke="#30363d" stroke-width="1"/>
 <text x="0" y="367" font-size="12.5" font-weight="600" fill="#e6edf3">guava</text>
 <text x="0" y="381" font-size="10" fill="#6e7681">Java &#183; 7,954 commits</text>
