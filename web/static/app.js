@@ -862,7 +862,7 @@ const impactTable = (rows, otherKey, selfId) =>
     { key: 'name', label: 'Repository', render: (r) => h('span', { class: 'mono', style: 'font-weight:550' }, r.name) },
     { key: 'evidence', label: 'Evidence', sortable: false, render: (r) => tierBadge(r) },
     { key: 'bump_count', label: 'Bumps', num: true },
-    { key: 'median_lag_days', label: 'Lag', num: true, render: (r) => lagText(r.median_lag_days) },
+    { key: 'median_adoption_days', label: 'Adopted after', num: true, render: (r) => adoptedAfter(r.median_adoption_days) },
     { key: 'score', label: 'Score', num: true, render: (r) => h('div', { class: 'confbar', style: 'justify-content:flex-end' }, h('span', {}, fx(r.score, 3)), bar(r.score)) },
   ], {
     initialSort: 'score',
@@ -1842,7 +1842,7 @@ const tierBadge = (row) => {
     h('i', { class: 'dot' }), 'discovery');
 };
 
-const lagText = (d) => (d === null || d === undefined ? '—' : `${Number(d).toFixed(1)}d`);
+const adoptedAfter = (d) => (d === null || d === undefined ? '—' : `${Number(d).toFixed(1)}d`);
 
 /** Render a chain as clickable nodes joined by weighted arrows. */
 function chainNode(repos, hops, repoIds, reverse = false) {
@@ -1955,7 +1955,7 @@ on('/impact', async (_args, params) => {
       { key: 'name', label: 'Repository', render: (r) => h('span', { class: 'mono', style: 'font-weight:550' }, r.name) },
       { key: 'evidence', label: 'Evidence', sortable: false, render: (r) => tierBadge(r) },
       { key: 'bump_count', label: 'Bumps', num: true, title: 'Observed manifest version bumps — ground truth' },
-      { key: 'median_lag_days', label: 'Median lag', num: true, title: 'Observed delay between the two changes', render: (r) => lagText(r.median_lag_days) },
+      { key: 'median_adoption_days', label: 'Adopted after', num: true, title: 'Median days from the upstream commit to the bump that took it', render: (r) => adoptedAfter(r.median_adoption_days) },
       { key: 'score', label: 'Score', num: true, render: (r) => h('div', { class: 'confbar', style: 'justify-content:flex-end' }, h('span', {}, fx(r.score, 3)), bar(r.score)) },
       { key: 'primary_language', label: 'Lang', render: (r) => (r.primary_language ? h('span', { class: 'badge muted' }, r.primary_language) : '—') },
     ], { initialSort: 'score', onRow: (r) => go(`/repopair/${direction === 'upstream' ? r.source_repo_id : repoId}/${direction === 'upstream' ? repoId : r.target_repo_id}`), empty: 'No cross-repo edges recorded for this repository.' }),
@@ -1990,7 +1990,7 @@ on('/impact', async (_args, params) => {
       dataTable(deps.bumps, [
         { key: 'dep_repo', label: 'Upstream', render: (b) => h('a', { href: `/repo/${b.dep_repo_id}`, 'data-nav': true, class: 'mono' }, b.dep_repo) },
         { key: 'bumps', label: 'Bumps', num: true },
-        { key: 'median_lag_days', label: 'Median lag', num: true, render: (b) => lagText(b.median_lag_days) },
+        { key: 'median_adoption_days', label: 'Adopted after', num: true, render: (b) => adoptedAfter(b.median_adoption_days) },
         { key: 'last_bump', label: 'Last', render: (b) => when(b.last_bump) },
       ], { initialSort: 'bumps', empty: 'No manifest bumps observed.' }),
       'Ground truth: a pseudo-version names the exact upstream commit')));
@@ -2021,8 +2021,8 @@ on('/repopair/:a/:b', async ({ a, b }) => {
       statTile('Impact score', fx(edge.score, 3), 'rank-averaged ensemble'),
       statTile('Evidence', edge.is_declared ? 'declared' : (edge.has_bump_history ? 'bump-backed' : 'discovery'), edge.is_declared ? 'validated tier' : 'see note'),
       statTile('Manifest bumps', num(edge.bump_count), 'observed propagation'),
-      statTile('Median lag', lagText(edge.median_lag_days), 'observed delay'),
-      statTile('Best lag', edge.best_lag_bins !== null ? `${edge.best_lag_bins * (edge.bin_hours || 6)}h` : '—', 'peak association'),
+      statTile('Adopted after', adoptedAfter(edge.median_adoption_days), 'median, upstream commit to bump'),
+      statTile('Peak association lag', edge.best_lag_bins !== null ? `${edge.best_lag_bins * (edge.bin_hours || 6)}h` : '—', 'peak association'),
       statTile('Rank', `#${edge.rank_in_source}`, `within ${repoA.name}`)));
   }
 
@@ -2032,7 +2032,7 @@ on('/repopair/:a/:b', async ({ a, b }) => {
   if (bump) {
     wrap.append(h('div', { class: 'help', style: 'margin-top:14px' },
       `${repoB.name} has bumped ${repoA.name} `, h('strong', {}, String(bump.bumps)),
-      ` times, with a median propagation lag of `, h('strong', {}, lagText(bump.median_lag_days)),
+      ` times, with a median propagation lag of `, h('strong', {}, adoptedAfter(bump.median_adoption_days)),
       `. Every one of them is below, with the version it moved to and the upstream `,
       `commit it consumed where that could be resolved.`));
   }
@@ -2065,9 +2065,9 @@ on('/repopair/:a/:b', async ({ a, b }) => {
           render: (r) => (r.resolution
             ? h('span', { class: `badge ${r.resolution === 'sha' ? 'ok' : 'info'}` }, r.resolution)
             : h('span', { class: 'badge muted' }, 'unresolved')) },
-        { key: 'lag_days', label: 'Lag', num: true,
-          title: 'Days between the upstream commit and this repository taking it',
-          render: (r) => (r.lag_days == null ? '\u2014' : `${r.lag_days}d`) },
+        { key: 'adoption_days', label: 'Adopted after', num: true,
+          title: 'Days from the upstream commit to the bump that took it',
+          render: (r) => (r.adoption_days == null ? '\u2014' : `${r.adoption_days}d`) },
         { key: 'upstream_subject', label: 'Upstream commit',
           render: (r) => (r.upstream_sha
             ? h('span', { title: r.upstream_sha },

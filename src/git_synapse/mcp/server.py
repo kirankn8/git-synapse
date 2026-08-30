@@ -625,7 +625,7 @@ def explain_repo_pair(repo_a: str, repo_b: str) -> dict:
     bumps = query(
         """
         SELECT consumer_sha, dep_version, dep_sha, bumped_at,
-               round(lag_seconds / 86400.0, 2) AS lag_days
+               round(adoption_seconds / 86400.0, 2) AS adoption_days
         FROM dep_bump
         WHERE dep_repo_id=%s AND consumer_repo_id=%s
         ORDER BY bumped_at DESC NULLS LAST LIMIT 8
@@ -653,7 +653,7 @@ def explain_repo_pair(repo_a: str, repo_b: str) -> dict:
                 "upstream_commit": r["dep_sha"],
                 "version": r["dep_version"],
                 "when": str(r["bumped_at"]) if r["bumped_at"] else None,
-                "lag_days": float(r["lag_days"]) if r["lag_days"] is not None else None,
+                "adoption_days": float(r["adoption_days"]) if r["adoption_days"] is not None else None,
             }
             for r in bumps
         ],
@@ -774,9 +774,9 @@ def _impact_row(row: dict, name: str) -> dict:
         "evidence": tier,
         "note": note,
         "bump_count": row["bump_count"],
-        "median_lag_days": (
-            round(float(row["median_lag_days"]), 2)
-            if row["median_lag_days"] is not None else None
+        "median_adoption_days": (
+            round(float(row["median_adoption_days"]), 2)
+            if row["median_adoption_days"] is not None else None
         ),
     }
 

@@ -618,9 +618,9 @@ def resolve_bumps(conn: psycopg.Connection | None = None) -> int:
         c.execute(
             """
             UPDATE dep_bump b
-               SET lag_seconds = EXTRACT(EPOCH FROM (cc.committed_at - dc.committed_at))::bigint
+               SET adoption_seconds = EXTRACT(EPOCH FROM (cc.committed_at - dc.committed_at))::bigint
               FROM commit dc, commit cc
-             WHERE b.lag_seconds IS NULL
+             WHERE b.adoption_seconds IS NULL
                AND b.dep_commit_id = dc.id
                AND cc.repo_id = b.consumer_repo_id
                AND cc.sha = b.consumer_sha
@@ -757,7 +757,7 @@ def _reject_impossible(c: psycopg.Connection) -> int:
     return c.execute(
         """
         UPDATE dep_bump b
-           SET dep_commit_id = NULL, resolution = NULL, lag_seconds = NULL
+           SET dep_commit_id = NULL, resolution = NULL, adoption_seconds = NULL
           FROM commit dc, commit cc
          WHERE b.dep_commit_id = dc.id
            AND cc.repo_id = b.consumer_repo_id
@@ -899,7 +899,7 @@ def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> Bump
         return _run(own)
 
 
-def propagation_lags(limit: int = 20) -> list[dict]:
+def adoption_delays(limit: int = 20) -> list[dict]:
     """Observed propagation delay per (dependency -> consumer) edge.
 
     Arithmetic on two known commits: when the upstream change was written, and
@@ -913,16 +913,16 @@ def propagation_lags(limit: int = 20) -> list[dict]:
         """
         SELECT rd.name AS dep, rc.name AS consumer,
                count(*) AS bumps,
-               count(*) FILTER (WHERE b.lag_seconds IS NOT NULL) AS timed,
+               count(*) FILTER (WHERE b.adoption_seconds IS NOT NULL) AS timed,
                round((percentile_cont(0.5) WITHIN GROUP (
-                        ORDER BY b.lag_seconds) / 86400.0)::numeric, 1) AS median_lag_days,
+                        ORDER BY b.adoption_seconds) / 86400.0)::numeric, 1) AS median_adoption_days,
                round((percentile_cont(0.9) WITHIN GROUP (
-                        ORDER BY b.lag_seconds) / 86400.0)::numeric, 1) AS p90_lag_days,
+                        ORDER BY b.adoption_seconds) / 86400.0)::numeric, 1) AS p90_adoption_days,
                max(b.bumped_at)::date AS last_bump
         FROM dep_bump b
         JOIN repo rc ON rc.id = b.consumer_repo_id
         JOIN repo rd ON rd.id = b.dep_repo_id
-        WHERE b.dep_repo_id IS NOT NULL AND b.lag_seconds >= 0
+        WHERE b.dep_repo_id IS NOT NULL AND b.adoption_seconds >= 0
         GROUP BY 1, 2
         HAVING count(*) >= 3
         ORDER BY bumps DESC

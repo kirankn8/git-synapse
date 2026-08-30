@@ -477,7 +477,7 @@ Or run it as a subprocess over stdio:
 | `upstream_repos` | **The one that prevents incomplete changes.** Repos whose changes *precede* this one — where a fix may actually belong. |
 | `impact_of_change` | The forward direction: what a change here forces others to update. |
 | `coupling_chain` | Multi-hop paths, e.g. `signer → packager → runtime`, with composed confidence. |
-| `explain_repo_pair` | Declared status, every observed bump with exact upstream commits, propagation lag. |
+| `explain_repo_pair` | Declared status, every observed bump with exact upstream commits, adoption delay. |
 | `list_repositories` | What is in the corpus. |
 | `list_measures` | The catalogue, with caveats on each measure. |
 
@@ -550,7 +550,7 @@ docker compose run --rm cli <command>
 | `measures` | Print the catalogue. |
 | `status` | Corpus summary and recent runs. |
 | `reset --yes` | Drop ingested data, keep the schema and the mirrors. |
-| `depbump` | Extract manifest-bump edges; prints observed propagation lags. |
+| `depbump` | Extract manifest-bump edges; prints observed adoption delays. |
 | `impact REPO` | What else to look at when changing a repo (`-d upstream\|downstream`). |
 | `chains REPO` | Transitive coupling chains. |
 | `xcoupled REPO` | Which other repositories change together with this one. |

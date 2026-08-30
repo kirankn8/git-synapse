@@ -452,11 +452,16 @@ erDiagram
   produces k(k−1)/2 pairs. Bulk reformats would dominate every count while
   carrying no design signal, so they are stored in full but flagged
   `pair_eligible = FALSE` — excluded, auditable, reversible.
-- **Lag means one thing now.** The delay between an upstream commit and the bump
-  that took it: arithmetic on two known dates, reported and never ranked on. The
-  other sense -- a time bin used to *infer* that two repositories were related --
-  went with the statistics it served, along with its `LAG_BIN_HOURS` setting.
-  Nothing infers a relationship from timing.
+- **"Lag" is not used as a name.** It meant two things: a time bin used to
+  *infer* that two repositories were related, and the delay before a consumer
+  took an upstream change. The first is gone with the statistics it served. The
+  second is real -- arithmetic on two known commit dates, reported and never
+  ranked on -- and is now called **adoption delay**, in the column
+  (`dep_bump.adoption_seconds`), the API (`adoption_days`) and the UI
+  ("Adopted after"). A renamed column has no migration in `schema.sql`:
+  Postgres has no `IF EXISTS` for `RENAME COLUMN`, so on a fresh database it
+  fails and takes the whole DDL batch with it, leaving no schema at all. An
+  existing database is renamed once by hand.
 - **Merges** are skipped, and not by choice: a merge has two parents, so *which*
   files it changed depends on which parent you compare against. Git declines to
   pick and reports no files at all, so a merge would be a commit row with nothing

@@ -410,7 +410,7 @@ def test_impact_marks_the_evidence_tier_on_each_row(db):
 #
 # Most CLI commands query, get nothing back from a test database, and print
 # "nothing found". The table-formatting code below that -- where a None median
-# lag, a missing name or a renamed key actually breaks -- never ran. These feed
+# adoption delay, a missing name or a renamed key actually breaks -- never ran. These feed
 # each command synthetic rows so the formatting executes.
 
 
@@ -456,31 +456,31 @@ def test_aggregate_can_skip_scoring(monkeypatch):
     assert "scored" not in r.stdout
 
 
-def test_depbump_renders_the_propagation_lag_table(monkeypatch):
+def test_depbump_renders_the_adoption_delay_table(monkeypatch):
     from git_synapse.analysis.depbump import BumpStats
 
     monkeypatch.setattr("git_synapse.cli.depbump.rebuild",
                         lambda force=False: BumpStats(repos_scanned=3, edges_found=9,
                                                       edges_written=4, resolved_commits=8,
                                                       duration_s=1.5))
-    monkeypatch.setattr("git_synapse.cli.depbump.propagation_lags", lambda limit=15: [
+    monkeypatch.setattr("git_synapse.cli.depbump.adoption_delays", lambda limit=15: [
         {"dep": "httpkit", "consumer": "console", "bumps": 6,
-         "median_lag_days": 2, "p90_lag_days": 9, "last_bump": "2026-08-01"},
-        # A dependency bumped exactly once has no lag distribution yet; the
-        # table must print a dash rather than formatting None.
+         "median_adoption_days": 2, "p90_adoption_days": 9, "last_bump": "2026-08-01"},
+        # A dependency bumped exactly once has no distribution yet; the table
+        # must print a dash rather than formatting None.
         {"dep": "telemetry", "consumer": "runtime", "bumps": 1,
-         "median_lag_days": None, "p90_lag_days": None, "last_bump": "2026-07-04"},
+         "median_adoption_days": None, "p90_adoption_days": None, "last_bump": "2026-07-04"},
     ])
     r = runner.invoke(app, ["depbump"])
     assert r.exit_code == 0, r.stdout
     assert "httpkit" in r.stdout and "telemetry" in r.stdout
 
 
-def test_depbump_omits_the_lag_table_when_there_are_no_lags(monkeypatch):
+def test_depbump_omits_the_adoption_table_when_nothing_was_adopted(monkeypatch):
     from git_synapse.analysis.depbump import BumpStats
 
     monkeypatch.setattr("git_synapse.cli.depbump.rebuild", lambda force=False: BumpStats())
-    monkeypatch.setattr("git_synapse.cli.depbump.propagation_lags", lambda limit=15: [])
+    monkeypatch.setattr("git_synapse.cli.depbump.adoption_delays", lambda limit=15: [])
     r = runner.invoke(app, ["depbump", "--force"])
     assert r.exit_code == 0
     assert "propagation lag" not in r.stdout
@@ -489,11 +489,11 @@ def test_depbump_omits_the_lag_table_when_there_are_no_lags(monkeypatch):
 def _impact_rows():
     return [
         {"score": 0.91, "is_declared": True, "has_bump_history": True, "bump_count": 12,
-         "median_lag_days": 1.5, "name": "acme/httpkit"},
+         "median_adoption_days": 1.5, "name": "acme/httpkit"},
         {"score": 0.40, "is_declared": False, "has_bump_history": True, "bump_count": 3,
-         "median_lag_days": None, "name": "acme/telemetry"},
+         "median_adoption_days": None, "name": "acme/telemetry"},
         {"score": 0.11, "is_declared": False, "has_bump_history": False, "bump_count": 0,
-         "median_lag_days": None, "name": "acme/runtime"},
+         "median_adoption_days": None, "name": "acme/runtime"},
     ]
 
 
