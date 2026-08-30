@@ -298,43 +298,10 @@ async function route() {
     return;
   }
 
-  const gone = RETIRED[path.replace(/\/$/, '')];
-  if (gone) {
-    view.replaceChildren(
-      h('div', { class: 'empty' },
-        h('strong', {}, 'This page was removed'),
-        h('div', { style: 'margin:8px 0 14px' }, gone.why),
-        h('a', { class: 'btn primary', href: gone.href, 'data-nav': true }, gone.cta),
-        h('div', { class: 'field-hint', style: 'margin-top:12px' },
-          'If you reached this from a link inside the app, that page is cached: '
-          + 'reload to pick up the current build.')),
-    );
-    return;
-  }
-
   view.replaceChildren(
     h('div', { class: 'empty' }, h('strong', {}, 'Not found'), `No view for ${path}`),
   );
 }
-
-/* Routes that existed and deliberately do not any more. A bookmark or a stale
-   tab still points at them, and "Not found" leaves the reader guessing whether
-   the feature moved, broke, or was never there. */
-const RETIRED = {
-  '/crossrepo': {
-    why: 'Cross-repository coupling was computed over change sets -- commits '
-       + 'grouped by ticket key or by author session. That was measured and '
-       + 'removed: it scored AUC 0.80 while managing 0.63 on which way the '
-       + 'arrow points, and a baseline ignoring coupling entirely matched it.',
-    href: '/impact', cta: 'Cross-repo impact',
-  },
-  '/validation': {
-    why: 'The lag validation charted that same time-binned coupling. What '
-       + 'replaced it is ground truth rather than correlation: an observed '
-       + 'version bump, resolved to the upstream commit it consumed.',
-    href: '/impact', cta: 'Cross-repo impact',
-  },
-};
 
 /* -------------------------------------------------- shared components -- */
 
@@ -2165,7 +2132,7 @@ on('/insights', async (_args, params) => {
   return wrap;
 });
 
-/* ---------------------------------------------------------- validation -- */
+/* ------------------------------------------------------------ accounts -- */
 
 /** A labelled form control with an optional hint underneath. */
 const field = (label, control, hint) =>
