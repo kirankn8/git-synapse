@@ -714,3 +714,23 @@ def test_a_commit_touching_one_file_yields_no_prompt(monkeypatch):
     history = flat([1, 2], bt.WARMUP_COMMITS) + [(1, [1, 1])]   # one distinct file
     before = replay(monkeypatch, flat([1, 2], bt.WARMUP_COMMITS), measures=("npmi",)).prompts
     assert replay(monkeypatch, history, measures=("npmi",)).prompts == before
+
+
+def test_prompts_that_defeat_both_free_rules_are_counted_separately(monkeypatch):
+    """The only number where this product is not redundant: prompts that
+    neither the naming rules nor the agent's own search could answer."""
+    paths = {1: "api/handler.py", 2: "web/template.html"}   # no shared stem or folder
+    history = flat([1, 2], bt.WARMUP_COMMITS + 400)
+    monkeypatch.setattr(bt, "_commit_shas",
+                        lambda repo_id: {i: (f"sha{i}", "org/repo")
+                                         for i in range(len(history))})
+    monkeypatch.setattr(bt, "mirror_path_for", lambda name: bt.Path("/nonexistent"))
+    monkeypatch.setattr(bt, "agent_search", lambda *a, **k: [])   # the search finds nothing
+
+    result = replay(monkeypatch, history, paths=paths,
+                    measures=("npmi",), grep_sample=20)
+    best = result.scores[0]
+    assert best.unaided_prompts > 0, "neither free rule could answer these"
+    assert best.unaided_hit_rate > 0.9, "but history has seen the pair 400 times"
+    low, high = best.unaided_ci
+    assert low <= best.unaided_hit_rate <= high

@@ -312,3 +312,38 @@ def test_a_nested_dependency_table_is_walked(monkeypatch):
     toml = '[dependencies]\nserde = { version = "1.0.188", features = ["derive"] }\n'
     names = {r.name: r.raw for r in M.references("Cargo.toml", toml)}
     assert names.get("serde") == "1.0.188"
+
+
+def test_a_stanza_without_a_submodule_header_takes_its_name_from_the_url():
+    """conanfile.txt and a bare .gitmodules fragment record a url and a ref and
+    no name, so neither line means anything without the other."""
+    text = "url = https://github.com/acme/widget.git\nrevision = v1.2.3\n"
+    assert M.parse_ini_like(text) == [("widget", "v1.2.3")]
+
+
+def test_a_bare_name_slash_version_line_is_a_pin():
+    """conanfile.txt writes requirements as `name/version` and nothing else."""
+    assert ("widget", "1.2.3") in M.parse_ini_like("widget/1.2.3\n")
+
+
+def test_yaml_that_cannot_be_parsed_yields_nothing():
+    """A workflow with a tab where a space belongs must not stop the scan."""
+    assert M.references("pnpm-lock.yaml", "a:\n\t- broken\n") == []
+
+
+def test_a_version_with_no_digits_is_not_a_version():
+    """`name` as a version is what a walker produces when it wanders into a CI
+    step definition -- a parse error that reads as a fact."""
+    import dataclasses
+    eco = dataclasses.replace(M.ecosystem_for("package.json"),
+                              parse=lambda _t: [("lodash", "name")])
+    import unittest.mock as mock
+    with mock.patch.object(M, "ecosystem_for", lambda p: eco):
+        assert M.references("package.json", "{}") == []
+
+
+def test_yaml_manifests_are_skipped_when_the_parser_is_absent(monkeypatch):
+    """PyYAML is optional. Without it a lockfile must yield nothing rather than
+    raise on every scan."""
+    monkeypatch.setattr(M, "yaml", None)
+    assert M.references("pnpm-lock.yaml", "packages:\n  /left-pad/1.0.0: {}\n") == []

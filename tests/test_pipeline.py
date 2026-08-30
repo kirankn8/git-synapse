@@ -762,3 +762,70 @@ def test_an_absent_token_is_refused_when_something_is_private(monkeypatch):
     monkeypatch.setattr(type(cfg), "current_token", lambda self: "", raising=False)
     with pytest.raises(AuthError):
         P.verify_credentials(required=True)
+
+
+def test_marking_a_replay_takes_it_out_of_the_statistics(db):
+    """Storing it is the point -- the commit is real and belongs in the range
+    between two releases -- but counting it would say those files belong
+    together on evidence that is one observation repeated."""
+    from git_synapse.db.engine import connection
+    from git_synapse.ingest.pipeline import _mark_replays
+
+    with connection() as conn:
+        repo = conn.execute(
+            "INSERT INTO repo (full_name, name, owner) VALUES "
+            "('acme/replayed','replayed','acme') RETURNING id").fetchone()[0]
+        try:
+            sha = "d" * 40
+            conn.execute("INSERT INTO commit (repo_id, sha, authored_at, committed_at, "
+                         "pair_eligible) VALUES (%s,%s,now(),now(),TRUE)", (repo, sha))
+            assert _mark_replays(repo, {sha}, conn) == 1
+            row = conn.execute("SELECT is_replay, pair_eligible FROM commit "
+                               " WHERE repo_id=%s AND sha=%s", (repo, sha)).fetchone()
+            assert row == (True, False)
+            # Re-running must not count it twice.
+            assert _mark_replays(repo, {sha}, conn) == 0
+        finally:
+            conn.rollback()
+
+
+def test_a_bad_credential_stops_discovery_rather_than_repeating_itself(two_accounts, db, monkeypatch):
+    """Retrying the rest would run the same broken credential against every
+    account and report a different failure for each."""
+    from git_synapse.ingest.pipeline import AuthError
+
+    def _client(cfg):
+        class _C:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def list_account_repos(self, login, kind):
+                raise AuthError("bad credential")
+        return _C()
+
+    monkeypatch.setattr(pipeline, "GitHubClient", _client)
+    with pytest.raises(AuthError, match="bad credential"):
+        pipeline.discover()
+
+
+def test_a_collapsed_listing_is_refused_even_with_accounts_configured(two_accounts, db, monkeypatch):
+    """An unauthenticated request returns HTTP 200 and only public repositories,
+    and the run then quietly refreshes a fraction of the corpus."""
+    from git_synapse.db.engine import connection
+    from git_synapse.ingest.pipeline import AuthError
+
+    with connection() as conn:
+        for i in range(30):
+            conn.execute("INSERT INTO repo (full_name, name, owner, is_enabled) VALUES "
+                         "(%s,%s,'bulk',TRUE) ON CONFLICT DO NOTHING",
+                         (f"bulk/r{i}", f"r{i}"))
+        conn.commit()
+    try:
+        monkeypatch.setattr(pipeline, "GitHubClient", _client_returning(
+            {"alpha": [_record("alpha/one")], "beta": []}))
+        monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: list(records))
+        with pytest.raises(AuthError, match="already known"):
+            pipeline.discover()
+    finally:
+        with connection() as conn:
+            conn.execute("DELETE FROM repo WHERE owner = 'bulk'")
+            conn.commit()

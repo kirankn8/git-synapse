@@ -168,9 +168,9 @@ def bounds(raw: str) -> tuple[str | None, str | None]:
     text = (raw or "").strip().strip("\"'")
     floor = ceiling = None
     for comparator, raw_version in _BOUND.findall(text):
+        # A match always begins with a digit and the strip only removes a
+        # trailing wildcard segment, so what is left is never empty.
         version = _WILDCARD_TAIL.sub("", raw_version).rstrip(".")
-        if not version:
-            continue
         if comparator in ("<", "<="):
             ceiling = ceiling or version
         else:                       # ^ ~ ~> >= > == = or a bare version
