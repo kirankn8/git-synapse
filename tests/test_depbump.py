@@ -10,7 +10,7 @@ import subprocess
 
 import pytest
 
-from git_synapse.analysis import depbump
+from git_synapse.analysis import depbump, manifests
 from git_synapse.analysis.manifests import _PSEUDO
 from git_synapse.analysis.depbump import (
     declared_at_head,
@@ -388,14 +388,14 @@ def _tag(conn, repo_id, name, commit_id, main_commit_id, key, at="2024-01-01"):
         (repo_id, name, "0" * 40, at, commit_id, main_commit_id, key))
 
 
-def _bump(conn, repo_id, dep_repo_id, version, at):
-    sha = f"{abs(hash((version, at))):040x}"[:40]
+def _bump(conn, repo_id, dep_repo_id, version, at, name="library"):
+    sha = f"{abs(hash((version, at, name))):040x}"[:40]
     _commit(conn, repo_id, sha, at)
     return conn.execute(
         "INSERT INTO dep_bump (consumer_repo_id, consumer_sha, dep_repo_id, "
         "dep_name, dep_version, manifest, bumped_at) "
-        "VALUES (%s, %s, %s, 'library', %s, 'pom.xml', %s) RETURNING id",
-        (repo_id, sha, dep_repo_id, version, at)).fetchone()[0]
+        "VALUES (%s, %s, %s, %s, %s, 'pom.xml', %s) RETURNING id",
+        (repo_id, sha, dep_repo_id, name, version, at)).fetchone()[0]
 
 
 def _resolved(conn, bump_id):
@@ -481,3 +481,92 @@ def test_a_commit_written_after_the_bump_is_rejected(bump_env):
 
     depbump.resolve_bumps(conn)
     assert _resolved(conn, row) == (None, None)
+
+
+# ------------------------------------------- which repository is this package
+
+@pytest.mark.parametrize(("path", "text", "expected"), [
+    ("package.json",   '{"name": "lodash"}',                        ["lodash"]),
+    ("composer.json",  '{"name": "acme/lib"}',                      ["acme/lib"]),
+    ("Cargo.toml",     '[package]\nname = "serde"',                 ["serde"]),
+    ("pyproject.toml", '[project]\nname = "requests"',              ["requests"]),
+    ("pyproject.toml", '[tool.poetry]\nname = "legacy"',            ["legacy"]),
+    ("go.mod",         "module github.com/google/go-cmp\n",         ["github.com/google/go-cmp"]),
+    ("lib.gemspec",    's.name = "rails"',                          ["rails"]),
+    ("pom.xml",        "<project><groupId>com.google.guava</groupId>"
+                       "<artifactId>guava</artifactId></project>",  ["com.google.guava:guava"]),
+])
+def test_a_repository_states_which_package_it_publishes(path, text, expected):
+    """Turning "which repository is `com.google.guava:guava`?" from a guess
+    about strings into something the repository declared about itself."""
+    assert manifests.published_names(path, text) == expected
+
+
+def test_a_maven_module_inherits_its_group_from_its_parent():
+    """A child module omits `groupId`, so reading only the top-level element
+    finds nothing for exactly the modules a monorepo publishes."""
+    pom = ("<project><parent><groupId>com.google.guava</groupId></parent>"
+           "<artifactId>guava-testlib</artifactId></project>")
+    assert manifests.published_names("pom.xml", pom) == ["com.google.guava:guava-testlib"]
+
+
+@pytest.mark.parametrize(("path", "text"), [
+    ("package.json", "{ not json"),
+    ("pom.xml", "<project>"),
+    ("Cargo.toml", "[package"),
+    ("README.md", "# not a manifest"),
+])
+def test_an_unreadable_manifest_claims_nothing(path, text):
+    assert manifests.published_names(path, text) == []
+
+
+def test_what_a_repository_publishes_beats_a_name_that_merely_matches():
+    """`otherco/utils` and an indexed `acme/utils` share a name and nothing
+    else. A declaration outranks the coincidence."""
+    by_full = {("acme", "utils"): 1}
+    by_name = {"utils": 1}
+    assert resolve_repo("utils", by_full, by_name, {"utils": 7}) == 7
+    assert resolve_repo("utils", by_full, by_name, {}) == 1
+
+
+def test_a_coordinate_two_repositories_claim_resolves_to_neither():
+    """Two projects publishing an artifact called `core` is ordinary, and
+    picking one of them would invent an edge."""
+    from git_synapse.analysis.depbump import _repo_lookups
+
+    class _Conn:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, sql, *a):
+            self.calls += 1
+            rows = ([("acme", "core", 1), ("other", "core", 2)] if "FROM repo" in sql
+                    and "repo_package" not in sql else [("core", 1), ("core", 2)])
+            return type("R", (), {"fetchall": lambda _self: rows})()
+
+    _, _, by_package = _repo_lookups(_Conn())
+    assert "core" not in by_package
+
+
+def test_a_bump_is_linked_to_the_repository_that_publishes_the_coordinate(bump_env):
+    """A coordinate becomes attributable only once the repository publishing it
+    has had its own manifests read, which can happen long after the bump."""
+    conn, repo, dep = bump_env
+    conn.execute("INSERT INTO repo_package (repo_id, name) VALUES (%s, 'geocoder')", (dep,))
+    row = _bump(conn, repo, None, version="1.0.0", at="2024-01-01", name="geocoder")
+
+    depbump.resolve_bumps(conn)
+    assert conn.execute("SELECT dep_repo_id FROM dep_bump WHERE id = %s",
+                        (row,)).fetchone()[0] == dep
+
+
+def test_a_reference_to_the_consumer_itself_is_not_a_repository_edge(bump_env):
+    """A monorepo names its own modules. That is a module edge, not a
+    dependency between two repositories."""
+    conn, repo, _ = bump_env
+    conn.execute("INSERT INTO repo_package (repo_id, name) VALUES (%s, 'geocoder')", (repo,))
+    row = _bump(conn, repo, None, version="1.0.0", at="2024-01-01", name="geocoder")
+
+    depbump.resolve_bumps(conn)
+    assert conn.execute("SELECT dep_repo_id FROM dep_bump WHERE id = %s",
+                        (row,)).fetchone()[0] is None
