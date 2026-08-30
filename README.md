@@ -30,6 +30,7 @@ repository, with no per-language support to add.
 | | |
 |---|---|
 | [What it does](#what-it-does) · [The 29 measures](#the-29-measures) | the idea, and the statistics behind it |
+| [**Does it actually help?**](#does-it-actually-help) | the backtest that judges the product, not the corpus |
 | [Quick start](#quick-start) · [Which repositories get scanned](#which-repositories-get-scanned) | running it |
 | [How it works](#how-it-works) · [What is incremental](#what-is-incremental-and-what-isnt) | the design |
 | [Using it from a coding agent](#using-it-from-a-coding-agent-mcp) · [The web UI](#the-web-ui) | the interfaces |
@@ -85,6 +86,78 @@ The first three show textbook **rare-item bias**: a pair seen twice, always
 together, maxes out any unpenalised measure. Log-likelihood and Fager — which
 weight evidence — find the real answer. The UI labels every biased measure, and
 `/validation` reports which ones actually predict reality.
+
+## Does it actually help?
+
+Every other number here describes your corpus. This one describes **the product**,
+and it is the honest one to look at first:
+
+```bash
+docker compose run --rm cli backtest
+```
+
+It replays history commit by commit. Before each commit is revealed it asks
+*"given one file this commit touched, would we have named the others?"* — scoring
+against only the counts accumulated from **earlier** commits, then folding that
+commit in. A pair never contributes evidence to its own prediction, which is the
+entire difficulty in evaluating a co-change model.
+
+```mermaid
+flowchart LR
+    subgraph each["for each commit, in time order"]
+        direction TB
+        TEST["<b>1 · TEST</b><br/>rank partners for each file<br/>using only what earlier<br/>commits taught"]
+        TRAIN["<b>2 · TRAIN</b><br/>fold this commit's pairs<br/>into the counts"]
+        TEST --> TRAIN
+    end
+    KNOWN[("counts from<br/>commits 1..k-1")] --> TEST
+    TRAIN --> KNOWN
+    TEST --> SCORE["hit rate · recall · MRR<br/>vs popularity baseline"]
+
+    style TEST stroke:#14b8a6,stroke-width:3px
+    style TRAIN stroke:#8b5cf6,stroke-width:3px
+    style SCORE stroke:#64748b,stroke-width:2px
+```
+
+The arrow only ever points forwards: commit *k* is scored before it is learned
+from, so no pair can vouch for itself.
+
+```
+ measure            hit rate       95% CI   lift  recall    MRR
+ Most-changed          43.4%  35.5%-51.5%      -   0.146      -
+ files (baseline)
+ confidence_ab         32.2%  25.1%-40.2%  0.74x   0.118  0.253
+ jaccard               31.5%  24.4%-39.5%  0.73x   0.101  0.243
+ npmi                  30.1%  23.2%-38.0%  0.69x   0.088  0.247
+ association_stre…     28.7%  21.9%-36.6%  0.66x   0.082  0.200  rare-item bias
+```
+
+**Read that carefully: on a small repository every measure loses to the
+baseline.** That is the tool being honest rather than flattering, and it is why
+three things are always reported next to the hit rate:
+
+| | Why it is there |
+|---|---|
+| **Lift over a popularity baseline** | A baseline that ignores coupling and just names the busiest files. Where `go.mod` and `go.sum` always move together, guessing wins. **Lift ≤ 1.0 means the statistics earned nothing.** |
+| **95% confidence interval** | So a gap between two measures is not mistaken for a real difference when the sample cannot support it. |
+| **`rare-item bias` flag** | Some measures top the table *because* they are biased. The registry knows which, and says so. |
+
+Below 300 prompts the run refuses to draw a conclusion and labels itself
+*indicative only*. Intervals assume independent prompts; several prompts drawn
+from one commit are not independent, so the true interval is a little wider than
+the one printed.
+
+Why the materialised tables cannot be used for this: `file_pair_metric` is computed
+over **all** history, so any query against it has already seen the future. The
+backtest recomputes from the atomic `commit_file` rows with a time cutoff — which
+is exactly what ["store the atom, derive the rest"](#store-the-atom-derive-the-rest)
+buys you.
+
+```bash
+cli backtest --repo my-service        # one repository
+cli backtest --measure npmi,jaccard   # specific measures
+cli backtest --top 10 --min-support 3 # 10 suggestions, stronger evidence
+```
 
 ## Quick start
 
@@ -195,33 +268,35 @@ Set `REFRESH_CRON=*/5 * * * *` for near-real-time, or `0 * * * *` to be gentler.
 
 ## How it works
 
+```mermaid
+flowchart TB
+    GH["GitHub API"] -->|discover| REPO["account · repo<br/><i>metadata + raw payload</i>"]
+    REPO -->|"clone --bare (blobless above a size threshold)"| MIRROR["git mirror on disk"]
+    MIRROR -->|"git log -z --raw --numstat<br/>streamed, oldest first"| ATOM
+
+    ATOM["<b>commit + commit_file</b><br/>THE ATOMIC FACT<br/><i>one row per (commit, file)</i>"]
+
+    ATOM --> FP["file_pair<br/><i>same commit</i>"]
+    ATOM --> CS["change_set<br/><i>ticket / session</i>"]
+    ATOM --> LAG["repo_lag_metric<br/><i>time-binned, DIRECTED</i>"]
+    ATOM --> DB["dep_bump<br/><i>manifest bumps</i>"]
+
+    FP --> FPM["file_pair_metric<br/><i>29 measures</i>"]
+    CS --> RPM["repo_pair_metric<br/>xrepo_file_pair"]
+    LAG --> IMP["repo_impact<br/><i>ensemble, evidence-tiered</i>"]
+    DB --> IMP
+    FPM --> MINE["file_cluster · pair_drift · file_risk"]
+
+    FPM --> OUT["Web UI · REST API · MCP server"]
+    RPM --> OUT
+    IMP --> OUT
+    MINE --> OUT
+
+    style ATOM stroke:#14b8a6,stroke-width:4px
+    style OUT stroke:#8b5cf6,stroke-width:3px
 ```
-GitHub API ──> discover repos (full metadata + raw JSON payload)
-                     │
-                     ▼
-              bare git mirror  ──── full clone, or blobless above a size threshold
-                     │
-                     ▼
-          git log -z --raw [--numstat]   streamed, oldest-first
-                     │
-                     ▼
-   ┌─────────────────────────────────────────────┐
-   │  commit  +  commit_file   ← THE ATOMIC FACT  │
-   └─────────────────────────────────────────────┘
-                     │  everything below is derived and rebuildable
-     ┌───────────────┼────────────────┬─────────────────┬──────────────┐
-     ▼               ▼                ▼                 ▼              ▼
- file_pair       change_set       repo_lag_metric    dep_bump      file_cluster
- (same commit)   (ticket /        (time-binned,      (manifest      pair_drift
-      │           session)         DIRECTED)          bumps)        file_risk
-      ▼               ▼                ▼                 ▼              ▼
- file_pair_      repo_pair_       ──────── repo_impact ────────      mining
- metric          metric           (ensemble, evidence-tiered)         layer
-      │               │                     │                          │
-      └───────────────┴──────────┬──────────┴──────────────────────────┘
-                                 ▼
-                    Web UI  ·  REST API  ·  MCP server
-```
+
+Everything below the atomic fact is **derived and rebuildable**.
 
 ### Store the atom, derive the rest
 
@@ -233,6 +308,42 @@ similarity.
 Everything else — marginals, joint counts, all 29 measures, directory rollups,
 change sets, lagged tables, impact scores, clusters, drift, risk — is a
 materialised cache. Consequences:
+
+```mermaid
+erDiagram
+    ACCOUNT ||--o{ REPO : discovers
+    REPO    ||--o{ COMMIT : contains
+    REPO    ||--o{ FILE : contains
+    COMMIT  ||--o{ COMMIT_FILE : "touched"
+    FILE    ||--o{ COMMIT_FILE : "was touched in"
+    FILE    ||--o{ FILE_ALIAS : "known by old paths"
+    AUTHOR  ||--o{ COMMIT : wrote
+    FILE_PAIR }o--|| FILE : "file_a"
+    FILE_PAIR }o--|| FILE : "file_b"
+
+    COMMIT {
+        text sha
+        bool pair_eligible "excluded from pairing, auditably"
+        timestamptz committed_at
+    }
+    COMMIT_FILE {
+        char change_type "A M D R C T"
+        int insertions
+        int deletions
+        text old_path "rename source"
+    }
+    FILE {
+        text path
+        bigint change_count "n_a over all commits"
+        bigint pair_change_count "n_a over the pair-eligible population"
+        bool is_deleted
+    }
+    FILE_PAIR {
+        bigint n_ab "the ONLY count stored"
+        float w_ab "recency-weighted"
+    }
+```
+
 
 - Adding a 30th measure is one function plus one registry entry, then
   `git-synapse score`. No re-clone, no re-parse.
@@ -576,6 +687,7 @@ docker compose run --rm cli <command>
 | `xcoupled REPO` | Which other repositories change together with this one. |
 | `mine` | Rebuild de-facto modules, coupling drift and file risk. |
 | `validate` | Measure quality against manifest-bump ground truth. |
+| `backtest` | Replay history and report whether the suggestions would have helped. |
 
 ```
 $ docker compose run --rm cli coupled terraform-provider-acme \
