@@ -581,3 +581,194 @@ def test_score_recomputes_one_repo_or_every_repo(monkeypatch):
     assert "s/a: 3 pairs" in r.stdout
 
 
+
+
+# --------------------------------------------------------- command bodies
+#
+# The help text alone proves an option was not renamed; it proves nothing about
+# the body. These run each body with the analysis layer stubbed, so a rename or
+# a wrong attribute surfaces here rather than in front of a user.
+
+def test_mine_reports_every_figure_the_stats_carry(monkeypatch):
+    from git_synapse.analysis import mining
+
+    class _Stats:
+        clusters, cross_directory_clusters, clustered_files = 7, 3, 41
+        drift_rows, emerging, decaying, risk_rows, duration_s = 12, 8, 4, 99, 1.25
+
+    monkeypatch.setattr(mining, "rebuild", lambda repo_id, force: _Stats())
+    r = runner.invoke(app, ["mine"])
+    assert r.exit_code == 0
+    for value in ("7", "3", "41", "12", "8", "4", "99"):
+        assert value in r.stdout
+
+
+def test_backtest_says_so_rather_than_dividing_by_zero(monkeypatch):
+    """An empty replay must report itself, not fall through to a table whose
+    denominators are all zero."""
+    from git_synapse.analysis import backtest as bt
+
+    monkeypatch.setattr(bt, "run", lambda *a, **k: bt.BacktestResult(
+        repo_id=None, k=5, min_support=2, commits_seen=0, commits_scored=0, prompts=0))
+    r = runner.invoke(app, ["backtest"])
+    assert r.exit_code == 0
+    assert "not enough history" in r.stdout
+
+
+def test_backtest_names_an_unknown_repository_instead_of_scoring_everything(monkeypatch):
+    """Silently backtesting the whole corpus because a name was mistyped would
+    report a number for something the user never asked about."""
+    monkeypatch.setattr("git_synapse.cli.query", lambda *a, **k: [])
+    r = runner.invoke(app, ["backtest", "--repo", "nope"])
+    assert r.exit_code == 1
+    assert "nope" in r.stdout
+
+
+def test_backtest_renders_the_scores_it_is_given(monkeypatch):
+    from git_synapse.analysis import backtest as bt
+
+    base = bt.Score(measure="neighbours", label="Apprentice -- the file's test",
+                    prompts=400, hit_prompts=200, found=200, wanted=400,
+                    hit_rate=0.5, ci_low=0.45, ci_high=0.55,
+                    recall_at_k=0.5, precision_at_k=0.1, mrr=0.0)
+    ours = bt.Score(measure="confidence_ab", label="Confidence", prompts=400,
+                    hit_prompts=300, found=300, wanted=400, hit_rate=0.75,
+                    ci_low=0.70, ci_high=0.80, recall_at_k=0.75,
+                    precision_at_k=0.15, mrr=0.6, lift=1.5, baseline_hit_rate=0.5)
+    monkeypatch.setattr(bt, "run", lambda *a, **k: bt.BacktestResult(
+        repo_id=None, k=5, min_support=2, commits_seen=500, commits_scored=400,
+        prompts=400, baselines=[base], scores=[ours]))
+
+    r = runner.invoke(app, ["backtest"])
+    assert r.exit_code == 0
+    assert "confidence_ab" in r.stdout and "1.50x" in r.stdout
+    assert "Apprentice" in r.stdout
+
+
+def test_coupled_reports_a_path_it_cannot_find(monkeypatch):
+    from git_synapse.analysis import query as q
+
+    monkeypatch.setattr(q, "resolve_file", lambda repo, path: None)
+    r = runner.invoke(app, ["coupled", "acme/app", "nowhere.go"])
+    assert r.exit_code == 1
+
+
+def test_coupled_lists_the_partners_it_is_given(monkeypatch):
+    from git_synapse.analysis import query as q
+
+    monkeypatch.setattr(q, "resolve_file", lambda repo, path: {
+        "id": 1, "repo": "acme/app", "path": "auth.go", "change_count": 12})
+    monkeypatch.setattr(q, "coupled_files", lambda *a, **k: [{
+        "path": "auth_test.go", "score": 0.91, "confidence_ab": 0.8,
+        "confidence_ba": 0.7, "n_ab": 9, "change_count": 10, "repo": "acme/app"}])
+    r = runner.invoke(app, ["coupled", "acme/app", "auth.go"])
+    assert r.exit_code == 0
+    assert "auth_test.go" in r.stdout
+
+
+# ------------------------------------------------------------- accounts
+
+def test_account_list_says_so_when_nothing_is_configured(db, monkeypatch):
+    from git_synapse.ingest import accounts
+
+    monkeypatch.setattr(accounts, "list_accounts", lambda *a, **k: [])
+    r = runner.invoke(app, ["account", "list"])
+    assert r.exit_code == 0
+    assert "no accounts configured" in r.stdout
+
+
+def _account(**over):
+    row = {"id": 1, "login": "acme", "kind": "org", "enabled": True,
+           "include_forks": True, "include_archived": True, "include_private": True,
+           "only_repos": [], "skip_repos": [], "repo_count": 4,
+           "last_discovered_at": None}
+    row.update(over)
+    return row
+
+
+def test_account_list_spells_out_each_filter(db, monkeypatch):
+    """The filters decide what gets scanned, so a row that does not show them
+    hides the reason a repository was skipped."""
+    from git_synapse.ingest import accounts
+
+    monkeypatch.setattr(accounts, "list_accounts", lambda *a, **k: [
+        _account(include_forks=False, include_archived=False)])
+    r = runner.invoke(app, ["account", "list"])
+    assert r.exit_code == 0
+    # Rich wraps the column at the default width, so compare on text not layout.
+    flat = " ".join(r.stdout.split())
+    assert "acme" in flat
+    assert "no forks" in flat and "no archived" in flat
+
+
+def test_an_allowlist_is_shown_instead_of_the_other_filters(db, monkeypatch):
+    """An allowlist overrides every other filter, so listing them beside it
+    would describe rules that are not being applied."""
+    from git_synapse.ingest import accounts
+
+    monkeypatch.setattr(accounts, "list_accounts", lambda *a, **k: [
+        _account(include_forks=False, only_repos=["a", "b"])])
+    flat = " ".join(runner.invoke(app, ["account", "list"]).stdout.split())
+    assert "only 2" in flat
+    assert "no forks" not in flat
+
+
+def test_adding_an_account_reports_the_failure_rather_than_a_traceback(db, monkeypatch):
+    from git_synapse.ingest import accounts
+
+    def _refuse(*a, **k):
+        raise accounts.AccountError("login already configured")
+
+    monkeypatch.setattr(accounts, "add_account", _refuse)
+    r = runner.invoke(app, ["account", "add", "acme"])
+    assert r.exit_code == 1
+    assert "already configured" in r.stdout
+
+
+def test_enabling_an_unknown_account_fails_cleanly(db, monkeypatch):
+    from git_synapse.ingest import accounts
+
+    def _refuse(*a, **k):
+        raise accounts.AccountError("no account 99")
+
+    monkeypatch.setattr(accounts, "update_account", _refuse)
+    r = runner.invoke(app, ["account", "enable", "99", "--off"])
+    assert r.exit_code == 1
+    assert "no account 99" in r.stdout
+
+
+def test_removing_an_unknown_account_fails_cleanly(db, monkeypatch):
+    """It reports absence by returning falsy rather than raising, so the caller
+    has to check the value -- a bare call would look like success."""
+    from git_synapse.ingest import accounts
+
+    monkeypatch.setattr(accounts, "remove_account", lambda *a, **k: False)
+    r = runner.invoke(app, ["account", "remove", "99"])
+    assert r.exit_code == 1
+    assert "not found" in r.stdout
+
+
+def test_removing_a_known_account_keeps_its_repositories(db, monkeypatch):
+    from git_synapse.ingest import accounts
+
+    monkeypatch.setattr(accounts, "remove_account", lambda *a, **k: True)
+    r = runner.invoke(app, ["account", "remove", "1"])
+    assert r.exit_code == 0
+    assert "removed" in r.stdout
+
+
+def test_status_renders_recent_runs(db, monkeypatch):
+    """A run row with a null duration or start time must not break the table --
+    an interrupted run has exactly those."""
+    import datetime as dt
+
+    rows = [
+        {"id": 2, "kind": "full", "trigger": "manual", "status": "success",
+         "started_at": dt.datetime(2026, 1, 2, 3, 4), "duration_s": 12.0,
+         "commits_added": 7},
+        {"id": 1, "kind": "fast", "trigger": "schedule", "status": "running",
+         "started_at": None, "duration_s": None, "commits_added": 0},
+    ]
+    monkeypatch.setattr("git_synapse.cli.query", lambda sql, *a, **k: rows)
+    r = runner.invoke(app, ["status"])
+    assert r.exit_code == 0
