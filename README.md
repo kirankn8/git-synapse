@@ -11,7 +11,7 @@
 ![Docker](https://img.shields.io/badge/Docker-compose-2496ED?style=flat-square&logo=docker&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-12%20tools-5eead4?style=flat-square)
 ![Measures](https://img.shields.io/badge/measures-29-a78bfa?style=flat-square)
-![Backtested](https://img.shields.io/badge/backtested-1.6--3.9x%20baseline-14b8a6?style=flat-square)
+![Backtested](https://img.shields.io/badge/backtested-240k%20predictions-14b8a6?style=flat-square)
 
 </div>
 
@@ -28,7 +28,7 @@ repository, with no per-language support to add.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/benchmark-dark.svg">
-  <img alt="Backtest results across six public repositories" src="docs/benchmark-light.svg" width="100%">
+  <img alt="What history adds over what an agent finds for free, across seven public corpora" src="docs/benchmark-light.svg" width="100%">
 </picture>
 
 <div align="center"><sub><b>Backtested, not asserted.</b> Every prediction scored against
@@ -136,60 +136,98 @@ The arrow only ever points forwards: commit *k* is scored before it is learned
 from, so no pair can vouch for itself.
 
 ```
-              backtest: 70,835 prompts over 17,332 commits (top-5)
- measure            hit rate       95% CI   lift  recall    MRR
- Most-changed          14.8%  14.6%-15.1%      -   0.036      -
- files (baseline)
- confidence_ab         49.8%  49.4%-50.2%  3.36x   0.234  0.379
- log_likelihood_r…     48.6%  48.2%-49.0%  3.28x   0.233  0.372
- jaccard               45.7%  45.4%-46.1%  3.08x   0.216  0.338
- npmi                  40.0%  39.6%-40.3%  2.70x   0.190  0.293
- association_stre…     30.9%  30.5%-31.2%  2.08x   0.144  0.195  rare-item bias
+              backtest: 240,734 prompts over 53,034 commits (top-5)
+ measure                        hit rate       95% CI   lift  unsolved    MRR
+ Apprentice -- the file's          56.9%  56.7%-57.1%      -         -      -
+ test, then its folder
+ New Hire -- greps names and       42.5%  37.7%-47.4%      -         -      -
+ bodies, follows leads (n=400)
+ Intern -- the file's              41.8%  41.6%-42.0%      -         -      -
+ folder-mates, busiest first
+ Tourist -- the repository's       38.0%  37.8%-38.2%      -         -      -
+ busiest files
+ confidence_ab                     61.7%  61.5%-61.9%  1.08x     43.3%  0.506
 ```
+
+### What it is measured against
+
+A benchmark is only as honest as its opponent. This one shipped a bad one: it
+compared against *the repository's busiest files*, which nobody has ever used to
+decide what to open, and every lift it reported was inflated by a weak rival.
+
+The baselines are now a ladder of people who could answer the question with **no
+history at all**. Every rung is free, so whatever Git Synapse adds on top of the
+highest one has to have come from the commit log and nowhere else.
+
+| Rung | What it has seen | How it answers |
+|---|---|---|
+| **Tourist** | nothing | the repository's busiest files |
+| **Intern** | where the file sits | its folder-mates, busiest first |
+| **Apprentice** | the naming conventions too | the file's test, then its folder |
+| **New Hire** | the whole codebase, none of its past | greps names *and* bodies, then widens |
+
+The **New Hire** is the opponent that matters, because it is what a coding agent
+actually does: derive search terms from the file's path and the symbols it
+declares, grep both file names and file contents, then widen the search using
+what came back. It searches the **parent** tree, so it never sees the change it
+is being asked to predict. [How it works, and what it still cannot do](DESIGN.md#what-the-backtest-is-measured-against).
 
 ### Measured result
 
-Backtested over **184,000 commits** — 409,354 prompts, every one scored only
+Replayed over **89,121 commits** — 240,734 predictions, every one scored only
 against earlier history ([chart above](#git-synapse)):
 
-| Corpus | Commits | Prompts | Baseline | `P(B\|A)` | Lift |
-|---|---:|---:|---:|---:|---:|
-| **38 repos from the `google` org** | 89,121 | 240,734 | 38.0% | **61.7%** | **1.62x** |
-| django | 33,992 | 70,835 | 14.8% | **49.8%** | **3.36x** |
-| scikit-learn | 30,873 | 52,475 | 14.2% | **55.1%** | **3.88x** |
-| pytest | 13,071 | 26,966 | 34.7% | **53.4%** | **1.54x** |
-| fastapi | 7,594 | 8,380 | 28.3% | **41.2%** | **1.45x** |
-| flask | 3,821 | 6,115 | 48.6% | **60.5%** | **1.24x** |
-| requests | 4,856 | 3,849 | 40.8% | **64.6%** | **1.58x** |
+| Corpus | Language | Apprentice | `P(B\|A)` | Lift | Recovers what the Apprentice missed |
+|---|---|---:|---:|---:|---:|
+| **38 repos from the `google` org** | mixed | 56.9% | **61.7%** | 1.08x | **43.3%** |
+| flatbuffers | C++ | 43.8% | **62.9%** | **1.36x** | 57.8% |
+| pytype | Python | 47.3% | **65.5%** | **1.38x** | 51.9% |
+| osv-scanner | Go | 47.7% | **61.1%** | **1.19x** | 50.8% |
+| closure-compiler | Java | 54.4% | **65.6%** | **1.21x** | 47.7% |
+| go-github | Go | 76.8% | 73.0% | 0.95x | 44.3% |
+| guava | Java | 76.6% | 64.4% | **0.84x** | 34.5% |
 
-**Across 38 Google repositories, naming five files gets at least one right 62%
-of the time, against 38% for guessing that repository's busiest files.**
+**The honest claim is narrower than a lift column suggests.** An agent that knows
+a file's test lives beside it already answers most prompts, and on a meticulously
+organised codebase it answers nearly all of them. On **guava, Git Synapse loses
+outright** — 0.84x, and under `--seeding obscure` it falls to 0.73x. That result
+stays in this table because it is the clearest statement of when this tool is not
+worth querying.
 
-Counts are kept per repository, never pooled. Two files in different
-repositories cannot co-occur, so a shared population hands the baseline
-candidates it can never hit — which does not weaken the baseline honestly, it
-breaks it. Pooling the same 38 repositories drove the baseline to 9% and
-reported 6.84x, four times the real figure. Confidence intervals do not overlap in any
-repository, so these are differences the sample supports.
+Where it earns its place is the last column: **the prompts where the file that
+had to change shares no name, no folder and no visible mention with the file you
+are editing.** There is nothing to grep for, and history is the only thing left.
+Across the corpus that is 103,690 of 240,734 prompts, and `P(B|A)` answers 43.3%
+of them — between a third and two thirds, depending on the repository.
 
-Two things the benchmark settled that opinion had not:
+Hold the New Hire to the same test and the picture is the same. Of 400 uniformly
+sampled prompts, **134 were solved by neither the free rules nor the search**, and
+`P(B|A)` answered 36.6% of those. That is the residue this product exists for:
+prompts where reading the code, however well, surfaces nothing.
+
+Counts are kept per repository, never pooled. Two files in different repositories
+cannot co-occur, so a shared population hands a baseline candidates it can never
+hit — which does not weaken it honestly, it breaks it. Pooling the same 38
+repositories drove the old baseline to 9% and reported 6.84x.
+
+Two things the backtest settled that opinion had not:
 
 - **`P(B|A)` wins every repository**, which is why it is the default. It is the
   quantity the question actually asks for — *given A changed, how often did B?*
   The symmetric measures answer "is this association surprising", a better
-  question for discovery and a worse one for prediction. `npmi` was the previous
-  default and places fourth to ninth, losing outright on flask (0.84x).
-- **Lift grows with codebase size and modularity.** The smallest repository
-  (flask, 3.8k commits) gains least, and on a *tiny* repository every measure
-  loses to the baseline — where two files always move together, guessing wins.
+  question for discovery and a worse one for prediction.
+- **What decides the lift is not the language, it is the discipline of the
+  codebase.** Guava and go-github are the two most convention-regular corpora
+  here and the only two where Git Synapse loses. Where layout has drifted from
+  naming — pytype, flatbuffers — it wins clearly.
 
 Three things are reported next to the hit rate, because recall alone is a vanity
 metric:
 
 | | Why it is there |
 |---|---|
-| **Lift over a popularity baseline** | A baseline that ignores coupling and just names the busiest files. Where `go.mod` and `go.sum` always move together, guessing wins. **Lift ≤ 1.0 means the statistics earned nothing.** |
-| **95% confidence interval** | So a gap between two measures is not mistaken for a real difference when the sample cannot support it. |
+| **Lift over the hardest baseline** | Never over a sampled one: dividing a rate measured over every prompt by one measured over a few hundred mixes two estimators. **Lift ≤ 1.0 means the statistics earned nothing.** |
+| **95% confidence interval** | So a gap between two measures is not mistaken for a real difference the sample cannot support. |
 | **`rare-item bias` flag** | Some measures top the table *because* they are biased. The registry knows which, and says so. |
 
 Below 300 prompts the run refuses to draw a conclusion and labels itself

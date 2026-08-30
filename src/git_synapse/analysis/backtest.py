@@ -72,6 +72,9 @@ MAX_FILES_PER_PROMPT = 25
 #: the result is reported as indicative rather than as a finding.
 MIN_PROMPTS_FOR_A_VERDICT = 300
 
+#: The one baseline that is sampled rather than run over every prompt.
+SAMPLED_BASELINE = "newhire"
+
 
 def wilson(successes: int, trials: int, z: float = 1.96) -> tuple[float, float]:
     """Wilson score interval, which stays sane at proportions near 0 and 1."""
@@ -110,13 +113,30 @@ class Score:
     hard_prompts: int = 0
     #: As above, but against everything an agent can do unaided -- the free
     #: rules *and* its own search. Measured on the sampled subset only.
-    unaided_hit_rate: float = 0.0
+    unaided_hits: int = 0
     unaided_prompts: int = 0
+    #: Hit rate of the baseline lift was measured against, kept so that beating
+    #: it can be tested against the interval rather than the point estimate.
+    baseline_hit_rate: float = 0.0
+
+    @property
+    def unaided_hit_rate(self) -> float:
+        """Share of the unaided-unsolved prompts this measure still answered."""
+        return self.unaided_hits / self.unaided_prompts if self.unaided_prompts else 0.0
+
+    @property
+    def unaided_ci(self) -> tuple[float, float]:
+        return wilson(self.unaided_hits, self.unaided_prompts)
 
     @property
     def beats_baseline(self) -> bool:
-        """True only when the interval clears the baseline, not merely the point."""
-        return self.lift > 1.0
+        """True only when the interval clears the baseline, not merely the point.
+
+        The point estimate crossing 1.0 is what a lift column shows and is not
+        evidence on its own; a measure one noisy percent above the baseline has
+        not beaten it.
+        """
+        return self.ci_low > self.baseline_hit_rate
 
 
 @dataclass(frozen=True)
@@ -141,8 +161,16 @@ class BacktestResult:
 
     @property
     def baseline(self) -> Score:
-        """The hardest baseline -- the one lift is measured against."""
-        return self.baselines[0]
+        """The hardest baseline lift is measured against.
+
+        Sampled baselines are excluded. Lift is a ratio, and dividing a rate
+        measured over every prompt by one measured over a few hundred mixes two
+        estimators: the figure would then move with the draw rather than with
+        the product. The New Hire is still shown in the table, and it is what
+        the unaided count is computed against.
+        """
+        full = [b for b in self.baselines if b.measure != SAMPLED_BASELINE]
+        return (full or self.baselines)[0]
 
     @property
     def conclusive(self) -> bool:
@@ -636,13 +664,14 @@ def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE
     if grep_n:
         low, high = wilson(grep_hits, grep_n)
         baselines.append(Score(
-            measure="newhire",
+            measure=SAMPLED_BASELINE,
             label=f"New Hire -- greps names and bodies, follows leads (n={grep_n:,})",
             prompts=grep_n, hit_prompts=grep_hits, found=grep_found, wanted=grep_wanted,
             hit_rate=grep_hits / grep_n, ci_low=low, ci_high=high,
             recall_at_k=grep_recall / grep_n, precision_at_k=grep_found / (grep_n * k), mrr=0.0))
     baselines.sort(key=lambda b: -b.hit_rate)
-    baseline = baselines[0]
+    # Same rule as BacktestResult.baseline: never divide by a sampled rate.
+    baseline = next((b for b in baselines if b.measure != SAMPLED_BASELINE), baselines[0])
 
     scores = []
     for s in specs:
@@ -656,8 +685,9 @@ def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE
             mrr=rr[s.key] / n,
             hard_hit_rate=hard_hits[s.key] / (hard_prompts or 1),
             hard_prompts=hard_prompts,
-            unaided_hit_rate=unaided_hits[s.key] / (unaided_hard or 1),
+            unaided_hits=unaided_hits[s.key],
             unaided_prompts=unaided_hard,
+            baseline_hit_rate=baseline.hit_rate,
             lift=rate / baseline.hit_rate if baseline.hit_rate else 0.0,
             rare_item_bias=s.rare_item_bias,
         ))
