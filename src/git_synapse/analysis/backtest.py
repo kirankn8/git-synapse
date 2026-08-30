@@ -135,6 +135,11 @@ class BacktestResult:
     seeding: str = "all"
 
     @property
+    def sampled(self) -> int:
+        """How many prompts the New Hire was actually run against."""
+        return next((b.prompts for b in self.baselines if b.measure == "newhire"), 0)
+
+    @property
     def baseline(self) -> Score:
         """The hardest baseline -- the one lift is measured against."""
         return self.baselines[0]
@@ -516,7 +521,14 @@ def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE
     bases = {n: [0, 0, 0.0] for n in ("neighbours", "same directory", "popularity")}
     #: The grep baseline is sampled: one `git grep` per prompt is far too slow
     #: to run over every one, so it carries its own denominator.
-    grep_hits, grep_found, grep_recall, grep_n = 0, 0, 0.0, 0
+    grep_hits, grep_found, grep_recall, grep_n, grep_wanted = 0, 0, 0.0, 0, 0
+    #: A uniform sample of prompts, filled by reservoir sampling and searched
+    #: once the replay is over. Sampling with a fixed probability and a cap
+    #: stopped as soon as the cap was reached, which drew the whole sample from
+    #: the oldest commits while every other measure was scored across all of
+    #: history -- a comparison between different eras of the repository.
+    reservoir: list[tuple] = []
+    candidates = 0
     #: Prompts in that sample which neither the free rules nor the agent's own
     #: search solved, and how often each measure answered them anyway.
     unaided_hard, unaided_hits = 0, dict(zero)
@@ -556,21 +568,20 @@ def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE
                     rank = next((i for i, f in enumerate(got, 1) if f in targets), 0)
                     rr[spec.key] += 1.0 / rank if rank else 0.0
 
-                if grep_sample and grep_n < grep_sample and rng.random() < 0.05:
+                if grep_sample:
                     sha, full_name = shas.get(commit_id, ("", ""))
                     seed_path = paths.get(seed)
                     if sha and seed_path:
-                        want = {paths.get(f) for f in targets}
-                        got = agent_search(mirror_path_for(full_name), sha, seed_path, k)
-                        correct = [g for g in got if g in want]
-                        grep_n += 1
-                        grep_hits += 1 if correct else 0
-                        grep_found += len(correct)
-                        grep_recall += len(correct) / len(targets)
-                        if not neighbour_solved and not correct:
-                            unaided_hard += 1
-                            for key, hit in hit_here.items():
-                                unaided_hits[key] += 1 if hit else 0
+                        entry = (full_name, sha, seed_path,
+                                 frozenset(p for p in (paths.get(f) for f in targets) if p),
+                                 len(targets), neighbour_solved, tuple(hit_here.items()))
+                        candidates += 1
+                        if len(reservoir) < grep_sample:
+                            reservoir.append(entry)
+                        else:                       # Algorithm R
+                            j = rng.randrange(candidates)
+                            if j < grep_sample:
+                                reservoir[j] = entry
 
                 for name, guess in (
                     ("neighbours", neighbour_guess),
@@ -592,6 +603,21 @@ def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE
             marginal[f] += 1
         totals[repo] += 1
 
+    # The sample is searched only now, so that every prompt in the replay had an
+    # equal chance of being in it regardless of when it occurred.
+    for full_name, sha, seed_path, want, n_targets, solved, hits in reservoir:
+        got = agent_search(mirror_path_for(full_name), sha, seed_path, k)
+        correct = [g for g in got if g in want]
+        grep_n += 1
+        grep_wanted += n_targets
+        grep_hits += 1 if correct else 0
+        grep_found += len(correct)
+        grep_recall += len(correct) / n_targets
+        if not solved and not correct:
+            unaided_hard += 1
+            for key, hit in hits:
+                unaided_hits[key] += 1 if hit else 0
+
     n = prompts or 1
     # Each baseline is a person who could answer this question without any
     # history, nicknamed by how much of the codebase they have seen. Every rung
@@ -612,7 +638,7 @@ def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE
         baselines.append(Score(
             measure="newhire",
             label=f"New Hire -- greps names and bodies, follows leads (n={grep_n:,})",
-            prompts=grep_n, hit_prompts=grep_hits, found=grep_found, wanted=wanted,
+            prompts=grep_n, hit_prompts=grep_hits, found=grep_found, wanted=grep_wanted,
             hit_rate=grep_hits / grep_n, ci_low=low, ci_high=high,
             recall_at_k=grep_recall / grep_n, precision_at_k=grep_found / (grep_n * k), mrr=0.0))
     baselines.sort(key=lambda b: -b.hit_rate)
