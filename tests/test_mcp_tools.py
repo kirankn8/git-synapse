@@ -685,3 +685,32 @@ def test_explain_repo_pair_reports_every_kind_of_evidence(monkeypatch):
     # The forward edge carries its own evidence tier, so an agent can tell a
     # declaration from a coincidence without reading the score.
     assert out["forward"]["evidence"] == "declared"
+
+
+# ------------------------------------------- every tool refuses an unknown repo
+
+@pytest.mark.parametrize(("tool", "args"), [
+    ("impact_of_change",   ("no-such-repo",)),
+    ("coupling_chain",     ("no-such-repo",)),
+    ("coupled_directories", ("no-such-repo", "pkg")),
+    ("module_context",     ("no-such-repo", "pkg/a.go")),
+    ("repo_hotspots",      ("no-such-repo",)),
+])
+def test_a_tool_names_the_repository_it_cannot_find(tool, args, monkeypatch):
+    """Returning empty results would read as "nothing is coupled here", which
+    is a claim about the code rather than about the name being wrong."""
+    monkeypatch.setattr(server, "_resolve_repo", lambda name: None)
+    out = getattr(server, tool)(*args)
+    assert "no repository matching" in out["error"]
+    assert "no-such-repo" in out["error"]
+
+
+def test_file_history_names_a_path_it_cannot_find(monkeypatch):
+    """It reports both failures as a missing *file*, because a path is resolved
+    within a repository and an unknown repository cannot contain one. The
+    message names both, so the caller can tell which was wrong."""
+    monkeypatch.setattr(server, "_resolve_repo",
+                        lambda name: {"id": 1, "name": "app", "full_name": "acme/app"})
+    monkeypatch.setattr(server.q, "resolve_file", lambda repo, path: None)
+    out = server.file_history("acme/app", "gone.go")
+    assert "no file" in out["error"] and "gone.go" in out["error"]
