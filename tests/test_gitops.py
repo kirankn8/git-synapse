@@ -473,3 +473,33 @@ def test_a_clone_that_fails_after_staging_exists_still_cleans_up(tmp_path, remot
 
     assert not staging.exists()
     assert not dest.exists()
+
+
+def test_tags_are_mirrored(tmp_path):
+    """A manifest pinning `v1.2.3` names a release, and only a tag turns that
+    into a commit. Excluding tags made the tag index build and stay empty."""
+    import subprocess
+    from git_synapse.ingest import gitops
+
+    work = tmp_path / "w"
+    work.mkdir()
+    env = {"GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@e",
+           "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@e",
+           "PATH": "/usr/bin:/bin:/usr/local/bin", "GIT_CONFIG_GLOBAL": "/dev/null",
+           "GIT_CONFIG_SYSTEM": "/dev/null"}
+    subprocess.run(["git", "init", "--quiet", "-b", "main", str(work)], check=True, env=env)
+    (work / "a.txt").write_text("x")
+    subprocess.run(["git", "add", "-A"], cwd=work, check=True, env=env)
+    subprocess.run(["git", "commit", "--quiet", "-m", "one"], cwd=work, check=True, env=env)
+    subprocess.run(["git", "tag", "v1.0.0"], cwd=work, check=True, env=env)
+    subprocess.run(["git", "tag", "-a", "v1.1.0", "-m", "annotated"], cwd=work, check=True, env=env)
+
+    mirror = tmp_path / "m.git"
+    gitops.clone_mirror(str(work), mirror, blobless=False)
+
+    tags = {t.name: t for t in gitops.read_tags(mirror)}
+    assert set(tags) == {"v1.0.0", "v1.1.0"}, "both tag kinds must be mirrored"
+    assert tags["v1.1.0"].annotated and not tags["v1.0.0"].annotated
+    # An annotated tag points at a tag object; the commit is what matters.
+    assert tags["v1.0.0"].commit_sha == tags["v1.1.0"].commit_sha
+    assert len(tags["v1.1.0"].commit_sha) == 40

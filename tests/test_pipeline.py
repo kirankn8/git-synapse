@@ -301,7 +301,7 @@ def test_a_run_gives_up_once_the_network_is_clearly_down(db, monkeypatch):
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.pipeline import NETWORK_FAILURE_ABORT, RepoResult
 
-    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda **_: "ok")
     monkeypatch.setattr(pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
 
     attempted = {"n": 0}
@@ -344,7 +344,7 @@ def test_an_isolated_failure_does_not_trip_the_breaker(db, monkeypatch):
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.pipeline import RepoResult
 
-    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda **_: "ok")
     monkeypatch.setattr(pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
 
     seen = []
@@ -372,7 +372,7 @@ def test_one_repository_raising_does_not_kill_the_run(db, monkeypatch):
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.pipeline import RepoResult
 
-    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda **_: "ok")
     monkeypatch.setattr(pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
 
     def explode_once(record, force_full=False):
@@ -417,7 +417,7 @@ class _Anything:
 
 
 def _stub_run(monkeypatch):
-    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda **_: "ok")
     monkeypatch.setattr(pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
 
 

@@ -283,7 +283,11 @@ def clone_mirror(
     if staging.exists():
         shutil.rmtree(staging)
 
-    args = ["clone", "--bare", "--no-tags", "--quiet"]
+    # Tags are fetched: a manifest that pins `v1.2.3` names a release, and
+    # `ref_tag` is what turns that into a commit. Excluding them made every
+    # ecosystem that pins by version rather than by SHA resolve to nothing,
+    # silently -- the tag index was built and stayed empty.
+    args = ["clone", "--bare", "--quiet"]
     if blobless:
         args.append("--filter=blob:none")
     args += [clone_url, str(staging)]
@@ -291,8 +295,13 @@ def clone_mirror(
     log.info("cloning %s mirror -> %s", "blobless" if blobless else "full", path)
     try:
         run_git_network(args)
-        # Mirror refspec so future fetches track every branch, not just HEAD.
+        # Mirror refspec so future fetches track every branch and every tag,
+        # not just HEAD. Written explicitly because a bare clone has no fetch
+        # refspec of its own: without this, `git fetch` updates FETCH_HEAD and
+        # nothing else, and the mirror silently stops moving.
         run_git(["config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"], cwd=staging)
+        run_git(["config", "--add", "remote.origin.fetch", "+refs/tags/*:refs/tags/*"],
+                cwd=staging)
         if public_url:
             run_git(["config", "remote.origin.url", public_url], cwd=staging)
     except BaseException:
@@ -331,7 +340,7 @@ def fetch_mirror(
     args = ["fetch", "--prune", "--quiet"]
     if blobless:
         args.append("--filter=blob:none")
-    args += [clone_url, "+refs/heads/*:refs/heads/*"]
+    args += [clone_url, "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"]
     run_git_network(args, cwd=path)
     if public_url:
         run_git(["config", "remote.origin.url", public_url], cwd=path, check=False)

@@ -79,7 +79,7 @@ def test_a_full_run_through_run_ingest_drives_every_stage(corpus, monkeypatch):
     from git_synapse.ingest.github import RepoRecord
 
     # The mirrors exist, so no network and no credential are needed.
-    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda **_: "ok")
 
     records = [
         RepoRecord(github_id=920001, owner="acme", name="dsx-lib",
@@ -106,7 +106,7 @@ def test_a_run_aborts_cleanly_when_the_credential_is_rejected(corpus, monkeypatc
     from git_synapse.ingest import pipeline
     from git_synapse.ingest.pipeline import AuthError
 
-    def reject():
+    def reject(**_):
         raise AuthError("GITHUB_TOKEN was rejected (HTTP 401)")
 
     monkeypatch.setattr(pipeline, "verify_credentials", reject)
@@ -123,7 +123,7 @@ def test_repo_results_are_recorded_per_repository(corpus, monkeypatch):
     from git_synapse.ingest import pipeline
     from git_synapse.ingest.github import RepoRecord
 
-    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda **_: "ok")
     result = pipeline.run_ingest(
         records=[RepoRecord(github_id=920001, owner="acme", name="dsx-lib",
                             full_name="acme/dsx-lib",

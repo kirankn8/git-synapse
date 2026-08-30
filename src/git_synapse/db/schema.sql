@@ -576,6 +576,29 @@ CREATE TABLE IF NOT EXISTS ingest_run_repo (
 
 -- Cross-repo marginal for a file: how many eligible change sets touched it.
 -- Distinct from file.pair_change_count, which counts commits, not change sets.
+-- ---------------------------------------------------------------------------
+-- Removals.
+--
+-- This file is otherwise all CREATE IF NOT EXISTS, which means deleting a table
+-- from it does nothing to a database that already has one: the table simply
+-- stays, holding stale rows that no code reads. Removals therefore have to be
+-- stated, once, and left here.
+--
+-- These eight held cross-repository coupling inferred from tickets and
+-- timestamps. That construction scored G2 = 570 between two public repositories
+-- sharing no code at all, because two busy repositories occupy the same time
+-- bins whatever they contain. It was replaced by the declared dependency graph.
+-- ---------------------------------------------------------------------------
+
+DROP TABLE IF EXISTS xrepo_file_pair_metric CASCADE;
+DROP TABLE IF EXISTS xrepo_file_pair        CASCADE;
+DROP TABLE IF EXISTS repo_pair_metric       CASCADE;
+DROP TABLE IF EXISTS repo_pair              CASCADE;
+DROP TABLE IF EXISTS repo_lag_metric        CASCADE;
+DROP TABLE IF EXISTS repo_change_stats      CASCADE;
+DROP TABLE IF EXISTS change_set_commit      CASCADE;
+DROP TABLE IF EXISTS change_set             CASCADE;
+
 ALTER TABLE file ADD COLUMN IF NOT EXISTS xrepo_change_count BIGINT NOT NULL DEFAULT 0;
 
 -- ---------------------------------------------------------------------------
@@ -908,5 +931,5 @@ CREATE TABLE IF NOT EXISTS meta (
 -- was not, so schema_is_current() was permanently false and every service boot
 -- re-ran the whole DDL, taking exactly the locks the fast path exists to avoid.
 INSERT INTO meta (key, value)
-VALUES ('schema_version', '17'::jsonb)
+VALUES ('schema_version', '18'::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();

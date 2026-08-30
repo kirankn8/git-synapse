@@ -231,7 +231,7 @@ def test_a_run_with_some_failures_is_partial_not_success(db, monkeypatch):
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.pipeline import RepoResult
 
-    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda **_: "ok")
     monkeypatch.setattr(pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
 
     def half_fail(record, force_full=False):
@@ -255,7 +255,7 @@ def test_a_run_where_everything_succeeds_is_success(db, monkeypatch):
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.pipeline import RepoResult
 
-    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda **_: "ok")
     monkeypatch.setattr(pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
     monkeypatch.setattr(
         pipeline, "sync_repo",
@@ -272,7 +272,7 @@ def test_a_run_where_everything_succeeds_is_success(db, monkeypatch):
 def test_run_ingest_discovers_when_given_no_records(db, monkeypatch):
     from git_synapse.ingest import pipeline
 
-    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda **_: "ok")
     monkeypatch.setattr(pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
     called = []
     monkeypatch.setattr(pipeline, "discover", lambda trigger: called.append(trigger) or [])

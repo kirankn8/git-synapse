@@ -239,3 +239,73 @@ def test_empty_repository_reads_as_no_commits_not_an_error(tmp_path):
     subprocess.run(["git", "init", "--bare", "--quiet", str(mirror)], check=True)
 
     assert list(iter_commits(mirror)) == []
+
+
+def test_a_refresh_does_not_blank_the_metadata_discovery_collected(db):
+    """`load_repo_records` rebuilds a record from the database and hands it
+    straight back to `upsert_repo`. When it read only the columns the pipeline
+    needed, every ingest wiped language, description, topics and stars."""
+    from git_synapse.db.engine import connection, query_one
+    from git_synapse.ingest.pipeline import load_repo_records
+
+    full = RepoRecord(
+        github_id=777001, owner="acme", name="meta-probe", full_name="acme/meta-probe",
+        clone_url="https://example.invalid/x.git", default_branch="main",
+        description="a description", primary_language="Rust",
+        topics=["a", "b"], license_spdx="MIT", stargazers=42,
+    )
+    with connection() as conn:
+        upsert_repo(full, conn)
+
+    reloaded = [r for r in load_repo_records() if r.full_name == "acme/meta-probe"]
+    assert reloaded, "the repository must come back from the database"
+    with connection() as conn:
+        upsert_repo(reloaded[0], conn)
+
+    row = query_one("SELECT primary_language, description, topics, license_spdx,"
+                    " stargazers FROM repo WHERE full_name = 'acme/meta-probe'")
+    assert row["primary_language"] == "Rust"
+    assert row["description"] == "a description"
+    assert row["topics"] == ["a", "b"]
+    assert row["license_spdx"] == "MIT"
+    assert row["stargazers"] == 42
+
+    from git_synapse.db.engine import execute
+    execute("DELETE FROM repo WHERE full_name = 'acme/meta-probe'")
+
+
+def test_tags_are_indexed_and_resolved_to_their_commit(db):
+    """The tag loader was unreachable while mirrors excluded tags, so nothing
+    exercised it: the first real tag hit `Connection.executemany`, which psycopg
+    puts on the cursor."""
+    from git_synapse.db.engine import connection, execute, query
+    from git_synapse.ingest.gitops import Tag
+    from git_synapse.ingest.store import load_tags
+
+    record = RepoRecord(github_id=777002, owner="acme", name="tagged",
+                        full_name="acme/tagged", clone_url="", default_branch="main")
+    with connection() as conn:
+        repo_id = upsert_repo(record, conn)
+        load_commits(repo_id, [make_commit(0, ["a.py"])], conn)
+        # Read through the same connection: the commits are not committed yet,
+        # and the query helper checks out a different one from the pool.
+        sha = conn.execute("SELECT sha FROM commit WHERE repo_id = %s",
+                           (repo_id,)).fetchone()[0]
+        written = load_tags(repo_id, [
+            Tag(name="v1.0.0", commit_sha=sha, tagged_at=BASE, annotated=False),
+            Tag(name="v1.1.0", commit_sha="f" * 40, tagged_at=BASE, annotated=True),
+        ], conn)
+
+    assert written == 2
+    rows = {r["name"]: r for r in query(
+        "SELECT name, commit_id, annotated FROM ref_tag WHERE repo_id = %s", (repo_id,))}
+    assert rows["v1.0.0"]["commit_id"] is not None, "a tag on an ingested commit resolves"
+    assert rows["v1.1.0"]["commit_id"] is None, "a tag off the shipped branch stays unresolved"
+    assert rows["v1.1.0"]["annotated"] is True
+
+    # Replaced wholesale, so a deleted or moved tag cannot linger.
+    with connection() as conn:
+        load_tags(repo_id, [Tag(name="v2.0.0", commit_sha=sha, tagged_at=BASE, annotated=False)], conn)
+    assert {r["name"] for r in query(
+        "SELECT name FROM ref_tag WHERE repo_id = %s", (repo_id,))} == {"v2.0.0"}
+    execute("DELETE FROM repo WHERE id = %s", (repo_id,))

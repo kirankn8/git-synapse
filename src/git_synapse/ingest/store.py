@@ -58,16 +58,18 @@ def load_tags(repo_id: int, tags: list, conn: psycopg.Connection) -> int:
     conn.execute("DELETE FROM ref_tag WHERE repo_id = %s", (repo_id,))
     if not tags:
         return 0
-    conn.executemany(
-        """
-        INSERT INTO ref_tag (repo_id, name, commit_sha, tagged_at, annotated, commit_id)
-        VALUES (%s, %s, %s, %s, %s,
-                (SELECT id FROM commit WHERE repo_id = %s AND sha = %s))
-        ON CONFLICT (repo_id, name) DO NOTHING
-        """,
-        [(repo_id, t.name, t.commit_sha, t.tagged_at, t.annotated, repo_id, t.commit_sha)
-         for t in tags],
-    )
+    # executemany lives on the cursor in psycopg 3, not on the connection.
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO ref_tag (repo_id, name, commit_sha, tagged_at, annotated, commit_id)
+            VALUES (%s, %s, %s, %s, %s,
+                    (SELECT id FROM commit WHERE repo_id = %s AND sha = %s))
+            ON CONFLICT (repo_id, name) DO NOTHING
+            """,
+            [(repo_id, t.name, t.commit_sha, t.tagged_at, t.annotated, repo_id, t.commit_sha)
+             for t in tags],
+        )
     return len(tags)
 
 
@@ -100,17 +102,17 @@ def upsert_repo(record: RepoRecord, conn: psycopg.Connection | None = None, acco
             )
             ON CONFLICT (full_name) DO UPDATE SET
                 github_id         = EXCLUDED.github_id,
-                description       = EXCLUDED.description,
-                homepage          = EXCLUDED.homepage,
+                description       = COALESCE(EXCLUDED.description, repo.description),
+                homepage          = COALESCE(EXCLUDED.homepage, repo.homepage),
                 html_url          = EXCLUDED.html_url,
                 clone_url         = EXCLUDED.clone_url,
                 ssh_url           = EXCLUDED.ssh_url,
                 default_branch    = EXCLUDED.default_branch,
-                primary_language  = EXCLUDED.primary_language,
+                primary_language  = COALESCE(EXCLUDED.primary_language, repo.primary_language),
                 languages         = EXCLUDED.languages,
                 topics            = EXCLUDED.topics,
-                license_spdx      = EXCLUDED.license_spdx,
-                visibility        = EXCLUDED.visibility,
+                license_spdx      = COALESCE(EXCLUDED.license_spdx, repo.license_spdx),
+                visibility        = COALESCE(EXCLUDED.visibility, repo.visibility),
                 is_private        = EXCLUDED.is_private,
                 is_fork           = EXCLUDED.is_fork,
                 is_archived       = EXCLUDED.is_archived,
@@ -124,7 +126,10 @@ def upsert_repo(record: RepoRecord, conn: psycopg.Connection | None = None, acco
                 github_created_at = EXCLUDED.github_created_at,
                 github_updated_at = EXCLUDED.github_updated_at,
                 github_pushed_at  = EXCLUDED.github_pushed_at,
-                raw_github        = EXCLUDED.raw_github,
+                -- COALESCE across the descriptive columns: a caller holding a
+                -- partial record must not blank what discovery collected.
+                raw_github        = CASE WHEN EXCLUDED.raw_github = '{}'::jsonb
+                                         THEN repo.raw_github ELSE EXCLUDED.raw_github END,
                 -- COALESCE, so a discovery run that carries no account context
                 -- cannot strip attribution an earlier run established.
                 account_id        = COALESCE(EXCLUDED.account_id, repo.account_id),

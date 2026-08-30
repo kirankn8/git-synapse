@@ -227,7 +227,21 @@ class AuthError(RuntimeError):
     """The GitHub credential is missing or rejected."""
 
 
-def verify_credentials() -> str:
+def private_repos_in_scope() -> int:
+    """How many repositories about to be mirrored are private.
+
+    A token is only genuinely required for those. An entirely public corpus --
+    a public organisation, or an allowlist of public repositories -- clones over
+    plain HTTPS and needs no credential at all.
+    """
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT count(*) FROM repo WHERE is_enabled AND is_private"
+        ).fetchone()
+    return int(row[0] or 0)
+
+
+def verify_credentials(required: bool = True) -> str:
     """Confirm the token works before any mirror is touched.
 
     Called at the start of every run. Without it, an expired token produces 272
@@ -244,8 +258,12 @@ def verify_credentials() -> str:
     cfg = get_config().github
     token = cfg.current_token()
     if not token:
+        if not required:
+            log.info("no GITHUB_TOKEN; every repository in scope is public, "
+                     "so cloning proceeds unauthenticated")
+            return "anonymous"
         raise AuthError(
-            "GITHUB_TOKEN is empty. Private repositories cannot be mirrored. "
+            "GITHUB_TOKEN is empty, and private repositories are in scope. "
             "Set it in .env and restart the affected services."
         )
 
@@ -301,9 +319,11 @@ def discover(trigger: str = "manual") -> list[RepoRecord]:
     selected: list[RepoRecord] = []
     owners: dict[str, int] = {}
     failures: list[str] = []
+    #: Repositories the API listed, before this account's filters were applied.
+    listed = 0
     for account in configured:
         try:
-            found = _discover_account(account)
+            found, raw = _discover_account(account)
         except AuthError:
             # A bad credential is not this account's fault and retrying the
             # rest would repeat the same failure against every one of them.
@@ -313,6 +333,7 @@ def discover(trigger: str = "manual") -> list[RepoRecord]:
             accounts.record_discovery(account["id"], 0, str(exc))
             failures.append(f"{account['login']}: {exc}")
             continue
+        listed += raw
         accounts.record_discovery(account["id"], len(found))
         for record in found:
             owners[record.full_name] = account["id"]
@@ -321,19 +342,22 @@ def discover(trigger: str = "manual") -> list[RepoRecord]:
     if not selected and failures:
         raise AuthError("every configured account failed discovery: " + "; ".join(failures))
 
-    # A discovery that collapses is a symptom, not a fact about the accounts. An
-    # unauthenticated request returns only public repositories -- with HTTP 200
-    # and no error -- and the run then quietly refreshes a fraction of the
-    # corpus. Refuse rather than narrow. Skipped when an account errored, since
-    # then the shrinkage is explained and already reported.
+    # A discovery that collapses is a symptom, not a fact about the accounts: an
+    # unauthenticated request returns only public repositories, with HTTP 200 and
+    # no error, and the run then quietly refreshes a fraction of the corpus.
+    #
+    # The comparison is against what the API *listed*, not what survived the
+    # filters. Measuring the filtered count made narrowing an allowlist
+    # indistinguishable from a broken credential, and refused the configuration
+    # change with an error about the credential. Skipped when an account errored,
+    # since then the shrinkage is explained and already reported.
     with connection() as conn:
         known = int(conn.execute("SELECT count(*) FROM repo WHERE is_enabled").fetchone()[0])
-    if not failures and known and len(selected) < known * DISCOVERY_SHRINK_FLOOR:
+    if not failures and known and listed < known * DISCOVERY_SHRINK_FLOOR:
         raise AuthError(
-            f"discovery returned {len(selected)} repositories but {known} are "
-            "already known. That is the shape of an unauthenticated or partial "
-            "listing, not repositories disappearing. Check the credential; "
-            "nothing was changed."
+            f"the API listed {listed} repositories but {known} are already known. "
+            "That is the shape of an unauthenticated or partial listing, not "
+            "repositories disappearing. Check the credential; nothing was changed."
         )
 
     with connection() as conn:
@@ -343,12 +367,17 @@ def discover(trigger: str = "manual") -> list[RepoRecord]:
     return selected
 
 
-def _discover_account(account: dict) -> list[RepoRecord]:
-    """List and filter one account's repositories using its own settings."""
+def _discover_account(account: dict) -> tuple[list[RepoRecord], int]:
+    """List and filter one account, returning the kept records and the raw count.
+
+    The raw count is what the shrink guard has to reason about: narrowing an
+    allowlist legitimately collapses the *filtered* result, while a credential
+    that has stopped working collapses the *listing*.
+    """
     cfg = accounts.config_for(account)
     with GitHubClient(cfg) as client:
         records = client.list_account_repos(account["login"], account["kind"])
-    return select_repos(records, cfg)
+    return select_repos(records, cfg), len(records)
 
 
 #: Attempts for a repository whose transaction lost a deadlock or serialization
@@ -671,8 +700,12 @@ def _run_ingest_locked(
 
     # Fail the whole run on a bad credential rather than letting every
     # repository fail individually. Deliberately before any mirror is touched.
+    #
+    # Required only when something private is in scope: refusing to run at all
+    # on a wholly public corpus blocked a legitimate configuration for no
+    # reason, since those clone over plain HTTPS.
     try:
-        verify_credentials()
+        verify_credentials(required=private_repos_in_scope() > 0)
     except AuthError as exc:
         log.error("aborting run: %s", exc)
         run = RunResult(kind="full" if force_full else "sync")
@@ -801,12 +834,21 @@ def load_repo_records() -> list[RepoRecord]:
 
     Lets a refresh run without calling the GitHub API, which is useful when
     re-processing after a config change or when the API is rate limited.
+
+    Every descriptive column is read back, not just the handful the pipeline
+    needs. The record is written straight back out by ``upsert_repo``, so a
+    partial read here silently blanked everything it omitted: language,
+    description, topics, licence and stars were wiped on every ingest.
     """
     with connection() as conn:
         rows = conn.execute(
             """
             SELECT github_id, owner, name, full_name, clone_url, default_branch,
-                   disk_usage_kb, is_private, is_fork, is_archived
+                   disk_usage_kb, is_private, is_fork, is_archived,
+                   description, homepage, html_url, ssh_url, primary_language,
+                   topics, license_spdx, visibility, is_template, is_disabled,
+                   stargazers, watchers, forks_count, open_issues,
+                   github_created_at, github_updated_at, github_pushed_at
             FROM repo WHERE is_enabled ORDER BY id
             """
         ).fetchall()
@@ -823,6 +865,23 @@ def load_repo_records() -> list[RepoRecord]:
             is_private=bool(r[7]),
             is_fork=bool(r[8]),
             is_archived=bool(r[9]),
+            description=r[10],
+            homepage=r[11],
+            html_url=r[12],
+            ssh_url=r[13],
+            primary_language=r[14],
+            topics=list(r[15] or []),
+            license_spdx=r[16],
+            visibility=r[17],
+            is_template=bool(r[18]),
+            is_disabled=bool(r[19]),
+            stargazers=r[20] or 0,
+            watchers=r[21] or 0,
+            forks_count=r[22] or 0,
+            open_issues=r[23] or 0,
+            github_created_at=r[24],
+            github_updated_at=r[25],
+            github_pushed_at=r[26],
         )
         for r in rows
     ]
