@@ -405,3 +405,46 @@ def test_a_file_never_seen_before_is_the_most_obscure():
 def test_an_unknown_seeding_is_refused(monkeypatch):
     with pytest.raises(ValueError, match="unknown seeding"):
         replay(monkeypatch, flat([1, 2], 5), measures=("npmi",), seeding="sideways")
+
+
+# ---------------------------------------------------- sampling the New Hire
+
+def sampled_commits(monkeypatch, n_commits, sample):
+    """Which commits the search baseline actually got run against."""
+    seen = []
+    history = flat([1, 2], bt.WARMUP_COMMITS) + [(1, [1, 2, 3])] * n_commits
+    monkeypatch.setattr(bt, "_commit_shas",
+                        lambda repo_id: {i: (f"sha{i}", "org/repo")
+                                         for i in range(len(history))})
+    monkeypatch.setattr(bt, "mirror_path_for", lambda name: bt.Path("/nonexistent"))
+
+    def spy(mirror, sha, seed_path, k):
+        seen.append(int(sha.removeprefix("sha")))
+        return []
+    monkeypatch.setattr(bt, "agent_search", spy)
+    replay(monkeypatch, history, measures=("npmi",), grep_sample=sample)
+    return seen
+
+
+def test_the_search_sample_is_drawn_from_the_whole_replay(monkeypatch):
+    """It used to sample with a fixed probability and stop at the cap, so the
+    entire sample came from the oldest commits while every other measure was
+    scored across all of history. That compares two different eras of the
+    repository and calls the difference a result."""
+    n_commits = 2_000
+    seen = sampled_commits(monkeypatch, n_commits, sample=50)
+
+    assert len(seen) == 50
+    last_commit = bt.WARMUP_COMMITS + n_commits
+    # A front-loaded sample cannot reach the final quarter of the replay.
+    assert max(seen) > last_commit * 0.75, (
+        f"sample stopped at commit {max(seen)} of {last_commit}")
+
+
+def test_the_sample_never_exceeds_what_was_asked_for(monkeypatch):
+    assert len(sampled_commits(monkeypatch, 500, sample=20)) == 20
+
+
+def test_a_replay_smaller_than_the_sample_is_taken_whole(monkeypatch):
+    seen = sampled_commits(monkeypatch, 5, sample=400)
+    assert 0 < len(seen) <= 400

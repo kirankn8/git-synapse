@@ -304,6 +304,15 @@ def backtest_cmd(
         )
     console.print(t)
     console.print(f"[bold]{result.verdict}[/bold]")
+    # The headline compares against one rung at a time. What an agent can do
+    # unaided is all of them at once, so this is the only line that says
+    # whether Git Synapse is answering anything nobody else could.
+    best = result.best
+    if best is not None and best.unaided_prompts:
+        console.print(
+            f"[cyan]neither the free rules nor the New Hire solved "
+            f"{best.unaided_prompts:,} of the {result.sampled:,} sampled prompts; "
+            f"{best.measure} answered {best.unaided_hit_rate:.1%} of those[/cyan]")
     if not result.conclusive:
         console.print("[dim]hit rate = share of prompts where a correct file appeared "
                       "in the top k. Intervals assume independent prompts; those from "
