@@ -60,8 +60,14 @@ def list_repos(
     descending: bool = True,
     limit: int | None = 500,
     offset: int = 0,
+    account_id: int | None = None,
 ) -> list[dict]:
-    """List repositories with their ingest state and history summary."""
+    """List repositories with their ingest state and history summary.
+
+    `account_id` is what makes the hierarchy navigable: an account owns
+    repositories, and without it the Accounts page can only send a reader to
+    every repository in the corpus and leave them to find the ones it scanned.
+    """
     allowed = {
         "commit_count", "file_count", "pair_count", "author_count", "name",
         "stargazers", "last_commit_at", "github_pushed_at", "disk_usage_kb",
@@ -81,10 +87,13 @@ def list_repos(
     if status:
         clauses.append("ingest_status = %(status)s")
         params["status"] = status
+    if account_id is not None:
+        clauses.append("account_id = %(account_id)s")
+        params["account_id"] = account_id
 
     return query(
         f"""
-        SELECT id, full_name, owner, name, description, html_url, primary_language,
+        SELECT id, account_id, full_name, owner, name, description, html_url, primary_language,
                topics, is_private, is_fork, is_archived, stargazers, forks_count,
                open_issues, license_spdx, visibility, default_branch, disk_usage_kb,
                mirror_size_kb, clone_mode, has_churn, ingest_status, ingest_error,

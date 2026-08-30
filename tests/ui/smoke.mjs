@@ -139,6 +139,24 @@ for (const [hash, label] of routes) {
 }
 
 // Interaction: clicking a table row must navigate.
+console.log('\n=== drill-down trail ===');
+for (const [path, label, expect] of [
+  ['/repo/5',  'repository', ['Accounts', 'google']],
+  ['/dir/1',   'directory',  ['Accounts', 'google', 'brotli']],
+]) {
+  window.history.pushState({}, '', path);
+  window.dispatchEvent(new window.PopStateEvent('popstate'));
+  let trail = '';
+  for (let i = 0; i < 60; i++) {
+    await sleep(120);
+    const el = window.document.querySelector('.crumbs');
+    trail = el ? el.textContent.replace(/\s+/g, ' ').trim() : '';
+    if (trail) break;
+  }
+  const missing = expect.filter((w) => !trail.includes(w));
+  report(`${label} trail`, !missing.length, trail || 'no breadcrumb');
+}
+
 console.log('\n=== interaction ===');
 window.history.pushState({}, '', '/repos');
 window.dispatchEvent(new window.PopStateEvent('popstate'));

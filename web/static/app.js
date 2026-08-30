@@ -315,6 +315,46 @@ export const crumbs = (...items) =>
     ]),
   );
 
+
+/* An account owns repositories; a repository owns files and directories. The
+   trail starts at whichever rung is known: without the account the reader
+   cannot climb past a flat list of every repository in the corpus. Accounts are
+   fetched once and reused -- a breadcrumb should not cost a request per page. */
+let _accountsOnce = null;
+const allAccounts = () => {
+  if (!_accountsOnce) {
+    _accountsOnce = api('/api/accounts').catch(() => ({ accounts: [] }));
+  }
+  return _accountsOnce;
+};
+
+const _repoOnce = new Map();
+const repoById = (id) => {
+  if (!_repoOnce.has(id)) _repoOnce.set(id, api(`/api/repos/${id}`).catch(() => null));
+  return _repoOnce.get(id);
+};
+
+async function repoTrail(repo) {
+  const trail = [];
+  let accountId = repo && (repo.account_id ?? repo.accountId);
+  // Most endpoints return the repository id but not its account. Rather than
+  // widen every one of them, resolve it here -- cached, so a breadcrumb costs
+  // at most one request per repository per session.
+  if (accountId == null && repo && repo.id) {
+    accountId = (await repoById(repo.id))?.account_id ?? null;
+  }
+  if (accountId != null) {
+    const { accounts } = await allAccounts();
+    const account = (accounts || []).find((a) => a.id === accountId);
+    if (account) {
+      trail.push(['Accounts', '/accounts'], [account.login, `/repos?account=${account.id}`]);
+    }
+  }
+  if (!trail.length) trail.push(['Repositories', '/repos']);
+  if (repo && repo.id) trail.push([repo.name || repo.full_name, `/repo/${repo.id}`]);
+  return trail;
+}
+
 export const pageHead = (title, sub, actions = []) =>
   h(
     'div',
@@ -607,13 +647,25 @@ async function triggerRefresh() {
 /* --------------------------------------------------------------- repos -- */
 
 on('/repos', async (_args, params) => {
-  const [repos, langs] = await Promise.all([
-    api('/api/repos', { limit: 1000, search: params.q, language: params.lang, status: params.status }),
+  const accountId = params.account ? Number(params.account) : null;
+  const [repos, langs, accounts] = await Promise.all([
+    api('/api/repos', { limit: 1000, search: params.q, language: params.lang,
+                        status: params.status, account_id: accountId }),
     api('/api/repos/languages'),
+    accountId ? api('/api/accounts') : Promise.resolve({ accounts: [] }),
   ]);
+  const account = (accounts.accounts || []).find((a) => a.id === accountId);
 
   const wrap = h('div');
-  wrap.append(pageHead('Repositories', `${repos.count} repositories in the corpus`));
+  if (account) {
+    // An account owns repositories, so this is a rung of the hierarchy rather
+    // than a filtered list that happens to look like one.
+    wrap.append(crumbs(['Accounts', '/accounts'], [account.login]));
+    wrap.append(pageHead(`${account.login} repositories`,
+      `${repos.count} of the ${account.kind === 'org' ? 'organisation' : 'user'}'s repositories are scanned`));
+  } else {
+    wrap.append(pageHead('Repositories', `${repos.count} repositories in the corpus`));
+  }
 
   const search = h('input', {
     class: 'input',
@@ -645,6 +697,7 @@ on('/repos', async (_args, params) => {
     if (search.value) p.set('q', search.value);
     if (langSel.value) p.set('lang', langSel.value);
     if (statusSel.value) p.set('status', statusSel.value);
+    if (accountId) p.set('account', String(accountId));
     go(`/repos${p.toString() ? '?' + p : ''}`);
   };
 
@@ -691,7 +744,7 @@ on('/repo/:id', async ({ id }, params) => {
   const repo = await api(`/api/repos/${id}`);
 
   const wrap = h('div');
-  wrap.append(crumbs(['Repositories', '/repos'], [repo.name]));
+  wrap.append(crumbs(...(await repoTrail({ ...repo, id: null })), [repo.name]));
   wrap.append(
     pageHead(
       h('span', { class: 'mono' }, repo.full_name),
@@ -1033,7 +1086,8 @@ on('/file/:id', async ({ id }, params) => {
 
   const wrap = h('div');
   wrap.append(
-    crumbs(['Repositories', '/repos'], [file.repo.split('/')[1], `/repo/${file.repo_id}`], [file.basename]),
+    crumbs(...(await repoTrail({ id: file.repo_id, name: file.repo.split('/')[1],
+                                 account_id: file.account_id })), [file.basename]),
   );
   wrap.append(
     pageHead(
@@ -1178,7 +1232,8 @@ on('/pair/:a/:b', async ({ a, b }) => {
   const c = detail.cells;
 
   const wrap = h('div');
-  wrap.append(crumbs(['Repositories', '/repos'], [detail.repo.split('/')[1], `/repo/${detail.repo_id}`], ['Pair']));
+  wrap.append(crumbs(...(await repoTrail({ id: detail.repo_id, name: detail.repo.split('/')[1],
+                                           account_id: detail.account_id })), ['Pair']));
   wrap.append(
     pageHead(
       'Coupling breakdown',
@@ -1357,8 +1412,15 @@ function measuresTable(detail) {
 on('/dir/:id', async ({ id }) => {
   const spec = state.byKey.get(state.measure);
   const data = await api(`/api/directories/${id}/coupled`, { measure: state.measure, limit: 200 });
+  const dir = data.directory;
   const wrap = h('div');
-  wrap.append(pageHead('Directory coupling', `Ranked by ${spec ? spec.label : state.measure}`));
+  if (dir) {
+    wrap.append(crumbs(...(await repoTrail({ id: dir.repo_id, name: dir.repo,
+                                             account_id: dir.account_id })), [dir.path]));
+  }
+  wrap.append(pageHead(dir ? `${dir.path}` : 'Directory coupling',
+    dir ? `In ${dir.full_name}, ranked by ${spec ? spec.label : state.measure}`
+        : `Ranked by ${spec ? spec.label : state.measure}`));
   wrap.append(
     card(
       'Directories that change together',
@@ -2009,7 +2071,7 @@ on('/repopair/:a/:b', async ({ a, b }) => {
   const edge = partners.edges.find((e) => String(e.source_repo_id) === String(a));
 
   const wrap = h('div');
-  wrap.append(crumbs(['Impact', '/impact'], [`${repoA.name} → ${repoB.name}`]));
+  wrap.append(crumbs(...(await repoTrail(repoB)), [`depends on ${repoA.name}`]));
   wrap.append(pageHead(
     h('span', { class: 'mono' }, `${repoA.name} → ${repoB.name}`),
     'Everything known about this repository relationship',
@@ -2206,7 +2268,7 @@ on('/accounts', async () => {
   const discovered = rows.reduce((n, r) => n + Number(r.live_repo_count || 0), 0);
   wrap.append(h('div', { class: 'grid grid-stats' },
     statTile('Accounts', num(rows.length), `${num(enabled.length)} enabled`),
-    statTile('Repositories', num(discovered), 'discovered from these accounts', () => go('/repos')),
+    statTile('Repositories', num(discovered), 'across every account', () => go('/repos')),
     statTile('Never scanned', num(rows.filter((r) => !r.last_discovered_at).length), 'awaiting first discovery'),
     statTile('Failing', num(rows.filter((r) => r.last_discover_error).length), 'last discovery errored')));
 
@@ -2298,7 +2360,11 @@ on('/accounts', async () => {
           h('strong', {}, r.login),
           h('span', { class: 'badge muted', style: 'margin-left:6px' }, r.kind)) },
       { key: 'live_repo_count', label: 'Repos', num: true,
-        title: 'Repositories currently attributed to this account.' },
+        title: 'Repositories currently attributed to this account. Click to see them.',
+        render: (r) => (Number(r.live_repo_count)
+          ? h('a', { class: 'mono', href: `/repos?account=${r.id}`, 'data-nav': true,
+                     onclick: (e) => e.stopPropagation() }, num(r.live_repo_count))
+          : h('span', { class: 'muted-cell' }, '0')) },
       { key: 'filters', label: 'Filters', sortable: false, render: filterCell },
       { key: 'last_discovered_at', label: 'Last discovery', render: (r) => (
           r.last_discover_error
@@ -2314,8 +2380,10 @@ on('/accounts', async () => {
           onclick: (e) => { e.stopPropagation(); remove(r); },
         }, 'Remove') },
     ], { initialSort: 'live_repo_count',
+         onRow: (r) => (Number(r.live_repo_count) ? go(`/repos?account=${r.id}`) : null),
          empty: 'No accounts yet. Add one above and run a discovery.' }),
-    'Removing an account keeps its repositories and their mined statistics'));
+    'An account owns repositories: open one to see just those. '
+    + 'Removing an account keeps them and everything mined from them.'));
 
   return wrap;
 });
