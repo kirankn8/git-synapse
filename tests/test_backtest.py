@@ -39,6 +39,26 @@ def flat(pairs, times, repo=1):
     return [(repo, list(pairs)) for _ in range(times)]
 
 
+def worktree(tmp_path, name):
+    """A non-bare repository, since tags on branches need a working tree."""
+    work = tmp_path / name
+    work.mkdir()
+    subprocess.run(["git", "init", "--quiet", "-b", "main", str(work)], check=True, env={**os.environ, **ENV})
+    (work / "a.txt").write_text("x")
+    g(work, "add", "-A"); g(work, "commit", "--quiet", "-m", "one")
+    return work
+
+
+def g(repo, *args):
+    return subprocess.run(["git", *args], cwd=repo, check=True,
+                          env={**os.environ, **ENV}, capture_output=True, text=True)
+
+
+def add_commit(repo, name, body):
+    (repo / name).write_text(body)
+    g(repo, "add", "-A"); g(repo, "commit", "--quiet", "-m", name)
+
+
 def git(repo, *args):
     subprocess.run(["git", *args], cwd=repo, check=True,
                    capture_output=True, env={**os.environ, **ENV})
@@ -485,3 +505,62 @@ def test_the_unaided_rate_is_zero_when_nothing_was_sampled(monkeypatch):
     assert result.scores[0].unaided_prompts == 0
     assert result.scores[0].unaided_hit_rate == 0.0
     assert result.sampled == 0
+
+
+# ------------------------------------------------------- reporting edge cases
+
+def test_the_unaided_interval_is_reported_alongside_the_rate():
+    """It is the number with the smallest denominator and the one most likely
+    to be over-read, so it must carry its own interval."""
+    s = bt.Score(measure="npmi", label="npmi", prompts=100, hit_prompts=50,
+                 found=50, wanted=100, hit_rate=0.5, ci_low=0.4, ci_high=0.6,
+                 recall_at_k=0.5, precision_at_k=0.1, mrr=0.3,
+                 unaided_hits=5, unaided_prompts=20)
+    low, high = s.unaided_ci
+    assert low < 0.25 < high
+    assert (low, high) == bt.wilson(5, 20)
+
+
+def test_a_run_with_prompts_but_no_measures_says_so(monkeypatch):
+    """Scoring nothing is not the same as having no history, and reporting the
+    second when the first happened would hide a misconfigured measure list."""
+    result = bt.BacktestResult(repo_id=None, k=5, min_support=2, commits_seen=10,
+                               commits_scored=5, prompts=40)
+    assert result.best is None
+    assert result.verdict == "no measures evaluated"
+
+
+@pytest.mark.parametrize(("path", "stem"), [
+    ("test_helpers.go", "helpers"),   # a leading affix, not a trailing one
+    ("spec_runner.rb", "runner"),
+])
+def test_a_leading_test_affix_is_stripped_too(path, stem):
+    """`test_helpers.go` is the partner of `helpers.go`; only stripping
+    trailing affixes would miss half the convention."""
+    assert bt.stem_of(path) == stem
+
+
+def test_a_seed_with_no_known_path_offers_no_neighbours(monkeypatch):
+    """A file id that predates the path index must not raise mid-replay."""
+    assert bt._neighbours(seed=999, marginal={}, k=5, paths={}, by_stem={}, by_dir={}) == []
+    assert bt._same_directory(seed=999, marginal={}, k=5, paths={}, by_dir={}) == []
+
+
+def test_a_name_sibling_outranks_the_rest_of_the_directory():
+    """The test beside the source is the cheapest and most reliable guess, so
+    it has to come first rather than merely be included."""
+    paths = {1: "pkg/auth.go", 2: "pkg/auth_test.go", 3: "pkg/unrelated.go"}
+    by_stem = {"auth": [1, 2], "unrelated": [3]}
+    by_dir = {"pkg": [1, 2, 3]}
+    got = bt._neighbours(1, {2: 1, 3: 500}, 5, paths, by_stem, by_dir)
+    assert got[0] == 2, "the sibling must outrank a much busier directory-mate"
+
+
+def test_the_search_declines_a_seed_it_cannot_name(tmp_path):
+    """No usable term means no answer, rather than an answer built from noise."""
+    work = worktree(tmp_path, "unnamed")
+    g(work, "tag", "v1.0.0")
+    add_commit(work, "b.txt", "2")
+    sha = g(work, "rev-parse", "HEAD").stdout.strip()
+    # `io` is below the length floor and `main` is a stopword.
+    assert bt.agent_search(work, sha, "pkg/io.go", 5) == []

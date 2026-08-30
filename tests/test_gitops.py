@@ -686,3 +686,52 @@ def test_the_watermark_covers_every_tip_the_walk_visits(tmp_path):
     tips = gitops.ref_tips(work)
     assert release in tips, "the tag's commit must be a watermark"
     assert all(len(t) == 40 for t in tips), "annotated tags must be peeled to commits"
+
+
+def test_reading_tags_from_a_directory_that_is_not_a_repository(tmp_path):
+    """A mirror that failed to clone must not raise mid-run."""
+    assert gitops.read_tags(tmp_path / "nothing") == []
+    assert gitops.replayed_commits(tmp_path / "nothing", "main") == set()
+
+
+def test_replay_detection_declines_when_the_branch_is_unknown(tmp_path):
+    """Without a branch there is nothing to compare against, so claiming a
+    commit is a replay would be a guess."""
+    work = worktree(tmp_path, "nobranch-replay")
+    g(work, "tag", "v1.0.0")
+    assert gitops.replayed_commits(work, None) == set()
+
+
+def test_a_tag_pointing_at_a_blob_is_skipped(tmp_path):
+    """`git tag` will happily name a blob. It has no commit, so it cannot be a
+    release, and reading it as one would put a non-commit in the index."""
+    work = worktree(tmp_path, "blobtag")
+    blob = g(work, "hash-object", "-w", "--stdin").stdout if False else None
+    import subprocess as sp
+    blob = sp.run(["git", "hash-object", "-w", "--stdin"], cwd=work, input="x",
+                  capture_output=True, text=True, env=ENV, check=True).stdout.strip()
+    g(work, "tag", "blobby", blob)
+    g(work, "tag", "v1.0.0")
+
+    names = {t.name for t in gitops.read_tags(work, "main")}
+    assert "v1.0.0" in names
+    assert "blobby" not in names, "a tag naming a blob is not a release"
+
+
+def test_an_unparseable_tag_date_does_not_lose_the_tag(tmp_path, monkeypatch):
+    """The date is useful; the tag-to-commit mapping is essential. Losing the
+    second because the first was malformed would drop a real release."""
+    work = worktree(tmp_path, "baddate")
+    g(work, "tag", "v1.0.0")
+    real = gitops.run_git
+
+    def _mangle(args, **kw):
+        proc = real(args, **kw)
+        if args and args[0] == "for-each-ref":
+            proc.stdout = proc.stdout.replace("\t2", "\tnot-a-date", 1) \
+                if "\t2" in proc.stdout else proc.stdout
+        return proc
+
+    monkeypatch.setattr(gitops, "run_git", _mangle)
+    tags = gitops.read_tags(work, "main")
+    assert [t.name for t in tags] == ["v1.0.0"]

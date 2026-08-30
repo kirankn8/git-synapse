@@ -525,9 +525,11 @@ def read_tags(path: Path, default_branch: str | None = None) -> list[Tag]:
     annotated tag and the committer's otherwise -- which is the date a release
     was actually cut.
     """
+    if not path.is_dir():
+        return []
     proc = run_git(
         ["for-each-ref", "--format=%(refname:short)\t%(objecttype)\t%(objectname)"
-         "\t%(*objectname)\t%(creatordate:iso-strict)", "refs/tags"],
+         "\t%(*objectname)\t%(*objecttype)\t%(creatordate:iso-strict)", "refs/tags"],
         cwd=path, check=False, timeout=300,
     )
     if proc.returncode != 0:
@@ -536,9 +538,15 @@ def read_tags(path: Path, default_branch: str | None = None) -> list[Tag]:
     tags: list[Tag] = []
     for line in proc.stdout.splitlines():
         parts = line.split("\t")
-        if len(parts) != 5:
+        if len(parts) != 6:
             continue
-        name, kind, obj, peeled, when = parts
+        name, kind, obj, peeled, peeled_kind, when = parts
+        # `git tag` will name a blob or a tree as readily as a commit, and their
+        # object ids are forty hex characters too -- so the shape check below
+        # cannot tell them apart. Such a tag is not a release: it resolves to no
+        # commit, and indexing it puts a non-commit in the version index.
+        if (peeled_kind or kind) != "commit":
+            continue
         sha = peeled or obj
         if len(sha) != 40 or not all(c in "0123456789abcdef" for c in sha):
             continue
@@ -602,7 +610,7 @@ def replayed_commits(path: Path, branch: str | None) -> set[str]:
     Only the divergent commits are compared, so the cost follows how much lives
     off the branch rather than the size of the history.
     """
-    if not branch:
+    if not branch or not path.is_dir():
         return set()
     proc = run_git(["for-each-ref", "--format=%(objectname)", "refs/tags"],
                    cwd=path, check=False, timeout=120)
