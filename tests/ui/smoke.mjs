@@ -88,6 +88,8 @@ const routes = [
   ['#/',                                  'Overview'],
   ['#/repos',                             'Repositories'],
   ['#/accounts',                          'Accounts'],
+  ['#/crossrepo',                         'Retired route explains itself'],
+  ['#/validation',                        'Retired route explains itself (lag)'],
   [`#/repo/${repoId}`,                    'Repo overview'],
   [`#/repo/${repoId}?tab=pairs`,          'Repo pairs'],
   [`#/repo/${repoId}?tab=files`,          'Repo files'],
