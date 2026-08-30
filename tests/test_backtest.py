@@ -655,23 +655,62 @@ def test_the_path_index_groups_by_stem_and_by_directory(seeded, monkeypatch):
 
 def test_the_search_scores_a_filename_match_without_reading_the_file(tmp_path):
     """The `.*` half of an agent's query: a file whose *name* shares a concept
-    is a candidate even when it mentions none of the seed's symbols, and that
-    is what reaches across directories and languages."""
+    is a candidate even when it mentions none of the seed's symbols, which is
+    what reaches across directories and languages."""
     work = worktree(tmp_path, "byname")
-    add_commit(work, "config_loader.py", "def load(): pass\n")
-    g(work, "checkout", "-q", "-b", "x")
-    (work / "docs").mkdir()
-    (work / "docs" / "config_loader.md").write_text("prose about nothing\n")
-    g(work, "add", "-A"); g(work, "commit", "--quiet", "-m", "docs")
-    g(work, "checkout", "-q", "main")
-    add_commit(work, "unrelated.py", "x = 1\n")
+    (work / "web").mkdir()
+    (work / "invoice_loader.py").write_text("def load(): return 1\n")
+    # Shares the concept in its name and mentions nothing from the seed. Note
+    # `config` would not do here: it is a stopword, because a term appearing in
+    # half a repository's files selects nothing.
+    (work / "web" / "invoice_renderer.py").write_text("# unrelated contents\n")
+    (work / "web" / "unrelated.py").write_text("x = 1\n")
+    g(work, "add", "-A"); g(work, "commit", "--quiet", "-m", "layout")
+    add_commit(work, "later.py", "y = 2\n")
     sha = g(work, "rev-parse", "HEAD").stdout.strip()
 
-    found = bt.agent_search(work, sha, "config_loader.py", 5)
-    assert isinstance(found, list)
+    found = bt.agent_search(work, sha, "invoice_loader.py", 5)
+    assert "web/invoice_renderer.py" in found
+    assert "web/unrelated.py" not in found
+
+
+def test_the_search_widens_using_what_the_first_round_returned(tmp_path):
+    """The read-a-result-and-search-again step. Without it the search stops at
+    files that mention the seed, and never reaches what those files pull in."""
+    work = worktree(tmp_path, "widen")
+    (work / "parser.py").write_text("class ParseTree:\n    pass\n")
+    # Found in round one: it mentions the seed's symbol.
+    (work / "treewalker.py").write_text("from parser import ParseTree\n")
+    # Reachable only in round two, via `treewalker`'s own name.
+    (work / "helpers.py").write_text("# see treewalker for details\n")
+    g(work, "add", "-A"); g(work, "commit", "--quiet", "-m", "layout")
+    add_commit(work, "later.py", "y = 2\n")
+    sha = g(work, "rev-parse", "HEAD").stdout.strip()
+
+    found = bt.agent_search(work, sha, "parser.py", 5)
+    assert "treewalker.py" in found, "round one must find the caller"
+    assert "helpers.py" in found, "round two must follow what round one returned"
 
 
 def test_grepping_for_no_terms_asks_git_nothing(tmp_path):
     """An empty alternation would match every line in the repository."""
     work = worktree(tmp_path, "noterms")
     assert bt._grep_terms(str(work), "HEAD", []) == {}
+
+
+def test_grep_output_that_is_not_for_this_commit_is_ignored(tmp_path, monkeypatch):
+    """`git grep` prefixes every line with the revision. A line without it did
+    not come from the tree being searched."""
+    work = worktree(tmp_path, "prefix")
+    add_commit(work, "auth.py", "def check(): pass\n")
+    sha = g(work, "rev-parse", "HEAD").stdout.strip()
+    monkeypatch.setattr(bt, "_git", lambda *a, **k: "stray line with no revision\n")
+    assert bt._grep_terms(str(work), sha, ["check"]) == {}
+
+
+def test_a_commit_touching_one_file_yields_no_prompt(monkeypatch):
+    """There is no "what else" when nothing else changed, and counting it as a
+    miss would punish every measure for a question never asked."""
+    history = flat([1, 2], bt.WARMUP_COMMITS) + [(1, [1, 1])]   # one distinct file
+    before = replay(monkeypatch, flat([1, 2], bt.WARMUP_COMMITS), measures=("npmi",)).prompts
+    assert replay(monkeypatch, history, measures=("npmi",)).prompts == before

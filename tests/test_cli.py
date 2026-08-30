@@ -790,3 +790,65 @@ def test_status_without_any_runs_still_shows_the_corpus(monkeypatch):
     r = runner.invoke(app, ["status"])
     assert r.exit_code == 0
     assert "commits" in " ".join(r.stdout.split())
+
+
+def test_backtest_scopes_to_a_named_repository(monkeypatch):
+    from git_synapse.analysis import backtest as bt
+
+    seen = {}
+    monkeypatch.setattr("git_synapse.cli.query", lambda *a, **k: [{"id": 42}])
+    monkeypatch.setattr(bt, "run", lambda repo_id, *a, **k: (
+        seen.setdefault("repo_id", repo_id),
+        bt.BacktestResult(repo_id=repo_id, k=5, min_support=2, commits_seen=0,
+                          commits_scored=0, prompts=0))[1])
+    runner.invoke(app, ["backtest", "--repo", "guava"])
+    assert seen["repo_id"] == 42
+
+
+def test_backtest_prints_the_unaided_line_and_the_interval_caveat(monkeypatch):
+    """Below the verdict threshold the run says so, and the unaided figure --
+    the smallest denominator in the table -- carries its own interval."""
+    from git_synapse.analysis import backtest as bt
+
+    base = bt.Score(measure="neighbours", label="Apprentice -- test then folder",
+                    prompts=10, hit_prompts=5, found=5, wanted=10, hit_rate=0.5,
+                    ci_low=0.2, ci_high=0.8, recall_at_k=0.5, precision_at_k=0.1,
+                    mrr=0.0)
+    sampled = bt.Score(measure=bt.SAMPLED_BASELINE, label="New Hire (n=8)",
+                       prompts=8, hit_prompts=4, found=4, wanted=8, hit_rate=0.5,
+                       ci_low=0.2, ci_high=0.8, recall_at_k=0.5,
+                       precision_at_k=0.1, mrr=0.0)
+    ours = bt.Score(measure="confidence_ab", label="Confidence", prompts=10,
+                    hit_prompts=8, found=8, wanted=10, hit_rate=0.8, ci_low=0.5,
+                    ci_high=0.95, recall_at_k=0.8, precision_at_k=0.16, mrr=0.7,
+                    lift=1.6, unaided_hits=2, unaided_prompts=4)
+    monkeypatch.setattr(bt, "run", lambda *a, **k: bt.BacktestResult(
+        repo_id=None, k=5, min_support=2, commits_seen=20, commits_scored=10,
+        prompts=10, baselines=[base, sampled], scores=[ours]))
+
+    r = runner.invoke(app, ["backtest"])
+    flat = " ".join(r.stdout.split())
+    assert "neither the free rules nor the New Hire" in flat
+    assert "indicative only" in flat or "intervals assume" in flat.lower()
+
+
+def test_adding_an_account_says_what_to_run_next(db, monkeypatch):
+    """Adding one scans nothing by itself, and leaving that unsaid reads as a
+    silent failure."""
+    from git_synapse.ingest import accounts
+
+    row = _account(login="fresh")
+    monkeypatch.setattr(accounts, "add_account", lambda *a, **k: row)
+    r = runner.invoke(app, ["account", "add", "fresh"])
+    assert r.exit_code == 0
+    assert "discover" in " ".join(r.stdout.split())
+
+
+def test_enabling_an_account_shows_its_new_state(db, monkeypatch):
+    from git_synapse.ingest import accounts
+
+    monkeypatch.setattr(accounts, "update_account",
+                        lambda *a, **k: _account(login="toggled", enabled=False))
+    r = runner.invoke(app, ["account", "enable", "1", "--off"])
+    assert r.exit_code == 0
+    assert "toggled" in " ".join(r.stdout.split())

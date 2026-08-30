@@ -598,3 +598,22 @@ def test_a_deleted_account_keeps_its_repositories(no_accounts):
         # `repo` -- one of which dereferences clone_url and fails on the None
         # this record has.
         execute("DELETE FROM repo WHERE id = %s", (repo_id,))
+
+
+def test_updating_an_account_to_a_taken_login_is_a_conflict(client):
+    """409, not 500: the request was well-formed and the caller can fix it."""
+    from git_synapse.ingest import accounts
+
+    first = accounts.add_account("apione")
+    second = accounts.add_account("apitwo")
+    try:
+        r = client.patch(f"/api/accounts/{second['id']}", json={"login": "apione"})
+        assert r.status_code == 409
+        assert "already configured" in r.json()["detail"]
+    finally:
+        accounts.remove_account(first["id"])
+        accounts.remove_account(second["id"])
+
+
+def test_a_run_that_does_not_exist_is_a_404(client):
+    assert client.get("/api/runs/-1").status_code == 404

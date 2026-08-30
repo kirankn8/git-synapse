@@ -286,3 +286,29 @@ http_archive(
 '''
     got = M.parse_pinned_refs(text)
     assert any(name == "com_google_absl" for name, _ in got)
+
+
+@pytest.mark.parametrize("raw", ["<", ">=", "^"])
+def test_a_comparator_with_no_version_bounds_nothing(raw):
+    """`>=` on its own is a truncated constraint, not a floor of zero."""
+    assert M.bounds(raw) == (None, None)
+
+
+def test_a_pom_without_an_artifact_publishes_nothing():
+    """`groupId` alone does not name a package, and inventing one from it would
+    claim this repository publishes something it does not."""
+    assert M.published_names("pom.xml", "<project><groupId>com.acme</groupId></project>") == []
+
+
+def test_yaml_that_is_not_a_mapping_is_not_a_manifest():
+    """A workflow file that parses to a list has no dependency block, and
+    treating its entries as packages invents them."""
+    assert M.references("pnpm-lock.yaml", "- one\n- two\n") == []
+
+
+def test_a_nested_dependency_table_is_walked(monkeypatch):
+    """Cargo writes `serde = { version = "1.0", features = [...] }`; reading only
+    the string form would miss every dependency that carries options."""
+    toml = '[dependencies]\nserde = { version = "1.0.188", features = ["derive"] }\n'
+    names = {r.name: r.raw for r in M.references("Cargo.toml", toml)}
+    assert names.get("serde") == "1.0.188"
