@@ -161,13 +161,13 @@ class BacktestResult:
             return (f"indicative only: {self.prompts} prompts is below the "
                     f"{MIN_PROMPTS_FOR_A_VERDICT} needed to separate measures")
         rung = self.baseline.label.split(" --")[0]
-        tail = (f"; on the {best.hard_prompts:,} prompts the Apprentice missed, "
-                f"the Veteran still answers {best.hard_hit_rate:.1%}")
+        tail = (f"; on the {best.hard_prompts:,} prompts the free rules missed, "
+                f"it still answers {best.hard_hit_rate:.1%}")
         if best.ci_low <= self.baseline.hit_rate:
-            return (f"the Veteran ({best.hit_rate:.1%}) does not beat the "
+            return (f"{best.measure} ({best.hit_rate:.1%}) does not beat the "
                     f"{rung} ({self.baseline.hit_rate:.1%}) by more than noise"
                     + tail)
-        return (f"the Veteran on {best.measure} hits {best.hit_rate:.1%} vs "
+        return (f"{best.measure} hits {best.hit_rate:.1%} vs "
                 f"{self.baseline.hit_rate:.1%} for the {rung} "
                 f"({best.lift:.2f}x)" + tail)
 
@@ -573,10 +573,10 @@ def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE
         totals[repo] += 1
 
     n = prompts or 1
-    # Each baseline is a person who could answer this question, ordered by how
-    # much of the codebase they have actually seen. The point of the ladder is
-    # that every rung is free -- none of them needs history -- so whatever the
-    # Veteran adds on top has to come from the commit log and nowhere else.
+    # Each baseline is a person who could answer this question without any
+    # history, nicknamed by how much of the codebase they have seen. Every rung
+    # is free, so whatever Git Synapse adds on top of the highest one has to
+    # have come from the commit log and nowhere else.
     labels = {"neighbours": "Apprentice -- the file's test, then its folder",
               "same directory": "Intern -- the file's folder-mates, busiest first",
               "popularity": "Tourist -- the repository's busiest files"}
