@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Move each new commit's date to the nearest weekend.
+
+Runs after the commit is written and amends it in place, because a hook cannot
+set GIT_AUTHOR_DATE for the commit that is invoking it -- the environment it
+exports dies with the hook process. Amending is safe here: the commit is local
+and unpushed by definition at this point.
+
+Ties (a Wednesday is equidistant) go to the preceding weekend, and a weekend
+that would land in the future is pulled back to the preceding one, so a commit
+is never dated later than the moment it was actually made.
+
+Install with `make hooks-install`. Bypass once with GIT_SYNAPSE_NO_WEEKEND=1.
+"""
+
+import datetime as dt
+import os
+import subprocess
+import sys
+
+GUARD = "GIT_SYNAPSE_WEEKEND_HOOK"
+
+
+def nearest_weekend(when: dt.datetime, now: dt.datetime) -> dt.datetime:
+    """The nearest Saturday or Sunday, never later than `now`."""
+    if when.weekday() >= 5:
+        return when
+
+    candidates = []
+    for delta in range(-7, 8):
+        day = when + dt.timedelta(days=delta)
+        if day.weekday() >= 5:
+            # Sort key: distance first, then prefer the earlier date so a tie
+            # resolves backwards rather than into the future.
+            candidates.append((abs(delta), delta > 0, delta, day))
+    candidates.sort()
+
+    for _, _, _, day in candidates:
+        if day <= now:
+            return day
+    return when
+
+
+def main() -> int:
+    # The amend below re-enters this hook; without the guard it never settles.
+    if os.environ.get(GUARD) or os.environ.get("GIT_SYNAPSE_NO_WEEKEND"):
+        return 0
+    # A rebase or cherry-pick replays existing commits; their dates were already
+    # settled and rewriting them here would fight the operation in progress.
+    git_dir = subprocess.run(["git", "rev-parse", "--git-dir"], capture_output=True,
+                             text=True).stdout.strip()
+    for marker in ("rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
+        if os.path.exists(os.path.join(git_dir, marker)):
+            return 0
+
+    raw = subprocess.run(["git", "log", "-1", "--format=%aI"], capture_output=True,
+                         text=True).stdout.strip()
+    if not raw:
+        return 0
+    authored = dt.datetime.fromisoformat(raw)
+    now = dt.datetime.now(authored.tzinfo)
+
+    moved = nearest_weekend(authored, now)
+    if moved == authored:
+        return 0
+
+    stamp = moved.strftime("%Y-%m-%dT%H:%M:%S%z")
+    env = {**os.environ, GUARD: "1", "GIT_COMMITTER_DATE": stamp}
+    result = subprocess.run(
+        ["git", "commit", "--amend", "--no-edit", "--no-verify", "--date", stamp],
+        env=env, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"weekend-date hook: could not amend ({result.stderr.strip()})", file=sys.stderr)
+        return 0  # never block a commit that already succeeded
+
+    print(f"weekend-date: {authored:%a %d %b %H:%M} -> {moved:%a %d %b %H:%M}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

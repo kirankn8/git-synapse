@@ -1,11 +1,39 @@
+<div align="center">
+
+<img src="web/static/favicon.svg" alt="Git Synapse" width="92" height="92">
+
 # Git Synapse
 
-**Change-coupling statistics over git history, so coding agents know what else must change.**
+**Change-coupling statistics over git history —<br>so coding agents know what else must change.**
 
-When you edit `resource_cluster_aws.go`, history says `resource_cluster_gcp.go` changes
-too — 74% of the time, across 49 shared commits. Git Synapse computes that from the commit
-history of an entire GitHub organisation and serves it to coding agents over MCP, to
-humans over an interactive web UI, and to scripts over REST.
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-compose-2496ED?style=flat-square&logo=docker&logoColor=white)
+![MCP](https://img.shields.io/badge/MCP-12%20tools-5eead4?style=flat-square)
+![Measures](https://img.shields.io/badge/measures-29-a78bfa?style=flat-square)
+
+</div>
+
+> When you edit `resource_cluster_aws.go`, history says `resource_cluster_gcp.go` changes
+> too — **74% of the time, across 49 shared commits.**
+
+Git Synapse computes that from the commit history of an entire GitHub organisation and
+serves it to coding agents over **MCP**, to humans over an **interactive web UI**, and to
+scripts over **REST**.
+
+It never parses your code. The atomic fact is *this commit touched this file*, and
+everything else is derived from it — which is why it works on any language, in any
+repository, with no per-language support to add.
+
+### Contents
+
+| | |
+|---|---|
+| [What it does](#what-it-does) · [The 29 measures](#the-29-measures) | the idea, and the statistics behind it |
+| [Quick start](#quick-start) · [Which repositories get scanned](#which-repositories-get-scanned) | running it |
+| [How it works](#how-it-works) · [What is incremental](#what-is-incremental-and-what-isnt) | the design |
+| [Using it from a coding agent](#using-it-from-a-coding-agent-mcp) · [The web UI](#the-web-ui) | the interfaces |
+| [CLI](#cli) · [Configuration](#configuration) · [Development](#development) | operating it |
 
 ---
 
@@ -566,12 +594,42 @@ $ docker compose run --rm cli coupled terraform-provider-acme \
 | Target | Purpose |
 |---|---|
 | `make skills-install` / `-uninstall` | Symlink `skills/git-synapse-mcp` into `~/.claude/skills` |
+| `make hooks-install` / `-uninstall` | Date every new commit to the nearest weekend ([below](#weekend-commit-dates)) |
 | `make hostname-install` / `-uninstall` | Map / unmap `http://git-synapse` in `/etc/hosts` |
 | `make daemon-install` / `-uninstall` | Install / remove the macOS LaunchAgent |
 | `make daemon-status` | Agent state, daemon log tail, next scheduled runs |
 | `make logs` | Tail all service logs |
 | `make psql` | Open a psql shell |
 | `make nuke` | Stop everything and delete the database and mirrors |
+
+### Weekend commit dates
+
+`make hooks-install` points `core.hooksPath` at `scripts/hooks`, whose
+`post-commit` hook re-dates each new commit to the nearest weekend. Commit on a
+Wednesday afternoon and it lands on the preceding Sunday, same clock time; both
+the author and committer dates move together.
+
+| You commit | It is dated |
+|---|---|
+| Mon / Tue / Wed | the preceding Sunday |
+| Thu / Fri | the preceding Sunday |
+| Sat / Sun | unchanged |
+
+A hook cannot set `GIT_AUTHOR_DATE` for the commit that invoked it — the
+environment it exports dies with the hook process — so it amends instead. That is
+safe because the commit is local and unpushed at that point, and it means the
+date is settled before a push ever happens: **when you push makes no difference.**
+
+Two details worth knowing:
+
+- **Never the future.** Thursday's *nearest* weekend is the coming Saturday, but
+  dating a commit ahead of the moment it was made is worse than moving it further,
+  so the hook falls back to the preceding weekend.
+- **Replays are left alone.** During a rebase, cherry-pick or revert the hook
+  exits immediately; those commits already have settled dates.
+
+Skip it for one commit with `GIT_SYNAPSE_NO_WEEKEND=1 git commit ...`, or turn it
+off entirely with `make hooks-uninstall`. Neither changes existing history.
 
 ## Configuration
 
