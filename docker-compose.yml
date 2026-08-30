@@ -38,6 +38,13 @@ x-app-env: &app-env
   RECENCY_HALF_LIFE_DAYS: ${RECENCY_HALF_LIFE_DAYS:-365}
   DEFAULT_QUERY_LIMIT: ${DEFAULT_QUERY_LIMIT:-50}
   MAX_QUERY_LIMIT: ${MAX_QUERY_LIMIT:-1000}
+  # Shared, not the scheduler's alone: /api/config reports the schedule and the
+  # Jobs page displays it, so the API has to see the same value the scheduler
+  # runs on. Declared only on the scheduler, the API fell back to the built-in
+  # default and told the reader a cadence nothing was using.
+  REFRESH_CRON: ${REFRESH_CRON:-0 * * * *}
+  DISCOVER_CRON: ${DISCOVER_CRON:-0 3 * * *}
+  SCHEDULER_TZ: ${SCHEDULER_TZ:-UTC}
   MIRROR_ROOT: /data/mirrors
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
@@ -128,9 +135,6 @@ services:
     environment:
       <<: *app-env
       SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
-      REFRESH_CRON: ${REFRESH_CRON:-*/15 * * * *}
-      DISCOVER_CRON: ${DISCOVER_CRON:-0 3 * * *}
-      SCHEDULER_TZ: ${SCHEDULER_TZ:-UTC}
       REFRESH_ON_START: ${REFRESH_ON_START:-false}
     command: python -m git_synapse.scheduler.main
     # No HTTP surface, so the image's default healthcheck does not apply.

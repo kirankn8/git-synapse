@@ -369,15 +369,19 @@ containers: restored and healthy in 8 seconds.
 
 | Tier | Default | What it does |
 |---|---|---|
-| **fast** (`REFRESH_CRON`) | `*/15 * * * *` | Fetch known repos, rebuild whatever moved. ~60 s. No GitHub API calls. |
+| **fast** (`REFRESH_CRON`) | `0 * * * *` | Fetch known repos, rebuild whatever moved. No GitHub API calls. |
 | **discovery** (`DISCOVER_CRON`) | `0 3 * * *` | Additionally re-list the org to pick up new, renamed or archived repos. |
 
 Split because the two halves cost very differently: the fast tier is almost
-entirely git fetches, while discovery is the only part that spends API quota — and
-new repositories do not appear every quarter hour. A tick is skipped outright if
-the previous one is still running, so a slow run can never overlap the next.
+entirely git fetches, while discovery is the only part that spends API quota —
+and new repositories do not appear hourly. A tick is skipped outright if the
+previous one is still running, so a slow run can never overlap the next.
 
-Set `REFRESH_CRON=*/5 * * * *` for near-real-time, or `0 * * * *` to be gentler.
+Hourly because a run re-fetches every mirror and rewrites the pair tables:
+measured at 683–1662 s over 163 repositories, so a quarter-hourly tick spent
+most of its time overlapping itself to pick up a handful of commits. Set
+`REFRESH_CRON=*/15 * * * *` if you want it snappier — nothing assumes the
+interval, and the misfire grace is derived from it rather than fixed.
 
 ### Measured on a 272-repository organisation
 

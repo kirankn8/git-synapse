@@ -59,6 +59,26 @@ def refresh(trigger: str = "schedule", discover: bool = False) -> None:
         _run_lock.release()
 
 
+def _grace_for(trigger, timezone: str, floor: int = 600) -> int:
+    """How late a tick may be and still be worth running.
+
+    Half the configured interval: late enough to survive a slow start, early
+    enough that a tick is dropped rather than colliding with the next. This was
+    a fixed 600s, justified by "the next one is imminent anyway" -- true when
+    the cron fired quarterly-hourly, false once it is hourly, where dropping a
+    tick costs a full hour. Derived from the trigger so it follows whatever
+    REFRESH_CRON is set to, rather than assuming an interval.
+    """
+    now = datetime.now(ZoneInfo(timezone))
+    first = trigger.get_next_fire_time(None, now)
+    if first is None:
+        return floor
+    second = trigger.get_next_fire_time(first, first)
+    if second is None:
+        return floor
+    return max(floor, int((second - first).total_seconds() // 2))
+
+
 def main() -> int:
     cfg = get_config()
     logging.basicConfig(
@@ -86,9 +106,7 @@ def main() -> int:
         name="incremental repository refresh",
         max_instances=1,
         coalesce=True,          # collapse missed ticks into one
-        # Short grace on the fast tier: a tick more than one interval late is
-        # better dropped than run, because the next one is imminent anyway.
-        misfire_grace_time=600,
+        misfire_grace_time=_grace_for(fast, cfg.schedule.timezone),
     )
 
     slow = CronTrigger.from_crontab(
