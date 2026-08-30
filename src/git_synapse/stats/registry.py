@@ -627,10 +627,14 @@ CORE_KEYS: tuple[str, ...] = tuple(
 ALL_KEYS: tuple[str, ...] = tuple(spec.key for spec in MEASURES)
 
 #: Sensible default when a caller does not name a measure.
-#: Chosen by measurement, not taste. Backtested over 94,872 commits in six
-#: public repositories (168,620 prompts), P(B|A) ranked first in every one, at
-#: 1.24x-3.88x the popularity baseline; npmi, the previous default, came fourth
-#: to ninth and lost outright on flask (0.84x). See `git-synapse backtest`.
+#: Chosen by measurement, not taste, and the claim is narrower than it once was.
+#: Backtested over 212,269 commits across six organisations and six languages,
+#: P(B|A) ranks first among the measures on every corpus tried. Against the
+#: hardest free baseline -- the file's test, then its folder -- that is 1.18x
+#: corpus-wide, not the 1.6x-3.9x once quoted here: those figures were measured
+#: against "the repository's busiest files", which nobody has ever used to
+#: decide what to open. On a meticulously organised codebase the free rule wins
+#: outright. See `git-synapse backtest`.
 #:
 #: The result is principled rather than lucky: "what else must change" asks for
 #: the probability B changes given A did, which is exactly what this computes.

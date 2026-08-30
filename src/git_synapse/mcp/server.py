@@ -271,9 +271,13 @@ def coupled_files(
         repo: repository name, either ``name`` or ``owner/name``.
         path: file path relative to the repository root. Renamed paths resolve
             through the alias table, so an old path still works.
-        measure: which association measure ranks the results. ``npmi`` is a good
-            default; ``log_likelihood_ratio`` favours statistical confidence;
-            ``confidence_ab`` favours directional predictability.
+        measure: which association measure ranks the results. Leave it unset
+            unless you have a reason: the default is ``confidence_ab``, the only
+            one chosen by backtest rather than by taste, and it asks exactly
+            what this tool is for -- given A changed, how often did B? The
+            symmetric measures (``npmi``, ``jaccard``, ``log_likelihood_ratio``)
+            answer "is this association surprising", which is a better question
+            for exploring a codebase and a worse one for predicting a change.
         limit: maximum partners to return.
         min_support: ignore partners sharing fewer than this many commits. Raise
             it to suppress coincidental pairs.
@@ -788,7 +792,7 @@ def _impact_row(row: dict, name: str) -> dict:
     ),
 )
 def coupled_directories(
-    repo: str, path: str, limit: int = 15, measure: str = "npmi"
+    repo: str, path: str, limit: int = 15, measure: str = DEFAULT_MEASURE
 ) -> dict:
     """Directories that historically change together with this one.
 
