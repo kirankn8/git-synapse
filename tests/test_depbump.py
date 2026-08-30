@@ -545,11 +545,15 @@ def test_what_a_repository_publishes_beats_a_name_that_merely_matches():
     else. A declaration outranks the coincidence."""
     by_full = {("acme", "utils"): 1}
     by_name = {"utils": 1}
-    claimed = {("cargo", "utils"): 7}
-    assert resolve_repo("utils", by_full, by_name, claimed, "cargo") == 7
-    # The same name in another ecosystem is a different package entirely.
-    assert resolve_repo("utils", by_full, by_name, claimed, "npm") == 1
-    assert resolve_repo("utils", by_full, by_name, {}, "cargo") == 1
+    claimed = {("rust", "utils"): 7}
+    assert resolve_repo("utils", by_full, by_name, claimed, "rust") == 7
+    # The same name in another ecosystem is a different package entirely, and
+    # with nothing claiming it there is no repository to resolve to: a registry
+    # coordinate is not a repository path.
+    assert resolve_repo("utils", by_full, by_name, claimed, "npm") is None
+    assert resolve_repo("utils", by_full, by_name, {}, "rust") is None
+    # Go names a repository outright, so there the name is the answer.
+    assert resolve_repo("github.com/acme/utils", by_full, by_name, {}, "go") == 1
 
 
 def test_a_coordinate_two_repositories_claim_resolves_to_neither():
@@ -716,3 +720,36 @@ def test_only_the_line_that_moved_is_recorded_as_a_bump(tmp_path):
     assert ("one", "v1.1.0") in moved
     assert ("two", "v2.0.0") in moved          # its first sighting
     assert moved.count(("two", "v2.0.0")) == 1, "an unchanged line is not a second bump"
+
+
+# ----------------------------------- a registry coordinate is not a repo path
+
+@pytest.mark.parametrize(("ecosystem", "resolves"), [
+    ("go", True),          # a module path is host/owner/repo
+    ("actions", True),     # an action is owner/repo
+    ("npm", False),        # a bare registry name owns nothing
+    ("java", False),
+    ("rust", False),
+    ("php", False),
+])
+def test_a_bare_name_resolves_only_where_the_name_is_a_repository(ecosystem, resolves):
+    """npm's `uuid` is not google/uuid, which is a Go library, and npm's `bytes`
+    is not tokio-rs/bytes, which is a Rust crate. Both became edges, and both
+    resolved to no commit only because the versions could never match -- luck
+    rather than a guard."""
+    by_full, by_name = {("google", "uuid"): 7}, {"uuid": 7}
+    got = resolve_repo("uuid", by_full, by_name, {}, ecosystem)
+    assert (got == 7) is resolves
+
+
+def test_a_repository_that_declares_the_name_resolves_in_any_ecosystem():
+    """The guard applies to guessing, not to a declaration. A repository whose
+    own manifest says it publishes `uuid` for npm still answers for it."""
+    claimed = {("npm", "uuid"): 42}
+    assert resolve_repo("uuid", {}, {"uuid": 7}, claimed, "npm") == 42
+
+
+def test_an_unknown_ecosystem_keeps_the_old_behaviour():
+    """Callers that cannot say which ecosystem they are in are not punished for
+    it; the guard needs to know what it is guarding."""
+    assert resolve_repo("uuid", {("google", "uuid"): 7}, {"uuid": 7}, {}, "") == 7
