@@ -56,8 +56,8 @@ coupling at three levels:
 | Level | Question | Unit of co-occurrence |
 |---|---|---|
 | **File** | "I'm editing `auth.go`, what else?" | the same commit |
-| **Cross-repo** | "I'm changing `runtime`, where does this really belong?" | the same *change set* |
-| **Transitive** | "does `signer` reach `runtime`, and how?" | composed path over validated edges |
+| **Cross-repo** | "I'm changing `runtime`, where does this really belong?" | a declared dependency |
+| **Transitive** | "does `signer` reach `runtime`, and how?" | composed path over declared edges |
 
 ### The 29 measures
 
@@ -78,8 +78,9 @@ Plus two directional extras — `P(B|A)` and `P(A|B)` — which are not symmetri
 are usually the most actionable numbers of all.
 
 The same 31 columns are computed at every level, because widening the unit of
-co-occurrence is all that changes. Swap *commit* for *change set* and the whole
-measure registry applies to cross-repo coupling untouched.
+co-occurrence is all that changes. Cross-repository relationships do not use them
+at all: they come from what a manifest declares, which is provable rather than
+inferred.
 
 **They disagree, and that is the point.** On a real repository, ranked by each:
 
@@ -294,18 +295,14 @@ Set `REFRESH_CRON=*/5 * * * *` for near-real-time, or `0 * * * *` to be gentler.
 | Atomic `(commit × file)` facts | 4,274,784 |
 | Files tracked | 1,177,848 (124,774 renames followed) |
 | File coupling pairs scored | 1,629,560 × 31 measures |
-| Change sets | 122,062 (20,580 ticket-linked) |
-| Cross-repo pairs | 1,120 repo-level, 57,918 file-level |
-| Directed lagged rows | 260,817 (266 repos × 21,326 bins × 8 lags) |
-| Manifest-bump ground truth | 6,388 edges, 4,074 resolved to an exact commit |
-| Impact edges | 532 (125 declared, 215 bump-backed) |
-| De-facto modules | 4,394 (1,389 cross-directory) |
+|||| Manifest-bump ground truth | 6,388 edges, 4,074 resolved to an exact commit |
+| Declared dependency edges | 532 across 29 ecosystems |
+|| De-facto modules | 4,394 (1,389 cross-directory) |
 | Risk-scored files | 1,147,836 |
 | Mirrors on disk | 11.1 GB |
 | Database | 8.5 GB |
 | API latency | 10–70 ms typical, 220 ms worst |
-| Prediction quality | **AUC 0.88** in sample within the declared candidate set; **0.69** held out in time |
-
+|
 ---
 
 ## How it works
@@ -385,7 +382,6 @@ Or run it as a subprocess over stdio:
 | `upstream_repos` | **The one that prevents incomplete changes.** Repos whose changes *precede* this one — where a fix may actually belong. |
 | `impact_of_change` | The forward direction: what a change here forces others to update. |
 | `coupling_chain` | Multi-hop paths, e.g. `signer → packager → runtime`, with composed confidence. |
-| `crossrepo_files` | Which specific file in another repo goes with this one. |
 | `explain_repo_pair` | Declared status, every observed bump with exact upstream commits, propagation lag. |
 | `list_repositories` | What is in the corpus. |
 | `list_measures` | The catalogue, with caveats on each measure. |
@@ -431,10 +427,8 @@ survives a refresh. Everything is clickable; every table sorts on every column.
 | **File** | Ranked partners with directional probabilities, history, authors. |
 | **Pair** | The 2×2 table as a grid, all 29 measures with bars, and the commits behind them. |
 | **Impact** | Upstream/downstream per repo with evidence tiers, transitive chains, declared deps and observed bumps. |
-| **Repo pair** | **Directional lag profile** — two curves whose gap *is* the directional evidence — plus shared change sets. |
-| **Cross-repo** | Repo-level and file-level coupling, ticket-backed ratios, recent change sets. |
+| **Cross-repo** | The declared dependency graph: who depends on whom, with bump history. |
 | **Insights** | Risk & bus factor, coupling drift (emerging vs decaying), de-facto modules. |
-| **Validation** | AUC / precision / directional accuracy per measure, against manifest-bump ground truth. |
 | **Graph** | Force-directed coupling network, at file level or repository level. |
 | **Measures** | The catalogue with formula, guidance and caveats. |
 
@@ -461,14 +455,11 @@ docker compose run --rm cli <command>
 | `measures` | Print the catalogue. |
 | `status` | Corpus summary and recent runs. |
 | `reset --yes` | Drop ingested data, keep the schema and the mirrors. |
-| `crossrepo` | Rebuild change sets, repo pairs and cross-repo file pairs. |
 | `depbump` | Extract manifest-bump edges; prints observed propagation lags. |
-| `lagged` | Compute directed, time-lagged coupling. |
 | `impact REPO` | What else to look at when changing a repo (`-d upstream\|downstream`). |
 | `chains REPO` | Transitive coupling chains. |
 | `xcoupled REPO` | Which other repositories change together with this one. |
 | `mine` | Rebuild de-facto modules, coupling drift and file risk. |
-| `validate` | Measure quality against manifest-bump ground truth. |
 | `backtest` | Replay history and report whether the suggestions would have helped. |
 
 ```
@@ -540,15 +531,11 @@ The ones that change the numbers:
 | `RECENCY_HALF_LIFE_DAYS` | 365 | Half-life for the recency-weighted `w_ab`. |
 | `REFRESH_CRON` | `0 3 * * *` | Daily refresh schedule. |
 | `INGEST_CONCURRENCY` | 8 | Repositories processed in parallel. |
-| `SESSION_GAP_HOURS` | 4 | Commits by one author within this gap form one change set. |
-| `TICKET_PATTERN` | JIRA-style | Regex for an issue key in a commit subject. |
-| `MAX_REPOS_PER_CHANGESET` | 8 | Wider change sets are excluded from pairing. |
 | `LAG_BIN_HOURS` | 6 | Time-bin width for directional analysis. |
-| `MIN_XREPO_SUPPORT` | 2 | Shared change sets before a cross-repo pair persists. |
 | `CHAIN_MIN_CONFIDENCE` | 0.15 | Per-hop floor when following chains. |
 
 After changing an ingest knob: `docker compose run --rm cli aggregate`.
-After changing a cross-repo knob: `crossrepo`, then `lagged`, then `impact`.
+After changing a dependency knob: `depbump`, then `impact`.
 
 ---
 
@@ -568,7 +555,7 @@ Integration tests skip cleanly when no database is reachable.
 | `test_store.py` | Loader: flush boundaries, idempotent re-ingest, rename identity, fan-out cap. |
 | `test_analysis.py` | The whole pipeline: a synthetic history with a known answer, aggregated and scored through real SQL, compared against the measures computed directly. |
 | `test_backtest.py` | The backtest itself, most of it pinning down leakage: a pair first seen in the commit being scored must be unpredictable, and predictable once taught. |
-| `test_crossrepo.py` | Change-set partitioning, that single-repo sets survive, that the lagged table is genuinely directional, that a corrupt date cannot stretch the time axis, and that chains never traverse an unvalidated hop. |
+| `test_manifests.py` | Dependency references across 29 ecosystems, each classified at its true strength, and prose never read as a dependency. |
 | `tests/ui/` | Optional headless UI smoke test — boots the real front-end in jsdom against a running API and drives all 18 routes. Needs Node; see its README. |
 
 Adding a measure, and the reasoning behind the schema, are in **[DESIGN.md](DESIGN.md)**.

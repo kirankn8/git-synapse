@@ -13,8 +13,7 @@ database table and the decisions that materially change the numbers.
 | [Every table at a glance](#every-table-at-a-glance) | all 34, one line each |
 | [How it works](#how-it-works) | the pipeline, end to end |
 | [Store the atom, derive the rest](#store-the-atom-derive-the-rest) | the schema's one rule, and every core table |
-| [Cross-repository coupling](#cross-repository-coupling-the-change-set) | why a commit is the wrong unit, and what replaces it |
-| [Direction: the lagged table](#direction-the-lagged-table) | making coupling directional |
+| [Cross-repository coupling](#cross-repository-coupling-what-repositories-declare) | why co-change cannot span repositories, and what does |
 | [Ground truth](#ground-truth-and-what-it-revealed) | the one thing here that is proven, not inferred |
 | [The mining layer](#the-mining-layer) | de-facto modules, drift, risk |
 | [Choices that affect the numbers](#choices-that-materially-affect-the-numbers) | where a default changes the answer |
@@ -54,27 +53,15 @@ everything after it is a materialised cache.
 | `dir_pair_metric` | The same 29 measures, one level up the tree. |
 | `author_file` | Who has touched what, which answers "who should review this?" alongside "what else must change?" |
 
-**Across repositories** — unit of co-occurrence: the change set
+**Across repositories** — what they declare about each other
 
 | Table | What it holds |
 |---|---|
-| `change_set` | The wider unit: commits grouped by ticket key or by one author's work session, because two repositories never share a commit. |
-| `change_set_commit` | Which commits make up a change set. Files are reached through `commit_file`, so no file ids are duplicated. |
-| `repo_change_stats` | How many eligible change sets touched each repository — the `n_a` of every repo-level contingency table. |
-| `repo_pair` | Repo-level joint counts: "changing `signer` implies changing `packager`". |
-| `repo_pair_metric` | The same 29 measures, with `N` counted in change sets rather than commits. |
-| `xrepo_file_pair` | Which specific file in repo A goes with which specific file in repo B — what an agent actually needs. |
-| `xrepo_file_pair_metric` | The measures for those cross-repo file pairs. |
-| `repo_lag_metric` | Directed, time-lagged coupling. The one pair table where `(A, B)` and `(B, A)` are different rows. |
-
-**Declared dependency graph** — parsed from manifests, not inferred
-
-| Table | What it holds |
-|---|---|
-| `dep_bump` | A manifest bump resolved to the exact upstream commit it consumed, with the observed lag. Ground truth rather than correlation. |
-| `repo_dependency` | What each repository declares at HEAD. This is the candidate set the ensemble ranks within, and the reason its base rate is 82% rather than 0.23%. |
+| `ref_tag` | Every release tag, peeled to its commit. The bridge from a declared version to a SHA; without it, `v1.2.3` resolves to nothing in every ecosystem that pins by version rather than by commit. |
+| `dep_bump` | One version change recorded in a manifest, resolved where possible to the exact upstream commit it consumed, with the observed lag. Ground truth rather than correlation. |
+| `repo_dependency` | What each repository declares at HEAD. **This is the answer to "which repositories depend on each other".** |
 | `module_dependency` | The intra-repository module graph, for monorepos whose real structure lives in submodules rather than cross-repo edges. |
-| `repo_impact` | The ranked answer to "I am changing X, what else?", carrying the features behind each score so any number can be explained. |
+| `repo_impact` | The ranked answer to "I am changing X, what else?", carrying the evidence behind each score so any number can be explained. |
 
 **Mining layer** — patterns over the pairs
 
@@ -102,7 +89,8 @@ flowchart TB
     GH["GitHub API"] -->|discover| REPO["account · repo"]
     REPO -->|"clone --bare, blobless above a size threshold"| MIRROR["git mirror on disk"]
     MIRROR -->|"git log -z --raw --numstat"| ATOM
-    MIRROR -->|"go.mod / package.json history"| declared
+    MIRROR -->|"for-each-ref refs/tags"| TAGS["ref_tag<br/><i>version to commit</i>"]
+    MIRROR -->|"manifest history, 29 ecosystems"| DECL
 
     ATOM["<b>commit + commit_file</b><br/>THE ATOMIC FACT<br/><i>one row per (commit, file)</i>"]
 
@@ -111,30 +99,18 @@ flowchart TB
         DP["dir_pair"] --> DPM["dir_pair_metric"]
     end
 
-    subgraph across["ACROSS repositories — unit: the change set"]
-        CS["change_set<br/>change_set_commit<br/><i>ticket key or author session</i>"]
-        CS --> RP["repo_pair"] --> RPM["repo_pair_metric<br/><i>same 29 measures</i>"]
-        CS --> XF["xrepo_file_pair"] --> XFM["xrepo_file_pair_metric"]
-        LAG["repo_lag_metric<br/><i>time-binned, DIRECTED</i>"]
-    end
-
-    subgraph declared["DECLARED — parsed from manifests, provable"]
-        DECL["dep_bump<br/><i>pseudo-version to exact upstream commit</i>"]
+    subgraph declared["ACROSS repositories — what they DECLARE, parsed not inferred"]
+        DECL["dep_bump<br/><i>a version change, dated</i>"]
         RD["repo_dependency<br/><i>declared at HEAD</i>"]
-        MD["module_dependency<br/><i>intra-repo module graph</i>"]
+        MD["module_dependency<br/><i>intra-repo modules</i>"]
     end
 
     ATOM --> FP
     ATOM --> DP
-    ATOM --> CS
-    ATOM --> LAG
+    TAGS --> DECL
+    declared --> IMPACT
 
-    RPM --> IMPACT
-    XFM --> IMPACT
-    LAG --> IMPACT
-    declared -->|"candidate set: base rate 0.23% → 82%"| IMPACT
-
-    IMPACT["<b>repo_impact</b><br/><i>ensemble, evidence-tiered</i><br/>AUC 0.80 → 0.88 within the declared set"]
+    IMPACT["<b>repo_impact</b><br/><i>ranked by declaration, bump count, recency</i>"]
 
     FPM --> MINE["file_cluster · pair_drift · file_risk"]
     FPM --> OUT
@@ -154,19 +130,21 @@ untouched. Those are separate tables, not the same ones widened:
 
 | | Within a repository | Across repositories |
 |---|---|---|
-| Unit of co-occurrence | one commit | one change set |
-| Repo level | — | `repo_pair` → `repo_pair_metric` |
-| File level | `file_pair` → `file_pair_metric` | `xrepo_file_pair` → `xrepo_file_pair_metric` |
+| Evidence | co-change, inferred | a manifest line, declared |
+| Unit | one commit | one version bump |
+| File level | `file_pair` → `file_pair_metric` | — *(needs absorbed sets)* |
 | Directory level | `dir_pair` → `dir_pair_metric` | — |
-| Direction | `P(B\|A)` vs `P(A\|B)` | `repo_lag_metric`, genuinely time-lagged |
+| Repo level | — | `repo_dependency` → `repo_impact` |
+| Direction | `P(B\|A)` vs `P(A\|B)` | inherent: a consumer names its dependency |
 
 **The dependency graph is a third, independent stream.** `dep_bump`,
 `repo_dependency` and `module_dependency` are *parsed from manifests*, not
 inferred from co-change — a Go pseudo-version names the exact upstream commit it
 was cut from, which makes those rows ground truth rather than correlation. They
-are not used to replace the statistics but to **restrict the candidate set**:
-ranking within declared pairs lifts the base rate from 0.23% to 82%, and the
-ensemble from AUC 0.80 to 0.88.
+**replaced** the statistics for cross-repository work rather than merely
+constraining them: restricting to declared pairs raises the base rate of a real
+relationship from 0.23% to 82%, and the statistics added little once inside that
+set — see [Ground truth](#ground-truth-and-what-it-revealed).
 
 
 ### Store the atom, derive the rest
@@ -177,7 +155,7 @@ row per (commit, file), with change type, line counts, rename source and
 similarity.
 
 Everything else — marginals, joint counts, all 29 measures, directory rollups,
-change sets, lagged tables, impact scores, clusters, drift, risk — is a
+directory rollups, the dependency graph, impact scores, clusters, drift, risk — is a
 materialised cache. Consequences:
 
 ```mermaid
@@ -279,142 +257,100 @@ erDiagram
   number in the UI traces back to four counts and then to actual commits.
 
 
-### Cross-repository coupling: the change set
+### Cross-repository coupling: what repositories declare
 
-The tables are separate from the within-repo ones, not the same ones widened.
-**Behavioural** — inferred from what moved together:
+Two repositories never share a commit, so co-change cannot express a
+relationship between them. This used to be solved by widening the unit: commits
+grouped into **change sets** by ticket key or by one author's work session, with
+the same 29 measures applied over that wider unit, plus a directed table built
+by binning time and shifting one repository's activity against another's.
 
-```mermaid
-erDiagram
-    AUTHOR     ||--o{ CHANGE_SET : "opened, for temporal sets"
-    CHANGE_SET ||--o{ CHANGE_SET_COMMIT : groups
-    COMMIT     ||--o{ CHANGE_SET_COMMIT : "belongs to exactly one"
-    REPO       ||--o{ REPO_PAIR : "as a or b"
-    REPO       ||--o{ REPO_PAIR_METRIC : "as a or b"
-    REPO       ||--o{ XREPO_FILE_PAIR : "as a or b"
-    FILE       ||--o{ XREPO_FILE_PAIR : "as a or b"
-    FILE       ||--o{ XREPO_FILE_PAIR_METRIC : "as a or b"
-    REPO       ||--o{ REPO_LAG_METRIC : "as a or b"
-    REPO       ||--|| REPO_CHANGE_STATS : summarises
+**That construction was measured and found unsound.** Two public repositories in
+the test corpus — sharing no code whatsoever — scored `G² = 570` against each
+other, and the profile was flat across every lag from one day to two weeks:
 
-    CHANGE_SET {
-        text key
-        text signal "ticket or temporal"
-        int n_repos
-        bool pair_eligible "single-repo sets are KEPT, or cells b and c vanish"
-    }
-    REPO_PAIR {
-        bigint n_ab "co-occurring change sets"
-        bigint n_ab_ticket "the ticket-linked subset"
-        float w_ab "recency-weighted"
-    }
-    XREPO_FILE_PAIR {
-        bigint file_a_id "a file in repo A"
-        bigint file_b_id "a file in repo B"
-        bigint n_ab
-    }
-    REPO_PAIR_METRIC {
-        bigint n_total "N = change sets, not commits"
-        float confidence_ab "the same 29 measures"
-    }
-    XREPO_FILE_PAIR_METRIC {
-        bigint n_ab
-        float confidence_ab
-    }
-    REPO_LAG_METRIC {
-        smallint lag_bins "A leads B by this many bins"
-        smallint bin_hours
-        bigint n_ab "genuinely directional: a-to-b differs from b-to-a"
-    }
-    REPO_CHANGE_STATS {
-        bigint change_set_count
-        bigint ticket_set_count
-    }
+```
+scikit-learn -> django    lag 4   G² 393      lift over chance 1.19
+                          lag 28  G² 570      lift over chance 1.23
+                          lag 56  G² 492      lift over chance 1.22
 ```
 
-**Declared** — parsed from manifests, and where the two streams meet:
+Real propagation has a characteristic delay, so a genuine signal peaks at some
+lag. A plateau is the signature of something else, and the marginals say what:
+django occupied 41% of all time bins and scikit-learn 33%. Two variables that
+are each "on" a third of the time co-occur constantly. The table was detecting a
+**shared release era**, not propagation. Direction was unstable for the same
+reason — `A → B` outscored `B → A` on one pair and the reverse on another,
+tracking relative commit volume rather than causation.
+
+So it is gone, along with change sets, and nothing infers a cross-repository
+relationship from calendar time any more.
+
+#### What replaced it
+
+A manifest naming a dependency is **dated** (it lives in a commit),
+**directional** (the consumer names the dependency, never the reverse) and
+**provable** (it is a literal string, not an inference). It cannot produce an
+edge between codebases that share no code, which is exactly the failure above.
 
 ```mermaid
 erDiagram
+    REPO   ||--o{ REF_TAG : publishes
+    COMMIT ||--o{ REF_TAG : "is named by"
     REPO   ||--o{ DEP_BUMP : "as consumer or dep"
-    COMMIT ||--o{ DEP_BUMP : "the exact upstream commit consumed"
+    COMMIT ||--o{ DEP_BUMP : "the upstream commit consumed"
     REPO   ||--o{ REPO_DEPENDENCY : "as consumer or dep"
     REPO   ||--o{ MODULE_DEPENDENCY : declares
     REPO   ||--o{ REPO_IMPACT : "as source or target"
 
+    REF_TAG {
+        text name "v1.2.3"
+        text commit_sha "peeled by for-each-ref"
+        timestamptz tagged_at "when the release was cut"
+        bool annotated
+    }
     DEP_BUMP {
         text consumer_sha "the commit that raised the version"
-        text dep_version "v3.0.0-20260626221153-5fc63d6f3055"
-        text dep_sha "extracted from the pseudo-version"
-        bigint dep_commit_id "resolved upstream commit: GROUND TRUTH"
+        text dep_version "v1.2.3, or a pseudo-version"
+        text dep_sha "when the reference pins a commit outright"
         bigint lag_seconds "observed propagation delay"
     }
     REPO_DEPENDENCY {
-        text dep_name "declared at HEAD"
+        text dep_name "as the manifest wrote it"
         text manifest
-        text ecosystem
+        text ecosystem "one of 29"
     }
     MODULE_DEPENDENCY {
         text consumer_module "intra-repo, e.g. gateway"
         text dep_module "e.g. apis"
     }
     REPO_IMPACT {
-        float score
-        bool is_declared "inside the candidate set"
+        float score "declaration + bump count + recency"
+        bool is_declared
         bool has_bump_history
         float median_lag_days
-        jsonb features "so any score can be explained"
     }
 ```
 
-`DEP_BUMP.dep_commit_id` is the one edge in this schema that is **proven rather
-than inferred**: a Go pseudo-version embeds the upstream commit it was cut from,
-so the row states "this commit consumed that commit" as a fact, with a measured
-lag. Everything else here is a correlation.
+Every ecosystem records the same thing in its own syntax, so references are read
+from 29 of them — with real parsers (`tomllib`, `xml.etree`, PyYAML) wherever
+the format has one, because a manifest that parses *almost* correctly is worse
+than one that fails loudly.
 
-Two repositories never share a commit, so "changed together" needs a wider unit.
-Every pair-eligible commit lands in exactly one **change set**, which makes them a
-partition and `N` unambiguous:
+Each reference is kept at its true strength, because that is exactly the
+confidence of the edge it produces:
 
-1. **ticket** — the subject carries an issue key (`ACME-2330`). All commits sharing
-   it form one change set. Precise: 1,709 keys span more than one repository here.
-   But coverage is uneven — `telemetry` is 37% keyed, `signer` is 0%.
-2. **temporal** — otherwise, consecutive commits by one author with no gap longer
-   than `SESSION_GAP_HOURS`. This reaches repos with no commit-message
-   convention, at the cost of noise from unrelated same-afternoon work.
+| Strength | Example | Resolves to |
+|---|---|---|
+| `commit` | a Go pseudo-version, a submodule, any lockfile `rev` | a commit outright — proven |
+| `tag` | `v1.2.3` | a commit, via `ref_tag` |
+| `range` | `^1.2.0`, `>=3,<4` | nothing; the edge exists, but pins no commit |
 
-`repo_pair.n_ab_ticket` records how much of each pair's evidence came from
-explicit ticket links rather than timing, so the UI can show "12 of 47
-ticket-backed" and a reader can discount the rest.
-
-**Single-repo change sets are kept deliberately.** It is tempting to store only
-multi-repo ones, but the contingency table needs the cells where A changed
-*without* B. Dropping them would make every change set multi-repo, drive those
-cells to zero, and inflate every score toward 1.0.
-
-
-### Direction: the lagged table
-
-The symmetric tables cannot express propagation, which is the pattern that
-matters for a dependency chain:
-
-```
-signer  merged 2026-06-26 22:11
-packager  bumped 2026-06-26 22:45   (+34 min)
-runtime  bumped 2026-06-27 00:36   (+2h25m)
-```
-
-So time is binned, each repository becomes a binary vector over bins, and for an
-ordered pair (A, B) at lag *k* the 2×2 table is formed between A's vector and B's
-vector **shifted by k**. All 29 measures then apply unchanged but become
-directional — `A→B` scoring far above `B→A` is exactly the statement "A's changes
-precede B's".
-
-The whole computation is one matrix product per lag: with a binary matrix `M`
-of shape (repos, bins), the joint counts for every ordered pair are
-`M @ shift(M, k).T`. 266 repositories over 21,326 six-hour bins across eight lags
-takes ~12 seconds.
-
+**What this cannot do.** It answers at repository level. "Which file in repo A
+goes with which file in repo B" needs the set of upstream commits a version bump
+absorbed — computable from `ref_tag` with `git rev-list --cherry-pick`, but not
+built. The change-set model did answer it, unreliably; nothing provable answers
+it today.
 
 ### Ground truth, and what it revealed
 
@@ -426,50 +362,37 @@ github.com/acme/signing/v3 v3.0.0-20260626221153-5fc63d6f3055
 ```
 
 So a `go.mod` diff is a **dated, directional, provable** propagation edge.
-Recovering 6,388 of them gave a labelled set to validate against — and the answer
-was not flattering to pure statistics:
+Recovering 6,388 of them gave a labelled set to test the statistical approach
+against — and the answer is why that approach is no longer here.
 
 | Approach | AUC | Directional accuracy |
 |---|---|---|
 | Best single measure over all ordered pairs | 0.80 | **0.63** |
-| Declared dependencies alone | — precise, but 4 of telemetry's 11 never co-change | — |
-| **Ensemble ranked within the declared set, in sample** | **0.884** | — |
-| **The same, held out in time** (features pre-2025, labels after) | **0.685** | — |
+| A coupling-free baseline: the consumer's raw commit count | **0.80** | — |
 
-There is no cross-validation figure here on purpose. The ensemble is an
-unweighted mean of fixed measures with no fitted parameters, so folds train
-nothing and the spread across them is subsample noise, not generalisation error.
-The honest generalisation number is the held-out-in-time row above.
+**The measure that topped the table was Russell-Rao** — `a / N`, pure joint
+frequency. It scored 0.80 by ranking *both repositories are busy*, while managing
+0.63 on which way the arrow points: barely better than a coin toss on the only
+part that matters. And a baseline that ignores coupling entirely, just counting
+the consumer's commits, matched it at 0.80.
 
-Two caveats on the in-sample figure, both measured. Every declared candidate has
-at least one bump, so the label is "bumped once or more than once" -- a
-bump-frequency question, not purely a coupling one. And a coupling-free baseline,
-the consumer repository's raw commit count, reaches 0.803 on the same task
-against the ensemble's 0.859, so activity confounding is present inside the
-declared set too, not only outside it. 
-
-**A high AUC is not the same as a useful answer.** The measure that tops the
-global table is Russell-Rao — `a / N`, pure joint frequency — which scores 0.80 by
-ranking *both repositories are busy* while managing only 0.63 on which way the
-arrow points. That is **activity confounding**, and it is why the discovery tier
-deliberately excludes every frequency-weighted measure.
+That is **activity confounding**, and it is the same defect that later showed up
+starkly in the time-binned table: two unrelated public repositories scoring
+`G² = 570` because both were busy in the same years.
 
 Restricting candidates to declared dependencies lifts the base rate from 0.23% to
-82% — a ~350× prior — before any measure is evaluated.
-
-This is why every cross-repo row carries an **evidence tier**, and why the UI
-never mixes them in one sorted column:
+82% — a ~350× prior — before any measure is evaluated. Once a prior that strong
+is available and provable, ranking correlations inside it earns little and risks
+presenting a coincidence as a finding. So the graph is now declared-only, and
+every row carries the evidence behind it:
 
 | Tier | Meaning | Trust |
 |---|---|---|
-| `declared` | the consumer declares it in a manifest | validated, AUC 0.86 in sample |
-| `bump-backed` | an actual version bump was observed | ground truth |
-| `discovery` | statistical only | unvalidated — verify before acting |
+| `bump-backed` | an actual version bump was observed, with its date | ground truth |
+| `declared` | the consumer names it in a manifest at HEAD | provable, but the edge may be inert |
 
-Discovery uses a deliberately different measure set (NPMI, phi, Ochiai — all
-normalised by both marginals) because the frequency-weighted measures are exactly
-what let a busy repository look coupled to everything.
-
+There is no `discovery` tier any more. An edge either has a manifest line behind
+it or it does not exist.
 
 ### The mining layer
 
@@ -552,7 +475,7 @@ The nightly job updates everything automatically. It is not uniformly
 | manifest bumps | **yes** | per repo, `last_depbump_sha <> head_sha` |
 | declared dependencies | **yes** | same sha watermark; per-repo delete-and-reinsert, so a *removed* dependency still disappears |
 | change sets | **yes** | only the tickets and authors touched by new commits are re-partitioned |
-| lagged coupling | **skipped when unchanged** | input fingerprint over pair-eligible commits |
+| impact graph | **skipped when unchanged** | fingerprint over repo_dependency and dep_bump |
 | impact prediction | **skipped when unchanged** | fingerprint over its three input tables |
 | mining | **yes** | per repo, `last_mining_at < last_aggregate_at` |
 
@@ -672,12 +595,10 @@ src/git_synapse/
   db/          schema.sql, connection pool, COPY helpers
   ingest/      github discovery, git mirroring, log parser, loader, pipeline
   analysis/    aggregation, scoring, read queries
-               crossrepo.py  change sets, repo pairs, cross-repo file pairs
-               lagged.py     directed time-lagged coupling (matrix products)
                depbump.py    manifest-bump ground truth + declared deps
-               predict.py    the evidence-tiered impact ensemble
+               predict.py    the declared dependency graph, ranked
+               manifests.py  dependency references, 29 ecosystems
                mining.py     de-facto modules, drift, ownership risk
-               validate.py   AUC / precision / directional accuracy
   api/         FastAPI app and routes
   mcp/         MCP server
   scheduler/   daily refresh
