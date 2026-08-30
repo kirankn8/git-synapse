@@ -233,6 +233,25 @@ def test_a_file_resolves_by_repository_id_as_well_as_by_name(corpus, db):
     assert q.resolve_file(None, row["path"], repo_id=999999999) is None
 
 
+def test_coupled_directories_excludes_containment(corpus, db):
+    """A directory changes when any file beneath it changes, so an ancestor
+    co-changes with its descendant by definition -- src/com scored 1.000
+    against src/com/google on every measure. That is containment reported as
+    coupling, and it crowded out the real partners."""
+    row = q.query_one(
+        "SELECT id, repo_id, path FROM directory WHERE depth >= 2"
+        " AND change_count > 0 ORDER BY change_count DESC LIMIT 1"
+    )
+    if row is None:
+        pytest.skip("no nested directory with changes")
+    partners = q.coupled_directories(row["id"], limit=50)
+    for partner in partners:
+        assert partner["path"], "the root changes in every commit; it is not a partner"
+        assert not partner["path"].startswith(f"{row['path']}/"), partner["path"]
+        assert not row["path"].startswith(f"{partner['path']}/"), partner["path"]
+        assert partner["path"] != row["path"]
+
+
 def test_file_authors_and_commits_are_bounded(db):
     row = q.query_one("SELECT id FROM file WHERE change_count > 5 LIMIT 1")
     if row is None:

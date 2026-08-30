@@ -371,7 +371,17 @@ def coupled_directories(
         )
         SELECT p.*, p.{order} AS score,
                d.path, d.depth, d.file_count, d.change_count, d.repo_id
-        FROM partners p JOIN directory d ON d.id = p.other_id
+        FROM partners p
+        JOIN directory d ON d.id = p.other_id
+        JOIN directory self ON self.id = %(dir_id)s
+        -- A directory changes when any file beneath it changes, so an ancestor
+        -- co-changes with its descendant by definition: src/com scored 1.000
+        -- against src/com/google on every measure, which is containment being
+        -- reported as coupling. The root is excluded for the same reason -- it
+        -- changes in every commit.
+        WHERE d.path <> '' AND self.path <> ''
+          AND NOT d.path LIKE self.path || '/%%'
+          AND NOT self.path LIKE d.path || '/%%'
         ORDER BY p.{order} DESC NULLS LAST
         LIMIT %(limit)s
         """,

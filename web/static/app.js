@@ -558,7 +558,7 @@ on('/', async () => {
       [
         h('button', { class: 'btn primary', onclick: triggerRefresh }, 'Refresh data'),
         h('a', { class: 'btn', href: '/insights/impact', 'data-nav': true }, 'Cross-repo impact'),
-        h('a', { class: 'btn', href: '/insights/impact/graph', 'data-nav': true }, 'Repository graph'),
+        h('a', { class: 'btn', href: '/insights/graph?mode=repos', 'data-nav': true }, 'Repository graph'),
       ],
     ),
   );
@@ -791,7 +791,7 @@ on('/repos/:id', async ({ id }, params) => {
       repo.description || 'No description',
       [
         repo.html_url ? h('a', { class: 'btn', href: repo.html_url, target: '_blank', rel: 'noopener' }, 'GitHub ↗') : null,
-        h('a', { class: 'btn primary', href: `/repos/${repo.id}/graph`, 'data-nav': true }, 'Coupling graph'),
+        h('a', { class: 'btn primary', href: `/insights/graph?repo=${repo.id}`, 'data-nav': true }, 'Coupling graph'),
       ].filter(Boolean),
     ),
   );
@@ -889,26 +889,33 @@ const impactTable = (rows, otherKey, selfId) =>
   });
 
 /** Repository-level impact graph: nodes are repos, edges are validated impact. */
-on('/insights/impact/graph', async (_args, params) => {
+async function repoImpactGraphView(params) {
   const minScore = Number(params.min || 0.4);
   const validated = params.all !== '1';
   const data = await api('/api/impact/graph', { min_score: minScore, validated_only: validated, limit: 600 });
 
-  const wrap = h('div');
-  wrap.append(crumbs(['Insights', '/insights/impact'], ['Repository graph']));
-  wrap.append(pageHead('Repository impact graph',
-    'Nodes are repositories; edges are directional impact. Only declared or bump-backed edges are shown by default.',
-    [h('a', { class: 'btn', href: '/insights/impact', 'data-nav': true }, 'Impact table')]));
+  // The same frame as every other Insights section, so the tab bar does not
+  // vanish when the graph switches from files to repositories.
+  const wrap = await insightsShell('graph', null);
+  wrap.append(
+    h('div', { class: 'toolbar' },
+      h('a', { class: 'btn', href: '/insights/graph', 'data-nav': true },
+        'Files within a repository'),
+      h('button', { class: 'btn primary' }, 'Repositories across the corpus'),
+      h('span', { class: 'spacer' }),
+      h('span', { class: 'card-sub' },
+        'Nodes are repositories; edges are directional impact.')),
+  );
 
   const scoreInput = h('input', { class: 'input', type: 'range', min: '0', max: '0.95', step: '0.05', value: String(minScore), style: 'width:150px' });
   const scoreLabel = h('span', { class: 'card-sub', style: 'min-width:76px' }, `min ${minScore.toFixed(2)}`);
   scoreInput.addEventListener('input', () => (scoreLabel.textContent = `min ${Number(scoreInput.value).toFixed(2)}`));
-  scoreInput.addEventListener('change', () => go(`/insights/impact/graph?min=${scoreInput.value}&all=${validated ? '0' : '1'}`));
+  scoreInput.addEventListener('change', () => go(`/insights/graph?mode=repos&min=${scoreInput.value}&all=${validated ? '0' : '1'}`));
 
   wrap.append(h('div', { class: 'toolbar' },
     h('div', { class: 'field' }, h('label', {}, 'Min score'), scoreInput, scoreLabel),
-    h('button', { class: `btn${validated ? ' primary' : ''}`, onclick: () => go(`/insights/impact/graph?min=${minScore}&all=0`) }, 'Validated only'),
-    h('button', { class: `btn${validated ? '' : ' primary'}`, onclick: () => go(`/insights/impact/graph?min=${minScore}&all=1`) }, 'Include discovery'),
+    h('button', { class: `btn${validated ? ' primary' : ''}`, onclick: () => go(`/insights/graph?mode=repos&min=${minScore}&all=0`) }, 'Validated only'),
+    h('button', { class: `btn${validated ? '' : ' primary'}`, onclick: () => go(`/insights/graph?mode=repos&min=${minScore}&all=1`) }, 'Include discovery'),
     h('span', { class: 'spacer' }),
     h('span', { class: 'card-sub' }, `${data.stats.node_count} repos, ${data.stats.edge_count} edges`)));
 
@@ -931,7 +938,7 @@ on('/insights/impact/graph', async (_args, params) => {
       ? 'Showing only edges with declared-dependency or manifest-bump evidence.'
       : 'Discovery edges included — these are statistical only and skew toward busy repositories.'));
   return wrap;
-});
+}
 
 const hotspotTable = (rows) =>
   dataTable(
@@ -943,7 +950,7 @@ const hotspotTable = (rows) =>
       { key: 'partner_count', label: 'Partners', num: true, render: (r) => num(r.partner_count) },
       { key: 'last_change_at', label: 'Last', render: (r) => when(r.last_change_at) },
     ],
-    { initialSort: 'change_count', onRow: (r) => go(`/repos/${r.repo_id}/files/${r.id}`), empty: 'No files ingested yet.' },
+    { initialSort: 'change_count', onRow: (r) => go(`/repos/${r.repo_id}/files/${r.path}`), empty: 'No files ingested yet.' },
   );
 
 const pairTable = (rows, spec, wide = false) =>
@@ -975,7 +982,7 @@ const fileTable = (rows, empty) => dataTable(
     { key: 'author_count', label: 'Authors', num: true },
     { key: 'last_change_at', label: 'Last change', render: (f) => when(f.last_change_at) },
   ],
-  { initialSort: 'change_count', onRow: (f) => go(`/repos/${f.repo_id}/files/${f.id}`), empty },
+  { initialSort: 'change_count', onRow: (f) => go(`/repos/${f.repo_id}/files/${f.path}`), empty },
 );
 
 /* Links to every analysis of one repository. They are links rather than tabs
@@ -987,6 +994,7 @@ const analyseBar = (repoId) =>
     h('span', { class: 'card-sub' }, 'Analyse:'),
     ...[
       ['Cross-repo impact', `/insights/impact?repo=${repoId}`],
+      ['Coupling graph', `/insights/graph?repo=${repoId}`],
       ['Risk', `/insights/risk?repo=${repoId}`],
       ['Coupling drift', `/insights/drift?repo=${repoId}`],
       ['De-facto modules', `/insights/modules?repo=${repoId}`],
@@ -1157,7 +1165,7 @@ on('/repos/:repo/files/*path', async ({ repo, path }, params) => {
       h('span', { class: 'mono' }, file.path),
       `${file.repo} · ${num(file.change_count)} changes by ${file.author_count} authors`,
       [
-        h('a', { class: 'btn', href: `/repos/${file.repo_id}/graph?center=${file.id}`, 'data-nav': true }, 'Graph neighbourhood'),
+        h('a', { class: 'btn', href: `/insights/graph?repo=${file.repo_id}&center=${file.id}`, 'data-nav': true }, 'Graph neighbourhood'),
       ],
     ),
   );
@@ -1184,7 +1192,7 @@ on('/repos/:repo/files/*path', async ({ repo, path }, params) => {
         ['history', 'Commit history'],
         ['authors', 'Authors'],
       ].map(([key, label]) =>
-        h('button', { class: `tab${tab === key ? ' active' : ''}`, onclick: () => go(`/repos/${file.repo_id}/files/${id}?tab=${key}`) }, label),
+        h('button', { class: `tab${tab === key ? ' active' : ''}`, onclick: () => go(`/repos/${file.repo_id}/files/${file.path}?tab=${key}`) }, label),
       ),
     ),
   );
@@ -1197,7 +1205,7 @@ on('/repos/:repo/files/*path', async ({ repo, path }, params) => {
     const data = await api(`/api/files/${id}/coupled`, { measure: state.measure, limit: 200, min_support: minSupport });
 
     const supportInput = h('input', { class: 'input', type: 'number', min: '1', value: String(minSupport), style: 'width:78px' });
-    supportInput.addEventListener('change', () => go(`/repos/${file.repo_id}/files/${id}?tab=coupled&min=${supportInput.value || 1}`));
+    supportInput.addEventListener('change', () => go(`/repos/${file.repo_id}/files/${file.path}?tab=coupled&min=${supportInput.value || 1}`));
 
     body.append(
       h(
@@ -1487,7 +1495,7 @@ on('/repos/:repo/tree/*path', async ({ repo, path }, params) => {
     h('span', { class: 'mono' }, clean),
     `In ${info.full_name}`,
     [h('a', { class: 'btn', href: `/repos/${repoId}`, 'data-nav': true }, 'Repository root'),
-     h('a', { class: 'btn', href: `/repos/${repoId}/graph`, 'data-nav': true }, 'Coupling graph')]));
+     h('a', { class: 'btn', href: `/insights/graph?repo=${repoId}`, 'data-nav': true }, 'Coupling graph')]));
   wrap.append(await treePanel(repoId, clean, params));
   return wrap;
 });
@@ -1508,30 +1516,34 @@ const folderTrail = (repoId, path) => {
   ]);
 };
 
-/* The graph draws one repository's files, so it lives under that repository
-   rather than in a tab of its own: it renders the coupled pairs, it does not
-   answer a question none of the other views answer. */
-on('/repos/:id/graph', async ({ id }, params) => {
-  const repoId = Number(id);
-  const info = await repoById(repoId);
-  if (!info) return notFound(`No repository ${id}`);
-
-  const wrap = h('div');
-  wrap.append(crumbs(...(await repoTrail(info)), ['Coupling graph']));
+/* Both graphs live here: files within one repository, and repositories across
+   the corpus. Neither owns data -- each draws couplings computed elsewhere --
+   but drawing them is a question in its own right, so it is a section rather
+   than a button hidden on a page. */
+on('/insights/graph', async (_args, params) => {
+  if (params.mode === 'repos') return repoImpactGraphView(params);
+  const repoId = Number(params.repo || 0)
+    || (await api('/api/repos', { limit: 1, order_by: 'pair_count' })).repos[0]?.id;
+  const wrap = await insightsShell('graph', Number(params.repo) || null);
   wrap.append(
-    pageHead('Coupling graph', 'Force-directed view of the strongest change couplings. Drag nodes, scroll to zoom, click to open a file.', [
-      h('a', { class: 'btn', href: `/repos/${repoId}`, 'data-nav': true }, 'Repository'),
-      h('a', { class: 'btn', href: '/insights/impact/graph', 'data-nav': true }, 'Repository-level graph'),
-    ]),
+    h('div', { class: 'toolbar' },
+      h('button', { class: 'btn primary' }, 'Files within a repository'),
+      h('a', { class: 'btn', href: '/insights/graph?mode=repos', 'data-nav': true },
+        'Repositories across the corpus')),
   );
+  if (!repoId) {
+    wrap.append(h('div', { class: 'empty' }, h('strong', {}, 'No coupling data yet'),
+      'Run an ingest to populate the graph.'));
+    return wrap;
+  }
   const edgeCount = h('input', { class: 'input', type: 'range', min: '20', max: '600', step: '20', value: params.limit || '160', style: 'width:130px' });
   const edgeLabel = h('span', { class: 'card-sub', style: 'min-width:66px' }, `${params.limit || 160} edges`);
   const minSupport = h('input', { class: 'input', type: 'number', min: '1', value: params.min || '3', style: 'width:70px' });
 
   const navigate = () => {
-    const p = new URLSearchParams({ limit: edgeCount.value, min: minSupport.value });
+    const p = new URLSearchParams({ repo: String(repoId), limit: edgeCount.value, min: minSupport.value });
     if (params.center) p.set('center', params.center);
-    go(`/repos/${repoId}/graph?${p}`);
+    go(`/insights/graph?${p}`);
   };
   minSupport.addEventListener('change', navigate);
   edgeCount.addEventListener('input', () => (edgeLabel.textContent = `${edgeCount.value} edges`));
@@ -1544,7 +1556,7 @@ on('/repos/:id/graph', async ({ id }, params) => {
       h('div', { class: 'field' }, h('label', {}, 'Edges'), edgeCount, edgeLabel),
       h('div', { class: 'field' }, h('label', {}, 'Min support'), minSupport),
       params.center
-        ? h('button', { class: 'btn sm', onclick: () => go(`/repos/${repoId}/graph?limit=${edgeCount.value}&min=${minSupport.value}`) }, 'Clear focus')
+        ? h('button', { class: 'btn sm', onclick: () => go(`/insights/graph?repo=${repoId}&limit=${edgeCount.value}&min=${minSupport.value}`) }, 'Clear focus')
         : null,
       h('span', { class: 'spacer' }),
     ),
@@ -1575,7 +1587,7 @@ on('/repos/:id/graph', async ({ id }, params) => {
         const node = data.nodes.find((n) => n.id === nodeId);
         if (node) go(`/repos/${repoId}/files/${node.path}`);
       },
-      onNodeFocus: (nodeId) => go(`/repos/${repoId}/graph?limit=${params.limit || 160}&min=${params.min || 3}&center=${nodeId}`),
+      onNodeFocus: (nodeId) => go(`/insights/graph?repo=${repoId}&limit=${params.limit || 160}&min=${params.min || 3}&center=${nodeId}`),
     }),
   );
 
@@ -1936,7 +1948,7 @@ on('/insights/impact', async (_args, params) => {
       statTile('Bump-backed', num(mining.bump_edges), 'ground truth from manifests'),
       statTile('Manifest bumps', num(mining.dep_bumps), 'observed propagation events'),
       statTile('Declared deps', num(mining.declared_deps), 'internal module edges'),
-      statTile('Repository graph', 'open', 'nodes are repositories', () => go('/insights/impact/graph')),
+      statTile('Repository graph', 'open', 'nodes are repositories', () => go('/insights/graph?mode=repos')),
     ),
   );
 
@@ -2130,6 +2142,7 @@ on('/insights/impact/:a/:b', async ({ a, b }) => {
    and a query parameter cannot express where you are inside that. */
 const INSIGHT_SECTIONS = [
   ['impact', 'Cross-repo impact'],
+  ['graph', 'Coupling graph'],
   ['risk', 'Risk & bus factor'],
   ['drift', 'Coupling drift'],
   ['modules', 'De-facto modules'],

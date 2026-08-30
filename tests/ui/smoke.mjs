@@ -102,13 +102,13 @@ const routes = [
   [`#/repos/${repoId}/files/${filePath}?tab=history`, 'File history'],
   [`#/repos/${repoId}/files/${filePath}?tab=authors`, 'File authors'],
   otherId ? [`#/repos/${repoId}/pairs/${fileId}/${otherId}`, 'Pair detail'] : null,
-  [`#/repos/${repoId}/graph?limit=60&min=5`,          'Coupling graph'],
+  [`#/insights/graph?repo=${repoId}&limit=60&min=5`,  'Coupling graph (files)'],
+  ['#/insights/graph?mode=repos&min=0.4',             'Coupling graph (repositories)'],
   ['#/insights',                           'Insights (redirects to impact)'],
   ['#/insights/impact',                    'Impact (pick a repository)'],
   [`#/insights/impact?repo=${impactRepoId}&dir=upstream`,   'Impact upstream'],
   [`#/insights/impact?repo=${impactSrcId}&dir=downstream`,  'Impact downstream'],
   [`#/insights/impact/${impactSrcId}/${impactRepoId}`,      'Impact edge detail'],
-  ['#/insights/impact/graph?min=0.4',      'Repository graph'],
   ['#/insights/risk',                      'Insights risk'],
   ['#/insights/drift',                     'Insights drift (emerging)'],
   ['#/insights/drift?trend=decaying',      'Insights drift (decaying)'],
@@ -148,7 +148,7 @@ for (const [path, label, expect] of [
    ['Accounts', filePath.split('/').pop()]],
   ['/insights/risk?repo=5', 'scoped insights', ['Accounts', 'google', 'guava', 'Insights']],
   ['/insights/impact?repo=5', 'scoped impact',  ['Accounts', 'google', 'guava', 'Insights']],
-  ['/repos/5/graph',   'scoped graph',    ['Accounts', 'google', 'guava']],
+  ['/insights/graph?repo=5', 'scoped graph', ['Accounts', 'google', 'guava', 'Insights']],
 ]) {
   window.history.pushState({}, '', path);
   window.dispatchEvent(new window.PopStateEvent('popstate'));
@@ -262,7 +262,7 @@ console.log('\n=== canonical paths ===');
     [`/repos/${repoId}/tree`,           'tree root'],
     [`/repos/${repoId}/`,               'repository (trailing slash)'],
     ['/insights',                       'insights (redirects)'],
-    ['/insights/impact/graph',          'repository graph'],
+    ['/insights/graph?mode=repos',      'repository graph'],
     ['/jobs',                           'jobs'],
   ].filter(Boolean);
   for (const [path, label] of cases) {
@@ -341,6 +341,20 @@ console.log('\n=== click walk: account -> repo -> folder -> file ===');
   step('file row opens the file, still under its repository',
        ok && /^\/repos\/\d+\/files\//.test(window.location.pathname)
           && crumbCount() >= depthAtFolder);
+
+  // The file page's own tab bar rebuilt its URL from the numeric id, so every
+  // tab on every file 404'd. Clicking a tab is the only way to see that.
+  const tabs = [...view().querySelectorAll('.tab')];
+  const history = tabs.find((t) => /history/i.test(t.textContent));
+  if (history) {
+    history.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await settle();
+    step('a file tab keeps the file',
+         !(view().textContent || '').includes('Not found')
+         && /^\/repos\/\d+\/files\//.test(window.location.pathname));
+  } else {
+    step('a file tab keeps the file', false);
+  }
 
   for (const [label, passed, where] of steps) report(label, passed, where);
 }
