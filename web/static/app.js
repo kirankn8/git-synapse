@@ -552,16 +552,11 @@ on('/', async () => {
 
   // Cross-repo and mining summaries, so the landing page reflects every layer.
   try {
-    const [xr, mine] = await Promise.all([
-      api('/api/crossrepo/overview'),
-      api('/api/mining/overview'),
-    ]);
+    const mine = await api('/api/mining/overview');
     wrap.append(h('div', { class: 'section-title' }, 'Cross-repository & mining layers'));
     wrap.append(h('div', { class: 'grid grid-stats' },
-      statTile('Change sets', num(xr.change_sets), `${num(xr.ticket_sets)} ticket-linked`, () => go('/crossrepo')),
-      statTile('Repo pairs', num(xr.repo_pairs), 'cross-repo coupling', () => go('/crossrepo')),
       statTile('Impact edges', num(mine.impact_edges), `${num(mine.declared_edges)} declared`, () => go('/impact')),
-      statTile('Manifest bumps', num(mine.dep_bumps), 'ground-truth propagation', () => go('/validation')),
+      statTile('Manifest bumps', num(mine.dep_bumps), 'ground-truth propagation', () => go('/impact')),
       statTile('De-facto modules', num(mine.modules), `${num(mine.cross_dir_modules)} cross-directory`, () => go('/insights?tab=modules')),
       statTile('Emerging coupling', num(mine.emerging), `${num(mine.decaying)} decaying`, () => go('/insights?tab=drift')),
     ));
@@ -1889,25 +1884,27 @@ on('/impact', async (_args, params) => {
   wrap.append(
     h('div', { class: 'grid grid-stats' },
       statTile('Impact edges', num(mining.impact_edges), 'ranked repo→repo relationships'),
-      statTile('Declared', num(mining.declared_edges), 'structural evidence', () => go('/validation')),
+      statTile('Declared', num(mining.declared_edges), 'structural evidence'),
       statTile('Bump-backed', num(mining.bump_edges), 'ground truth from manifests'),
       statTile('Manifest bumps', num(mining.dep_bumps), 'observed propagation events'),
       statTile('Declared deps', num(mining.declared_deps), 'internal module edges'),
-      statTile('Lagged rows', num(mining.lagged_rows), 'directed, time-binned'),
     ),
   );
 
   wrap.append(
     h('div', { class: 'help' },
       h('strong', {}, 'How to read this. '),
-      'Within a repository, coupling means “same commit”. Two repositories never share a commit, ',
-      'so cross-repo coupling is computed over ', h('em', {}, 'change sets'),
-      ' — commits grouped by shared ticket key, or by one author’s work session. ',
-      'Ranking is then done inside the ',
+      'Within a repository, coupling means “same commit”. Two repositories never share one, ',
+      'so nothing here is inferred from co-change: every edge is read from a ',
       h('strong', {}, 'declared dependency'),
-      ' set, which lifts the base rate from 0.23% to 82% and takes AUC to 0.86 in sample. ',
-      h('strong', {}, 'Discovery'),
-      ' rows fall outside that set and are unvalidated.',
+      ' in a manifest, and is stronger still when an actual version ',
+      h('strong', {}, 'bump'),
+      ' was observed and resolved to the upstream commit it consumed. ',
+      'Grouping commits by ticket key or by author session was tried and removed: it scored ',
+      'AUC 0.80 while managing 0.63 on which way the arrow points, and a baseline that ',
+      'ignored coupling entirely matched it — the measure was ranking “both repositories ',
+      'are busy”. Restricting to declared dependencies lifts the base rate from 0.23% to 82% ',
+      'before any measure is evaluated.',
     ),
   );
 
@@ -1926,26 +1923,17 @@ on('/impact', async (_args, params) => {
       h('div', { class: 'field' },
         dirBtn('upstream', 'Upstream', 'Repos whose changes precede this one — where a fix may belong'),
         dirBtn('downstream', 'Downstream', 'Repos a change here forces to update')),
-      h('span', { class: 'spacer' }),
-      h('a', { class: 'btn', href: '/crossrepo', 'data-nav': true }, 'Cross-repo detail'),
     ),
   );
 
   if (!repoId) {
-    const top = await api('/api/crossrepo/pairs', { measure: state.measure, limit: 40, min_support: 8 });
-    const mspec = state.byKey.get(state.measure);
-    wrap.append(card(`Top 40 repository couplings by ${mspec ? mspec.label : state.measure}`,
-      dataTable(top.pairs, [
-        { key: 'repo_a', label: 'Repository A', render: (r) => h('span', { class: 'mono' }, r.repo_a) },
-        { key: 'repo_b', label: 'Repository B', render: (r) => h('span', { class: 'mono' }, r.repo_b) },
-        { key: 'n_ab', label: 'Shared sets', num: true },
-        { key: 'n_ab_ticket', label: 'Ticket-linked', num: true, title: 'Portion backed by an explicit ticket key rather than timing' },
-        { key: 'ticket_ratio', label: '%', num: true, render: (r) => pct(r.ticket_ratio) },
-        { key: 'confidence_ab', label: 'P(B|A)', num: true, render: (r) => pct(r.confidence_ab) },
-        { key: 'confidence_ba', label: 'P(A|B)', num: true, render: (r) => pct(r.confidence_ba) },
-        { key: 'score', label: 'Score', num: true, render: (r) => scoreCell(r.score, state.byKey.get(state.measure)) },
-      ], { initialSort: 'score', onRow: (r) => go(`/impact?repo=${r.repo_b_id}&dir=upstream`) }),
-      'Pick a repository above for its ranked impact list'));
+    wrap.append(card('Pick a repository',
+      h('div', { class: 'empty' },
+        'Cross-repository impact is per repository: choose one above to see what '
+        + 'it reaches and what reaches it. The org-wide table that used to sit here '
+        + 'ranked repositories by co-change across change sets, which is not how '
+        + 'this graph is built any more -- it is read from declared dependencies '
+        + 'and observed version bumps.')));
     return wrap;
   }
 
@@ -2013,15 +2001,12 @@ on('/impact', async (_args, params) => {
 /* --------------------------------------------------- repo pair detail -- */
 
 on('/repopair/:a/:b', async ({ a, b }) => {
-  const [depsA, profile] = await Promise.all([
+  const [depsA] = await Promise.all([
     api(`/api/repos/${b}/dependencies`),
-    api(`/api/repos/${a}/lag-profile/${b}`, { measure: 'confidence_ab' }).catch((e) => ({ __failed: String(e.message || e) })),
   ]);
   const [repoA, repoB] = await Promise.all([api(`/api/repos/${a}`), api(`/api/repos/${b}`)]);
   const partners = await api(`/api/repos/${b}/impact`, { direction: 'upstream', limit: 200 });
   const edge = partners.edges.find((e) => String(e.source_repo_id) === String(a));
-  const sets = await api(`/api/repos/${a}/partners/${b}/change-sets`, { limit: 20 })
-    .catch((e) => ({ change_sets: [], __failed: String(e.message || e) }));
 
   const wrap = h('div');
   wrap.append(crumbs(['Impact', '/impact'], [`${repoA.name} → ${repoB.name}`]));
@@ -2043,60 +2028,6 @@ on('/repopair/:a/:b', async ({ a, b }) => {
 
   // Lag profile: two directional curves. If A precedes B, the forward curve
   // sits above the reverse one — that visual gap IS the directional evidence.
-  if (profile && profile.__failed) {
-    wrap.append(h('div', { class: 'section-title' }, 'Directional lag profile'));
-    wrap.append(card('Could not load the lag profile', h('div', { class: 'empty' },
-      `This section failed to load, so it is not evidence of absence: ${profile.__failed}`)));
-  } else if (profile && profile.forward.length) {
-    const W = 640, H = 170, PAD = 30;
-    const all = [...profile.forward, ...profile.reverse];
-    const maxV = Math.max(1e-9, ...all.map((r) => Number(r.value) || 0));
-    const lags = [...new Set(profile.forward.map((r) => r.lag_bins))].sort((x, y) => x - y);
-    const binH = profile.forward[0]?.bin_hours || 6;
-    const xAt = (lag) => PAD + (lags.indexOf(lag) / Math.max(lags.length - 1, 1)) * (W - PAD * 2);
-    const yAt = (v) => H - PAD - ((Number(v) || 0) / maxV) * (H - PAD * 2);
-    const pathOf = (rows) => rows.slice().sort((p, q) => p.lag_bins - q.lag_bins)
-      .map((r, i) => `${i ? 'L' : 'M'}${xAt(r.lag_bins).toFixed(1)},${yAt(r.value).toFixed(1)}`).join(' ');
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-    svg.setAttribute('class', 'spark');
-    svg.setAttribute('width', '100%');
-    svg.innerHTML =
-      `<line class="axis" x1="${PAD}" y1="${H - PAD}" x2="${W - PAD}" y2="${H - PAD}"/>` +
-      `<line class="axis" x1="${PAD}" y1="${PAD}" x2="${PAD}" y2="${H - PAD}"/>` +
-      `<path class="fwd" d="${pathOf(profile.forward)}"/>` +
-      (profile.reverse.length ? `<path class="rev" d="${pathOf(profile.reverse)}"/>` : '') +
-      lags.map((l) => `<text class="lbl" x="${xAt(l)}" y="${H - PAD + 13}" text-anchor="middle">${l * binH}h</text>`).join('') +
-      `<text class="lbl" x="${PAD - 6}" y="${PAD + 4}" text-anchor="end">${maxV.toFixed(3)}</text>`;
-    wrap.append(h('div', { class: 'section-title' }, 'Directional lag profile'));
-    wrap.append(card('P(other changes | this changed), by lag',
-      h('div', { class: 'card-body' }, svg,
-        h('div', { class: 'legend-inline' },
-          h('span', {}, h('i', { style: 'background:var(--accent)' }), `${repoA.name} → ${repoB.name}`),
-          h('span', {}, h('i', { style: 'background:var(--danger)' }), `${repoB.name} → ${repoA.name}`)),
-        h('div', { class: 'metric-note' },
-          'A forward curve sitting above the reverse one is the directional evidence: it says this repository’s changes precede the other’s, rather than the two simply being busy at the same time.')),
-      'The same 2×2 table, recomputed at each lag'));
-  }
-
-  if (sets.__failed) {
-    wrap.append(card('Could not load the shared change sets', h('div', { class: 'empty' },
-      `This section failed to load, so it is not evidence of absence: ${sets.__failed}`)));
-  } else if (sets.change_sets.length) {
-    wrap.append(h('div', { class: 'section-title' }, 'Shared change sets — the evidence'));
-    wrap.append(card(`${sets.change_sets.length} change sets touching both repositories`,
-      dataTable(sets.change_sets, [
-        { key: 'ticket', label: 'Ticket', render: (c) => (c.ticket ? h('span', { class: 'badge info' }, c.ticket) : h('span', { class: 'badge muted' }, 'session')) },
-        { key: 'signal', label: 'Signal', render: (c) => h('span', { class: `badge ${c.signal === 'ticket' ? 'ok' : 'muted'}` }, c.signal) },
-        { key: 'n_repos', label: 'Repos', num: true },
-        { key: 'n_commits', label: 'Commits', num: true },
-        { key: 'n_files', label: 'Files', num: true },
-        { key: 'author', label: 'Author' },
-        { key: 'last_at', label: 'When', render: (c) => when(c.last_at) },
-      ], { initialSort: 'last_at', onRow: (c) => go(`/changeset/${c.id}`) }),
-      'Ticket-linked sets are precise; session sets are temporal proximity'));
-  }
-
   const bump = depsA.bumps.find((x) => String(x.dep_repo_id) === String(a));
   if (bump) {
     wrap.append(h('div', { class: 'help', style: 'margin-top:14px' },
@@ -2106,110 +2037,6 @@ on('/repopair/:a/:b', async ({ a, b }) => {
   }
   return wrap;
 });
-
-on('/changeset/:id', async ({ id }) => {
-  const cs = await api(`/api/change-sets/${id}`);
-  const wrap = h('div');
-  wrap.append(crumbs(['Cross-repo', '/crossrepo'], [cs.key]));
-  wrap.append(pageHead(h('span', { class: 'mono' }, cs.key),
-    `${cs.signal === 'ticket' ? 'Ticket-linked' : 'Temporal session'} · ${cs.n_commits} commits across ${cs.n_repos} repositories`));
-  wrap.append(h('div', { class: 'grid grid-stats' },
-    statTile('Signal', cs.signal, cs.signal === 'ticket' ? 'explicit ticket key' : 'same author, one session'),
-    statTile('Repositories', num(cs.n_repos), cs.pair_eligible ? 'pair-eligible' : 'excluded (too wide)'),
-    statTile('Commits', num(cs.n_commits)),
-    statTile('Files', num(cs.n_files)),
-    statTile('Author', cs.author || '—'),
-    statTile('Span', when(cs.first_at), `to ${when(cs.last_at)}`)));
-  wrap.append(card('Commits in this change set',
-    dataTable(cs.commits, [
-      { key: 'repo', label: 'Repository', render: (c) => h('a', { href: `/repo/${c.repo_id}`, 'data-nav': true, class: 'mono' }, c.repo) },
-      { key: 'sha', label: 'SHA', render: (c) => h('span', { class: 'mono' }, c.sha.slice(0, 9)) },
-      { key: 'subject', label: 'Subject', render: (c) => h('span', { style: 'display:block;max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, c.subject) },
-      { key: 'author', label: 'Author' },
-      { key: 'n_files', label: 'Files', num: true },
-      { key: 'committed_at', label: 'When', render: (c) => when(c.committed_at) },
-    ], { initialSort: 'committed_at', desc: false })));
-  return wrap;
-});
-
-/* ========================================================================
-   Cross-repo overview, insights (mining), validation
-   ======================================================================== */
-
-on('/crossrepo', async (_args, params) => {
-  const level = params.level === 'file' ? 'file' : 'repo';
-  const [ov, pairs, sets] = await Promise.all([
-    api('/api/crossrepo/overview'),
-    api('/api/crossrepo/pairs', { measure: state.measure, level, limit: 120, min_support: level === 'file' ? 3 : 6 }),
-    api('/api/change-sets', { limit: 30, multi_repo_only: true }),
-  ]);
-
-  const wrap = h('div');
-  wrap.append(pageHead('Cross-repository coupling',
-    'Two repositories never share a commit, so coupling is computed over change sets: commits grouped by ticket key, or by one author’s work session.'));
-
-  wrap.append(h('div', { class: 'grid grid-stats' },
-    statTile('Change sets', num(ov.change_sets), 'the cross-repo unit of work'),
-    statTile('Ticket-linked', num(ov.ticket_sets), 'precise evidence'),
-    statTile('Temporal', num(ov.temporal_sets), 'same author, one session'),
-    statTile('Multi-repo', num(ov.multi_repo_sets), 'span more than one repo'),
-    statTile('Repo pairs', num(ov.repo_pairs), 'scored with all 29 measures'),
-    statTile('File pairs', num(ov.file_pairs), 'across repository boundaries'),
-    statTile('Widest set', num(ov.widest_set), 'repos in one change set'),
-    statTile('Excluded', num(ov.change_sets - ov.eligible_sets), 'too wide to be design signal')));
-
-  wrap.append(h('div', { class: 'help' },
-    h('strong', {}, 'Why single-repo change sets are kept. '),
-    'It is tempting to store only the multi-repo ones, but the contingency table needs the cells where A changed ',
-    h('em', {}, 'without'), ' B. Dropping them would make every change set multi-repo, drive those cells to zero, and inflate every score toward 1.0.'));
-
-  const tabBtn = (key, label) => h('button', { class: `tab${level === key ? ' active' : ''}`, onclick: () => go(`/crossrepo?level=${key}`) }, label);
-  wrap.append(h('div', { class: 'tabs' }, tabBtn('repo', 'Repository pairs'), tabBtn('file', 'File pairs across repos')));
-
-  const spec = state.byKey.get(state.measure);
-  if (level === 'repo') {
-    wrap.append(card(`${pairs.pairs.length} repository pairs`,
-      dataTable(pairs.pairs, [
-        { key: 'repo_a', label: 'Repository A', render: (r) => h('span', { class: 'mono' }, r.repo_a) },
-        { key: 'repo_b', label: 'Repository B', render: (r) => h('span', { class: 'mono' }, r.repo_b) },
-        { key: 'n_ab', label: 'Shared', num: true },
-        { key: 'n_ab_ticket', label: 'Ticket', num: true },
-        { key: 'ticket_ratio', label: 'Evidence', num: true, title: 'Share of joint evidence backed by an explicit ticket key', render: (r) => h('div', { class: 'confbar', style: 'justify-content:flex-end' }, h('span', {}, pct(r.ticket_ratio)), bar(r.ticket_ratio, r.ticket_ratio >= 0.4 ? '' : 'mid')) },
-        { key: 'confidence_ab', label: 'P(B|A)', num: true, render: (r) => pct(r.confidence_ab) },
-        { key: 'confidence_ba', label: 'P(A|B)', num: true, render: (r) => pct(r.confidence_ba) },
-        { key: 'npmi', label: 'NPMI', num: true, render: (r) => fx(r.npmi, 3) },
-        { key: 'score', label: spec ? spec.label : 'Score', num: true, render: (r) => scoreCell(r.score, spec) },
-      ], { initialSort: 'score', onRow: (r) => go(`/repopair/${r.repo_a_id}/${r.repo_b_id}`) }),
-      'Click for lag profile, bumps and shared change sets'));
-  } else {
-    wrap.append(card(`${pairs.pairs.length} file pairs spanning repositories`,
-      dataTable(pairs.pairs, [
-        { key: 'repo_a', label: 'Repo A', render: (r) => h('span', { class: 'mono', style: 'font-size:11px' }, r.repo_a) },
-        { key: 'path_a', label: 'File A', render: (r) => pathNode(r.path_a) },
-        { key: 'repo_b', label: 'Repo B', render: (r) => h('span', { class: 'mono', style: 'font-size:11px' }, r.repo_b) },
-        { key: 'path_b', label: 'File B', render: (r) => pathNode(r.path_b) },
-        { key: 'n_ab', label: 'Shared', num: true },
-        { key: 'ticket_ratio', label: 'Ticket', num: true, render: (r) => pct(r.ticket_ratio) },
-        { key: 'score', label: spec ? spec.label : 'Score', num: true, render: (r) => scoreCell(r.score, spec) },
-      ], { initialSort: 'score', onRow: (r) => go(`/file/${r.file_a_id}`) }),
-      'The actionable cross-repo answer: which file goes with which'));
-  }
-
-  wrap.append(h('div', { class: 'section-title' }, 'Recent multi-repository change sets'));
-  wrap.append(card('Raw evidence',
-    dataTable(sets.change_sets, [
-      { key: 'ticket', label: 'Key', render: (c) => (c.ticket ? h('span', { class: 'badge info' }, c.ticket) : h('span', { class: 'badge muted' }, 'session')) },
-      { key: 'repos', label: 'Repositories', render: (c) => h('span', { class: 'mono', style: 'font-size:11px' }, (c.repos || []).join(', ')) },
-      { key: 'n_repos', label: 'Repos', num: true },
-      { key: 'n_commits', label: 'Commits', num: true },
-      { key: 'n_files', label: 'Files', num: true },
-      { key: 'author', label: 'Author' },
-      { key: 'last_at', label: 'When', render: (c) => when(c.last_at) },
-    ], { initialSort: 'last_at', onRow: (c) => go(`/changeset/${c.id}`) })));
-  return wrap;
-});
-
-/* ------------------------------------------------------------ insights -- */
 
 on('/insights', async (_args, params) => {
   const tab = params.tab || 'risk';
@@ -2307,78 +2134,7 @@ on('/insights', async (_args, params) => {
 
 /* ---------------------------------------------------------- validation -- */
 
-on('/validation', async (_args, params) => {
-  const lag = Number(params.lag || 1);
-  const [val, ov] = await Promise.all([
-    api('/api/validation', { lag_bins: lag, min_bumps: 2, limit: 35 }),
-    api('/api/mining/overview'),
-  ]);
-
-  const wrap = h('div');
-  wrap.append(pageHead('Measure validation',
-    'Which numbers to trust — computed against ground truth, not asserted.'));
-
-  wrap.append(h('div', { class: 'help' },
-    h('strong', {}, 'The ground truth. '),
-    'A Go pseudo-version embeds the upstream commit it was cut from (',
-    h('code', { style: 'font-family:var(--mono);color:var(--info)' }, 'v3.0.0-20260626221153-5fc63d6f3055'),
-    '), so a manifest diff is a dated, directional, provable propagation edge. ',
-    `${num(ov.dep_bumps)} such edges were recovered. Each measure is then scored on how well it ranks them above non-edges.`));
-
-  wrap.append(h('div', { class: 'grid grid-stats' },
-    statTile('Ground-truth edges', num(val.true_edges), 'from manifest bumps'),
-    statTile('Candidate pairs', num(val.candidates), 'ordered repo pairs'),
-    statTile('Base rate', pct(val.true_edges / Math.max(val.candidates, 1)), 'positives among all pairs'),
-    statTile('Best AUC (global)', fx(val.measures[0] && val.measures[0].auc, 4), val.measures[0] ? val.measures[0].measure : ''),
-    statTile('Within declared set', '0.88', 'in sample; 0.69 held out in time'),
-    statTile('Lift from structure', '~350×', 'base rate 0.23% → 82%')));
-
-  wrap.append(h('div', { class: 'help', style: 'border-left-color:var(--warn)' },
-    h('strong', {}, 'Read the two numbers carefully. '), val.note));
-
-  const lagBtns = h('div', { class: 'toolbar' }, h('div', { class: 'field' }, h('label', {}, 'Lag'),
-    ...[0, 1, 2, 4, 8, 12, 28, 56].map((l) => h('button', { class: `chip${lag === l ? ' active' : ''}`, onclick: () => go(`/validation?lag=${l}`) }, `${l}`))));
-  wrap.append(lagBtns);
-
-  wrap.append(card(`Measure quality at lag ${lag}`,
-    dataTable(val.measures, [
-      { key: 'measure', label: 'Measure', render: (m) => h('div', {},
-          h('span', { style: 'font-weight:550' }, (state.byKey.get(m.measure) || {}).label || m.measure),
-          h('div', { style: 'font-size:11px;color:var(--text-faint)' }, m.measure)) },
-      { key: 'auc', label: 'AUC', num: true, title: 'P(a true edge outranks a non-edge). 0.5 is chance.', render: (m) => h('div', { class: 'confbar', style: 'justify-content:flex-end' }, h('span', {}, fx(m.auc, 4)), bar(((m.auc || 0.5) - 0.5) * 2)) },
-      { key: 'p10', label: 'P@10', num: true, sort: (m) => m.precision_at['10'], render: (m) => fx(m.precision_at['10'], 2) },
-      { key: 'p25', label: 'P@25', num: true, sort: (m) => m.precision_at['25'], render: (m) => fx(m.precision_at['25'], 2) },
-      { key: 'p50', label: 'P@50', num: true, sort: (m) => m.precision_at['50'], render: (m) => fx(m.precision_at['50'], 2) },
-      { key: 'directional_accuracy', label: 'Direction', num: true, title: 'For a true A→B edge, does the measure score A→B above B→A? 0.5 is a coin flip.', render: (m) => fx(m.directional_accuracy, 3) },
-    ], { initialSort: 'auc', onRow: (m) => setMeasure(m.measure) }),
-    'Click a measure to make it the active ranking'));
-
-  wrap.append(h('div', { class: 'section-title' }, 'What this told us'));
-  wrap.append(h('div', { class: 'card' }, h('div', { class: 'card-body' },
-    h('p', { style: 'margin:0 0 9px;font-size:13px;color:var(--text-dim);line-height:1.6' },
-      h('strong', { style: 'color:var(--text)' }, '1. A high AUC is not a useful answer. '),
-      'The best single measure over all ordered pairs reaches AUC 0.80 at lag 0 — where a symmetric measure is 0.50 directional by construction, not by measurement. The best directional accuracy anywhere is 0.63, at lag 4, where AUC is 0.74. That measure is Russell-Rao, which is pure joint frequency, so it scores well by ranking “both repositories are busy” and is near a coin flip on which way the arrow points. Activity confounding is the cause.'),
-    h('p', { style: 'margin:0 0 9px;font-size:13px;color:var(--text-dim);line-height:1.6' },
-      h('strong', { style: 'color:var(--text)' }, '2. Structure is a decisive prior. '),
-      'Restricting candidates to declared dependencies lifts the base rate from 0.23% to 82% before any measure is evaluated. But structure alone is not enough either — of telemetry’s 9 declared internal dependencies, 1 has never once co-changed.'),
-    h('p', { style: 'margin:0;font-size:13px;color:var(--text-dim);line-height:1.6' },
-      h('strong', { style: 'color:var(--accent)' }, '3. Together they reach AUC 0.88 in sample '),
-      '(measured 0.884 over the shipped score, declared candidates only) and 0.69 held out in time. No cross-validation figure is quoted: the ensemble has no fitted parameters, so folds train nothing. A coupling-free baseline — the consumer repo\'s raw commit count — reaches 0.80 on the same task, so activity confounding is present inside the declared set too. That is what the Impact view uses, and why its rows carry an explicit evidence tier.'))));
-  return wrap;
-});
-
-
-/* ------------------------------------------------------------- feedback -- */
-
-/**
- * Defects the sessions using Git Synapse have reported against it.
- *
- * The occurrence count is the priority column, not the severity: a gap twenty
- * sessions hit matters more than one seen once, however it was graded.
- */
-/* ---------------------------------------------------------- accounts -- */
-
-/** A labelled control, stacked so the input gets the full column width. */
+/** A labelled form control with an optional hint underneath. */
 const field = (label, control, hint) =>
   h('div', { class: 'field-block' },
     h('label', { class: 'field-label' }, label),
