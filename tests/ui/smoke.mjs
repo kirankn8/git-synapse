@@ -88,7 +88,8 @@ const routes = [
   ['#/',                                  'Overview'],
   ['#/repos',                             'Repositories'],
   ['#/accounts',                          'Accounts'],
-  [`#/repo/${repoId}`,                    'Repo overview'],
+  [`#/repo/${repoId}`,                    'Repo (lands on files)'],
+  [`#/repo/${repoId}?tab=overview`,       'Repo overview'],
   [`#/repo/${repoId}?tab=pairs`,          'Repo pairs'],
   [`#/repo/${repoId}?tab=files`,          'Repo files (tree)'],
   [`#/repo/${repoId}?tab=files&view=table`, 'Repo files (table)'],
@@ -161,19 +162,23 @@ for (const [path, label, expect] of [
   report(`${label} trail`, !missing.length, trail || 'no breadcrumb');
 }
 
-// The tree is the point of the files tab: a flat list hides the structure.
-window.history.pushState({}, '', `/repo/${repoId}?tab=files`);
+// Opening a repository with no tab at all must land on the tree, not on a
+// summary the reader then has to click past.
+window.history.pushState({}, '', `/repo/${repoId}`);
 window.dispatchEvent(new window.PopStateEvent('popstate'));
 {
   let dirs = 0, leaves = 0;
   for (let i = 0; i < 60; i++) {
     await sleep(120);
     dirs = window.document.querySelectorAll('.tree-dir').length;
-    leaves = window.document.querySelectorAll('.tree-file').length;
+    leaves = window.document.querySelectorAll('.tree-row.is-file').length;
     if (dirs || leaves) break;
   }
-  report('files render as a tree', dirs > 0 && leaves > 0,
-         `${dirs} folders, ${leaves} files`);
+  // A tree that shows less than the table it replaced is a downgrade, so the
+  // row has to carry the same columns.
+  const cells = window.document.querySelectorAll('.tree-row.is-file .tree-cell').length;
+  report('files render as a tree', dirs > 0 && leaves > 0 && cells >= leaves * 6,
+         `${dirs} folders, ${leaves} files, ${cells} cells`);
 }
 
 console.log('\n=== interaction ===');
