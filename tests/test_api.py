@@ -474,7 +474,7 @@ def test_a_refresh_starts_in_the_background_and_returns_at_once(client,
 
 
 @pytest.mark.parametrize("path", ["/repos", "/graph", "/feedback/17",
-                                  "/repo/acme/telemetry"])
+                                  "/repos/5/files/17"])
 def test_the_spa_serves_its_own_routes(client, path):
     r = client.get(path)
     assert r.status_code == 200
@@ -709,3 +709,34 @@ def test_lag_is_a_number_in_json_not_a_string(client, db):
         with connection() as conn:
             conn.execute("DELETE FROM repo WHERE id IN (%s, %s)", (a, b))
             conn.commit()
+
+
+def test_the_server_serves_the_shell_for_every_route_the_spa_claims():
+    """The nav covers the tabs; this covers the rest. A route registered in the
+    client but unknown to the server 404s on reload and on a pasted link, which
+    is precisely when a shareable URL is worth having."""
+    import re
+    from pathlib import Path
+
+    from git_synapse.api.main import app  # noqa: F401  (ensures the module loads)
+
+    web = Path(__file__).resolve().parents[1] / "web" / "static" / "app.js"
+    claimed = {m.group(1) for m in re.finditer(r"^on\('/([a-z]+)", web.read_text(), re.M)}
+    assert claimed, "no client routes found; the regex probably broke"
+
+    served = set(_spa_routes())
+    assert claimed <= served, f"the SPA routes {sorted(claimed - served)}, which 404 on reload"
+
+
+def _spa_routes():
+    """The tuple is a local inside the module's `if web root exists` block, so it
+    is read back out of the source rather than imported."""
+    import ast
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1]
+           / "src" / "git_synapse" / "api" / "main.py").read_text()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "SPA_ROUTES":
+            return ast.literal_eval(node.value)
+    raise AssertionError("SPA_ROUTES no longer exists in api/main.py")

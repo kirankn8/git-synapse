@@ -352,12 +352,24 @@ async function repoTrail(repo) {
     const { accounts } = await allAccounts();
     const account = (accounts || []).find((a) => a.id === accountId);
     if (account) {
-      trail.push(['Accounts', '/accounts'], [account.login, `/repos?account=${account.id}`]);
+      trail.push(['Accounts', '/accounts'], [account.login, `/accounts/${account.id}`]);
     }
   }
   if (!trail.length) trail.push(['Repositories', '/repos']);
-  if (repo && repo.id) trail.push([repo.name || repo.full_name, `/repo/${repo.id}`]);
+  if (repo && repo.id) trail.push([repo.name || repo.full_name, `/repos/${repo.id}`]);
   return trail;
+}
+
+/* A path that names a repository the entity does not belong to is worse than no
+   path at all: it reads as authoritative and is wrong. Ids are globally unique,
+   so the view still renders the right thing -- the address is quietly corrected
+   to match, without a history entry, so Back still goes where it should. */
+function canonicalise(expectedPath) {
+  const [current] = currentPath().split('?');
+  if (current !== expectedPath) {
+    const qs = window.location.search || '';
+    window.history.replaceState({}, '', expectedPath + qs);
+  }
 }
 
 export const pageHead = (title, sub, actions = []) =>
@@ -566,7 +578,7 @@ on('/', async () => {
         ],
         {
           initialSort: 'score',
-          onRow: (r) => go(`/pair/${r.file_a_id}/${r.file_b_id}`),
+          onRow: (r) => go(`/repos/${r.repo_id}/pairs/${r.file_a_id}/${r.file_b_id}`),
           empty: 'No pairs yet — run an ingest first.',
         },
       ),
@@ -636,14 +648,14 @@ const runsTable = (runs) =>
       { key: 'repos_failed', label: 'Failed', num: true },
       { key: 'commits_added', label: 'Commits', num: true, render: (r) => num(r.commits_added) },
     ],
-    { initialSort: 'id', onRow: (r) => go(`/run/${r.id}`) },
+    { initialSort: 'id', onRow: (r) => go(`/jobs/${r.id}`) },
   );
 
 async function triggerRefresh() {
   try {
     await fetch('/api/ingest/refresh', { method: 'POST' });
     toast('Ingest started — watch progress under Jobs');
-    setTimeout(() => go('/runs'), 700);
+    setTimeout(() => go('/jobs'), 700);
   } catch (err) {
     toast(String(err.message || err), true);
   }
@@ -651,8 +663,11 @@ async function triggerRefresh() {
 
 /* --------------------------------------------------------------- repos -- */
 
-on('/repos', async (_args, params) => {
-  const accountId = params.account ? Number(params.account) : null;
+/* Registered twice: `/repos` is every repository, `/accounts/:id` is one
+   account's. Same view, and the account arrives in the path rather than as a
+   query, because it is a place in the hierarchy and not a filter over it. */
+const reposView = async (args, params) => {
+  const accountId = args.id ? Number(args.id) : null;
   const [repos, langs, accounts] = await Promise.all([
     api('/api/repos', { limit: 1000, search: params.q, language: params.lang,
                         status: params.status, account_id: accountId }),
@@ -702,8 +717,8 @@ on('/repos', async (_args, params) => {
     if (search.value) p.set('q', search.value);
     if (langSel.value) p.set('lang', langSel.value);
     if (statusSel.value) p.set('status', statusSel.value);
-    if (accountId) p.set('account', String(accountId));
-    go(`/repos${p.toString() ? '?' + p : ''}`);
+    const base = accountId ? `/accounts/${accountId}` : '/repos';
+    go(`${base}${p.toString() ? '?' + p : ''}`);
   };
 
   wrap.append(
@@ -740,11 +755,14 @@ on('/repos', async (_args, params) => {
     ),
   );
   return wrap;
-});
+};
+
+on('/repos', reposView);
+on('/accounts/:id', reposView);
 
 /* ---------------------------------------------------------- repo detail -- */
 
-on('/repo/:id', async ({ id }, params) => {
+on('/repos/:id', async ({ id }, params) => {
   const tab = params.tab || 'files';
   const repo = await api(`/api/repos/${id}`);
 
@@ -766,7 +784,7 @@ on('/repo/:id', async ({ id }, params) => {
       'div',
       { class: 'grid grid-stats' },
       statTile('Commits', num(repo.commit_count), `${num(repo.pair_population)} pair-eligible`),
-      statTile('Files', num(repo.file_count), `${num(repo.pair_count)} coupling pairs`, () => go(`/repo/${id}?tab=files`)),
+      statTile('Files', num(repo.file_count), `${num(repo.pair_count)} coupling pairs`, () => go(`/repos/${id}?tab=files`)),
       statTile('Authors', num(repo.author_count), 'distinct contributors'),
       statTile('Churn', repo.has_churn ? `+${num(repo.total_insertions)}` : 'n/a', repo.has_churn ? `−${num(repo.total_deletions)} lines` : 'blobless mirror'),
       statTile('Stars', num(repo.stargazers), `${num(repo.forks_count)} forks`),
@@ -791,7 +809,7 @@ on('/repo/:id', async ({ id }, params) => {
       ['risk', 'Risk'],
       ['meta', 'Metadata'],
     ].map(([key, label]) =>
-      h('button', { class: `tab${tab === key ? ' active' : ''}`, onclick: () => go(`/repo/${id}?tab=${key}`) }, label),
+      h('button', { class: `tab${tab === key ? ' active' : ''}`, onclick: () => go(`/repos/${id}?tab=${key}`) }, label),
     ),
   );
   wrap.append(tabs);
@@ -845,7 +863,7 @@ on('/repo/:id', async ({ id }, params) => {
             { key: 'change_count', label: 'Commits', num: true, render: (d) => num(d.change_count) },
             { key: 'last_change_at', label: 'Last change', render: (d) => when(d.last_change_at) },
           ],
-          { initialSort: 'change_count', onRow: (d) => go(`/dir/${d.id}`) },
+          { initialSort: 'change_count', onRow: (d) => go(`/repos/${d.repo_id ?? id}/dirs/${d.id}`) },
         ),
       ),
     );
@@ -873,7 +891,7 @@ on('/repo/:id', async ({ id }, params) => {
       card('From manifests at HEAD',
         dataTable(deps.declared, [
           { key: 'dep_name', label: 'Module', render: (d) => h('span', { class: 'mono' }, d.dep_name) },
-          { key: 'dep_repo', label: 'Tracked repo', render: (d) => (d.dep_repo ? h('a', { href: `/repo/${d.dep_repo_id}`, 'data-nav': true, class: 'mono' }, d.dep_repo) : h('span', { class: 'badge muted' }, 'external')) },
+          { key: 'dep_repo', label: 'Tracked repo', render: (d) => (d.dep_repo ? h('a', { href: `/repos/${d.dep_repo_id}`, 'data-nav': true, class: 'mono' }, d.dep_repo) : h('span', { class: 'badge muted' }, 'external')) },
           { key: 'manifest', label: 'Manifest', render: (d) => h('span', { class: 'badge muted' }, d.manifest) },
           { key: 'dep_version', label: 'Version', render: (d) => h('span', { class: 'mono', style: 'font-size:11px' }, (d.dep_version || '').slice(0, 40)) },
         ], { empty: 'No manifest dependencies found for this repository.' })),
@@ -909,7 +927,7 @@ on('/repo/:id', async ({ id }, params) => {
           { key: 'effective_authors', label: 'Effective', num: true, render: (r) => h('span', { style: `color:${(r.effective_authors || 9) < 1.5 ? 'var(--danger)' : 'inherit'}` }, fx(r.effective_authors, 1)) },
           { key: 'top_author', label: 'Top author' },
           { key: 'risk_score', label: 'Risk', num: true, render: (r) => h('div', { class: 'confbar', style: 'justify-content:flex-end' }, h('span', {}, fx(r.risk_score, 3)), bar((r.risk_score || 0) / 2)) },
-        ], { initialSort: 'risk_score', onRow: (r) => go(`/file/${r.file_id}`) })),
+        ], { initialSort: 'risk_score', onRow: (r) => go(`/repos/${r.repo_id}/files/${r.file_id}`) })),
     );
   } else {
     body.append(metadataPanel(repo));
@@ -932,7 +950,7 @@ const impactTable = (rows, otherKey, selfId) =>
       const other = r[otherKey];
       const a = otherKey === 'source_repo_id' ? other : selfId;
       const b = otherKey === 'source_repo_id' ? selfId : other;
-      go(`/repopair/${a}/${b}`);
+      go(`/impact/${a}/${b}`);
     },
     empty: 'No cross-repository edges recorded.',
   });
@@ -971,7 +989,7 @@ async function repoImpactGraphView(params) {
     measureLabel: 'impact score',
     centerId: null,
     onNodeClick: (id) => go(`/impact?repo=${id}&dir=upstream`),
-    onNodeFocus: (id) => go(`/repo/${id}?tab=impact`),
+    onNodeFocus: (id) => go(`/repos/${id}?tab=impact`),
   }));
   wrap.append(h('div', { class: 'help', style: 'margin-top:13px' },
     'Click a repository to open its impact view; shift-click for its detail page. ',
@@ -991,7 +1009,7 @@ const hotspotTable = (rows) =>
       { key: 'partner_count', label: 'Partners', num: true, render: (r) => num(r.partner_count) },
       { key: 'last_change_at', label: 'Last', render: (r) => when(r.last_change_at) },
     ],
-    { initialSort: 'change_count', onRow: (r) => go(`/file/${r.id}`), empty: 'No files ingested yet.' },
+    { initialSort: 'change_count', onRow: (r) => go(`/repos/${r.repo_id}/files/${r.id}`), empty: 'No files ingested yet.' },
   );
 
 const pairTable = (rows, spec, wide = false) =>
@@ -1008,7 +1026,7 @@ const pairTable = (rows, spec, wide = false) =>
       wide ? { key: 'log_likelihood_ratio', label: 'G²', num: true, render: (r) => fx(r.log_likelihood_ratio, 1) } : null,
       { key: 'score', label: spec ? spec.label : 'Score', num: true, render: (r) => scoreCell(r.score, spec) },
     ].filter(Boolean),
-    { initialSort: 'score', onRow: (r) => go(`/pair/${r.file_a_id}/${r.file_b_id}`), empty: 'No pairs above the support threshold.' },
+    { initialSort: 'score', onRow: (r) => go(`/repos/${r.repo_id}/pairs/${r.file_a_id}/${r.file_b_id}`), empty: 'No pairs above the support threshold.' },
   );
 
 const fileTable = (rows, empty) => dataTable(
@@ -1023,7 +1041,7 @@ const fileTable = (rows, empty) => dataTable(
     { key: 'author_count', label: 'Authors', num: true },
     { key: 'last_change_at', label: 'Last change', render: (f) => when(f.last_change_at) },
   ],
-  { initialSort: 'change_count', onRow: (f) => go(`/file/${f.id}`), empty },
+  { initialSort: 'change_count', onRow: (f) => go(`/repos/${f.repo_id}/files/${f.id}`), empty },
 );
 
 async function repoFilesPanel(repoId, params) {
@@ -1087,9 +1105,10 @@ function metadataPanel(repo) {
 
 /* ---------------------------------------------------------- file detail -- */
 
-on('/file/:id', async ({ id }, params) => {
+on('/repos/:repo/files/:id', async ({ id }, params) => {
   const tab = params.tab || 'coupled';
   const file = await api(`/api/files/${id}`);
+  canonicalise(`/repos/${file.repo_id}/files/${id}`);
   const spec = state.byKey.get(state.measure);
 
   const wrap = h('div');
@@ -1129,7 +1148,7 @@ on('/file/:id', async ({ id }, params) => {
         ['history', 'Commit history'],
         ['authors', 'Authors'],
       ].map(([key, label]) =>
-        h('button', { class: `tab${tab === key ? ' active' : ''}`, onclick: () => go(`/file/${id}?tab=${key}`) }, label),
+        h('button', { class: `tab${tab === key ? ' active' : ''}`, onclick: () => go(`/repos/${file.repo_id}/files/${id}?tab=${key}`) }, label),
       ),
     ),
   );
@@ -1142,7 +1161,7 @@ on('/file/:id', async ({ id }, params) => {
     const data = await api(`/api/files/${id}/coupled`, { measure: state.measure, limit: 200, min_support: minSupport });
 
     const supportInput = h('input', { class: 'input', type: 'number', min: '1', value: String(minSupport), style: 'width:78px' });
-    supportInput.addEventListener('change', () => go(`/file/${id}?tab=coupled&min=${supportInput.value || 1}`));
+    supportInput.addEventListener('change', () => go(`/repos/${file.repo_id}/files/${id}?tab=coupled&min=${supportInput.value || 1}`));
 
     body.append(
       h(
@@ -1177,7 +1196,7 @@ on('/file/:id', async ({ id }, params) => {
           ],
           {
             initialSort: 'score',
-            onRow: (p) => go(`/pair/${id}/${p.other_id}`),
+            onRow: (p) => go(`/repos/${file.repo_id}/pairs/${id}/${p.other_id}`),
             empty: 'No coupling partners above the support threshold.',
           },
         ),
@@ -1232,7 +1251,7 @@ on('/file/:id', async ({ id }, params) => {
 
 /* ---------------------------------------------------------- pair detail -- */
 
-on('/pair/:a/:b', async ({ a, b }) => {
+on('/repos/:repo/pairs/:a/:b', async ({ a, b }) => {
   const [detail, commits] = await Promise.all([
     api(`/api/pairs/${a}/${b}`),
     api(`/api/pairs/${a}/${b}/commits`, { limit: 30 }),
@@ -1417,10 +1436,11 @@ function measuresTable(detail) {
 
 /* ----------------------------------------------------- directory detail -- */
 
-on('/dir/:id', async ({ id }) => {
+on('/repos/:repo/dirs/:id', async ({ id }) => {
   const spec = state.byKey.get(state.measure);
   const data = await api(`/api/directories/${id}/coupled`, { measure: state.measure, limit: 200 });
   const dir = data.directory;
+  if (dir) canonicalise(`/repos/${dir.repo_id}/dirs/${id}`);
   const wrap = h('div');
   if (dir) {
     wrap.append(crumbs(...(await repoTrail({ id: dir.repo_id, name: dir.repo,
@@ -1442,7 +1462,7 @@ on('/dir/:id', async ({ id }) => {
           { key: 'confidence_out', label: 'P(it|this)', num: true, render: (d) => pct(d.confidence_out) },
           { key: 'score', label: spec ? spec.label : state.measure, num: true, render: (d) => scoreCell(d.score, spec) },
         ],
-        { initialSort: 'score', onRow: (d) => go(`/dir/${d.other_id}`), empty: 'No coupled directories.' },
+        { initialSort: 'score', onRow: (d) => go(`/repos/${dir.repo_id}/dirs/${d.other_id}`), empty: 'No coupled directories.' },
       ),
     ),
   );
@@ -1506,7 +1526,7 @@ on('/explore', async (_args, params) => {
           { key: 'author_count', label: 'Authors', num: true },
           { key: 'last_change_at', label: 'Last change', render: (f) => when(f.last_change_at) },
         ],
-        { initialSort: 'change_count', onRow: (f) => go(`/file/${f.id}`), empty: 'Nothing matched that search.' },
+        { initialSort: 'change_count', onRow: (f) => go(`/repos/${f.repo_id}/files/${f.id}`), empty: 'Nothing matched that search.' },
       ),
     ),
   );
@@ -1590,7 +1610,7 @@ on('/graph', async (_args, params) => {
     renderGraph(shell, data, {
       measureLabel: spec ? spec.label : state.measure,
       centerId: params.center ? Number(params.center) : null,
-      onNodeClick: (nodeId) => go(`/file/${nodeId}`),
+      onNodeClick: (nodeId) => go(`/repos/${repoId}/files/${nodeId}`),
       onNodeFocus: (nodeId) => go(`/graph?repo=${repoId}&limit=${params.limit || 160}&min=${params.min || 3}&center=${nodeId}`),
     }),
   );
@@ -1669,7 +1689,7 @@ on('/measures', async () => {
 
 /* ----------------------------------------------------------------- jobs -- */
 
-on('/runs', async () => {
+on('/jobs', async () => {
   const [runs, cfg] = await Promise.all([api('/api/runs', { limit: 60 }), api('/api/config')]);
   const wrap = h('div');
   wrap.append(
@@ -1694,10 +1714,10 @@ on('/runs', async () => {
   return wrap;
 });
 
-on('/run/:id', async ({ id }) => {
+on('/jobs/:id', async ({ id }) => {
   const run = await api(`/api/runs/${id}`);
   const wrap = h('div');
-  wrap.append(crumbs(['Jobs', '/runs'], [`Run ${id}`]));
+  wrap.append(crumbs(['Jobs', '/jobs'], [`Run ${id}`]));
   wrap.append(
     pageHead(
       `Run ${run.id} — ${run.status}`,
@@ -2032,7 +2052,7 @@ on('/impact', async (_args, params) => {
       { key: 'median_adoption_days', label: 'Adopted after', num: true, title: 'Median days from the upstream commit to the bump that took it', render: (r) => adoptedAfter(r.median_adoption_days) },
       { key: 'score', label: 'Score', num: true, render: (r) => h('div', { class: 'confbar', style: 'justify-content:flex-end' }, h('span', {}, fx(r.score, 3)), bar(r.score)) },
       { key: 'primary_language', label: 'Lang', render: (r) => (r.primary_language ? h('span', { class: 'badge muted' }, r.primary_language) : '—') },
-    ], { initialSort: 'score', onRow: (r) => go(`/repopair/${direction === 'upstream' ? r.source_repo_id : repoId}/${direction === 'upstream' ? repoId : r.target_repo_id}`), empty: 'No cross-repo edges recorded for this repository.' }),
+    ], { initialSort: 'score', onRow: (r) => go(`/impact/${direction === 'upstream' ? r.source_repo_id : repoId}/${direction === 'upstream' ? repoId : r.target_repo_id}`), empty: 'No cross-repo edges recorded for this repository.' }),
     'Click a row for the full evidence, including the exact commits'));
 
   if (chains.chains.length) {
@@ -2055,14 +2075,14 @@ on('/impact', async (_args, params) => {
     card(`Declared in manifests (${deps.declared.length})`,
       dataTable(deps.declared, [
         { key: 'dep_name', label: 'Module', render: (d) => h('span', { class: 'mono' }, d.dep_name) },
-        { key: 'dep_repo', label: 'Tracked repo', render: (d) => (d.dep_repo ? h('a', { href: `/repo/${d.dep_repo_id}`, 'data-nav': true, class: 'mono' }, d.dep_repo) : h('span', { class: 'badge muted' }, 'external')) },
+        { key: 'dep_repo', label: 'Tracked repo', render: (d) => (d.dep_repo ? h('a', { href: `/repos/${d.dep_repo_id}`, 'data-nav': true, class: 'mono' }, d.dep_repo) : h('span', { class: 'badge muted' }, 'external')) },
         { key: 'manifest', label: 'Manifest', render: (d) => h('span', { class: 'badge muted' }, d.manifest) },
         { key: 'dep_version', label: 'Version', render: (d) => h('span', { class: 'mono', style: 'font-size:11px' }, (d.dep_version || '').slice(0, 34)) },
       ], { empty: 'No manifest dependencies found.' }),
       'Structural: the candidate set that lifts the base rate ~350×'),
     card(`Observed bumps (${deps.bumps.length})`,
       dataTable(deps.bumps, [
-        { key: 'dep_repo', label: 'Upstream', render: (b) => h('a', { href: `/repo/${b.dep_repo_id}`, 'data-nav': true, class: 'mono' }, b.dep_repo) },
+        { key: 'dep_repo', label: 'Upstream', render: (b) => h('a', { href: `/repos/${b.dep_repo_id}`, 'data-nav': true, class: 'mono' }, b.dep_repo) },
         { key: 'bumps', label: 'Bumps', num: true },
         { key: 'median_adoption_days', label: 'Adopted after', num: true, render: (b) => adoptedAfter(b.median_adoption_days) },
         { key: 'last_bump', label: 'Last', render: (b) => when(b.last_bump) },
@@ -2074,7 +2094,7 @@ on('/impact', async (_args, params) => {
 
 /* --------------------------------------------------- repo pair detail -- */
 
-on('/repopair/:a/:b', async ({ a, b }) => {
+on('/impact/:a/:b', async ({ a, b }) => {
   const [depsA] = await Promise.all([
     api(`/api/repos/${b}/dependencies`),
   ]);
@@ -2087,8 +2107,8 @@ on('/repopair/:a/:b', async ({ a, b }) => {
   wrap.append(pageHead(
     h('span', { class: 'mono' }, `${repoA.name} → ${repoB.name}`),
     'Everything known about this repository relationship',
-    [h('a', { class: 'btn', href: `/repo/${a}`, 'data-nav': true }, repoA.name),
-     h('a', { class: 'btn', href: `/repo/${b}`, 'data-nav': true }, repoB.name)]));
+    [h('a', { class: 'btn', href: `/repos/${a}`, 'data-nav': true }, repoA.name),
+     h('a', { class: 'btn', href: `/repos/${b}`, 'data-nav': true }, repoB.name)]));
 
   if (edge) {
     wrap.append(h('div', { class: 'grid grid-stats' },
@@ -2403,7 +2423,7 @@ on('/accounts', async () => {
       { key: 'live_repo_count', label: 'Repos', num: true,
         title: 'Repositories currently attributed to this account. Click to see them.',
         render: (r) => (Number(r.live_repo_count)
-          ? h('a', { class: 'mono', href: `/repos?account=${r.id}`, 'data-nav': true,
+          ? h('a', { class: 'mono', href: `/accounts/${r.id}`, 'data-nav': true,
                      onclick: (e) => e.stopPropagation() }, num(r.live_repo_count))
           : h('span', { class: 'muted-cell' }, '0')) },
       { key: 'filters', label: 'Filters', sortable: false, render: filterCell },
@@ -2421,7 +2441,7 @@ on('/accounts', async () => {
           onclick: (e) => { e.stopPropagation(); remove(r); },
         }, 'Remove') },
     ], { initialSort: 'live_repo_count',
-         onRow: (r) => (Number(r.live_repo_count) ? go(`/repos?account=${r.id}`) : null),
+         onRow: (r) => (Number(r.live_repo_count) ? go(`/accounts/${r.id}`) : null),
          empty: 'No accounts yet. Add one above and run a discovery.' }),
     'An account owns repositories: open one to see just those. '
     + 'Removing an account keeps them and everything mined from them.'));

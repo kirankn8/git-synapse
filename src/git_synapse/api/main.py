@@ -135,10 +135,11 @@ if _web_root.is_dir():
     #: Client-side routes the SPA owns. Enumerated rather than matched with a
     #: catch-all so a genuine typo still returns 404 instead of silently
     #: rendering the shell.
+    #: Every deeper view lives under the tab that owns it -- a file is
+    #: /repos/{id}/files/{id}, not /file/{id} -- so this is exactly the nav.
     SPA_ROUTES = (
-        "repos", "repo", "accounts", "impact", "repopair", "crossrepo", "changeset",
-        "insights", "validation", "explore", "graph", "measures", "runs",
-        "run", "file", "pair", "dir", "feedback",
+        "accounts", "repos", "insights", "impact", "explore",
+        "graph", "measures", "jobs", "feedback",
     )
 
     @app.get("/{segment}", include_in_schema=False)

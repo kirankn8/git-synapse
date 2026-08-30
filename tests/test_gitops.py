@@ -726,10 +726,15 @@ def test_an_unparseable_tag_date_does_not_lose_the_tag(tmp_path, monkeypatch):
     real = gitops.run_git
 
     def _mangle(args, **kw):
+        # The date is the last field. Targeting it by position rather than by
+        # "the first tab followed by a 2" matters: an object name beginning
+        # with 2 would otherwise be mangled instead, one run in sixteen.
         proc = real(args, **kw)
         if args and args[0] == "for-each-ref":
-            proc.stdout = proc.stdout.replace("\t2", "\tnot-a-date", 1) \
-                if "\t2" in proc.stdout else proc.stdout
+            proc.stdout = "\n".join(
+                line.rsplit("\t", 1)[0] + "\tnot-a-date" if "\t" in line else line
+                for line in proc.stdout.splitlines()
+            )
         return proc
 
     monkeypatch.setattr(gitops, "run_git", _mangle)
