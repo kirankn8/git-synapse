@@ -262,6 +262,7 @@ def iter_commits(
     mirror: Path,
     since_shas: list[str] | None = None,
     rev: str = "HEAD",
+    include_tags: bool = False,
     include_merges: bool | None = None,
     rename_similarity: int | None = None,
     blobless: bool = False,
@@ -272,6 +273,9 @@ def iter_commits(
     Args:
         mirror: path to the bare repository.
         rev: what to walk. Defaults to HEAD, i.e. the default branch only.
+        include_tags: also walk commits reachable from tags. A release is often
+            cut on a branch that never merges back, so its commits are otherwise
+            never read -- and the range between two releases is uncomputable.
             Coupling is a claim about the code that shipped, and 25.8% of this
             corpus exists solely on branches that never merged: abandoned
             experiments, and backports that restate a change already counted on
@@ -333,6 +337,8 @@ def iter_commits(
     # HEAD does in a repository with no commits -- is read as a path, and git
     # then rejects every option that follows it.
     args.append(rev)
+    if include_tags:
+        args.append("--tags")
     for sha in since_shas or []:
         args.append(f"^{sha}")
 

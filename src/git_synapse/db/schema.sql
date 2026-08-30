@@ -947,6 +947,12 @@ CREATE INDEX IF NOT EXISTS repo_package_name_idx ON repo_package (ecosystem, nam
 
 ALTER TABLE dep_bump ADD COLUMN IF NOT EXISTS ecosystem TEXT;
 
+-- A commit reachable only from a release tag whose diff is patch-identical to
+-- one already on the shipping branch: the same change replayed, not a second
+-- observation of it. Stored so the exclusion is auditable, and separate from
+-- `pair_eligible` because that is recomputed from configuration.
+ALTER TABLE commit ADD COLUMN IF NOT EXISTS is_replay BOOLEAN NOT NULL DEFAULT FALSE;
+
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -982,5 +988,5 @@ CREATE TABLE IF NOT EXISTS meta (
 -- was not, so schema_is_current() was permanently false and every service boot
 -- re-ran the whole DDL, taking exactly the locks the fast path exists to avoid.
 INSERT INTO meta (key, value)
-VALUES ('schema_version', '22'::jsonb)
+VALUES ('schema_version', '23'::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();

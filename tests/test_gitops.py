@@ -627,3 +627,62 @@ def test_a_tag_pointing_straight_at_a_merge_still_anchors_to_a_real_commit(tmp_p
     assert tag.main_sha != merge_sha, "a merge commit is never stored"
     assert len(g(work, "rev-list", "--parents", "-n", "1", tag.main_sha)
                .stdout.split()) == 2, "the anchor must have a single parent"
+
+
+def test_a_cherry_picked_release_commit_is_recognised_as_a_replay(tmp_path):
+    """A fix landed on the shipping branch and then cherry-picked onto a release
+    branch is the same change twice. Counting the second would claim those files
+    belong together on evidence that is one observation repeated."""
+    work = worktree(tmp_path, "replay")
+    add_commit(work, "auth.py", "def check(): pass\n")
+    g(work, "checkout", "-q", "-b", "release-1.0", "HEAD~1")
+    g(work, "cherry-pick", "-x", "main")
+    picked = g(work, "rev-parse", "HEAD").stdout.strip()
+    g(work, "tag", "v1.0.0")
+    g(work, "checkout", "-q", "main")
+
+    assert picked in gitops.replayed_commits(work, "main")
+
+
+def test_a_backport_that_touched_extra_files_is_not_a_replay(tmp_path):
+    """A different diff is a different change, and the extra file really did
+    have to move with the others on that branch. That is evidence we would
+    otherwise throw away."""
+    work = worktree(tmp_path, "adapted")
+    add_commit(work, "auth.py", "def check(): pass\n")
+    g(work, "checkout", "-q", "-b", "release-1.0", "HEAD~1")
+    (work / "auth.py").write_text("def check(): pass\n")
+    (work / "compat.py").write_text("shim\n")          # the old branch needed this too
+    g(work, "add", "-A"); g(work, "commit", "--quiet", "-m", "backport auth fix")
+    adapted = g(work, "rev-parse", "HEAD").stdout.strip()
+    g(work, "tag", "v1.0.0")
+    g(work, "checkout", "-q", "main")
+
+    assert adapted not in gitops.replayed_commits(work, "main")
+
+
+def test_a_release_only_commit_is_not_a_replay(tmp_path):
+    """Work that exists nowhere else is the case this whole change is for."""
+    work = worktree(tmp_path, "release-only")
+    g(work, "checkout", "-q", "-b", "release-1.0")
+    add_commit(work, "pom.xml", "1.0.0")
+    only = g(work, "rev-parse", "HEAD").stdout.strip()
+    g(work, "tag", "v1.0.0")
+    g(work, "checkout", "-q", "main")
+
+    assert only not in gitops.replayed_commits(work, "main")
+
+
+def test_the_watermark_covers_every_tip_the_walk_visits(tmp_path):
+    """The walk now reads tags too, so a watermark of the branch tip alone
+    would re-read every release commit on each run."""
+    work = worktree(tmp_path, "tips")
+    g(work, "checkout", "-q", "-b", "release-1.0")
+    add_commit(work, "pom.xml", "1.0.0")
+    release = g(work, "rev-parse", "HEAD").stdout.strip()
+    g(work, "tag", "-a", "v1.0.0", "-m", "annotated")   # a tag object, not a commit
+    g(work, "checkout", "-q", "main")
+
+    tips = gitops.ref_tips(work)
+    assert release in tips, "the tag's commit must be a watermark"
+    assert all(len(t) == 40 for t in tips), "annotated tags must be peeled to commits"

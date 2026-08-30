@@ -473,15 +473,18 @@ def default_branch(path: Path) -> str | None:
 
 
 def ref_tips(path: Path) -> list[str]:
-    """SHA of the default branch tip, as a single-element list.
+    """Every tip the walk visits: the default branch, and every tag.
 
-    The watermark for an incremental walk. It used to be every branch tip,
-    because the walk visited every branch; the walk now follows only the branch
-    that ships, so anything else would exclude commits that must still be read
-    when they eventually merge.
+    The watermark for an incremental walk, so it has to cover exactly what the
+    walk covers. Excluding only the branch tip would re-read every release
+    commit on each run; excluding a branch the walk never visits would skip
+    commits that must still be read when that branch merges.
     """
+    # `rev-list --no-walk` peels to commits; `rev-parse --tags` would hand back
+    # the tag *object* for an annotated tag, which is not a commit and which the
+    # watermark check below would discard on every run.
     proc = run_git(
-        ["rev-parse", "HEAD"],
+        ["rev-list", "--no-walk", "--tags", "HEAD"],
         cwd=path,
         check=False,
         timeout=120,
@@ -582,6 +585,40 @@ def _anchor_to_branch(path: Path, tags: list[Tag], branch: str | None) -> list[T
         found = mb.stdout.strip() if mb.returncode == 0 else ""
         anchored.append(replace(tag, main_sha=_first_real_commit(path, found)))
     return anchored
+
+
+def replayed_commits(path: Path, branch: str | None) -> set[str]:
+    """Commits off the branch whose diff already exists on it.
+
+    A fix landed on the shipping branch and then cherry-picked onto a release
+    branch is the same change twice, and counting the second would say those
+    files belong together on evidence that is really one observation repeated.
+
+    `--cherry-mark` is git's own answer: it compares by patch id, normalised for
+    whitespace and line offsets, so it recognises a backport that had to shift
+    to apply -- and it does *not* recognise one that had to touch extra files,
+    which is correct, because that is a different change.
+
+    Only the divergent commits are compared, so the cost follows how much lives
+    off the branch rather than the size of the history.
+    """
+    if not branch:
+        return set()
+    proc = run_git(["for-each-ref", "--format=%(objectname)", "refs/tags"],
+                   cwd=path, check=False, timeout=120)
+    if proc.returncode != 0:
+        return set()
+
+    replays: set[str] = set()
+    for tip in dict.fromkeys(proc.stdout.split()):
+        # A tag already on the branch has nothing on the other side to compare.
+        marked = run_git(["rev-list", "--cherry-mark", "--right-only", "--no-merges",
+                          f"{branch}...{tip}"], cwd=path, check=False, timeout=120)
+        if marked.returncode != 0:
+            continue
+        replays.update(line[1:] for line in marked.stdout.splitlines()
+                       if line.startswith("="))
+    return replays
 
 
 def _first_real_commit(path: Path, sha: str) -> str | None:

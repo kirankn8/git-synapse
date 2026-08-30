@@ -39,7 +39,7 @@ everything after it is a materialised cache.
 | `author` | Author identity, deduplicated by lowercased email. |
 | `file` | One row per canonical path per repo, carrying both marginal counts. A rename folds into the existing row rather than creating a new one. |
 | `file_alias` | Historical paths that resolve to a current `file` row, so a file renamed three times keeps one identity and one history. |
-| `commit` | One row per commit per repo, including `pair_eligible` — whether it was allowed to produce pairs. |
+| `commit` | One row per commit per repo, from the shipping branch *and* every release tag, carrying `pair_eligible` — whether it was allowed to produce pairs — and `is_replay`, whether its change already exists on the branch. |
 | `commit_parent` | The commit DAG. Not needed by the coupling maths; kept for branch and lead-time analysis. |
 | **`commit_file`** | **The atomic fact: one row per (commit, file).** Every other number in the system derives from this table joined to `commit`. |
 
@@ -91,7 +91,7 @@ everything after it is a materialised cache.
 flowchart TB
     GH["GitHub API"] -->|discover| REPO["account · repo"]
     REPO -->|"clone --bare, blobless above a size threshold"| MIRROR["git mirror on disk"]
-    MIRROR -->|"git log -z --raw --numstat"| ATOM
+    MIRROR -->|"git log -z --raw --numstat HEAD --tags"| ATOM
     MIRROR -->|"for-each-ref refs/tags"| TAGS["ref_tag<br/><i>version to commit</i>"]
     MIRROR -->|"manifest history, 29 ecosystems"| DECL
 
@@ -453,7 +453,26 @@ erDiagram
   dependabot sweep touching 61 repositories is not a design signal.
 - **Lag bin width** (`LAG_BIN_HOURS`, default 6). At 24 hours, directional
   accuracy drops from 0.70 to 0.64 and a 34-minute propagation is invisible.
-- **Merges** are skipped: they restate their parents' changes.
+- **Merges** are skipped, and not by choice: a merge has two parents, so *which*
+  files it changed depends on which parent you compare against. Git declines to
+  pick and reports no files at all, so a merge would be a commit row with nothing
+  attached. Its content is already recorded in the commits it joined. This is why
+  a tag pointing straight at a merge — how Prometheus marks nearly half its
+  releases — has to fall back to the nearest real commit.
+- **Release tags are walked too, not just the shipping branch.** A release is
+  usually cut on a branch that never merges back, so its commits were never read
+  and the range between two releases was uncomputable. They cost 3–8% more
+  commits, and the watermark covers every tip the walk visits so they are read
+  once rather than on every run.
+- **A replayed change is stored but never counted** (`commit.is_replay`). A fix
+  cherry-picked onto three release branches is one decision that those files
+  belong together, repeated mechanically — counting it four times would inflate
+  whatever gets backported, which is a release-management habit rather than a
+  fact about the code. Detection is `git rev-list --cherry-mark`, which compares
+  by patch id: normalised for whitespace and line offsets, so it catches a
+  backport that had to shift to apply, and correctly does *not* catch one that
+  had to touch extra files — that is a different change, and the extra file
+  really did have to move with the others.
 - **Renames** keep a file's identity — history is walked oldest-first, so a moved
   file keeps one id and one continuous history.
 - **Infeasible tables are clamped.** A 2×2 table only exists when
