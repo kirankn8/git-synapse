@@ -477,6 +477,136 @@ def _repos_to_scan(conn: psycopg.Connection, force: bool) -> list[tuple[int, str
     return [(int(r[0]), r[1], r[2]) for r in rows]
 
 
+def resolve_bumps(conn: psycopg.Connection | None = None) -> int:
+    """Fill in the upstream commit for bumps that do not yet have one.
+
+    Separate from extraction, and re-runnable, because the inputs arrive at
+    different times: a bump is recorded the moment a manifest changes, but the
+    tag that dates it may only be mirrored later, and the upstream commit may
+    only be ingested later still. Resolving at insert time meant a bump seen
+    before its dependency was ingested stayed unresolved forever.
+
+    Returns:
+        How many rows gained a commit.
+    """
+
+    def _run(c: psycopg.Connection) -> int:
+        # Pins first: a reference naming a commit needs no interpretation.
+        by_sha = c.execute(
+            """
+            UPDATE dep_bump b
+               SET dep_commit_id = dc.id
+              FROM commit dc
+             WHERE b.dep_commit_id IS NULL
+               AND b.dep_sha IS NOT NULL
+               AND dc.repo_id = b.dep_repo_id
+               AND dc.sha LIKE b.dep_sha || '%'
+            """
+        ).rowcount or 0
+
+        # Then releases. Package version to tag name is a convention rather
+        # than anything git knows, and the conventions genuinely differ: Go
+        # writes `v1.2.3`, Maven's release plugin writes `gson-parent-2.9.1`,
+        # and a monorepo writes `pkg@1.2.3`. Rather than enumerate them all,
+        # an exact spelling is preferred and a boundary-anchored suffix match
+        # is the fallback -- so a tag counts when the version is the *end* of
+        # it and what precedes it is a separator, never a digit. Without that
+        # boundary, version 2.6 would happily match tag `gson-parent-12.6`.
+        by_tag = c.execute(
+            r"""
+            WITH matched AS (
+                SELECT b.ctid,
+                       (SELECT rt.commit_id
+                          FROM ref_tag rt
+                         WHERE rt.repo_id = b.dep_repo_id
+                           AND rt.commit_id IS NOT NULL
+                           AND (
+                                 rt.name = b.dep_version
+                              OR rt.name = 'v' || ltrim(b.dep_version, 'v')
+                              OR rt.name ~ ('(^|[^0-9A-Za-z.])'
+                                            || replace(ltrim(b.dep_version, 'v'), '.', '\.')
+                                            || '$')
+                           )
+                      ORDER BY (rt.name = b.dep_version) DESC,
+                               (rt.name = 'v' || ltrim(b.dep_version, 'v')) DESC,
+                               length(rt.name)
+                         LIMIT 1) AS commit_id
+                  FROM dep_bump b
+                 WHERE b.dep_commit_id IS NULL
+                   AND b.dep_repo_id IS NOT NULL
+                   AND b.dep_version <> ''
+            )
+            UPDATE dep_bump b
+               SET dep_commit_id = m.commit_id
+              FROM matched m
+             WHERE b.ctid = m.ctid AND m.commit_id IS NOT NULL
+            """
+        ).rowcount or 0
+
+        # A tag can name a commit the walk never read: the pair-generating walk
+        # follows only the branch that ships, and Java projects in particular
+        # cut releases from release branches. The tag still dates the release --
+        # that is what `tagged_at` is -- so the propagation lag is measurable
+        # even though the upstream commit itself was never ingested. Recorded
+        # separately from the commit-backed case, which stays stronger evidence.
+        by_tag_date = c.execute(
+            r"""
+            WITH matched AS (
+                SELECT b.ctid,
+                       (SELECT rt.tagged_at
+                          FROM ref_tag rt
+                         WHERE rt.repo_id = b.dep_repo_id
+                           AND rt.tagged_at IS NOT NULL
+                           AND (
+                                 rt.name = b.dep_version
+                              OR rt.name = 'v' || ltrim(b.dep_version, 'v')
+                              OR rt.name ~ ('(^|[^0-9A-Za-z.])'
+                                            || replace(ltrim(b.dep_version, 'v'), '.', '\.')
+                                            || '$')
+                           )
+                      ORDER BY (rt.name = b.dep_version) DESC,
+                               (rt.name = 'v' || ltrim(b.dep_version, 'v')) DESC,
+                               length(rt.name)
+                         LIMIT 1) AS tagged_at
+                  FROM dep_bump b
+                 WHERE b.lag_seconds IS NULL
+                   AND b.dep_repo_id IS NOT NULL
+                   AND b.dep_version <> ''
+            )
+            UPDATE dep_bump b
+               SET lag_seconds = EXTRACT(EPOCH FROM (cc.committed_at - m.tagged_at))::bigint
+              FROM matched m, commit cc
+             WHERE b.ctid = m.ctid
+               AND m.tagged_at IS NOT NULL
+               AND cc.repo_id = b.consumer_repo_id
+               AND cc.sha = b.consumer_sha
+               AND cc.committed_at >= m.tagged_at
+            """
+        ).rowcount or 0
+
+        # The lag is only meaningful once both ends are known.
+        c.execute(
+            """
+            UPDATE dep_bump b
+               SET lag_seconds = EXTRACT(EPOCH FROM (cc.committed_at - dc.committed_at))::bigint
+              FROM commit dc, commit cc
+             WHERE b.lag_seconds IS NULL
+               AND b.dep_commit_id = dc.id
+               AND cc.repo_id = b.consumer_repo_id
+               AND cc.sha = b.consumer_sha
+            """
+        )
+        log.info("bump resolution: %d by pinned sha, %d by tag, "
+                 "%d dated from a tag whose commit was never ingested",
+                 by_sha, by_tag, by_tag_date)
+        return by_sha + by_tag
+
+    if conn is not None:
+        return _run(conn)
+    with connection() as own:
+        return _run(own)
+
+
 def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> BumpStats:
     """Extract manifest-bump edges for every stale repository.
 
@@ -551,20 +681,48 @@ def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> Bump
                                         t.dep_name, t.dep_version)
                            t.consumer_repo_id, t.consumer_sha, t.dep_repo_id,
                            t.dep_name, t.dep_version, t.dep_sha,
-                           dc.id, t.manifest, cc.committed_at,
-                           CASE WHEN dc.committed_at IS NOT NULL
-                                     AND cc.committed_at IS NOT NULL
-                                THEN EXTRACT(EPOCH FROM
-                                     (cc.committed_at - dc.committed_at))::bigint
+                           COALESCE(dc.id, tag.commit_id), t.manifest,
+                           cc.committed_at,
+                           CASE WHEN cc.committed_at IS NOT NULL
+                                THEN EXTRACT(EPOCH FROM (cc.committed_at
+                                     - COALESCE(dc.committed_at, tc.committed_at)))::bigint
                            END
                     FROM tmp_bump t
                     LEFT JOIN commit cc
                            ON cc.repo_id = t.consumer_repo_id
                           AND cc.sha = t.consumer_sha
+                    -- A reference that pins a commit outright: a Go
+                    -- pseudo-version, a submodule, or any lockfile revision.
+                    -- The sha is a 12-char prefix, so this is a prefix match.
                     LEFT JOIN commit dc
                            ON dc.repo_id = t.dep_repo_id
                           AND t.dep_sha IS NOT NULL
                           AND dc.sha LIKE t.dep_sha || '%'
+                    -- A reference that names a release instead. Package version
+                    -- to tag name is a convention rather than anything git
+                    -- knows, so the usual spellings are tried and the one that
+                    -- matched is recorded. Without this every ecosystem that
+                    -- pins by version -- Maven, NuGet, Gradle, plain npm --
+                    -- resolved to nothing at all.
+                    LEFT JOIN LATERAL (
+                        SELECT rt.commit_id, rt.name
+                          FROM ref_tag rt
+                         WHERE t.dep_sha IS NULL
+                           AND rt.repo_id = t.dep_repo_id
+                           AND rt.commit_id IS NOT NULL
+                           AND rt.name IN (
+                                 t.dep_version,
+                                 'v' || t.dep_version,
+                                 ltrim(t.dep_version, 'v'),
+                                 'release-' || ltrim(t.dep_version, 'v'),
+                                 t.dep_name || '-' || ltrim(t.dep_version, 'v'),
+                                 t.dep_name || '@' || ltrim(t.dep_version, 'v'),
+                                 t.dep_name || '/v' || ltrim(t.dep_version, 'v'))
+                      ORDER BY rt.name = t.dep_version DESC,
+                               rt.name = 'v' || t.dep_version DESC
+                         LIMIT 1
+                    ) tag ON TRUE
+                    LEFT JOIN commit tc ON tc.id = tag.commit_id
                     ON CONFLICT (consumer_repo_id, consumer_sha, dep_name, dep_version)
                     DO NOTHING
                     """
@@ -573,6 +731,9 @@ def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> Bump
             )
             c.execute("DROP TABLE IF EXISTS tmp_bump")
 
+        # Re-run every time: tags and upstream commits arrive on their own
+        # schedule, so a bump unresolved last run may be resolvable now.
+        resolve_bumps(c)
         stats.resolved_commits = int(
             c.execute("SELECT count(*) FROM dep_bump WHERE dep_commit_id IS NOT NULL")
             .fetchone()[0]
