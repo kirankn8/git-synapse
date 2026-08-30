@@ -2033,7 +2033,50 @@ on('/repopair/:a/:b', async ({ a, b }) => {
     wrap.append(h('div', { class: 'help', style: 'margin-top:14px' },
       `${repoB.name} has bumped ${repoA.name} `, h('strong', {}, String(bump.bumps)),
       ` times, with a median propagation lag of `, h('strong', {}, lagText(bump.median_lag_days)),
-      `. Each bump names the exact upstream commit consumed, recovered from the manifest's pseudo-version.`));
+      `. Every one of them is below, with the version it moved to and the upstream `,
+      `commit it consumed where that could be resolved.`));
+  }
+
+  // The tiles above summarise; this is the thing they summarise. A count and a
+  // median say a relationship exists without ever saying when anything happened.
+  const evidence = await api(`/api/repos/${b}/bumps/${a}`, { limit: 200 })
+    .catch((e) => ({ bumps: [], __failed: String(e.message || e) }));
+
+  wrap.append(h('div', { class: 'section-title' }, 'Every bump, newest first'));
+  if (evidence.__failed) {
+    wrap.append(card('Could not load the bumps', h('div', { class: 'empty' },
+      `This section failed to load, so it is not evidence of absence: ${evidence.__failed}`)));
+  } else if (!evidence.bumps.length) {
+    wrap.append(card('No recorded bumps', h('div', { class: 'empty' },
+      `${repoB.name} declares ${repoA.name}, but no version change has been observed `
+      + `in a manifest yet. The edge is real and undated.`)));
+  } else {
+    wrap.append(card(`${evidence.bumps.length} version changes`,
+      dataTable(evidence.bumps, [
+        { key: 'bumped_at', label: 'When', render: (r) => when(r.bumped_at) },
+        { key: 'dep_version', label: 'Moved to',
+          render: (r) => h('span', { class: 'mono' }, r.dep_version) },
+        { key: 'manifest', label: 'Manifest',
+          render: (r) => h('span', { class: 'mono' }, r.manifest) },
+        { key: 'resolution', label: 'Evidence',
+          title: 'sha: the manifest named the commit. tag: an exact version matched a '
+               + 'tag. floor: a range\u2019s declared lower bound. ceiling: the newest '
+               + 'release below an upper bound.',
+          render: (r) => (r.resolution
+            ? h('span', { class: `badge ${r.resolution === 'sha' ? 'ok' : 'info'}` }, r.resolution)
+            : h('span', { class: 'badge muted' }, 'unresolved')) },
+        { key: 'lag_days', label: 'Lag', num: true,
+          title: 'Days between the upstream commit and this repository taking it',
+          render: (r) => (r.lag_days == null ? '\u2014' : `${r.lag_days}d`) },
+        { key: 'upstream_subject', label: 'Upstream commit',
+          render: (r) => (r.upstream_sha
+            ? h('span', { title: r.upstream_sha },
+                h('span', { class: 'mono' }, String(r.upstream_sha).slice(0, 8)), ' ',
+                String(r.upstream_subject || '').slice(0, 60))
+            : h('span', { class: 'muted' }, 'not resolved to a commit')) },
+      ], { initialSort: 'bumped_at' }),
+      'A row with no upstream commit is a bump that happened; only the version it '
+      + 'named could not be tied to one.'));
   }
   return wrap;
 });

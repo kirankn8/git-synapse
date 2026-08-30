@@ -448,6 +448,37 @@ def impact_graph(
             "stats": {"node_count": len(nodes), "edge_count": len(edges)}}
 
 
+@router.get("/repos/{consumer_id}/bumps/{dep_id}", tags=["impact"])
+def repo_pair_bumps(consumer_id: int, dep_id: int,
+                    limit: int = Query(100, ge=1, le=500)) -> dict:
+    """Every version bump one repository made to another, newest first.
+
+    The aggregate above it says "13 bumps, median lag 41.8 days", which is a
+    summary of something and never shows the something. This is the evidence:
+    which version, on what date, and the upstream commit it consumed where that
+    could be resolved.
+    """
+    from git_synapse.db.engine import query as raw
+
+    rows = raw(
+        """
+        SELECT b.dep_name, b.dep_version, b.manifest, b.ecosystem, b.resolution,
+               b.bumped_at, b.consumer_sha, b.dep_sha,
+               round(b.lag_seconds / 86400.0, 1)::float8 AS lag_days,
+               dc.sha AS upstream_sha, dc.subject AS upstream_subject,
+               dc.committed_at AS upstream_at
+          FROM dep_bump b
+          LEFT JOIN commit dc ON dc.id = b.dep_commit_id
+         WHERE b.consumer_repo_id = %(consumer)s AND b.dep_repo_id = %(dep)s
+      ORDER BY b.bumped_at DESC NULLS LAST
+         LIMIT %(limit)s
+        """,
+        {"consumer": consumer_id, "dep": dep_id, "limit": limit},
+    )
+    return {"consumer_repo_id": consumer_id, "dep_repo_id": dep_id,
+            "count": len(rows), "bumps": rows}
+
+
 @router.get("/repos/{repo_id}/dependencies", tags=["impact"])
 def repo_dependencies(repo_id: int) -> dict:
     """Declared dependencies and observed bumps for one repository."""
@@ -468,7 +499,7 @@ def repo_dependencies(repo_id: int) -> dict:
         """
         SELECT rd.name AS dep_repo, b.dep_repo_id, count(*) AS bumps,
                round((percentile_cont(0.5) WITHIN GROUP (ORDER BY b.lag_seconds)
-                      / 86400.0)::numeric, 2) AS median_lag_days,
+                      / 86400.0)::numeric, 2)::float8 AS median_lag_days,
                max(b.bumped_at) AS last_bump
         FROM dep_bump b
         LEFT JOIN repo rd ON rd.id = b.dep_repo_id
