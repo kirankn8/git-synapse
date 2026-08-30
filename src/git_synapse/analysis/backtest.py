@@ -229,7 +229,8 @@ _EXCLUDE = (":(exclude)*vendor/*", ":(exclude)*third_party/*",
             ":(exclude)*node_modules/*", ":(exclude)*.min.js")
 
 
-def concept_tokens(name: str) -> set[str]:
+@lru_cache(maxsize=200_000)
+def concept_tokens(name: str) -> frozenset[str]:
     """Split a path or symbol into the words an agent would actually search for.
 
     ``ImmutableList.java`` becomes ``{immutable, list}``. This is what a ``.*``
@@ -243,17 +244,42 @@ def concept_tokens(name: str) -> set[str]:
             part = part.lower()
             if len(part) >= 4 and part not in _STOPWORDS:
                 out.add(part)
-    return out
+    return frozenset(out)
+
+
+def _git(mirror: str, args: list[str], timeout: int) -> str:
+    """Stdout of a git command, or "" if it failed, timed out or git is absent.
+
+    A baseline that cannot answer scores a miss. Letting one slow `git grep`
+    raise would abandon a replay that has already scored hundreds of thousands
+    of prompts, which is a far worse outcome than one unanswered prompt.
+    """
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed executable
+            ["git", *args], cwd=mirror, env=_base_env(), capture_output=True,
+            text=True, errors="replace", timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log.debug("baseline git %s failed in %s: %s", args[0], mirror, exc)
+        return ""
+    return proc.stdout if proc.returncode in (0, 1) else ""
+
+
+#: Vendored, generated and minified paths. Excluded from *both* halves of the
+#: search: an agent ignores them, and matching their names while refusing to
+#: match their contents would score them on a rule the grep never applied.
+_EXCLUDE_DIRS = ("vendor/", "third_party/", "node_modules/", "testdata/")
+
+
+def _wanted(path: str) -> bool:
+    return not (path.endswith(".min.js")
+                or any(d in f"/{path}" for d in (f"/{x}" for x in _EXCLUDE_DIRS)))
 
 
 @lru_cache(maxsize=32)
 def _tree(mirror: str, sha: str) -> tuple[str, ...]:
-    """Every path in the tree at that commit; cached, as prompts share commits."""
-    proc = subprocess.run(  # noqa: S603 - fixed executable
-        ["git", "ls-tree", "-r", "--name-only", sha],
-        cwd=mirror, env=_base_env(), capture_output=True,
-        text=True, errors="replace", timeout=120)
-    return tuple(proc.stdout.splitlines()) if proc.returncode == 0 else ()
+    """Searchable paths in the tree at that commit; cached, as prompts share commits."""
+    out = _git(mirror, ["ls-tree", "-r", "--name-only", sha], timeout=120)
+    return tuple(p for p in out.splitlines() if _wanted(p))
 
 
 def _grep_terms(mirror: str, sha: str, terms: list[str]) -> dict[str, set[str]]:
@@ -261,30 +287,23 @@ def _grep_terms(mirror: str, sha: str, terms: list[str]) -> dict[str, set[str]]:
     if not terms:
         return {}
     pattern = "|".join(re.escape(t) for t in terms)
-    proc = subprocess.run(  # noqa: S603 - fixed executable
-        ["git", "grep", "-I", "-w", "-i", "-o", "-E", "-e", pattern, sha,
-         "--", *_EXCLUDE],
-        cwd=mirror, env=_base_env(), capture_output=True,
-        text=True, errors="replace", timeout=180)
-    if proc.returncode not in (0, 1):
-        return {}
+    stdout = _git(mirror, ["grep", "-I", "-w", "-i", "-o", "-E", "-e", pattern,
+                           sha, "--", *_EXCLUDE], timeout=180)
     prefix = sha + ":"
     out: dict[str, set[str]] = defaultdict(set)
-    for line in proc.stdout.splitlines():
+    for line in stdout.splitlines():
         if not line.startswith(prefix):
             continue
         # "<sha>:<path>:<matched text>"
         path, _, matched = line[len(prefix):].rpartition(":")
-        if path:
+        if path and _wanted(path):
             out[path].add(matched.lower())
     return out
 
 
 def _blob(mirror: str, sha: str, path: str) -> str:
-    proc = subprocess.run(  # noqa: S603 - fixed executable
-        ["git", "show", f"{sha}:{path}"], cwd=mirror, env=_base_env(),
-        capture_output=True, text=True, errors="replace", timeout=60)
-    return proc.stdout if proc.returncode == 0 else ""
+    """The file as it stood at that commit, or "" if it did not exist yet."""
+    return _git(mirror, ["show", f"{sha}:{path}"], timeout=60)
 
 
 #: How strongly each kind of evidence counts. A term in the file's *name* is the
@@ -318,7 +337,8 @@ def agent_search(mirror: Path, sha: str, seed_path: str, k: int) -> list[str]:
                if len(m) >= 4}
     # Declared symbols first: they are the precise terms. Longer path tokens
     # next, because a long word is a more selective query than a short one.
-    terms = list(symbols)[:8] + sorted(path_tokens, key=len, reverse=True)[:4]
+    terms = (sorted(symbols, key=lambda t: (-len(t), t))[:8]
+             + sorted(path_tokens, key=lambda t: (-len(t), t))[:4])
     if not terms:
         return []
 
