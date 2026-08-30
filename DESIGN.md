@@ -319,7 +319,7 @@ erDiagram
         text consumer_sha "the commit that raised the version"
         text dep_version "v1.2.3, or a pseudo-version"
         text dep_sha "when the reference pins a commit outright"
-        bigint lag_seconds "observed propagation delay"
+        bigint adoption_seconds "upstream commit to the bump that took it"
     }
     REPO_DEPENDENCY {
         text dep_name "as the manifest wrote it"
@@ -334,7 +334,7 @@ erDiagram
         float score "declaration + bump count + recency"
         bool is_declared
         bool has_bump_history
-        float median_lag_days
+        float median_adoption_days
     }
 ```
 
