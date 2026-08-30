@@ -607,3 +607,23 @@ def test_an_anchor_that_lands_on_a_merge_moves_to_a_real_commit(tmp_path):
     assert tag.main_sha != base
     assert len(g(work, "rev-list", "--parents", "-n", "1", tag.main_sha)
                .stdout.split()) == 2, "the anchor must be a single-parent commit"
+
+
+def test_a_tag_pointing_straight_at_a_merge_still_anchors_to_a_real_commit(tmp_path):
+    """Prometheus tags nearly half its releases on the merge commit that landed
+    the release PR. Such a tag is on the shipping branch yet names a row the
+    walk never wrote, so "on the branch" is not the same as "resolvable"."""
+    work = worktree(tmp_path, "tag-on-merge")
+    g(work, "checkout", "-q", "-b", "feature")
+    add_commit(work, "feature.txt", "f")
+    g(work, "checkout", "-q", "main")
+    add_commit(work, "main.txt", "m")
+    g(work, "merge", "-q", "--no-ff", "-m", "release v1.0.0", "feature")
+    merge_sha = g(work, "rev-parse", "HEAD").stdout.strip()
+    g(work, "tag", "v1.0.0")            # tagged directly on the merge
+
+    tag = {t.name: t for t in gitops.read_tags(work, "main")}["v1.0.0"]
+    assert tag.commit_sha == merge_sha, "the tag really is on the merge"
+    assert tag.main_sha != merge_sha, "a merge commit is never stored"
+    assert len(g(work, "rev-list", "--parents", "-n", "1", tag.main_sha)
+               .stdout.split()) == 2, "the anchor must have a single parent"

@@ -570,3 +570,20 @@ def test_a_reference_to_the_consumer_itself_is_not_a_repository_edge(bump_env):
     depbump.resolve_bumps(conn)
     assert conn.execute("SELECT dep_repo_id FROM dep_bump WHERE id = %s",
                         (row,)).fetchone()[0] is None
+
+
+def test_every_resolved_bump_records_how_it_was_resolved(bump_env):
+    """The tier is what keeps a floor from being read as an exact answer, so a
+    row carrying a commit and no tier defeats the point. Extraction used to
+    resolve versions itself and record nothing, leaving 1,099 such rows."""
+    conn, repo, dep = bump_env
+    c = _commit(conn, dep, "ab" * 20, "2024-01-01")
+    _tag(conn, dep, "v1.0.0", commit_id=c, main_commit_id=c, key="1")
+    _bump(conn, repo, dep, version="1.0.0", at="2024-02-01")
+    _bump(conn, repo, dep, version="^1.0.0", at="2024-03-01", name="lib2")
+
+    depbump.resolve_bumps(conn)
+    orphans = conn.execute(
+        "SELECT count(*) FROM dep_bump "
+        " WHERE dep_commit_id IS NOT NULL AND resolution IS NULL").fetchone()[0]
+    assert orphans == 0
