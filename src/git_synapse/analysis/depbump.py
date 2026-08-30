@@ -109,6 +109,18 @@ def published_at_head(mirror: Path) -> set[tuple[str, str]]:
     return found
 
 
+#: Ecosystems whose coordinate *is* a repository reference. A Go module path is
+#: host/owner/repo, a GitHub Action is owner/repo, a submodule is a URL -- so
+#: reading a repository out of the name is reading what it says.
+#:
+#: Everywhere else the coordinate names a registry artifact, and matching it
+#: against repository names invents edges: npm's `uuid` became google/uuid, a Go
+#: library, and npm's `bytes` became tokio-rs/bytes, a Rust crate. Those
+#: resolved to no commit only because the versions could never match, which is
+#: luck rather than a guard.
+_REPO_PATH_ECOSYSTEMS = frozenset(("go", "actions", "docker", "bazel", "nix"))
+
+
 def resolve_repo(dep_name: str, by_full_name: dict[tuple[str, str], int],
                  by_name: dict[str, int],
                  by_package: dict[tuple[str, str], int] | None = None,
@@ -126,6 +138,10 @@ def resolve_repo(dep_name: str, by_full_name: dict[tuple[str, str], int],
     """
     if by_package and (hit := by_package.get((ecosystem, (dep_name or "").strip().lower()))):
         return hit
+    if ecosystem and ecosystem not in _REPO_PATH_ECOSYSTEMS:
+        # A registry coordinate that nothing published says it owns. Guessing
+        # from the name is how an npm package becomes a Go repository.
+        return None
     owner, name = repo_ref(dep_name)
     if not name:
         return None
@@ -441,8 +457,9 @@ def refresh_declared(
             for manifest, ecosystem in manifest_paths(mirror):
                 for dep_name, version in declared_at_head(mirror, name, manifest, ecosystem):
                     payload.append(
-                        (repo_id, resolve_repo(dep_name, by_full, by_name, by_pkg), dep_name,
-                         version[:200], manifest, ecosystem)
+                        (repo_id,
+                         resolve_repo(dep_name, by_full, by_name, by_pkg, ecosystem),
+                         dep_name, version[:200], manifest, ecosystem)
                     )
 
         # Delete only the scanned repositories' rows, so an incremental pass
