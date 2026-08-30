@@ -14,15 +14,17 @@ inference.
 
 Why they exist here
 -------------------
-Two purposes, in order of importance:
+They *are* the cross-repository graph. That was not always so: they began as a
+labelled set for measuring whether directed lagged statistics ranked real
+propagation, and the answer was that they did not -- AUC 0.80 with 0.63 on
+which way the arrow points, matched by a baseline that ignored coupling
+altogether. The statistics went; the ground truth stayed and became the graph.
 
-1. **Validation.** They form a labelled set of real propagation edges, which is
-   what makes it possible to *measure* whether the directed lagged statistics in
-   :mod:`git_synapse.analysis.lagged` actually rank true dependency propagation
-   highly, rather than assuming they do.
-2. **Empirical lag.** The gap between the upstream commit and the consumer's
-   bump is the observed propagation delay, which tells the lagged analysis which
-   lags are worth evaluating instead of guessing.
+One number survives from that work and means something narrower than it used
+to. The gap between the upstream commit and the bump that took it is a real
+propagation delay, arithmetic on two known commit dates. It is not the earlier
+sense of "lag" -- a time bin used to *infer* that two repositories were
+related. Nothing infers a relationship from timing any more.
 
 They are deliberately *not* used to replace the statistics: a manifest only
 describes declared code dependencies, and misses the coupling that matters most
@@ -900,8 +902,10 @@ def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> Bump
 def propagation_lags(limit: int = 20) -> list[dict]:
     """Observed propagation delay per (dependency -> consumer) edge.
 
-    The median lag is the empirically correct window for the lagged analysis to
-    look in, rather than a guess.
+    Arithmetic on two known commits: when the upstream change was written, and
+    when the consumer took it. Reported, not ranked on -- how long a team takes
+    to adopt a release says nothing about whether the dependency is real, which
+    the manifest already settled.
     """
     from git_synapse.db.engine import query
 

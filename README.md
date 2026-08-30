@@ -642,7 +642,6 @@ The ones that change the numbers:
 | `RECENCY_HALF_LIFE_DAYS` | 365 | Half-life for the recency-weighted `w_ab`. |
 | `REFRESH_CRON` | `0 3 * * *` | Daily refresh schedule. |
 | `INGEST_CONCURRENCY` | 8 | Repositories processed in parallel. |
-| `LAG_BIN_HOURS` | 6 | Time-bin width for directional analysis. |
 | `CHAIN_MIN_CONFIDENCE` | 0.15 | Per-hop floor when following chains. |
 
 After changing an ingest knob: `docker compose run --rm cli aggregate`.
