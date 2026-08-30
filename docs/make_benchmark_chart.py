@@ -7,16 +7,17 @@ Apprentice's coverage plus the share of the remainder Git Synapse recovers.
 """
 import pathlib
 
-#: repo, language, prompts, Apprentice hit rate, share of the prompts the
-#: Apprentice missed that P(B|A) recovered.
+#: repo, language, commits replayed, Apprentice hit rate, share of the prompts
+#: the Apprentice missed that P(B|A) recovered. Every figure measured over all
+#: prompts -- none of these columns is sampled.
 DATA = [
-    ("google (38 repos)", "mixed",  240_734, 56.9, 43.3),
-    ("flatbuffers",       "C++",     15_534, 43.8, 57.8),
-    ("pytype",            "Python",  25_803, 47.3, 51.9),
-    ("osv-scanner",       "Go",       8_311, 47.7, 50.8),
-    ("closure-compiler",  "Java",    54_612, 54.4, 47.7),
-    ("go-github",         "Go",       7_617, 76.8, 44.3),
-    ("guava",             "Java",    24_995, 76.6, 34.5),
+    ("google (38 repos)", "mixed",  89_121, 56.9, 43.3),
+    ("flatbuffers",       "C++",     3_147, 43.8, 57.8),
+    ("pytype",            "Python",  6_184, 47.3, 51.9),
+    ("osv-scanner",       "Go",      2_005, 47.7, 50.8),
+    ("closure-compiler",  "Java",   20_399, 54.4, 47.7),
+    ("go-github",         "Go",      3_000, 76.8, 44.3),
+    ("guava",             "Java",    7_501, 76.6, 34.5),
 ]
 
 THEMES = {
@@ -56,7 +57,7 @@ def build(t):
         o.append(f'<line x1="0" y1="{y - 8}" x2="{W}" y2="{y - 8}" stroke="{t["rule"]}" stroke-width="1"/>')
         o.append(f'<text x="0" y="{y + 9}" font-size="12.5" font-weight="600" fill="{t["text"]}">{esc(name)}</text>')
         o.append(f'<text x="0" y="{y + 23}" font-size="10" fill="{t["faint"]}">'
-                 f'{esc(lang)} &#183; {prompts:,} predictions</text>')
+                 f'{esc(lang)} &#183; {prompts:,} commits</text>')
 
         bw = PLOT * base / 100.0
         aw = PLOT * added / 100.0

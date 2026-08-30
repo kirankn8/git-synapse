@@ -17,6 +17,7 @@ database table and the decisions that materially change the numbers.
 | [Ground truth](#ground-truth-and-what-it-revealed) | the one thing here that is proven, not inferred |
 | [The mining layer](#the-mining-layer) | de-facto modules, drift, risk |
 | [Choices that affect the numbers](#choices-that-materially-affect-the-numbers) | where a default changes the answer |
+| [**What the backtest is measured against**](#what-the-backtest-is-measured-against) | the baselines, and why a weak one is worse than none |
 | [What is incremental](#what-is-incremental-and-what-isnt) | what a refresh actually redoes |
 | [Bookkeeping](#bookkeeping) · [Portability](#portability) · [Layout](#layout) | operations and structure |
 | [Adding a measure](#adding-a-measure) | extending the registry |
@@ -458,6 +459,64 @@ erDiagram
   aggregation yields things like φ = −7.9.
 - **Corrupt commit dates cannot set the time origin.** Four epoch-dated commits
   once stretched the lag axis from 2,200 bins to 20,687, inflating `N` tenfold.
+
+---
+
+### What the backtest is measured against
+
+A benchmark is only as honest as its opponent, and this one has been wrong twice.
+The baselines are now a ladder of people who could answer *"what else changes?"*
+without any history at all. Every rung is free, so whatever Git Synapse adds on
+top of the highest one has to have come from the commit log and nowhere else.
+
+| Rung | What it has seen | How it answers |
+|---|---|---|
+| **Tourist** | nothing | the repository's busiest files |
+| **Intern** | where the file sits | its folder-mates, busiest first |
+| **Apprentice** | the naming conventions too | the file's test, then its folder |
+| **New Hire** | the whole codebase, none of its past | greps names *and* bodies, then widens |
+
+The **New Hire** is the opponent that matters, because it is what a coding agent
+actually does. Given the seed file it derives search terms from the path and from
+the symbols the file declares, matches them against both file names and file
+contents, then widens the search using what the first round returned — the
+read-a-result-and-search-again step that finds a caller in another directory that
+no naming or folder rule would ever suggest.
+
+Four things make it a fair opponent rather than a strawman:
+
+- **It searches the parent tree.** Grepping the commit's own tree lets a file
+  edited *by* that commit answer for it, because it already contains the
+  reference the change introduced. That is leakage, and it is tested for.
+- **Vendored, generated and minified paths are excluded from both halves.**
+  Matching their names while refusing to read their contents would credit the
+  baseline for a rule the grep never ran.
+- **Distinct terms are counted, not raw hits.** A file mentioning one word four
+  hundred times is a big file; a file mentioning three of the seed's symbols is a
+  real candidate.
+- **The sample is uniform.** It is far too slow to run on every prompt, so it is
+  reservoir-sampled and searched after the replay. Sampling with a fixed
+  probability and stopping at a cap drew the whole sample from the oldest
+  commits, and understated the opponent by fourteen points on guava.
+
+Lift is never divided by the New Hire's rate. Lift is a ratio, and dividing a
+rate measured over every prompt by one measured over a few hundred mixes two
+estimators, so the figure would move with the draw rather than with the product.
+The New Hire instead feeds the only number that says whether this product answers
+anything nobody else could: **the share of prompts that neither the free rules
+nor the search solved, which a measure still answers.**
+
+Two seeding modes, because they ask different questions:
+
+| Mode | Prompts per commit | What it isolates |
+|---|---|---|
+| `all` | one per changed file | the product's own question, and the larger sample |
+| `obscure` | one, seeded with the least-changed file | starting from a quiet corner, where no hub makes the rest easy to guess |
+
+What it still does not measure: the seed file is given, so finding the *first*
+file from a bug report — the hard half of an agent's job — is skipped, and the
+seed is always a file that genuinely changed. That flatters both sides equally,
+but it means the absolute hit rates are higher than practice.
 
 ---
 

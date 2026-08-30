@@ -448,3 +448,40 @@ def test_the_sample_never_exceeds_what_was_asked_for(monkeypatch):
 def test_a_replay_smaller_than_the_sample_is_taken_whole(monkeypatch):
     seen = sampled_commits(monkeypatch, 5, sample=400)
     assert 0 < len(seen) <= 400
+
+
+# --------------------------------------------------- what lift is divided by
+
+def test_lift_is_never_divided_by_a_sampled_rate(monkeypatch):
+    """Lift is a ratio. Dividing a rate measured over every prompt by one
+    measured over a few hundred mixes two estimators, and the figure then moves
+    with the draw rather than with the product."""
+    history = flat([1, 2], bt.WARMUP_COMMITS + 400)
+    monkeypatch.setattr(bt, "_commit_shas",
+                        lambda repo_id: {i: (f"sha{i}", "org/repo")
+                                         for i in range(len(history))})
+    monkeypatch.setattr(bt, "mirror_path_for", lambda name: bt.Path("/nonexistent"))
+    # A New Hire that answers everything, so it would top the table if allowed.
+    monkeypatch.setattr(bt, "agent_search", lambda m, sha, path, k: [path])
+    result = replay(monkeypatch, history, measures=("npmi",), grep_sample=50)
+
+    assert any(b.measure == bt.SAMPLED_BASELINE for b in result.baselines)
+    assert result.baseline.measure != bt.SAMPLED_BASELINE
+
+
+def test_beating_the_baseline_requires_the_interval_to_clear_it(monkeypatch):
+    """A point estimate one noisy percent above the baseline has not beaten it,
+    and the property used to say it had."""
+    history = flat([1, 2], bt.WARMUP_COMMITS + 400)
+    result = replay(monkeypatch, history, measures=("npmi",))
+    s = result.scores[0]
+    assert s.baseline_hit_rate == pytest.approx(result.baseline.hit_rate)
+    assert s.beats_baseline == (s.ci_low > result.baseline.hit_rate)
+
+
+def test_the_unaided_rate_is_zero_when_nothing_was_sampled(monkeypatch):
+    """Dividing by a sample that was never taken must not invent a rate."""
+    result = replay(monkeypatch, flat([1, 2], bt.WARMUP_COMMITS + 400), measures=("npmi",))
+    assert result.scores[0].unaided_prompts == 0
+    assert result.scores[0].unaided_hit_rate == 0.0
+    assert result.sampled == 0
