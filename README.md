@@ -573,6 +573,22 @@ $ docker compose run --rm cli coupled terraform-provider-acme \
 | `make psql` | Open a psql shell |
 | `make nuke` | Stop everything and delete the database and mirrors |
 
+### Refusing a push that breaks the build
+
+`make hooks-install` also installs `pre-push`, which runs both halves before a
+push leaves the machine: the backend suite with its 100% coverage gate, and the
+UI smoke test that renders every route against the live API.
+
+The backend half runs against a **throwaway database**, never the running one.
+Both reasons were found by writing it: the scheduler holds the ingest advisory
+lock, so every pipeline test is skipped and reports as a failure; and the suite
+writes repositories and accounts, which has no business happening in a live
+corpus.
+
+A check it cannot run is reported loudly rather than passed over, because a hook
+that skips everything is worse than no hook -- it reads as approval. Override
+with `--no-verify`.
+
 ### Weekend commit dates
 
 `make hooks-install` points `core.hooksPath` at `scripts/hooks`, whose
