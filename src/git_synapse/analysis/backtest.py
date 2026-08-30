@@ -143,12 +143,19 @@ class BacktestResult:
                 f"({best.lift:.2f}x)")
 
 
-def _history(repo_id: int | None) -> list[list[int]]:
-    """Pair-eligible commits in time order, each as its list of file ids."""
+def _history(repo_id: int | None) -> list[tuple[int, list[int]]]:
+    """Pair-eligible commits in time order, as ``(repo_id, file ids)``.
+
+    The repository travels with the commit because counts must never be pooled
+    across repositories. Two files in different repositories cannot co-occur, so
+    a shared population would hand the popularity baseline a set of candidates it
+    can never hit -- which does not weaken the baseline honestly, it breaks it,
+    and every lift measured against it is inflated.
+    """
     where = "WHERE c.pair_eligible" + ("" if repo_id is None else " AND c.repo_id = %(repo)s")
     rows = query(
         f"""
-        SELECT c.id AS commit_id, cf.file_id
+        SELECT c.id AS commit_id, c.repo_id, cf.file_id
           FROM commit c JOIN commit_file cf ON cf.commit_id = c.id
           {where}
       ORDER BY c.committed_at, c.id, cf.file_id
@@ -156,9 +163,11 @@ def _history(repo_id: int | None) -> list[list[int]]:
         {"repo": repo_id},
     )
     grouped: dict[int, list[int]] = defaultdict(list)
+    owner: dict[int, int] = {}
     for row in rows:
         grouped[row["commit_id"]].append(row["file_id"])
-    return list(grouped.values())
+        owner[row["commit_id"]] = row["repo_id"]
+    return [(owner[cid], files) for cid, files in grouped.items()]
 
 
 def _rank(seed: int, joint: dict[int, dict[int, int]], marginal: dict[int, int], total: int, spec, k: int, min_support: int) -> list[int]:
@@ -203,9 +212,10 @@ def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE
     if limit is not None:
         commits = commits[:limit]
 
-    joint: dict[int, dict[int, int]] = defaultdict(dict)
-    marginal: dict[int, int] = defaultdict(int)
-    total = 0
+    # Per repository, never pooled: see _history.
+    joints: dict[int, dict[int, dict[int, int]]] = defaultdict(lambda: defaultdict(dict))
+    marginals: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+    totals: dict[int, int] = defaultdict(int)
 
     zero = {s.key: 0 for s in specs}
     hit_prompts, found = dict(zero), dict(zero)
@@ -215,7 +225,8 @@ def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE
     base_hit_prompts, base_found, base_recall = 0, 0, 0.0
     prompts, wanted, scored_commits = 0, 0, 0
 
-    for files in commits:
+    for repo, files in commits:
+        joint, marginal, total = joints[repo], marginals[repo], totals[repo]
         # ---- test, using only what earlier commits taught -------------------
         if total >= WARMUP_COMMITS and 2 <= len(files) <= MAX_FILES_PER_PROMPT:
             scored_here = False
@@ -249,7 +260,7 @@ def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE
             joint[b][a] = joint[b].get(a, 0) + 1
         for f in set(files):
             marginal[f] += 1
-        total += 1
+        totals[repo] += 1
 
     n = prompts or 1
     b_low, b_high = wilson(base_hit_prompts, prompts)

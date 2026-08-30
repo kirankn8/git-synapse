@@ -18,9 +18,9 @@ def replay(monkeypatch, commits, **kw):
     return bt.run(**kw)
 
 
-def flat(pairs, times):
-    """`times` commits, each touching the same set of files."""
-    return [list(pairs) for _ in range(times)]
+def flat(pairs, times, repo=1):
+    """`times` commits in one repository, each touching the same files."""
+    return [(repo, list(pairs)) for _ in range(times)]
 
 
 # ------------------------------------------------------------------- leakage
@@ -30,7 +30,7 @@ def test_a_commit_cannot_inform_its_own_prediction(monkeypatch):
     scored must be unpredictable, because at that moment nothing has taught us
     they belong together."""
     history = flat([1, 2], bt.WARMUP_COMMITS + 1)   # noise to get past warmup
-    history.append([90, 91])                        # first and only sighting
+    history.append((1, [90, 91]))                        # first and only sighting
     result = replay(monkeypatch, history, measures=("npmi",))
 
     scored = [s for s in result.scores if s.measure == "npmi"][0]
@@ -42,7 +42,7 @@ def test_a_pair_becomes_predictable_only_after_it_has_been_seen(monkeypatch):
     """Same two files, but now with prior evidence, must be found."""
     history = flat([1, 2], bt.WARMUP_COMMITS)
     history += flat([90, 91], 5)                    # teach the pair
-    history.append([90, 91])                        # then ask
+    history.append((1, [90, 91]))                        # then ask
     result = replay(monkeypatch, history, measures=("npmi",))
 
     scored = [s for s in result.scores if s.measure == "npmi"][0]
@@ -59,13 +59,13 @@ def test_warmup_commits_are_not_scored(monkeypatch):
 def test_sweeping_commits_are_not_used_as_prompts(monkeypatch):
     """A 500-file reformat has no 'the file you are editing'."""
     history = flat([1, 2], bt.WARMUP_COMMITS)
-    history.append(list(range(500, 500 + bt.MAX_FILES_PER_PROMPT + 5)))
+    history.append((1, list(range(500, 500 + bt.MAX_FILES_PER_PROMPT + 5))))
     result = replay(monkeypatch, history, measures=("npmi",))
     assert result.prompts == 0
 
 
 def test_single_file_commits_produce_no_prompt(monkeypatch):
-    history = flat([1, 2], bt.WARMUP_COMMITS) + [[7]]
+    history = flat([1, 2], bt.WARMUP_COMMITS) + [(1, [7])]
     before = replay(monkeypatch, flat([1, 2], bt.WARMUP_COMMITS), measures=("npmi",)).prompts
     assert replay(monkeypatch, history, measures=("npmi",)).prompts == before
 
@@ -147,7 +147,7 @@ def test_an_unknown_measure_is_refused_with_the_valid_names(monkeypatch):
 def test_min_support_suppresses_thin_evidence(monkeypatch):
     """Seen together once is not evidence; the option must actually apply."""
     history = flat([1, 2], bt.WARMUP_COMMITS)
-    history += [[90, 91]] * 2 + [[90, 91]]
+    history += [(1, [90, 91])] * 3
     loose = replay(monkeypatch, history, measures=("npmi",), min_support=2)
     strict = replay(monkeypatch, history, measures=("npmi",), min_support=99)
     assert strict.scores[0].found <= loose.scores[0].found
@@ -164,3 +164,20 @@ def test_k_bounds_how_many_suggestions_are_counted(monkeypatch):
     small = replay(monkeypatch, history, measures=("npmi",), k=1)
     large = replay(monkeypatch, history, measures=("npmi",), k=5)
     assert small.scores[0].found <= large.scores[0].found
+
+
+def test_counts_are_never_pooled_across_repositories(monkeypatch):
+    """Two files in different repositories cannot co-occur. Pooling them hands
+    the popularity baseline candidates it can never hit, which does not weaken
+    the baseline honestly -- it breaks it, and inflates every lift measured
+    against it."""
+    a = flat([1, 2], bt.WARMUP_COMMITS + 10, repo=1)
+    b = flat([50, 51], bt.WARMUP_COMMITS + 10, repo=2)
+    result = replay(monkeypatch, a + b, measures=("npmi",))
+
+    # Each repository's own pair is learnable, so the baseline -- which ranks
+    # that repository's busiest files -- must do well rather than near zero.
+    assert result.baseline.hit_rate > 0.5, (
+        "a pooled population would make the baseline miss almost everything, "
+        f"got {result.baseline.hit_rate:.1%}")
+    assert result.scores[0].lift <= 1.5
