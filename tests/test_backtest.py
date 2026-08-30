@@ -106,6 +106,47 @@ def test_the_search_reads_the_parent_tree_not_the_commit_being_scored(repo):
     assert "web/server.go" not in bt.agent_search(repo, sha, "core/registry.go", 5)
 
 
+@pytest.mark.parametrize("path", [
+    "vendor/github.com/x/y.go", "third_party/zlib/deflate.c",
+    "web/node_modules/left-pad/index.js", "pkg/testdata/golden.json",
+    "static/app.min.js",
+])
+def test_vendored_and_generated_paths_are_never_offered(path):
+    """An agent ignores these. Scoring their *names* while the grep refuses to
+    read their *contents* would credit the baseline for a rule it never ran."""
+    assert not bt._wanted(path)
+
+
+@pytest.mark.parametrize("path", ["src/vendorised/thing.go", "internal/testdata.go"])
+def test_a_path_that_merely_looks_vendored_is_kept(path):
+    """`vendor/` is a directory, not a substring; excluding by substring would
+    silently drop real source files."""
+    assert bt._wanted(path)
+
+
+def test_a_failing_git_call_costs_one_prompt_not_the_whole_run(tmp_path):
+    """A replay scores hundreds of thousands of prompts. Letting one slow or
+    broken git invocation raise would throw all of that away, so a baseline
+    that cannot answer simply misses."""
+    assert bt._git(str(tmp_path / "does-not-exist"), ["ls-tree", "HEAD"], timeout=5) == ""
+    assert bt.agent_search(tmp_path / "does-not-exist", "deadbeef", "a/b.go", 5) == []
+
+
+def test_the_same_commit_is_searched_the_same_way_twice(repo):
+    """Search terms came off an unordered set, so results moved between runs
+    and the benchmark was not reproducible."""
+    commit(repo, "base",
+           **{"core__registry.go": "package core\nfunc ResolveHandler() {}\nfunc BuildIndex() {}\n",
+              "web__server.go": "package web\nfunc main() { ResolveHandler() }\n"})
+    sha = commit(repo, "next", **{"core__registry.go":
+                                  "package core\nfunc ResolveHandler() { x() }\nfunc BuildIndex() {}\n"})
+    bt.concept_tokens.cache_clear()
+    first = bt.agent_search(repo, sha, "core/registry.go", 5)
+    bt._tree.cache_clear()
+    bt.concept_tokens.cache_clear()
+    assert bt.agent_search(repo, sha, "core/registry.go", 5) == first
+
+
 def test_a_root_commit_has_no_parent_to_search(repo):
     sha = commit(repo, "first", **{"core__registry.go": "package core\nfunc ResolveHandler() {}\n"})
     assert bt.agent_search(repo, sha, "core/registry.go", 5) == []
