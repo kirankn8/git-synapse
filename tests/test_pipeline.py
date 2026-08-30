@@ -61,12 +61,12 @@ def _commit_repo(tmp_path, n: int):
     return bare
 
 
-def test_sweep_is_a_no_op_when_the_repo_has_no_stored_commits(tmp_path):
+def test_sweep_is_a_no_op_when_the_repo_has_no_stored_commits(tmp_path, db):
     """The cheap count check must gate the expensive walk."""
     assert _drop_unreachable_commits(repo_id=-1, mirror=_commit_repo(tmp_path, 2)) == 0
 
 
-def test_sweep_tolerates_a_missing_mirror(tmp_path):
+def test_sweep_tolerates_a_missing_mirror(tmp_path, db):
     """A mirror that is not there must not raise mid-run."""
     assert _drop_unreachable_commits(repo_id=-1, mirror=tmp_path / "absent.git") == 0
 
@@ -625,3 +625,108 @@ def test_an_empty_reachable_set_deletes_nothing(swept_repo, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", flaky)
     assert _drop_unreachable_commits(repo_id, mirror) == 0
+
+
+# ------------------------------------------------- discovery across accounts
+#
+# The guard tests above skip unless the corpus is already populated, so the body
+# of `discover` -- per-account listing, failure isolation, ownership -- ran under
+# no test at all. These build their own accounts instead.
+
+@pytest.fixture
+def two_accounts(db):
+    from git_synapse.db.engine import connection
+    from git_synapse.ingest import accounts
+
+    with connection() as conn:
+        conn.execute("DELETE FROM account WHERE login IN ('alpha','beta')")
+        conn.commit()
+    made = [accounts.add_account("alpha"), accounts.add_account("beta")]
+    yield made
+    with connection() as conn:
+        conn.execute("DELETE FROM account WHERE login IN ('alpha','beta')")
+        conn.commit()
+
+
+def _record(full_name):
+    from git_synapse.ingest.github import RepoRecord
+    owner, name = full_name.split("/")
+    return RepoRecord(github_id=abs(hash(full_name)) % 10**8, owner=owner,
+                      name=name, full_name=full_name)
+
+
+def _client_returning(mapping):
+    """A GitHubClient whose listing depends on the account, or raises for it."""
+    class _Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+        def list_account_repos(self, login, kind):
+            outcome = mapping[login]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+    return lambda cfg: _Client()
+
+
+def test_discovery_with_no_accounts_says_how_to_add_one(db, monkeypatch):
+    """Returning an empty list would look like an org with no repositories."""
+    from git_synapse.ingest import accounts
+    from git_synapse.ingest.pipeline import AuthError
+
+    monkeypatch.setattr(accounts, "list_accounts", lambda **k: [])
+    monkeypatch.setattr(accounts, "seed_from_env", lambda: None)
+    with pytest.raises(AuthError, match="account add"):
+        pipeline.discover()
+
+
+def test_one_failing_account_does_not_stop_the_others(two_accounts, db, monkeypatch):
+    """Discovery runs across accounts, so a single broken one must cost only
+    its own repositories."""
+    good = [_record("beta/keep")]
+    monkeypatch.setattr(pipeline, "GitHubClient", _client_returning(
+        {"alpha": RuntimeError("listing blew up"), "beta": good}))
+    monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: list(records))
+
+    selected = pipeline.discover()
+    assert [r.full_name for r in selected] == ["beta/keep"]
+
+
+def test_every_account_failing_is_reported_as_one_error(two_accounts, db, monkeypatch):
+    """Nothing discovered *and* everything failed is a broken run, not an empty
+    organisation, and must not be reported as the latter."""
+    from git_synapse.ingest.pipeline import AuthError
+
+    monkeypatch.setattr(pipeline, "GitHubClient", _client_returning(
+        {"alpha": RuntimeError("down"), "beta": RuntimeError("also down")}))
+    monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: [])
+
+    with pytest.raises(AuthError, match="every configured account failed"):
+        pipeline.discover()
+
+
+def test_a_discovered_repository_records_which_account_found_it(two_accounts, db, monkeypatch):
+    """`repo.account_id` is what lets an account be removed without deleting the
+    history mined from it."""
+    from git_synapse.db.engine import query_one
+
+    monkeypatch.setattr(pipeline, "GitHubClient", _client_returning(
+        {"alpha": [_record("alpha/one")], "beta": []}))
+    monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: list(records))
+    monkeypatch.setattr(pipeline, "DISCOVERY_SHRINK_FLOOR", 0.0)
+
+    pipeline.discover()
+    row = query_one("SELECT a.login FROM repo r JOIN account a ON a.id = r.account_id "
+                    " WHERE r.full_name = 'alpha/one'")
+    assert row and row["login"] == "alpha"
+
+
+def test_the_shrink_guard_stands_down_when_an_account_errored(two_accounts, db, monkeypatch):
+    """A collapse already explained by a reported failure is not evidence of a
+    bad credential, and refusing the run twice for one cause helps nobody."""
+    monkeypatch.setattr(pipeline, "GitHubClient", _client_returning(
+        {"alpha": RuntimeError("down"), "beta": [_record("beta/still-here")]}))
+    monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: list(records))
+
+    selected = pipeline.discover()          # must not raise the shrink AuthError
+    assert [r.full_name for r in selected] == ["beta/still-here"]
