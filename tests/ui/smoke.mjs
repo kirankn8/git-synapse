@@ -256,6 +256,11 @@ console.log('\n=== canonical paths ===');
     ['/repos/5',                        'repository'],
     [`/repos/${repoId}/files/${filePath}`,      'file'],
     dirPath ? [`/repos/${repoId}/tree/${dirPath}`, 'folder'] : null,
+    // The root directory is a legitimate coupling partner, and its path is the
+    // empty string -- which built /repos/N/tree/ and rendered "Not found".
+    [`/repos/${repoId}/tree/`,          'tree root (trailing slash)'],
+    [`/repos/${repoId}/tree`,           'tree root'],
+    [`/repos/${repoId}/`,               'repository (trailing slash)'],
     ['/insights',                       'insights (redirects)'],
     ['/insights/impact/graph',          'repository graph'],
     ['/jobs',                           'jobs'],
