@@ -588,7 +588,7 @@ on('/', async () => {
           { key: 'pair_count', label: 'Pairs', num: true, render: (r) => num(r.pair_count) },
           { key: 'ingest_status', label: 'Status', render: (r) => statusBadge(r.ingest_status) },
         ],
-        { initialSort: 'commit_count', onRow: (r) => go(`/repo/${r.id}`) },
+        { initialSort: 'commit_count', onRow: (r) => go(`/insights?tab=files&repo=${r.id}`) },
       ),
       'Click a repository to explore it',
       h('a', { class: 'btn sm', href: '/repos', 'data-nav': true }, 'All repositories'),
@@ -735,7 +735,7 @@ on('/repos', async (_args, params) => {
           { key: 'last_commit_at', label: 'Last commit', render: (r) => when(r.last_commit_at) },
           { key: 'ingest_status', label: 'Status', render: (r) => (r.ingest_error ? h('span', { class: 'badge danger', title: r.ingest_error }, 'failed') : statusBadge(r.ingest_status)) },
         ],
-        { initialSort: 'commit_count', onRow: (r) => go(`/repo/${r.id}`), empty: 'No repositories match those filters.' },
+        { initialSort: 'commit_count', onRow: (r) => go(`/insights?tab=files&repo=${r.id}`), empty: 'No repositories match those filters.' },
       ),
     ),
   );
@@ -1011,77 +1011,20 @@ const pairTable = (rows, spec, wide = false) =>
     { initialSort: 'score', onRow: (r) => go(`/pair/${r.file_a_id}/${r.file_b_id}`), empty: 'No pairs above the support threshold.' },
   );
 
-/* A repository is a tree of directories, and a flat list of five hundred paths
-   hides that completely. Built from the paths the API already returns, so it
-   needs no endpoint of its own, and `<details>` gives collapsing with no state
-   to keep.
-
-   Every row carries what the table row carries. Indentation is applied to the
-   name cell alone rather than to the whole subtree, so the numeric columns stay
-   on the same axis however deep the nesting goes -- a tree whose columns drift
-   right with depth is unreadable exactly where a repository is most nested. */
-function fileTreeNode(files) {
-  const root = { dirs: new Map(), files: [], changes: 0, ins: 0, del: 0, last: null };
-  const roll = (node, f) => {
-    node.changes += Number(f.change_count || 0);
-    node.ins += Number(f.insertions || 0);
-    node.del += Number(f.deletions || 0);
-    if (f.last_change_at && (!node.last || f.last_change_at > node.last)) node.last = f.last_change_at;
-  };
-  for (const f of files) {
-    const parts = String(f.path || '').split('/');
-    const name = parts.pop();
-    let node = root;
-    roll(node, f);
-    for (const part of parts) {
-      if (!node.dirs.has(part)) {
-        node.dirs.set(part, { dirs: new Map(), files: [], changes: 0, ins: 0, del: 0, last: null });
-      }
-      node = node.dirs.get(part);
-      roll(node, f);
-    }
-    node.files.push({ ...f, basename: name });
-  }
-  return root;
-}
-
-const countFiles = (node) =>
-  node.files.length + [...node.dirs.values()].reduce((n, c) => n + countFiles(c), 0);
-
-/** One row of the grid: the cells after the name line up at every depth. */
-const treeRow = (nameCell, cells, cls) =>
-  h('div', { class: `tree-row ${cls}` }, nameCell,
-    ...cells.map((c) => h('span', { class: 'tree-cell' }, c)));
-
-function renderTree(node, depth) {
-  const out = [];
-  const pad = { style: `padding-left:${depth * 14}px` };
-  // Directories first and busiest first, so the parts of a repository that move
-  // most are visible without opening anything.
-  const dirs = [...node.dirs.entries()].sort((a, b) => b[1].changes - a[1].changes);
-  for (const [name, child] of dirs) {
-    const n = countFiles(child);
-    out.push(h('details', { class: 'tree-dir', open: depth === 0 },
-      h('summary', {},
-        treeRow(
-          h('span', { class: 'tree-name', ...pad },
-            h('span', { class: 'mono' }, name + '/')),
-          [`${num(n)} file${n === 1 ? '' : 's'}`, num(child.changes),
-           num(child.ins), num(child.del), '', when(child.last) || '—'],
-          'is-dir')),
-      h('div', { class: 'tree-children' }, ...renderTree(child, depth + 1))));
-  }
-  for (const f of [...node.files].sort((a, b) => b.change_count - a.change_count)) {
-    out.push(treeRow(
-      h('span', { class: 'tree-name', style: `padding-left:${(depth + 1) * 14}px` },
-        h('a', { href: `/file/${f.id}`, 'data-nav': true, class: 'mono' }, f.basename),
-        f.is_deleted ? h('span', { class: 'badge muted', style: 'margin-left:6px' }, 'deleted') : null),
-      [f.extension || '—', num(f.change_count), num(f.insertions), num(f.deletions),
-       num(f.author_count), when(f.last_change_at) || '—'],
-      'is-file'));
-  }
-  return out;
-}
+const fileTable = (rows, empty) => dataTable(
+  rows,
+  [
+    { key: 'path', label: 'Path', render: (f) => h('span', {}, pathNode(f.path),
+        f.is_deleted ? h('span', { class: 'badge muted', style: 'margin-left:6px' }, 'deleted') : null) },
+    { key: 'extension', label: 'Ext', render: (f) => (f.extension ? h('span', { class: 'badge muted' }, f.extension) : '\u2014') },
+    { key: 'change_count', label: 'Changes', num: true, render: (f) => num(f.change_count) },
+    { key: 'insertions', label: '+', num: true, render: (f) => num(f.insertions) },
+    { key: 'deletions', label: '\u2212', num: true, render: (f) => num(f.deletions) },
+    { key: 'author_count', label: 'Authors', num: true },
+    { key: 'last_change_at', label: 'Last change', render: (f) => when(f.last_change_at) },
+  ],
+  { initialSort: 'change_count', onRow: (f) => go(`/file/${f.id}`), empty },
+);
 
 async function repoFilesPanel(repoId, params) {
   const [files, exts] = await Promise.all([
@@ -1105,52 +1048,9 @@ async function repoFilesPanel(repoId, params) {
   search.addEventListener('input', debounce(apply, 300));
   extSel.addEventListener('change', apply);
 
-  const view = params.view === 'table' ? 'table' : 'tree';
-  const viewBtn = (key, label) => h('button', {
-    class: `btn sm${view === key ? ' primary' : ''}`,
-    onclick: () => {
-      const p = new URLSearchParams({ tab: 'files' });
-      if (search.value) p.set('f', search.value);
-      if (extSel.value) p.set('ext', extSel.value);
-      if (key === 'table') p.set('view', 'table');
-      go(`/repo/${repoId}?${p}`);
-    },
-  }, label);
-
-  box.append(h('div', { class: 'toolbar' }, search, extSel,
-    h('span', { class: 'field' }, viewBtn('tree', 'Tree'), viewBtn('table', 'Table')),
-    h('span', { class: 'spacer' }), h('span', { class: 'card-sub' }, `${files.count} files`)));
-
-  if (view === 'tree') {
-    box.append(card('Files',
-      files.files.length
-        ? h('div', { class: 'tree' },
-            treeRow(h('span', { class: 'tree-name' }, 'Path'),
-                    ['Ext', 'Changes', '+', '\u2212', 'Authors', 'Last change'], 'is-head'),
-            ...renderTree(fileTreeNode(files.files), 0))
-        : h('div', { class: 'empty' }, 'No files match those filters.'),
-      'Folders carry the totals of everything beneath them, ordered by how much they change'));
-    return box;
-  }
-
-  box.append(
-    card(
-      'Files',
-      dataTable(
-        files.files,
-        [
-          { key: 'path', label: 'Path', render: (f) => h('span', {}, pathNode(f.path), f.is_deleted ? h('span', { class: 'badge muted', style: 'margin-left:6px' }, 'deleted') : null) },
-          { key: 'extension', label: 'Ext', render: (f) => (f.extension ? h('span', { class: 'badge muted' }, f.extension) : '—') },
-          { key: 'change_count', label: 'Changes', num: true, render: (f) => num(f.change_count) },
-          { key: 'insertions', label: '+', num: true, render: (f) => num(f.insertions) },
-          { key: 'deletions', label: '−', num: true, render: (f) => num(f.deletions) },
-          { key: 'author_count', label: 'Authors', num: true },
-          { key: 'last_change_at', label: 'Last change', render: (f) => when(f.last_change_at) },
-        ],
-        { initialSort: 'change_count', onRow: (f) => go(`/file/${f.id}`) },
-      ),
-    ),
-  );
+  box.append(h('div', { class: 'toolbar' }, search, extSel, h('span', { class: 'spacer' }),
+    h('span', { class: 'card-sub' }, `${files.count} files`)));
+  box.append(card('Files', fileTable(files.files, 'No files match those filters.')));
   return box;
 }
 
@@ -2255,7 +2155,7 @@ on('/repopair/:a/:b', async ({ a, b }) => {
 });
 
 on('/insights', async (_args, params) => {
-  const tab = params.tab || 'risk';
+  const tab = params.tab || 'files';
   const [ov, repos] = await Promise.all([
     api('/api/mining/overview'),
     api('/api/repos', { limit: 1000, order_by: 'commit_count' }),
@@ -2283,9 +2183,35 @@ on('/insights', async (_args, params) => {
   repoSel.addEventListener('change', () => go(`/insights?tab=${tab}&repo=${repoSel.value}`));
 
   wrap.append(h('div', { class: 'tabs' },
-    ...[['risk', 'Risk & bus factor'], ['drift', 'Coupling drift'], ['modules', 'De-facto modules']]
+    ...[['files', 'Files'], ['risk', 'Risk & bus factor'], ['drift', 'Coupling drift'],
+        ['modules', 'De-facto modules']]
       .map(([k, l]) => h('button', { class: `tab${tab === k ? ' active' : ''}`, onclick: () => go(`/insights?tab=${k}&repo=${repoId || ''}`) }, l))));
   wrap.append(h('div', { class: 'toolbar' }, h('div', { class: 'field' }, h('label', {}, 'Scope'), repoSel)));
+
+  if (tab === 'files') {
+    // Files belong to one repository, so this tab needs a scope before it can
+    // say anything -- the selector above is the way in rather than an ornament.
+    if (!repoId) {
+      wrap.append(card('Files', h('div', { class: 'empty' },
+        h('strong', {}, 'Pick a repository'),
+        'Files belong to one repository. Choose one in Scope above, or open one from Repositories.')));
+      return wrap;
+    }
+    const files = await api(`/api/repos/${repoId}/files`,
+                            { limit: 1000, search: params.f, order_by: 'change_count' });
+    const search = h('input', { class: 'input', type: 'search', style: 'width:280px',
+                                placeholder: 'Filter by path\u2026', value: params.f || '' });
+    search.addEventListener('input', debounce(() => {
+      const q = new URLSearchParams({ tab: 'files', repo: String(repoId) });
+      if (search.value) q.set('f', search.value);
+      go(`/insights?${q}`);
+    }, 300));
+    wrap.append(h('div', { class: 'toolbar' }, search, h('span', { class: 'spacer' }),
+      h('span', { class: 'card-sub' }, `${files.count} files`)));
+    wrap.append(card('Files', fileTable(files.files, 'No files match that filter.'),
+      'Sorted by how often each file changes; click a row for its history and partners'));
+    return wrap;
+  }
 
   if (tab === 'risk') {
     const data = await api('/api/risk', { repo_id: repoId || undefined, limit: 120 });
