@@ -252,7 +252,7 @@ def impact_cmd(
 @app.command("backtest")
 def backtest_cmd(
     repo: str = typer.Option("", "--repo", "-r", help="Restrict to one repository."),
-    measure: str = typer.Option("", "--measure", "-m", help="Comma-separated; default is the recommended set."),
+    measure: str = typer.Option("", "--measure", "-m", help="Comma-separated; defaults to the one the backtest ranks first."),
     k: int = typer.Option(5, "--top", "-k", help="How many suggestions the product may offer."),
     min_support: int = typer.Option(2, "--min-support", help="Ignore pairs seen fewer times than this."),
     limit: int = typer.Option(0, "--limit", help="Stop after this many commits."),
@@ -276,8 +276,8 @@ def backtest_cmd(
             raise typer.Exit(1)
         repo_id = row[0]["id"]
 
-    keys = tuple(m.strip() for m in measure.split(",") if m.strip()) or \
-        tuple(m.key for m in MEASURES if m.recommended)
+    # No opinion about which others are worth running: name them and they run.
+    keys = tuple(m.strip() for m in measure.split(",") if m.strip()) or (DEFAULT_MEASURE,)
     result = bt.run(repo_id, keys, k=k, min_support=min_support,
                     limit=limit or None, grep_sample=grep_sample, seeding=seeding)
 
@@ -329,16 +329,17 @@ def measures() -> None:
         table.add_column("key", style="green")
         table.add_column("formula", style="dim")
         table.add_column("summary", overflow="fold")
+        table.add_column("measured", justify="right")
         table.add_column("flags", style="yellow")
         for spec in specs:
             flags = []
-            if spec.recommended:
-                flags.append("recommended")
             if spec.rare_item_bias:
                 flags.append("rare-item bias")
             if spec.saturates_on_sparse:
                 flags.append("saturates")
-            table.add_row(spec.key, spec.formula, spec.summary, ", ".join(flags))
+            table.add_row(spec.key, spec.formula, spec.summary,
+                          f"{spec.hit_rate:.1%}" if spec.hit_rate is not None else "-",
+                          ", ".join(flags))
         console.print(table)
         console.print()
 

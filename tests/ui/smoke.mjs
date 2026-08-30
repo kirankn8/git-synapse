@@ -83,8 +83,6 @@ const runId = runs.runs[0].id;
 const repoWithImpact = await (await fetch(BASE + '/api/impact/graph?limit=5')).json();
 const impactRepoId = (repoWithImpact.edges[0] || {}).target_repo_id || repoId;
 const impactSrcId = (repoWithImpact.edges[0] || {}).source_repo_id || repoId;
-const csList = await (await fetch(BASE + '/api/change-sets?limit=1')).json();
-const csId = (csList.change_sets[0] || {}).id;
 
 const routes = [
   ['#/',                                  'Overview'],
@@ -109,7 +107,6 @@ const routes = [
   [`#/repopair/${impactSrcId}/${impactRepoId}`,    'Repo pair detail'],
   ['#/crossrepo',                         'Cross-repo (repo level)'],
   ['#/crossrepo?level=file',              'Cross-repo (file level)'],
-  csId ? [`#/changeset/${csId}`,          'Change set detail'] : null,
   ['#/insights?tab=risk',                 'Insights risk'],
   ['#/insights?tab=drift',                'Insights drift (emerging)'],
   ['#/insights?tab=drift&trend=decaying', 'Insights drift (decaying)'],

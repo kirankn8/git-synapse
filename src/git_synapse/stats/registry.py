@@ -52,7 +52,11 @@ class MeasureSpec:
             with tiny marginals; the UI warns on these.
         saturates_on_sparse: True for measures that count joint absence and so
             sit near their maximum for almost every commit-data pair.
-        recommended: True for the handful worth defaulting to.
+        hit_rate: what the reference backtest measured -- the share of prompts
+            where a file that really changed appeared in this measure's top 5.
+            Not a recommendation. Which question a caller wants asked depends on
+            a scenario only the caller knows; this says only how each question
+            fared at predicting the next commit.
     """
 
     key: str
@@ -69,7 +73,8 @@ class MeasureSpec:
     is_significance: bool = False
     rare_item_bias: bool = False
     saturates_on_sparse: bool = False
-    recommended: bool = False
+    #: Measured, not asserted. See MEASURED_ON for the corpus.
+    hit_rate: float | None = None
     aliases: tuple[str, ...] = field(default_factory=tuple)
 
     def compute(self, t: Contingency) -> np.ndarray:
@@ -95,7 +100,6 @@ MEASURES: tuple[MeasureSpec, ...] = (
         fn=m.jaccard,
         lower=0.0,
         upper=1.0,
-        recommended=True,
     ),
     MeasureSpec(
         key="dice",
@@ -142,7 +146,6 @@ MEASURES: tuple[MeasureSpec, ...] = (
         fn=m.ochiai,
         lower=0.0,
         upper=1.0,
-        recommended=True,
         aliases=("cosine",),
     ),
     MeasureSpec(
@@ -210,7 +213,6 @@ MEASURES: tuple[MeasureSpec, ...] = (
         lower=None,
         upper=1.0,
         signed=True,
-        recommended=True,
     ),
     # ---------------- Matching coefficients ----------------
     MeasureSpec(
@@ -310,7 +312,6 @@ MEASURES: tuple[MeasureSpec, ...] = (
         fn=m.mutual_information,
         lower=0.0,
         upper=1.0,
-        recommended=True,
     ),
     MeasureSpec(
         key="pmi",
@@ -347,7 +348,6 @@ MEASURES: tuple[MeasureSpec, ...] = (
         upper=1.0,
         signed=True,
         neutral=0.0,
-        recommended=True,
     ),
     MeasureSpec(
         key="ppmi",
@@ -380,7 +380,6 @@ MEASURES: tuple[MeasureSpec, ...] = (
         fn=m.chi_square,
         lower=0.0,
         is_significance=True,
-        recommended=True,
     ),
     MeasureSpec(
         key="log_likelihood_ratio",
@@ -397,7 +396,6 @@ MEASURES: tuple[MeasureSpec, ...] = (
         fn=m.log_likelihood_ratio,
         lower=0.0,
         is_significance=True,
-        recommended=True,
     ),
     MeasureSpec(
         key="t_score",
@@ -483,7 +481,6 @@ MEASURES: tuple[MeasureSpec, ...] = (
         upper=1.0,
         signed=True,
         neutral=0.0,
-        recommended=True,
     ),
     MeasureSpec(
         key="cramers_v",
@@ -573,7 +570,6 @@ MEASURES: tuple[MeasureSpec, ...] = (
         lower=0.0,
         neutral=1.0,
         rare_item_bias=True,
-        recommended=True,
         aliases=("lift",),
     ),
     # ---------------- Directional extras (not part of the 29) ----------------
@@ -591,7 +587,6 @@ MEASURES: tuple[MeasureSpec, ...] = (
         fn=m.confidence_ab,
         lower=0.0,
         upper=1.0,
-        recommended=True,
     ),
     MeasureSpec(
         key="confidence_ba",
@@ -641,6 +636,62 @@ ALL_KEYS: tuple[str, ...] = tuple(spec.key for spec in MEASURES)
 #: The symmetric measures answer "is this association surprising?" -- a better
 #: question for discovery, a worse one for prediction.
 DEFAULT_MEASURE = "confidence_ab"
+
+#: The corpus every `hit_rate` and `lift` on a MeasureSpec was measured over, so
+#: a caller can weigh how much the number should travel. Different code has
+#: different habits: the figures move by repository, and on the most
+#: convention-regular ones every measure loses to guessing the file's test.
+MEASURED_ON = ("471,972 predictions over 105,986 commits in 79 repositories "
+               "across six organisations and six languages")
+
+#: What the same corpus yields with no history at all: the file's test, then the
+#: rest of its folder. Reported beside every measured hit rate so the two can be
+#: compared without a ratio anyone has to interpret. A measure below it is one
+#: worth ignoring -- and on the most convention-regular repositories, every
+#: measure is below it.
+FREE_LOOKUP_HIT_RATE = 0.534
+
+#: What each measure scored on that corpus. Reported rather than ranked: the
+#: order here answers one question -- what else changes with this file -- and a
+#: caller asking a different one should read the formula, not this number.
+#:
+#: Note what the top of the list means. `confidence_ab` is `a / n_a` and
+#: `russell_rao` is `a / N`; when ranking one file's partners both denominators
+#: are constant, so both sort by `a` alone and score identically. The measure
+#: that wins this benchmark is arithmetically "how often did these two change
+#: together", and the other thirty earn their place on other questions, not on
+#: this one.
+_MEASURED_HIT_RATE = {
+    "russell_rao": 0.632,
+    "confidence_ab": 0.632,
+    "michael": 0.626,
+    "t_score": 0.615,
+    "fager": 0.596,
+    "jaccard": 0.589,
+    "dice": 0.589,
+    "sorensen": 0.589,
+    "braun_blanquet": 0.586,
+    "ochiai": 0.584,
+    "chi_square": 0.574,
+    "cramers_v": 0.574,
+    "phi": 0.574,
+    "z_score": 0.571,
+    "npmi": 0.543,
+    "kulczynski": 0.532,
+    "faith": 0.514,
+    "sokal_michener": 0.467,
+    "rogers_tanimoto": 0.467,
+    "hamann": 0.467,
+    "simpson": 0.464,
+    "yules_y": 0.442,
+    "yules_q": 0.442,
+    "pmi": 0.407,
+    "confidence_ba": 0.407,
+    "ppmi": 0.407,
+}
+
+for _spec in MEASURES:
+    object.__setattr__(_spec, "hit_rate", _MEASURED_HIT_RATE.get(_spec.key))
 
 
 def resolve(key: str) -> MeasureSpec:
