@@ -271,3 +271,17 @@ def test_skip_repos_matches_a_bare_name_or_a_full_name():
     cfg = dataclasses.replace(
         base, skip_repos=("ByName", "acme/byfullname"))
     assert [r.name for r in select_repos(records, cfg=cfg)] == ["keep"]
+
+
+def test_a_disabled_repository_is_never_selected():
+    """A disabled repository cannot be cloned at all, so selecting it turns one
+    upstream state into a run-long sequence of failures."""
+    from git_synapse.ingest.github import RepoRecord, select_repos
+    from git_synapse.config import GitHubConfig
+
+    cfg = GitHubConfig(org="acme")
+    live = RepoRecord(github_id=1, owner="acme", name="live", full_name="acme/live")
+    dead = RepoRecord(github_id=2, owner="acme", name="dead", full_name="acme/dead",
+                      is_disabled=True)
+    kept = {r.name for r in select_repos([live, dead], cfg)}
+    assert kept == {"live"}

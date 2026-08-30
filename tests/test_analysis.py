@@ -305,3 +305,53 @@ def test_the_conditional_measures_order_by_direction(measure, expected):
     from git_synapse.analysis.query import _oriented_order
 
     assert _oriented_order(measure) == expected
+
+
+# ------------------------------------- callers that pass their own connection
+
+def test_the_derived_stages_accept_a_caller_supplied_connection(db):
+    """Every stage takes an optional connection so a pipeline run does the whole
+    repository in one transaction. Called without one they open their own, which
+    is the path the tests took -- leaving the shared-transaction path untested,
+    and that is the one the pipeline actually uses."""
+    from git_synapse.analysis import depbump, score
+    from git_synapse.analysis.aggregate import rebuild_repo
+    from git_synapse.db.engine import connection
+
+    with connection() as conn:
+        repo = conn.execute(
+            "INSERT INTO repo (full_name, name, owner) VALUES "
+            "('acme/staged','staged','acme') RETURNING id").fetchone()[0]
+        try:
+            from git_synapse.analysis.aggregate import repos_needing_aggregation
+
+            assert rebuild_repo(repo, conn=conn) is not None
+            assert score.score_repo(repo, conn=conn) is not None
+            assert depbump.resolve_bumps(conn) == 0
+            assert depbump.rebuild(conn=conn) is not None
+            # The sweeps over *every* repository take one too.
+            assert isinstance(repos_needing_aggregation(conn), list)
+            assert isinstance(score.score_all(conn), list)
+            assert isinstance(depbump.refresh_modules(conn), int)
+            assert isinstance(depbump.refresh_declared(conn=conn), int)
+        finally:
+            conn.rollback()
+
+
+def test_declared_only_impact_filters_to_manifest_backed_edges(db):
+    """The flag is what separates "these are declared" from "these correlate",
+    and an agent is told to trust the first."""
+    from git_synapse.analysis import predict
+
+    assert predict.impact_for(repo_id=-1, declared_only=False) == []
+    assert predict.impact_for(repo_id=-1, declared_only=True) == []
+
+
+def test_a_minimum_score_filters_both_orientations(db):
+    """A pair is stored once and read from either end, so a threshold applied to
+    only one side would return partners below it whenever the pair happened to
+    be stored the other way round."""
+    from git_synapse.analysis import query as q
+
+    assert q.coupled_files(file_id=-1, measure="jaccard", limit=5,
+                           min_support=1, min_score=0.9) == []

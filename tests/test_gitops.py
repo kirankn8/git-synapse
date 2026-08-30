@@ -735,3 +735,67 @@ def test_an_unparseable_tag_date_does_not_lose_the_tag(tmp_path, monkeypatch):
     monkeypatch.setattr(gitops, "run_git", _mangle)
     tags = gitops.read_tags(work, "main")
     assert [t.name for t in tags] == ["v1.0.0"]
+
+
+def test_a_directory_that_is_not_a_repository_yields_no_tags(tmp_path):
+    """It exists, so the earlier `is_dir` guard passes and git itself refuses.
+    A half-written mirror looks exactly like this."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert gitops.read_tags(plain, "main") == []
+    assert gitops.replayed_commits(plain, "main") == set()
+
+
+def test_a_tag_line_that_does_not_parse_is_skipped(tmp_path, monkeypatch):
+    """`for-each-ref` output is split on tabs, and a ref name containing one
+    would otherwise unpack into the wrong fields."""
+    work = worktree(tmp_path, "oddline")
+    g(work, "tag", "v1.0.0")
+    real = gitops.run_git
+
+    def _extra_line(args, **kw):
+        proc = real(args, **kw)
+        if args and args[0] == "for-each-ref" and "refname:short" in " ".join(args):
+            proc.stdout = "too\tfew\tfields\n" + proc.stdout
+        return proc
+
+    monkeypatch.setattr(gitops, "run_git", _extra_line)
+    assert [t.name for t in gitops.read_tags(work, "main")] == ["v1.0.0"]
+
+
+def test_tags_survive_a_branch_that_cannot_be_listed(tmp_path, monkeypatch):
+    """Without the branch there is no anchor, but the tags themselves are still
+    the version index and must not be dropped with it."""
+    work = worktree(tmp_path, "nolist")
+    g(work, "tag", "v1.0.0")
+    real = gitops.run_git
+
+    def _fail_rev_list(args, **kw):
+        if args and args[0] == "rev-list":
+            proc = real(["rev-parse", "--verify", "definitely-not-a-ref"], **kw)
+            return proc
+        return real(args, **kw)
+
+    monkeypatch.setattr(gitops, "run_git", _fail_rev_list)
+    tags = gitops.read_tags(work, "main")
+    assert [t.name for t in tags] == ["v1.0.0"]
+    assert tags[0].main_sha is None
+
+
+def test_a_tag_whose_merge_base_cannot_be_computed_is_left_unanchored(tmp_path, monkeypatch):
+    """One unanchorable tag must not cost the others their anchor."""
+    work = worktree(tmp_path, "nomb")
+    g(work, "checkout", "-q", "-b", "side")
+    add_commit(work, "side.txt", "s")
+    g(work, "tag", "v1.0.0")
+    g(work, "checkout", "-q", "main")
+    real = gitops.run_git
+
+    def _fail_merge_base(args, **kw):
+        if args and args[0] == "merge-base":
+            return real(["rev-parse", "--verify", "nope"], **kw)
+        return real(args, **kw)
+
+    monkeypatch.setattr(gitops, "run_git", _fail_merge_base)
+    tags = {t.name: t for t in gitops.read_tags(work, "main")}
+    assert tags["v1.0.0"].main_sha is None

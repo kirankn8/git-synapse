@@ -714,3 +714,70 @@ def test_file_history_names_a_path_it_cannot_find(monkeypatch):
     monkeypatch.setattr(server.q, "resolve_file", lambda repo, path: None)
     out = server.file_history("acme/app", "gone.go")
     assert "no file" in out["error"] and "gone.go" in out["error"]
+
+
+# ------------------------------------------------------------ evidence tiers
+
+@pytest.mark.parametrize(("row", "tier"), [
+    ({"is_declared": True,  "has_bump_history": True},  "declared"),
+    ({"is_declared": False, "has_bump_history": True},  "bump-backed"),
+    ({"is_declared": False, "has_bump_history": False}, "discovery"),
+])
+def test_an_impact_row_states_which_tier_it_came_from(row, tier):
+    """An agent acts differently on a manifest line than on a correlation, so
+    the tier travels with every row rather than being inferred from the score."""
+    row = {**row, "score": 0.5, "bump_count": 2, "median_lag_days": None,
+           "rank_in_source": 1}
+    out = server._impact_row(row, "acme/app")
+    assert out["evidence"] == tier
+    if tier == "discovery":
+        assert "unvalidated" in out["note"]
+
+
+def test_coupled_directories_names_a_directory_it_cannot_find(monkeypatch):
+    """A file path is accepted as a convenience, so a genuine miss has to say
+    it wanted a directory rather than silently returning nothing."""
+    monkeypatch.setattr(server, "_resolve_repo",
+                        lambda name: {"id": 1, "name": "app", "full_name": "acme/app"})
+    monkeypatch.setattr(server.q, "query_one", lambda *a, **k: None)
+    monkeypatch.setattr(server.q, "resolve_file", lambda repo, path: None)
+    out = server.coupled_directories("acme/app", "nowhere")
+    assert "no directory" in out["error"]
+    assert "hint" in out
+
+
+def test_module_context_explains_both_directions_of_a_declaration(monkeypatch):
+    """Being declared by a module and declaring one are different obligations,
+    and an agent needs to be told which it is looking at."""
+    monkeypatch.setattr(server, "_resolve_repo",
+                        lambda name: {"id": 1, "name": "app", "full_name": "acme/app"})
+    monkeypatch.setattr(server.q, "resolve_file",
+                        lambda repo, path: {"id": 7, "path": "core/a.go"})
+    monkeypatch.setattr(server.q, "module_context", lambda repo_id, path: {
+        "owning_module": "core", "declared_by": ["web"], "declares": ["util"],
+        "modules": ["core", "web", "util"]})
+
+    out = server.module_context("acme/app", "core/a.go")
+    assert "declared by" in out["guidance"] and "declares" in out["guidance"]
+
+
+def test_a_parent_directory_is_marked_as_not_informative(monkeypatch):
+    """Every change to `pkg/auth` is a change to `pkg` by construction, so it
+    scores high and means nothing. Saying so stops an agent reading arithmetic
+    as a discovery."""
+    monkeypatch.setattr(server, "_resolve_repo",
+                        lambda name: {"id": 1, "name": "app", "full_name": "acme/app"})
+    monkeypatch.setattr(server.q, "query_one", lambda *a, **k: {
+        "id": 9, "path": "pkg/auth", "file_count": 12, "change_count": 300})
+    monkeypatch.setattr(server.q, "coupled_directories", lambda *a, **k: [
+        {"path": "pkg", "score": 0.99, "n_ab": 90, "confidence_ab": 0.9,
+         "confidence_ba": 0.9, "change_count": 100},
+        {"path": "web", "score": 0.40, "n_ab": 20, "confidence_ab": 0.4,
+         "confidence_ba": 0.4, "change_count": 60},
+    ])
+
+    out = server.coupled_directories("acme/app", "pkg/auth")
+    by_path = {d["path"]: d for d in out["partners"]}
+    assert by_path["pkg"]["relation"] == "ancestor-or-descendant"
+    assert by_path["pkg"]["informative"] is False
+    assert by_path["web"]["informative"] is True

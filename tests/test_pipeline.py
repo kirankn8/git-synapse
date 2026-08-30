@@ -730,3 +730,35 @@ def test_the_shrink_guard_stands_down_when_an_account_errored(two_accounts, db, 
 
     selected = pipeline.discover()          # must not raise the shrink AuthError
     assert [r.full_name for r in selected] == ["beta/still-here"]
+
+
+def test_marking_no_replays_touches_nothing(db):
+    """Called for every repository, and most have none. An empty set must not
+    become an UPDATE with an empty ANY() clause."""
+    from git_synapse.db.engine import connection
+    from git_synapse.ingest.pipeline import _mark_replays
+
+    with connection() as conn:
+        assert _mark_replays(1, set(), conn) == 0
+
+
+def test_an_absent_token_is_allowed_when_every_repository_is_public(monkeypatch):
+    """Cloning public repositories needs no credential, so demanding one would
+    refuse a run that would have worked."""
+    from git_synapse.ingest import pipeline as P
+
+    cfg = P.get_config().github
+    monkeypatch.setattr(type(cfg), "current_token", lambda self: "", raising=False)
+    assert P.verify_credentials(required=False) == "anonymous"
+
+
+def test_an_absent_token_is_refused_when_something_is_private(monkeypatch):
+    """A private repository cannot be cloned anonymously, and finding that out
+    per-repository turns one missing setting into dozens of clone failures."""
+    from git_synapse.ingest import pipeline as P
+    from git_synapse.ingest.pipeline import AuthError
+
+    cfg = P.get_config().github
+    monkeypatch.setattr(type(cfg), "current_token", lambda self: "", raising=False)
+    with pytest.raises(AuthError):
+        P.verify_credentials(required=True)
