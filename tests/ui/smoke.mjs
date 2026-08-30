@@ -102,9 +102,11 @@ const routes = [
   [`#/repos/${repoId}/files/${filePath}?tab=history`, 'File history'],
   [`#/repos/${repoId}/files/${filePath}?tab=authors`, 'File authors'],
   otherId ? [`#/repos/${repoId}/pairs/${fileId}/${otherId}`, 'Pair detail'] : null,
-  [`#/insights/graph?repo=${repoId}&limit=60&min=5`,  'Coupling graph (files)'],
-  ['#/insights/graph?mode=repos&min=0.4',             'Coupling graph (repositories)'],
-  ['#/insights',                           'Insights (redirects to impact)'],
+  [`#/insights/graph?repo=${repoId}&limit=60&min=5`,  'Map (one repository\u2019s files)'],
+  ['#/insights/graph',                                'Map (all repositories)'],
+  ['#/insights/graph?mode=repos&min=0.4',             'Map (explicit repos mode)'],
+  ['#/insights/graph?mode=files',                     'Map (files, nothing scoped)'],
+  ['#/insights',                           'Insights (lands on the map)'],
   ['#/insights/impact',                    'Impact (pick a repository)'],
   [`#/insights/impact?repo=${impactRepoId}&dir=upstream`,   'Impact upstream'],
   [`#/insights/impact?repo=${impactSrcId}&dir=downstream`,  'Impact downstream'],
@@ -261,7 +263,7 @@ console.log('\n=== canonical paths ===');
     [`/repos/${repoId}/tree/`,          'tree root (trailing slash)'],
     [`/repos/${repoId}/tree`,           'tree root'],
     [`/repos/${repoId}/`,               'repository (trailing slash)'],
-    ['/insights',                       'insights (redirects)'],
+    ['/insights',                       'insights (lands on the map)'],
     ['/insights/graph?mode=repos',      'repository graph'],
     ['/jobs',                           'jobs'],
   ].filter(Boolean);
@@ -286,6 +288,25 @@ console.log('\n=== canonical paths ===');
    sideways, so the address stopped describing where you were. Walking it by
    clicking -- never by pushing a URL -- is the only way to catch that, and it
    is what the route-driving loop above cannot see. */
+console.log('\n=== measure bar shows only where it ranks something ===');
+for (const [path, shouldShow] of [
+  ['/', true],
+  [`/repos/${repoId}?tab=pairs`, true],
+  [`/repos/${repoId}/files/${filePath}`, true],
+  [`/repos/${repoId}`, false],
+  ['/insights/risk', false],
+  ['/insights/graph', false],
+  ['/jobs', false],
+  ['/repos', false],
+]) {
+  window.history.pushState({}, '', path);
+  window.dispatchEvent(new window.PopStateEvent('popstate'));
+  await sleep(360);
+  const shown = !window.document.getElementById('measure-bar').hidden;
+  report(`measure bar on ${path}`, shown === shouldShow,
+         shown ? 'shown' : 'hidden');
+}
+
 console.log('\n=== click walk: account -> repo -> folder -> file ===');
 {
   const settle = async () => {
