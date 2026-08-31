@@ -37,6 +37,17 @@ from git_synapse.ingest.github import GitHubClient, RepoRecord, select_repos
 from git_synapse.ingest.parser import iter_commits
 from git_synapse.ingest.store import load_commits, load_tags, upsert_repo
 
+
+def _mark_replays(repo_id: int, shas: set[str], conn: psycopg.Connection) -> int:
+    """Flag commits whose change already exists on the shipping branch."""
+    if not shas:
+        return 0
+    return conn.execute(
+        "UPDATE commit SET is_replay = TRUE, pair_eligible = FALSE "
+        " WHERE repo_id = %s AND sha = ANY(%s) AND NOT is_replay",
+        (repo_id, list(shas)),
+    ).rowcount or 0
+
 log = logging.getLogger(__name__)
 
 #: Consecutive network-failed repositories before a run gives up. Set above the
@@ -554,10 +565,16 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
             since_shas=watermarks,
             blobless=blobless,
             reverse=True,
+            include_tags=True,
         )
 
         with connection() as conn:
             stats = load_commits(repo_id, commits, conn)
+            # Marked after loading, because a replay is only recognisable by
+            # comparing against the branch, and the flag is what keeps the same
+            # change from being counted once per release branch it reached.
+            branch = gitops.default_branch(fetch.path)
+            _mark_replays(repo_id, gitops.replayed_commits(fetch.path, branch), conn)
             # After the commits, so each tag resolves to a row rather than
             # leaving commit_id null on the first run.
             mirror = gitops.mirror_path_for(record.full_name)

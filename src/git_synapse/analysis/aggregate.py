@@ -88,18 +88,24 @@ def _refresh_commit_flags(conn: psycopg.Connection, repo_id: int) -> None:
     Stored rather than applied at query time so the exclusion is auditable, and
     recomputed here so that changing ``MAX_FILES_PER_COMMIT`` takes effect on the
     next aggregation without re-reading git.
+
+    A replay is excluded for a different reason and one configuration cannot
+    change: the same change applied to a release branch is not a second
+    observation that those files belong together, it is the first one repeated.
     """
     cfg = get_config().ingest
     conn.execute(
         """
         UPDATE commit SET pair_eligible = (
             NOT is_merge
+            AND NOT is_replay
             AND n_files > 0
             AND (%(cap)s <= 0 OR n_files <= %(cap)s)
         )
         WHERE repo_id = %(repo)s
           AND pair_eligible <> (
               NOT is_merge
+              AND NOT is_replay
               AND n_files > 0
               AND (%(cap)s <= 0 OR n_files <= %(cap)s)
           )
