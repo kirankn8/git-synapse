@@ -62,7 +62,7 @@ def test_search_files_survives_metacharacters_and_unicode(db, term):
     assert isinstance(rows, list)
 
 
-def test_search_files_scoped_to_a_repo_stays_in_it(db):
+def test_search_files_scoped_to_a_repo_stays_in_it(corpus):
     row = q.query_one("SELECT id, full_name FROM repo WHERE is_enabled LIMIT 1")
     rows = q.search_files(term="", repo_id=row["id"], limit=10)
     assert all(r["repo_id"] == row["id"] for r in rows)
@@ -161,7 +161,7 @@ def test_hotspots_are_ranked(db):
     assert counts == sorted(counts, reverse=True)
 
 
-def test_hotspots_scoped_to_a_repo_stay_in_it(db):
+def test_hotspots_scoped_to_a_repo_stay_in_it(corpus):
     row = q.query_one("SELECT id FROM repo WHERE is_enabled LIMIT 1")
     rows = q.hotspots(repo_id=row["id"], limit=5)
     assert all(r["repo_id"] == row["id"] for r in rows)

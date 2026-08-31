@@ -46,7 +46,7 @@ def _commit(sha_seed: int, subject: str, when: datetime, paths: list[str],
     )
 
 
-def test_corrupt_dates_cannot_stretch_the_time_axis(db):
+def test_corrupt_dates_cannot_stretch_the_time_axis(corpus):
     """A commit at the Unix epoch must not set the time origin.
 
     Before this guard, four epoch-dated commits stretched the axis to 20,687
