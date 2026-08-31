@@ -670,13 +670,13 @@ def test_explain_repo_pair_reports_every_kind_of_evidence(monkeypatch):
     monkeypatch.setattr(server, "_resolve_repo", lambda name: a if "lib" in name else b)
 
     impact = {"score": 0.8, "bump_count": 3, "is_declared": True,
-              "median_lag_days": 4.0, "rank_in_source": 1}
+              "median_adoption_days": 4.0, "rank_in_source": 1}
     monkeypatch.setattr("git_synapse.db.engine.query_one", lambda sql, *ar, **kw: (
         impact if "repo_impact" in sql and "%s" in sql else
         {"dep_name": "lib", "dep_version": "1.2.3", "manifest": "pom.xml"}))
     monkeypatch.setattr("git_synapse.db.engine.query", lambda sql, *ar, **kw: [
         {"consumer_sha": "a" * 40, "dep_version": "1.2.3", "dep_sha": "b" * 12,
-         "bumped_at": None, "lag_days": 4.0}])
+         "bumped_at": None, "adoption_days": 4.0}])
 
     out = server.explain_repo_pair("acme/lib", "acme/app")
     assert out.get("error") is None
@@ -726,7 +726,7 @@ def test_file_history_names_a_path_it_cannot_find(monkeypatch):
 def test_an_impact_row_states_which_tier_it_came_from(row, tier):
     """An agent acts differently on a manifest line than on a correlation, so
     the tier travels with every row rather than being inferred from the score."""
-    row = {**row, "score": 0.5, "bump_count": 2, "median_lag_days": None,
+    row = {**row, "score": 0.5, "bump_count": 2, "median_adoption_days": None,
            "rank_in_source": 1}
     out = server._impact_row(row, "acme/app")
     assert out["evidence"] == tier

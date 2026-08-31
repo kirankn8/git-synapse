@@ -425,7 +425,7 @@ def impact_graph(
         f"""
         SELECT i.source_repo_id AS source, i.target_repo_id AS target,
                i.score, i.is_declared, i.has_bump_history, i.bump_count,
-               i.median_lag_days
+               i.median_adoption_days
         FROM repo_impact i
         WHERE {' AND '.join(clauses)}
         ORDER BY i.score DESC
@@ -464,7 +464,7 @@ def repo_pair_bumps(consumer_id: int, dep_id: int,
         """
         SELECT b.dep_name, b.dep_version, b.manifest, b.ecosystem, b.resolution,
                b.bumped_at, b.consumer_sha, b.dep_sha,
-               round(b.lag_seconds / 86400.0, 1)::float8 AS lag_days,
+               round(b.adoption_seconds / 86400.0, 1)::float8 AS adoption_days,
                dc.sha AS upstream_sha, dc.subject AS upstream_subject,
                dc.committed_at AS upstream_at
           FROM dep_bump b
@@ -498,8 +498,8 @@ def repo_dependencies(repo_id: int) -> dict:
     bumps = raw(
         """
         SELECT rd.name AS dep_repo, b.dep_repo_id, count(*) AS bumps,
-               round((percentile_cont(0.5) WITHIN GROUP (ORDER BY b.lag_seconds)
-                      / 86400.0)::numeric, 2)::float8 AS median_lag_days,
+               round((percentile_cont(0.5) WITHIN GROUP (ORDER BY b.adoption_seconds)
+                      / 86400.0)::numeric, 2)::float8 AS median_adoption_days,
                max(b.bumped_at) AS last_bump
         FROM dep_bump b
         LEFT JOIN repo rd ON rd.id = b.dep_repo_id

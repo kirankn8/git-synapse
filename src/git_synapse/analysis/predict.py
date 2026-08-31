@@ -86,7 +86,7 @@ def rebuild(conn: psycopg.Connection | None = None, force: bool = False) -> Pred
                        count(*)                       AS bump_count,
                        max(bumped_at)                 AS last_bump,
                        percentile_cont(0.5) WITHIN GROUP (
-                           ORDER BY lag_seconds) / 86400.0 AS median_lag_days
+                           ORDER BY adoption_seconds) / 86400.0 AS median_adoption_days
                   FROM dep_bump
                  WHERE dep_repo_id IS NOT NULL
               GROUP BY dep_repo_id, consumer_repo_id
@@ -96,18 +96,18 @@ def rebuild(conn: psycopg.Connection | None = None, force: bool = False) -> Pred
                        d.consumer_repo_id AS target_repo_id,
                        TRUE               AS is_declared,
                        COALESCE(b.bump_count, 0) AS bump_count,
-                       b.last_bump, b.median_lag_days
+                       b.last_bump, b.median_adoption_days
                   FROM repo_dependency d
              LEFT JOIN bumps b ON b.dep_repo_id = d.dep_repo_id
                               AND b.consumer_repo_id = d.consumer_repo_id
                  WHERE d.dep_repo_id IS NOT NULL
                    AND d.dep_repo_id <> d.consumer_repo_id
-              GROUP BY 1, 2, 3, 4, b.last_bump, b.median_lag_days
+              GROUP BY 1, 2, 3, 4, b.last_bump, b.median_adoption_days
                 UNION
                 -- A dependency dropped from the manifest but bumped in the past
                 -- is still a real historical relationship.
                 SELECT b.dep_repo_id, b.consumer_repo_id, FALSE,
-                       b.bump_count, b.last_bump, b.median_lag_days
+                       b.bump_count, b.last_bump, b.median_adoption_days
                   FROM bumps b
                  WHERE b.dep_repo_id <> b.consumer_repo_id
                    AND NOT EXISTS (
@@ -134,10 +134,10 @@ def rebuild(conn: psycopg.Connection | None = None, force: bool = False) -> Pred
             )
             INSERT INTO repo_impact (
                 source_repo_id, target_repo_id, score, rank_in_source,
-                is_declared, has_bump_history, bump_count, median_lag_days, features)
+                is_declared, has_bump_history, bump_count, median_adoption_days, features)
             SELECT source_repo_id, target_repo_id, score,
                    row_number() OVER (PARTITION BY source_repo_id ORDER BY score DESC),
-                   is_declared, bump_count > 0, bump_count, median_lag_days,
+                   is_declared, bump_count > 0, bump_count, median_adoption_days,
                    jsonb_build_object(
                        'scored_by', 'declared',
                        'bump_count', bump_count,
@@ -250,7 +250,7 @@ def impact_chains(
                    ARRAY[i.source_repo_id, i.target_repo_id] AS path,
                    ARRAY[round(i.score::numeric, 4)] AS hops,
                    ARRAY[i.is_declared] AS declared,
-                   ARRAY[i.median_lag_days] AS lags
+                   ARRAY[i.median_adoption_days] AS lags
             FROM repo_impact i
             WHERE i.source_repo_id = %(repo_id)s
               AND i.score >= %(min_score)s
@@ -263,7 +263,7 @@ def impact_chains(
                    w.path || i.target_repo_id,
                    w.hops || round(i.score::numeric, 4),
                    w.declared || i.is_declared,
-                   w.lags || i.median_lag_days
+                   w.lags || i.median_adoption_days
             FROM walk w
             JOIN repo_impact i ON i.source_repo_id = w.dst
             WHERE w.depth < %(depth)s

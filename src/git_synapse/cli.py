@@ -180,15 +180,15 @@ def depbump_cmd(
     table.add_row("duration", f"{stats.duration_s:.1f}s")
     console.print(table)
 
-    lags = depbump.propagation_lags(limit=15)
+    lags = depbump.adoption_delays(limit=15)
     if lags:
-        lt = Table(title="observed propagation lag", box=None, title_style="bold")
-        for col in ("dependency", "consumer", "bumps", "median lag", "p90 lag", "last"):
+        lt = Table(title="how long consumers took to adopt", box=None, title_style="bold")
+        for col in ("dependency", "consumer", "bumps", "median", "p90", "last"):
             lt.add_column(col)
         for r in lags:
             lt.add_row(r["dep"], r["consumer"], str(r["bumps"]),
-                       f"{r['median_lag_days']}d" if r["median_lag_days"] is not None else "-",
-                       f"{r['p90_lag_days']}d" if r["p90_lag_days"] is not None else "-",
+                       f"{r['median_adoption_days']}d" if r["median_adoption_days"] is not None else "-",
+                       f"{r['p90_adoption_days']}d" if r["p90_adoption_days"] is not None else "-",
                        str(r["last_bump"]))
         console.print(lt)
 
@@ -238,13 +238,13 @@ def impact_cmd(
             else predict.impact_for(target["id"], limit=limit))
     label = "upstream of" if direction.startswith("up") else "downstream of"
     t = Table(title=f"{label} {target['name']}", box=None, title_style="bold")
-    for c in ("score", "evidence", "bumps", "median lag", "repository"):
+    for c in ("score", "evidence", "bumps", "adopted after", "repository"):
         t.add_column(c, justify="right" if c in ("score","bumps","median lag") else "left")
     for r in rows:
         ev = "declared" if r["is_declared"] else ("bumps" if r["has_bump_history"] else "discovery")
         style = "green" if ev == "declared" else ("cyan" if ev == "bumps" else "dim")
         t.add_row(f"{r['score']:.3f}", f"[{style}]{ev}[/{style}]", str(r["bump_count"]),
-                  f"{r['median_lag_days']:.1f}d" if r["median_lag_days"] is not None else "-",
+                  f"{r['median_adoption_days']:.1f}d" if r["median_adoption_days"] is not None else "-",
                   r["name"])
     console.print(t)
 

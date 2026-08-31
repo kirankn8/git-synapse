@@ -187,17 +187,17 @@ def test_score_reports_for_every_repo_when_asked(db, monkeypatch):
     assert r.exit_code == 0, r.stdout
 
 
-def test_depbump_prints_propagation_lags_when_there_are_any(db):
+def test_depbump_prints_adoption_delays_when_there_are_any(db):
     from typer.testing import CliRunner
 
-    from git_synapse.analysis.depbump import propagation_lags
+    from git_synapse.analysis.depbump import adoption_delays
     from git_synapse.cli import app
 
-    if not propagation_lags(limit=1):
-        pytest.skip("no propagation lags recorded")
+    if not adoption_delays(limit=1):
+        pytest.skip("no adoption delays recorded")
     r = CliRunner().invoke(app, ["depbump"])
     assert r.exit_code == 0, r.stdout
-    assert "lag" in r.stdout.lower()
+    assert "adopt" in r.stdout.lower()
 
 
 def test_impact_prints_rows_for_a_repo_that_has_them(db):

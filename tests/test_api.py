@@ -656,7 +656,7 @@ def test_a_repository_pair_lists_every_bump_not_just_a_count(client, db):
             conn.execute(
                 "INSERT INTO dep_bump (consumer_repo_id, consumer_sha, dep_repo_id, "
                 "dep_name, dep_version, manifest, bumped_at, dep_commit_id, resolution, "
-                "lag_seconds) VALUES (%s,%s,%s,'lib',%s,'pom.xml',%s,%s,'tag',86400)",
+                "adoption_seconds) VALUES (%s,%s,%s,'lib',%s,'pom.xml',%s,%s,'tag',86400)",
                 (a, version.replace(".", "") + "a" * 34, b, version, at, up))
         conn.commit()
     try:
@@ -667,7 +667,7 @@ def test_a_repository_pair_lists_every_bump_not_just_a_count(client, db):
         newest = body["bumps"][0]
         assert newest["dep_version"] == "1.1.0", "newest first"
         assert newest["upstream_subject"] == "upstream work"
-        assert newest["lag_days"] == 1.0
+        assert newest["adoption_days"] == 1.0
         assert newest["resolution"] == "tag"
     finally:
         with connection() as conn:
@@ -695,15 +695,15 @@ def test_lag_is_a_number_in_json_not_a_string(client, db):
                          "('acme/n2','n2','acme') RETURNING id").fetchone()[0]
         conn.execute(
             "INSERT INTO dep_bump (consumer_repo_id, consumer_sha, dep_repo_id, "
-            "dep_name, dep_version, manifest, bumped_at, lag_seconds) "
+            "dep_name, dep_version, manifest, bumped_at, adoption_seconds) "
             "VALUES (%s,%s,%s,'n2','1.0.0','pom.xml','2024-01-01',172800)",
             (a, "e" * 40, b))
         conn.commit()
     try:
-        lag = client.get(f"/api/repos/{a}/bumps/{b}").json()["bumps"][0]["lag_days"]
+        lag = client.get(f"/api/repos/{a}/bumps/{b}").json()["bumps"][0]["adoption_days"]
         assert isinstance(lag, (int, float)) and lag == 2.0
 
-        median = client.get(f"/api/repos/{a}/dependencies").json()["bumps"][0]["median_lag_days"]
+        median = client.get(f"/api/repos/{a}/dependencies").json()["bumps"][0]["median_adoption_days"]
         assert isinstance(median, (int, float))
     finally:
         with connection() as conn:

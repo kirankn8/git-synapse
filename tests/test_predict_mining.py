@@ -149,7 +149,7 @@ def impact_corpus(scratch_db):
         for i in range(5):
             conn.execute(
                 "INSERT INTO dep_bump (consumer_repo_id, consumer_sha, dep_repo_id,"
-                " dep_name, dep_version, manifest, bumped_at, lag_seconds)"
+                " dep_name, dep_version, manifest, bumped_at, adoption_seconds)"
                 " VALUES (%s,%s,%s,'github.com/acme/signer',%s,'go.mod',"
                 " now() - make_interval(days => %s), %s)",
                 (ids["packager"], f"{i:040x}", ids["signer"], f"v1.{i}.0", i * 10, 86400 * 2),
@@ -180,7 +180,7 @@ def test_a_repository_nothing_declares_has_no_edges(impact_corpus):
 def test_a_bump_backed_edge_carries_its_count_and_lag(impact_corpus):
     edge = next(e for e in _edges() if (e["source"], e["target"]) == ("signer", "packager"))
     assert edge["has_bump_history"] and edge["bump_count"] == 5
-    assert edge["median_lag_days"] == pytest.approx(2.0, abs=0.01)
+    assert edge["median_adoption_days"] == pytest.approx(2.0, abs=0.01)
     assert edge["is_declared"]
 
 

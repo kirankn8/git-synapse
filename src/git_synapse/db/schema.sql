@@ -632,9 +632,12 @@ CREATE TABLE IF NOT EXISTS dep_bump (
     dep_commit_id   BIGINT REFERENCES commit (id) ON DELETE SET NULL,
     manifest        TEXT   NOT NULL DEFAULT 'go.mod',
     bumped_at       TIMESTAMPTZ,
-    -- Delay between the upstream commit and this consumer picking it up. The
-    -- empirical propagation lag, and the thing the lagged analysis should see.
-    lag_seconds     BIGINT,
+    -- How long this consumer took to adopt the upstream change: the gap between
+    -- the upstream commit being written and the bump that took it. Both ends are
+    -- known commits, so this is subtraction, not inference. Named for what it
+    -- measures -- "lag" also meant a time bin used to infer that two
+    -- repositories were related, and that analysis is gone.
+    adoption_seconds BIGINT,
     UNIQUE (consumer_repo_id, consumer_sha, dep_name, dep_version)
 );
 
@@ -723,7 +726,7 @@ CREATE TABLE IF NOT EXISTS repo_impact (
     -- TRUE when a manifest bump has actually been observed, i.e. ground truth.
     has_bump_history BOOLEAN NOT NULL DEFAULT FALSE,
     bump_count      INTEGER NOT NULL DEFAULT 0,
-    median_lag_days DOUBLE PRECISION,
+    median_adoption_days DOUBLE PRECISION,
     -- Lag at which the association was strongest, in bins.
     best_lag_bins   SMALLINT,
     bin_hours       SMALLINT,
@@ -953,6 +956,13 @@ ALTER TABLE dep_bump ADD COLUMN IF NOT EXISTS ecosystem TEXT;
 -- `pair_eligible` because that is recomputed from configuration.
 ALTER TABLE commit ADD COLUMN IF NOT EXISTS is_replay BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- `adoption_seconds` and `median_adoption_days` were once `lag_seconds` and
+-- `median_lag_days`. There is deliberately no rename migration here: Postgres
+-- has no IF EXISTS for RENAME COLUMN, so on a fresh database -- where the
+-- CREATE TABLE above already used the new name -- it fails and takes the whole
+-- DDL batch with it, leaving no schema at all. An existing database is renamed
+-- once by hand; see the note in DESIGN.
+
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -988,5 +998,5 @@ CREATE TABLE IF NOT EXISTS meta (
 -- was not, so schema_is_current() was permanently false and every service boot
 -- re-ran the whole DDL, taking exactly the locks the fast path exists to avoid.
 INSERT INTO meta (key, value)
-VALUES ('schema_version', '23'::jsonb)
+VALUES ('schema_version', '24'::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
