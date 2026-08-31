@@ -1214,6 +1214,28 @@ def list_measures() -> dict:
     }
 
 
+def tool_names() -> list[str]:
+    """Every tool this server exposes, in registration order."""
+    return sorted(server._tool_manager._tools)
+
+
+def _publish_tool_inventory() -> None:
+    """Record what this server offers, so the UI can show never-called tools.
+
+    Written by the MCP process rather than read by the API, which would mean the
+    API importing this module to answer a question about a different container.
+    A tool nobody calls is the interesting case -- without the inventory the
+    activity page shows two tools and implies there are two.
+    """
+    from git_synapse.db.engine import set_watermark
+
+    try:
+        set_watermark("mcp_tools", ",".join(tool_names()))
+        log.info("published %d tool name(s)", len(tool_names()))
+    except Exception:
+        log.warning("could not publish the tool inventory", exc_info=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Git Synapse MCP server")
     parser.add_argument(
@@ -1235,6 +1257,7 @@ def main(argv: list[str] | None = None) -> int:
 
     wait_for_database()
     apply_schema()
+    _publish_tool_inventory()
 
     if args.transport == "stdio":
         log.info("git-synapse mcp server on stdio")

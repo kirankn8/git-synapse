@@ -793,9 +793,21 @@ pruned by age and by count at the end of every ingest.
 page would generate the traffic it displays and could never show a quiet
 system.
 
+**It lists tools nobody has called.** A table built from calls can only show
+tools that were called, so with two of fourteen exercised the page showed two
+and read as *"this server has two tools"*. The MCP process publishes its
+inventory at startup — written by the process that owns it, rather than the API
+importing another container's module to answer the question — and idle tools
+appear with a `never called` badge. That row is the useful one: it says which
+tools are dead weight. The inventory is dropped under "errors only", where a
+tool that has never run has never failed either and would read as passing.
+
 Reading it is the same drill-down as everywhere else: Overview ranks tools and
 routes, Callers lists the individual calls, and one call opens the arguments it
-was given and the reply that went back.
+was given and the reply that went back. Every filter — surface, status, window
+— reaches all three; the summary originally ignored them, so the list narrowed
+while every figure above it stayed put, which reads as broken rather than
+empty.
 
 ## How the UI is addressed
 

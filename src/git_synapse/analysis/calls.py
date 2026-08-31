@@ -211,10 +211,23 @@ def prune() -> int:
 
 # --------------------------------------------------------------------- reads
 
-def summary(hours: int = 24) -> dict:
+def known_mcp_tools() -> list[str]:
+    """The tools the MCP server published at startup, called or not."""
+    from git_synapse.db.engine import get_watermark
+
+    raw = get_watermark("mcp_tools") or ""
+    return [name for name in raw.split(",") if name]
+
+
+def summary(hours: int = 24, surface: str | None = None) -> dict:
     """Headline counts an operator reads first: volume, failures, latency."""
+    clause = "at > now() - make_interval(hours => %(hours)s)"
+    params: dict[str, Any] = {"hours": hours}
+    if surface:
+        clause += " AND surface = %(surface)s"
+        params["surface"] = surface
     row = query_one(
-        """
+        f"""
         SELECT count(*)                                        AS calls,
                count(*) FILTER (WHERE surface = 'mcp')         AS mcp_calls,
                count(*) FILTER (WHERE surface = 'http')        AS http_calls,
@@ -223,21 +236,25 @@ def summary(hours: int = 24) -> dict:
                round(percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms)::numeric, 1) AS p50_ms,
                round(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::numeric, 1) AS p95_ms,
                max(at)                                         AS last_call
-        FROM call_log WHERE at > now() - make_interval(hours => %(hours)s)
+        FROM call_log WHERE {clause}
         """,
-        {"hours": hours},
+        params,
     ) or {}
-    return {**row, "hours": hours, "dropped": dropped()}
+    return {**row, "hours": hours, "surface": surface, "dropped": dropped()}
 
 
-def by_name(surface: str | None = None, hours: int = 24, limit: int = 50) -> list[dict]:
+def by_name(surface: str | None = None, hours: int = 24, limit: int = 50,
+            status: str | None = None) -> list[dict]:
     """Which tools and routes are actually used, and how well they behave."""
     clause = "at > now() - make_interval(hours => %(hours)s)"
     params: dict[str, Any] = {"hours": hours, "limit": limit}
     if surface:
         clause += " AND surface = %(surface)s"
         params["surface"] = surface
-    return query(
+    if status:
+        clause += " AND status = %(status)s"
+        params["status"] = status
+    rows = query(
         f"""
         SELECT surface, name,
                count(*)                                 AS calls,
@@ -253,6 +270,19 @@ def by_name(surface: str | None = None, hours: int = 24, limit: int = 50) -> lis
         """,
         params,
     )
+    if surface == "http" or status:
+        return rows
+
+    # A tool nobody has called is the interesting row, and it cannot appear in a
+    # table built from calls. Without this the page showed two tools and read as
+    # "this server has two tools".
+    seen = {r["name"] for r in rows if r["surface"] == "mcp"}
+    idle = [
+        {"surface": "mcp", "name": name, "calls": 0, "errors": 0,
+         "avg_ms": None, "max_ms": None, "avg_rows": None, "last_call": None}
+        for name in known_mcp_tools() if name not in seen
+    ]
+    return rows + idle
 
 
 def recent(
@@ -260,9 +290,14 @@ def recent(
     name: str | None = None,
     status: str | None = None,
     limit: int = 100,
+    hours: int | None = None,
 ) -> list[dict]:
     """The call list itself, newest first, without the payloads."""
-    clauses, params = ["TRUE"], {"limit": limit}
+    clauses: list[str] = ["TRUE"]
+    params: dict[str, Any] = {"limit": limit}
+    if hours:
+        clauses.append("at > now() - make_interval(hours => %(hours)s)")
+        params["hours"] = hours
     for column, value in (("surface", surface), ("name", name), ("status", status)):
         if value:
             clauses.append(f"{column} = %({column})s")

@@ -183,3 +183,29 @@ def corpus(scratch_db, tmp_path_factory):
         else:
             os.environ["MIRROR_ROOT"] = previous
         reset_config_cache()
+
+
+@pytest.fixture
+def settled_calls():
+    """Wait until queued calls have reached the database.
+
+    Recording is asynchronous by design: a caller hands a row to a queue and a
+    daemon thread writes it. A test that flushes by hand races that thread and
+    finds an empty queue, so it waits for the row instead of assuming which of
+    the two got there first.
+    """
+    import time
+
+    from git_synapse.analysis import calls
+
+    def wait(predicate, timeout: float = 5.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            calls._flush_once()
+            found = predicate()
+            if found:
+                return found
+            time.sleep(0.05)
+        raise AssertionError("queued calls never reached the database")
+
+    return wait
