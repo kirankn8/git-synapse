@@ -78,21 +78,6 @@ skills-uninstall:  ## Remove the user-level skill symlink
 		[ -L "$$target" ] && rm -f "$$target" && echo "unlinked $$name" || true; \
 	done
 
-.PHONY: claudemd-install
-claudemd-install:  ## Symlink ~/.claude/CLAUDE.md at config/CLAUDE.md (coding standard)
-	@if [ -e "$$HOME/.claude/CLAUDE.md" ] && [ ! -L "$$HOME/.claude/CLAUDE.md" ]; then \
-		echo "SKIP: $$HOME/.claude/CLAUDE.md is a real file — move it aside first"; \
-	else \
-		mkdir -p "$$HOME/.claude"; \
-		ln -sfn "$(CURDIR)/config/CLAUDE.md" "$$HOME/.claude/CLAUDE.md"; \
-		echo "linked ~/.claude/CLAUDE.md -> $(CURDIR)/config/CLAUDE.md"; \
-	fi
-
-.PHONY: claudemd-uninstall
-claudemd-uninstall:  ## Remove the ~/.claude/CLAUDE.md symlink
-	@[ -L "$$HOME/.claude/CLAUDE.md" ] && rm -f "$$HOME/.claude/CLAUDE.md" \
-		&& echo "unlinked ~/.claude/CLAUDE.md" || echo "not a symlink; left alone"
-
 .PHONY: hostname-install
 hostname-install:  ## Map http://git-synapse to this stack in /etc/hosts (needs sudo)
 	@if grep -qE '^[0-9.]+[[:space:]]+.*\bgit-synapse\b' /etc/hosts; then \
