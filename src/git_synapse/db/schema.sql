@@ -728,8 +728,6 @@ CREATE TABLE IF NOT EXISTS repo_impact (
     bump_count      INTEGER NOT NULL DEFAULT 0,
     median_adoption_days DOUBLE PRECISION,
     -- Lag at which the association was strongest, in bins.
-    best_lag_bins   SMALLINT,
-    bin_hours       SMALLINT,
     -- Per-measure contributions, so a score is always explainable.
     features        JSONB NOT NULL DEFAULT '{}'::jsonb,
     computed_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -956,6 +954,12 @@ ALTER TABLE dep_bump ADD COLUMN IF NOT EXISTS ecosystem TEXT;
 -- `pair_eligible` because that is recomputed from configuration.
 ALTER TABLE commit ADD COLUMN IF NOT EXISTS is_replay BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- Columns of the time-binned analysis, which was removed. Never populated
+-- since: 0 of 380 rows. The UI still rendered a "Peak association lag" tile
+-- from them, which could only ever show a dash.
+ALTER TABLE repo_impact DROP COLUMN IF EXISTS best_lag_bins;
+ALTER TABLE repo_impact DROP COLUMN IF EXISTS bin_hours;
+
 -- `adoption_seconds` and `median_adoption_days` were once `lag_seconds` and
 -- `median_lag_days`. There is deliberately no rename migration here: Postgres
 -- has no IF EXISTS for RENAME COLUMN, so on a fresh database -- where the
@@ -998,5 +1002,5 @@ CREATE TABLE IF NOT EXISTS meta (
 -- was not, so schema_is_current() was permanently false and every service boot
 -- re-ran the whole DDL, taking exactly the locks the fast path exists to avoid.
 INSERT INTO meta (key, value)
-VALUES ('schema_version', '24'::jsonb)
+VALUES ('schema_version', '25'::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();

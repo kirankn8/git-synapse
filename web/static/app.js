@@ -2022,7 +2022,6 @@ on('/repopair/:a/:b', async ({ a, b }) => {
       statTile('Evidence', edge.is_declared ? 'declared' : (edge.has_bump_history ? 'bump-backed' : 'discovery'), edge.is_declared ? 'validated tier' : 'see note'),
       statTile('Manifest bumps', num(edge.bump_count), 'observed propagation'),
       statTile('Adopted after', adoptedAfter(edge.median_adoption_days), 'median, upstream commit to bump'),
-      statTile('Peak association lag', edge.best_lag_bins !== null ? `${edge.best_lag_bins * (edge.bin_hours || 6)}h` : '—', 'peak association'),
       statTile('Rank', `#${edge.rank_in_source}`, `within ${repoA.name}`)));
   }
 
