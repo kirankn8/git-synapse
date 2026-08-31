@@ -786,8 +786,9 @@ can check rather than on taste:
 /repos/5                                    /insights/impact/graph nodes are repositories
 /repos/5/tree/src/main/java                 /insights/risk         ?repo=5
 /repos/5/files/src/main/java/Cache.java     /insights/drift        ?repo=5
-/repos/5/pairs/36/91                        /insights/modules      ?repo=5
-/repos/5/graph
+/repos/5/pairs/36/91                        /insights/graph        ?repo=5
+                                            /insights/graph        ?mode=repos
+                                            /insights/modules      ?repo=5
 ```
 
 Three consequences worth stating, because each was a defect before:
@@ -804,10 +805,18 @@ Insights opens `/repos/5/files/…`, because that is where the file lives. This
 only reads as a jump if clicking a *repository* went somewhere other than the
 repository — which is exactly the bug that prompted the restructure.
 
-**The graphs render data, they do not own it.** The file graph draws one
-repository's pairs, so it sits at `/repos/5/graph`; the repository graph draws
-impact edges, so it sits at `/insights/impact/graph`. Neither is a tab, because
-neither answers a question no other view answers.
+**Both graphs are one Insights section.** Neither owns data — each draws
+couplings computed elsewhere — but drawing them is a question in its own right,
+so `/insights/graph` holds both modes: files within a repository, and
+repositories across the corpus. A repository, folder or file links into it
+already scoped.
+
+**Directory coupling excludes containment.** A directory changes in a commit if
+any file beneath it changed, so an ancestor co-changes with its descendant by
+definition: `src/com` scored 1.000 against `src/com/google` on every measure,
+and the root — which changes in every commit — scored 1.000 against everything.
+Those rows crowded out the real partners, which for `src/com/google/javascript`
+turn out to be the matching `test/…` subtrees.
 
 Two tests hold the shape. `tests/test_ui_links.py` checks every `href` and
 `go()` target in `app.js` against the client's own route table and against the
