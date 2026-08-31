@@ -336,6 +336,11 @@ const repoById = (id) => {
 
 async function repoTrail(repo) {
   const trail = [];
+  // A caller with only an id gets the rest looked up, so every page can build
+  // the same trail without carrying repository fields it does not otherwise need.
+  if (repo && repo.id && !repo.name) {
+    repo = { ...(await repoById(repo.id)) || {}, ...repo };
+  }
   let accountId = repo && (repo.account_id ?? repo.accountId);
   // Most endpoints return the repository id but not its account. Rather than
   // widen every one of them, resolve it here -- cached, so a breadcrumb costs
@@ -856,6 +861,8 @@ on('/repo/:id', async ({ id }, params) => {
         'Rows are tagged with their evidence tier; only declared and bump-backed rows are validated.'),
       h('div', { class: 'toolbar' },
         h('a', { class: 'btn primary', href: `/impact?repo=${id}&dir=upstream`, 'data-nav': true }, 'Full impact view'),
+        h('a', { class: 'btn', href: `/graph?repo=${id}`, 'data-nav': true }, 'File graph'),
+        h('a', { class: 'btn', href: `/insights?repo=${id}`, 'data-nav': true }, 'Insights'),
         h('a', { class: 'btn', href: '/graph?mode=repos', 'data-nav': true }, 'Repository graph')),
       h('div', { class: 'grid grid-2' },
         card(`Upstream (${up.edges.length})`, impactTable(up.edges, 'source_repo_id', id), 'A change here may belong in one of these'),
@@ -1002,6 +1009,53 @@ const pairTable = (rows, spec, wide = false) =>
     { initialSort: 'score', onRow: (r) => go(`/pair/${r.file_a_id}/${r.file_b_id}`), empty: 'No pairs above the support threshold.' },
   );
 
+/* A repository is a tree of directories, and a flat list of 500 paths hides
+   that completely. Built from the paths the API already returns, so it needs no
+   endpoint of its own; `<details>` gives collapsing without any state to keep. */
+function fileTreeNode(files) {
+  const root = { dirs: new Map(), files: [], changes: 0 };
+  for (const f of files) {
+    const parts = String(f.path || '').split('/');
+    const name = parts.pop();
+    let node = root;
+    node.changes += Number(f.change_count || 0);
+    for (const part of parts) {
+      if (!node.dirs.has(part)) node.dirs.set(part, { dirs: new Map(), files: [], changes: 0 });
+      node = node.dirs.get(part);
+      node.changes += Number(f.change_count || 0);
+    }
+    node.files.push({ ...f, basename: name });
+  }
+  return root;
+}
+
+function renderTree(node, depth) {
+  const out = [];
+  // Directories first and busiest first, so the parts of a repository that move
+  // most are the parts you see without opening anything.
+  const dirs = [...node.dirs.entries()].sort((a, b) => b[1].changes - a[1].changes);
+  for (const [name, child] of dirs) {
+    const count = countFiles(child);
+    out.push(h('details', { class: 'tree-dir', open: depth === 0 },
+      h('summary', {},
+        h('span', { class: 'mono' }, name + '/'),
+        h('span', { class: 'card-sub', style: 'margin-left:8px' },
+          `${num(count)} file${count === 1 ? '' : 's'} · ${num(child.changes)} changes`)),
+      h('div', { class: 'tree-children' }, ...renderTree(child, depth + 1))));
+  }
+  for (const f of [...node.files].sort((a, b) => b.change_count - a.change_count)) {
+    out.push(h('div', { class: 'tree-file' },
+      h('a', { href: `/file/${f.id}`, 'data-nav': true, class: 'mono' }, f.basename),
+      f.is_deleted ? h('span', { class: 'badge muted', style: 'margin-left:6px' }, 'deleted') : null,
+      h('span', { class: 'card-sub', style: 'margin-left:8px' },
+        `${num(f.change_count)} changes`)));
+  }
+  return out;
+}
+
+const countFiles = (node) =>
+  node.files.length + [...node.dirs.values()].reduce((n, c) => n + countFiles(c), 0);
+
 async function repoFilesPanel(repoId, params) {
   const [files, exts] = await Promise.all([
     api(`/api/repos/${repoId}/files`, { limit: 500, search: params.f, extension: params.ext, order_by: 'change_count' }),
@@ -1024,7 +1078,31 @@ async function repoFilesPanel(repoId, params) {
   search.addEventListener('input', debounce(apply, 300));
   extSel.addEventListener('change', apply);
 
-  box.append(h('div', { class: 'toolbar' }, search, extSel, h('span', { class: 'spacer' }), h('span', { class: 'card-sub' }, `${files.count} files`)));
+  const view = params.view === 'table' ? 'table' : 'tree';
+  const viewBtn = (key, label) => h('button', {
+    class: `btn sm${view === key ? ' primary' : ''}`,
+    onclick: () => {
+      const p = new URLSearchParams({ tab: 'files' });
+      if (search.value) p.set('f', search.value);
+      if (extSel.value) p.set('ext', extSel.value);
+      if (key === 'table') p.set('view', 'table');
+      go(`/repo/${repoId}?${p}`);
+    },
+  }, label);
+
+  box.append(h('div', { class: 'toolbar' }, search, extSel,
+    h('span', { class: 'field' }, viewBtn('tree', 'Tree'), viewBtn('table', 'Table')),
+    h('span', { class: 'spacer' }), h('span', { class: 'card-sub' }, `${files.count} files`)));
+
+  if (view === 'tree') {
+    box.append(card('Files',
+      files.files.length
+        ? h('div', { class: 'tree' }, ...renderTree(fileTreeNode(files.files), 0))
+        : h('div', { class: 'empty' }, 'No files match those filters.'),
+      'Directories are ordered by how much they change, so the busiest parts are visible unopened'));
+    return box;
+  }
+
   box.append(
     card(
       'Files',
@@ -1515,6 +1593,9 @@ on('/graph', async (_args, params) => {
   const repoId = Number(params.repo || (withPairs[0] && withPairs[0].id) || 0);
 
   const wrap = h('div');
+  // The graph always draws one repository's files, so it sits under that
+  // repository even when reached from the top nav rather than from it.
+  if (repoId) wrap.append(crumbs(...(await repoTrail({ id: repoId })), ['Coupling graph']));
   wrap.append(
     pageHead('Coupling graph', 'Force-directed view of the strongest change couplings. Drag nodes, scroll to zoom, click to open a file.', [
       h('a', { class: 'btn', href: '/graph?mode=repos', 'data-nav': true }, 'Repository-level graph'),
@@ -1936,6 +2017,7 @@ on('/impact', async (_args, params) => {
   const direction = params.dir === 'downstream' ? 'downstream' : 'upstream';
 
   const wrap = h('div');
+  if (repoId) wrap.append(crumbs(...(await repoTrail({ id: repoId })), ['Impact']));
   wrap.append(
     pageHead(
       'Cross-repository impact',
@@ -2151,6 +2233,9 @@ on('/insights', async (_args, params) => {
   const repoId = params.repo ? Number(params.repo) : null;
 
   const wrap = h('div');
+  // Scoped to one repository, this is a rung of the drill-down rather than a
+  // corpus-wide view that happens to be filtered.
+  if (repoId) wrap.append(crumbs(...(await repoTrail({ id: repoId })), ['Insights']));
   wrap.append(pageHead('Insights',
     'Architectural and risk analyses derived from the same atomic facts — questions the coupling tables alone do not answer.'));
 
