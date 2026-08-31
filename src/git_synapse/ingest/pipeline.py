@@ -440,9 +440,13 @@ def _drop_unreachable_commits(repo_id: int, mirror: Path) -> int:
     that were deliberately removed. The reachable-set walk is only worth its cost
     when the counts actually disagree, so a cheap comparison gates it.
 
-    Reachability is measured from the default branch, matching what the ingest
-    walks. A commit that only ever lived on a branch that never merged is not
-    part of the shipped history and must not be counted as one.
+    Reachability must be measured over exactly the refs the ingest walks, which
+    is the shipping branch *and* every release tag. Measuring from the branch
+    alone made this prune delete every commit the tag walk had just inserted --
+    and delete it silently, because the run counts what the loader wrote rather
+    than what survived. It is self-triggering, too: the new commits push the
+    stored count above the branch count, which is the very condition that runs
+    the prune.
     """
     with connection() as conn:
         stored = int(
@@ -454,7 +458,7 @@ def _drop_unreachable_commits(repo_id: int, mirror: Path) -> int:
         return 0
     try:
         proc = subprocess.run(  # noqa: S603 - fixed executable
-            ["git", "rev-list", "HEAD", "--no-merges", "--count"],
+            ["git", "rev-list", "HEAD", "--tags", "--no-merges", "--count"],
             cwd=str(mirror), capture_output=True, text=True, timeout=600, check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -464,7 +468,7 @@ def _drop_unreachable_commits(repo_id: int, mirror: Path) -> int:
 
     try:
         walk = subprocess.run(  # noqa: S603 - fixed executable
-            ["git", "rev-list", "HEAD", "--no-merges"],
+            ["git", "rev-list", "HEAD", "--tags", "--no-merges"],
             cwd=str(mirror), capture_output=True, text=True, timeout=900, check=False,
         )
     except (OSError, subprocess.SubprocessError):
