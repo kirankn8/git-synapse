@@ -127,9 +127,12 @@ flowchart TB
 ```
 
 Two repositories never share a commit, so cross-repo coupling cannot reuse the
-commit as its unit. It uses a **change set** instead — commits grouped by ticket
-key or by one author's work session — and the *same* 29 measures then apply
-untouched. Those are separate tables, not the same ones widened:
+commit as its unit. Grouping commits into **change sets** — by ticket key, or by
+one author's work session — was the answer for a while, and it was measured and
+removed: the best measure scored AUC 0.80 while managing 0.63 on which way the
+arrow points, and a baseline ignoring coupling entirely matched it. Nothing is
+inferred across repositories now. The unit is a declared version bump, and these
+are separate tables rather than the same ones widened:
 
 | | Within a repository | Across repositories |
 |---|---|---|
@@ -449,10 +452,11 @@ erDiagram
   produces k(k−1)/2 pairs. Bulk reformats would dominate every count while
   carrying no design signal, so they are stored in full but flagged
   `pair_eligible = FALSE` — excluded, auditable, reversible.
-- **Change-set width cap** (`MAX_REPOS_PER_CHANGESET`, default 8). An org-wide
-  dependabot sweep touching 61 repositories is not a design signal.
-- **Lag bin width** (`LAG_BIN_HOURS`, default 6). At 24 hours, directional
-  accuracy drops from 0.70 to 0.64 and a 34-minute propagation is invisible.
+- **Lag means one thing now.** The delay between an upstream commit and the bump
+  that took it: arithmetic on two known dates, reported and never ranked on. The
+  other sense -- a time bin used to *infer* that two repositories were related --
+  went with the statistics it served, along with its `LAG_BIN_HOURS` setting.
+  Nothing infers a relationship from timing.
 - **Merges** are skipped, and not by choice: a merge has two parents, so *which*
   files it changed depends on which parent you compare against. Git declines to
   pick and reports no files at all, so a merge would be a commit row with nothing
