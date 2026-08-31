@@ -10,6 +10,7 @@ database table and the decisions that materially change the numbers.
 
 | | |
 |---|---|
+| [Every table at a glance](#every-table-at-a-glance) | all 34, one line each |
 | [How it works](#how-it-works) | the pipeline, end to end |
 | [Store the atom, derive the rest](#store-the-atom-derive-the-rest) | the schema's one rule, and every core table |
 | [Cross-repository coupling](#cross-repository-coupling-the-change-set) | why a commit is the wrong unit, and what replaces it |
@@ -20,6 +21,77 @@ database table and the decisions that materially change the numbers.
 | [What is incremental](#what-is-incremental-and-what-isnt) | what a refresh actually redoes |
 | [Bookkeeping](#bookkeeping) · [Portability](#portability) · [Layout](#layout) | operations and structure |
 | [Adding a measure](#adding-a-measure) | extending the registry |
+
+---
+
+## Every table at a glance
+
+Thirty-four tables. The first group is the only one that cannot be recomputed;
+everything after it is a materialised cache.
+
+**Identity and the atom** — the source of truth
+
+| Table | What it holds |
+|---|---|
+| `account` | An organisation or user to scan. Discovery reads this, so onboarding is a write rather than a redeploy. |
+| `repo` | One row per repository: the full GitHub record, ingest state, and the watermarks each stage resumes from. |
+| `author` | Author identity, deduplicated by lowercased email. |
+| `file` | One row per canonical path per repo, carrying both marginal counts. A rename folds into the existing row rather than creating a new one. |
+| `file_alias` | Historical paths that resolve to a current `file` row, so a file renamed three times keeps one identity and one history. |
+| `commit` | One row per commit per repo, including `pair_eligible` — whether it was allowed to produce pairs. |
+| `commit_parent` | The commit DAG. Not needed by the coupling maths; kept for branch and lead-time analysis. |
+| **`commit_file`** | **The atomic fact: one row per (commit, file).** Every other number in the system derives from this table joined to `commit`. |
+
+**Derived within one repository** — unit of co-occurrence: the commit
+
+| Table | What it holds |
+|---|---|
+| `file_pair` | The joint co-change count for a file pair. Only `n_ab`; the marginals and `N` live on `file` and `repo`. |
+| `file_pair_metric` | The 29 measures materialised, so the UI can sort millions of pairs by any of them without recomputing. |
+| `directory` | Directory-level rollup. A directory "changed" in a commit if any file beneath it changed. |
+| `file_directory` | Which directories contain a file, one row per ancestor, so the rollup is a join rather than string work. |
+| `dir_pair` | Joint co-change counts between directories. |
+| `dir_pair_metric` | The same 29 measures, one level up the tree. |
+| `author_file` | Who has touched what, which answers "who should review this?" alongside "what else must change?" |
+
+**Across repositories** — unit of co-occurrence: the change set
+
+| Table | What it holds |
+|---|---|
+| `change_set` | The wider unit: commits grouped by ticket key or by one author's work session, because two repositories never share a commit. |
+| `change_set_commit` | Which commits make up a change set. Files are reached through `commit_file`, so no file ids are duplicated. |
+| `repo_change_stats` | How many eligible change sets touched each repository — the `n_a` of every repo-level contingency table. |
+| `repo_pair` | Repo-level joint counts: "changing `signer` implies changing `packager`". |
+| `repo_pair_metric` | The same 29 measures, with `N` counted in change sets rather than commits. |
+| `xrepo_file_pair` | Which specific file in repo A goes with which specific file in repo B — what an agent actually needs. |
+| `xrepo_file_pair_metric` | The measures for those cross-repo file pairs. |
+| `repo_lag_metric` | Directed, time-lagged coupling. The one pair table where `(A, B)` and `(B, A)` are different rows. |
+
+**Declared dependency graph** — parsed from manifests, not inferred
+
+| Table | What it holds |
+|---|---|
+| `dep_bump` | A manifest bump resolved to the exact upstream commit it consumed, with the observed lag. Ground truth rather than correlation. |
+| `repo_dependency` | What each repository declares at HEAD. This is the candidate set the ensemble ranks within, and the reason its base rate is 82% rather than 0.23%. |
+| `module_dependency` | The intra-repository module graph, for monorepos whose real structure lives in submodules rather than cross-repo edges. |
+| `repo_impact` | The ranked answer to "I am changing X, what else?", carrying the features behind each score so any number can be explained. |
+
+**Mining layer** — patterns over the pairs
+
+| Table | What it holds |
+|---|---|
+| `file_cluster` | De-facto modules found by label propagation over the coupling graph. The value is where they *disagree* with the directory tree. |
+| `pair_drift` | Whether a coupling is strengthening or decaying, by scoring the same pair on a recent and a historical window. |
+| `file_risk` | Per-file risk, each component a percentile within its repository so the composite compares across repos of very different sizes. |
+
+**Bookkeeping** — read by nothing analytical
+
+| Table | What it holds |
+|---|---|
+| `ingest_run` | Job history: what ran, when, and whether it worked. |
+| `ingest_run_repo` | Per-repo detail for a run, so a failure is traceable to the repository that caused it. |
+| `feedback` | Defects in Git Synapse reported by the sessions using it. The only table an agent may write to, and deliberately read by no measure. |
+| `meta` | Key/value for the schema version and similar single values. |
 
 ---
 
