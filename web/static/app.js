@@ -558,149 +558,86 @@ export function scoreCell(value, spec) {
 
 /* ------------------------------------------------------------ overview -- */
 
+/* Overview answers one question: is this deployment healthy, and is anything
+   using it? Everything that was a worse copy of another tab is gone -- the
+   repository list belongs to Repositories, the mining figures to Insights, the
+   run history to Jobs, and the shortcut buttons duplicated the nav one line
+   above. What is left is corpus scale, ingest health, and callers. */
 on('/', async () => {
-  const [ov, repos, runs, top] = await Promise.all([
+  const [ov, runs, callers] = await Promise.all([
     api('/api/overview'),
-    api('/api/repos', { limit: 12, order_by: 'commit_count' }),
-    api('/api/runs', { limit: 5 }),
-    api('/api/pairs', { measure: state.measure, limit: 12, min_support: 4 }),
+    api('/api/runs', { limit: 12 }),
+    api('/api/calls/summary', { hours: 24 }).catch(() => ({ summary: {}, by_name: [] })),
   ]);
-  state.overview = ov;
-  paintFooter(ov);
-
   const wrap = h('div');
-  wrap.append(
-    pageHead(
-      'Change coupling across the organisation',
-      'Files that historically change together, derived from commit co-occurrence.',
-      [
-        h('button', { class: 'btn primary', onclick: triggerRefresh }, 'Refresh data'),
-        h('a', { class: 'btn', href: '/insights/impact', 'data-nav': true }, 'Cross-repo impact'),
-        h('a', { class: 'btn', href: '/insights/graph?mode=repos', 'data-nav': true }, 'Repository graph'),
-      ],
-    ),
-  );
+  const c = callers.summary || {};
 
-  wrap.append(
-    h(
-      'div',
-      { class: 'grid grid-stats' },
-      statTile('Repositories', num(ov.repos), `${num(ov.repos_ready)} ready · ${num(ov.repos_failed)} failed`, () => go('/repos')),
-      statTile('Commits', num(ov.commits), 'analysed', () => go('/repos')),
-      statTile('File changes', num(ov.file_changes), 'atomic (commit × file) facts'),
-      statTile('Files tracked', num(ov.files), `${num(ov.directories)} directories`, () => go('/repos')),
-      statTile('Coupling pairs', num(ov.file_pairs), `${num(ov.dir_pairs)} directory pairs`, () => go('/repos')),
-      statTile('Contributors', num(ov.authors), 'distinct authors'),
-      statTile('Mirror size', bytes(ov.mirror_kb), 'bare git mirrors'),
-      statTile('History span', ov.first_commit_at ? `${dateStr(ov.first_commit_at).slice(0, 4)}→` : '—', `to ${dateStr(ov.last_commit_at)}`),
-    ),
-  );
+  wrap.append(pageHead('Overview',
+    'The state of the corpus and of the deployment serving it.'));
 
-  const spec = state.byKey.get(state.measure);
-  wrap.append(h('div', { class: 'section-title' }, 'Strongest couplings org-wide'));
-  wrap.append(
-    card(
-      `Top pairs by ${spec ? spec.label : state.measure}`,
-      dataTable(
-        top.pairs,
-        [
-          { key: 'repo', label: 'Repository', render: (r) => h('span', { class: 'mono', style: 'font-size:11.5px' }, r.repo.split('/')[1]) },
-          { key: 'path_a', label: 'File A', render: (r) => pathNode(r.path_a) },
-          { key: 'path_b', label: 'File B', render: (r) => pathNode(r.path_b) },
-          { key: 'n_ab', label: 'Together', num: true },
-          { key: 'confidence_ab', label: 'P(B|A)', num: true, render: (r) => pct(r.confidence_ab) },
-          { key: 'score', label: spec ? spec.label : 'Score', num: true, render: (r) => scoreCell(r.score, spec) },
-        ],
-        {
-          initialSort: 'score',
-          onRow: (r) => go(`/repos/${r.repo_id}/pairs/${r.file_a_id}/${r.file_b_id}`),
-          empty: 'No pairs yet — run an ingest first.',
-        },
-      ),
-      'Click any row for the full statistical breakdown',
-    ),
-  );
+  wrap.append(h('div', { class: 'section-title' }, 'Data'));
+  wrap.append(h('div', { class: 'grid grid-stats' },
+    statTile('Repositories', num(ov.repos), `${num(ov.repos_ready)} ready · ${num(ov.repos_failed)} failed`, () => go('/repos')),
+    statTile('Commits', num(ov.commits), 'analysed'),
+    statTile('Files tracked', num(ov.files), `${num(ov.directories)} directories`),
+    statTile('Coupling pairs', num(ov.file_pairs), `${num(ov.dir_pairs)} directory pairs`),
+    statTile('Contributors', num(ov.authors), 'distinct authors'),
+    statTile('Mirror size', bytes(ov.mirror_kb), 'bare git mirrors'),
+    statTile('History span', ov.first_commit_at ? `${dateStr(ov.first_commit_at).slice(0, 4)}\u2192` : '\u2014',
+             `to ${dateStr(ov.last_commit_at)}`),
+    statTile('File changes', num(ov.file_changes), 'atomic (commit \u00d7 file) facts')));
 
-  wrap.append(h('div', { class: 'section-title' }, 'Repositories by history depth'));
-  wrap.append(
-    card(
-      'Largest corpora',
-      dataTable(
-        repos.repos,
-        [
-          { key: 'full_name', label: 'Repository', render: (r) => h('span', { class: 'mono' }, r.full_name) },
-          { key: 'primary_language', label: 'Language', render: (r) => (r.primary_language ? h('span', { class: 'badge muted' }, r.primary_language) : '—') },
-          { key: 'commit_count', label: 'Commits', num: true, render: (r) => num(r.commit_count) },
-          { key: 'file_count', label: 'Files', num: true, render: (r) => num(r.file_count) },
-          { key: 'pair_count', label: 'Pairs', num: true, render: (r) => num(r.pair_count) },
-          { key: 'ingest_status', label: 'Status', render: (r) => statusBadge(r.ingest_status) },
-        ],
-        { initialSort: 'commit_count', onRow: (r) => go(`/repos/${r.id}`) },
-      ),
-      'Click a repository to explore it',
-      h('a', { class: 'btn sm', href: '/repos', 'data-nav': true }, 'All repositories'),
-    ),
-  );
+  // ---- ingest health ------------------------------------------------------
+  const rows = runs.runs || [];
+  const last = rows[0];
+  const failing = rows.filter((r) => r.status === 'failed').length;
+  const stale = last && last.started_at
+    ? (Date.now() - new Date(last.started_at).getTime()) / 3600000 : null;
 
-  // Cross-repo and mining summaries, so the landing page reflects every layer.
-  try {
-    const mine = await api('/api/mining/overview');
-    wrap.append(h('div', { class: 'section-title' }, 'Cross-repository & mining layers'));
-    wrap.append(h('div', { class: 'grid grid-stats' },
-      statTile('Impact edges', num(mine.impact_edges), `${num(mine.declared_edges)} declared`, () => go('/insights/impact')),
-      statTile('Manifest bumps', num(mine.dep_bumps), 'ground-truth propagation', () => go('/insights/impact')),
-      statTile('De-facto modules', num(mine.modules), `${num(mine.cross_dir_modules)} cross-directory`, () => go('/insights/modules')),
-      statTile('Emerging coupling', num(mine.emerging), `${num(mine.decaying)} decaying`, () => go('/insights/drift')),
-    ));
-  } catch (err) {
-    console.warn('cross-repo layers unavailable', err);
+  wrap.append(h('div', { class: 'section-title' }, 'Ingest'));
+  wrap.append(h('div', { class: 'grid grid-stats' },
+    statTile('Last run', last ? when(last.started_at) : 'never',
+             last ? `${last.status} in ${Math.round(last.duration_s || 0)}s` : 'no runs recorded',
+             () => go('/jobs')),
+    statTile('Failed lately', num(failing), `of the last ${rows.length} runs`, () => go('/jobs')),
+    statTile('Repositories failing', num(ov.repos_failed), 'last ingest errored', () => go('/repos')),
+    statTile('Freshness', stale === null ? '\u2014' : `${stale.toFixed(1)}h`,
+             'since the last run started', () => go('/jobs?tab=settings'))));
+
+  if (last && last.status === 'failed') {
+    wrap.append(h('div', { class: 'help', style: 'border-left-color:var(--danger)' },
+      h('strong', {}, 'The last ingest failed. '), last.error || 'See Jobs for the detail.'));
   }
 
-  if (runs.runs.length) {
-    wrap.append(h('div', { class: 'section-title' }, 'Recent ingest jobs'));
-    wrap.append(card('Job history', runsTable(runs.runs), 'Daily refresh plus manual runs'));
-  }
+  // ---- who is calling -----------------------------------------------------
+  wrap.append(h('div', { class: 'section-title' }, 'Callers, last 24 hours'));
+  wrap.append(h('div', { class: 'grid grid-stats' },
+    statTile('MCP calls', num(c.mcp_calls || 0), 'tools invoked by agents', () => go('/callers?surface=mcp')),
+    statTile('HTTP calls', num(c.http_calls || 0), 'API requests', () => go('/callers?surface=http')),
+    statTile('Errors', num(c.errors || 0), `of ${num(c.calls || 0)} calls`, () => go('/callers?status=error')),
+    statTile('Median', c.p50_ms == null ? '\u2014' : `${c.p50_ms}ms`,
+             c.p95_ms == null ? 'no calls recorded' : `p95 ${c.p95_ms}ms`, () => go('/callers'))));
 
+  wrap.append(card('Most-called', dataTable(callers.by_name || [], [
+    { key: 'surface', label: 'Surface', render: (r) => h('span', { class: `badge ${r.surface === 'mcp' ? 'ok' : 'muted'}` }, r.surface) },
+    { key: 'name', label: 'Tool or route', render: (r) => h('span', { class: 'mono' }, r.name) },
+    { key: 'calls', label: 'Calls', num: true, render: (r) => num(r.calls) },
+    { key: 'errors', label: 'Errors', num: true, render: (r) => h('span', { style: `color:${r.errors ? 'var(--danger)' : 'inherit'}` }, num(r.errors)) },
+    { key: 'avg_ms', label: 'Avg', num: true, render: (r) => `${fx(r.avg_ms, 0)}ms` },
+    { key: 'avg_rows', label: 'Avg rows', num: true, render: (r) => (r.avg_rows == null ? '\u2014' : fx(r.avg_rows, 0)) },
+    { key: 'last_call', label: 'Last', render: (r) => when(r.last_call) },
+  ], {
+    initialSort: 'calls',
+    onRow: (r) => go(`/callers?surface=${r.surface}&name=${encodeURIComponent(r.name)}`),
+    empty: 'Nothing has called this deployment in the last 24 hours.',
+  }), 'Click a row for the individual calls'));
+
+  wrap.append(h('div', { class: 'help' },
+    'The corpus itself is under ', h('a', { href: '/repos', 'data-nav': true }, 'Repositories'),
+    '; what history says about it is under ', h('a', { href: '/insights', 'data-nav': true }, 'Insights'), '.'));
   return wrap;
 });
 
-const statusBadge = (status) => {
-  const map = { ready: 'ok', failed: 'danger', ingesting: 'info', pending: 'muted' };
-  return h('span', { class: `badge ${map[status] || 'muted'}` }, status || 'unknown');
-};
-
-const runsTable = (runs) =>
-  dataTable(
-    runs,
-    [
-      { key: 'id', label: 'Run', num: true },
-      { key: 'kind', label: 'Kind', render: (r) => h('span', { class: 'badge muted' }, r.kind) },
-      { key: 'trigger', label: 'Trigger' },
-      { key: 'status', label: 'Status', render: (r) => h('span', { class: `badge ${r.status === 'success' ? 'ok' : r.status === 'failed' ? 'danger' : r.status === 'partial' ? 'warn' : 'info'}` }, r.status) },
-      { key: 'started_at', label: 'Started', render: (r) => stamp(r.started_at) },
-      { key: 'duration_s', label: 'Duration', num: true, render: (r) => (r.duration_s ? `${r.duration_s.toFixed(0)}s` : '—') },
-      { key: 'repos_ok', label: 'OK', num: true },
-      { key: 'repos_failed', label: 'Failed', num: true },
-      { key: 'commits_added', label: 'Commits', num: true, render: (r) => num(r.commits_added) },
-    ],
-    { initialSort: 'id', onRow: (r) => go(`/jobs/${r.id}`) },
-  );
-
-async function triggerRefresh() {
-  try {
-    await fetch('/api/ingest/refresh', { method: 'POST' });
-    toast('Ingest started — watch progress under Jobs');
-    setTimeout(() => go('/jobs'), 700);
-  } catch (err) {
-    toast(String(err.message || err), true);
-  }
-}
-
-/* --------------------------------------------------------------- repos -- */
-
-/* Registered twice: `/repos` is every repository, `/accounts/:id` is one
-   account's. Same view, and the account arrives in the path rather than as a
-   query, because it is a place in the hierarchy and not a filter over it. */
 const reposView = async (args, params) => {
   const accountId = args.id ? Number(args.id) : null;
   const [repos, langs, accounts] = await Promise.all([
@@ -792,10 +729,37 @@ const reposView = async (args, params) => {
   return wrap;
 };
 
-on('/repos', reposView);
-on('/accounts/:id', reposView);
+const statusBadge = (status) => {
+  const map = { ready: 'ok', failed: 'danger', ingesting: 'info', pending: 'muted' };
+  return h('span', { class: `badge ${map[status] || 'muted'}` }, status || 'unknown');
+};
 
-/* ---------------------------------------------------------- repo detail -- */
+const runsTable = (runs) =>
+  dataTable(
+    runs,
+    [
+      { key: 'id', label: 'Run', num: true },
+      { key: 'kind', label: 'Kind', render: (r) => h('span', { class: 'badge muted' }, r.kind) },
+      { key: 'trigger', label: 'Trigger' },
+      { key: 'status', label: 'Status', render: (r) => h('span', { class: `badge ${r.status === 'success' ? 'ok' : r.status === 'failed' ? 'danger' : r.status === 'partial' ? 'warn' : 'info'}` }, r.status) },
+      { key: 'started_at', label: 'Started', render: (r) => stamp(r.started_at) },
+      { key: 'duration_s', label: 'Duration', num: true, render: (r) => (r.duration_s ? `${r.duration_s.toFixed(0)}s` : '—') },
+      { key: 'repos_ok', label: 'OK', num: true },
+      { key: 'repos_failed', label: 'Failed', num: true },
+      { key: 'commits_added', label: 'Commits', num: true, render: (r) => num(r.commits_added) },
+    ],
+    { initialSort: 'id', onRow: (r) => go(`/jobs/${r.id}`) },
+  );
+
+async function triggerRefresh() {
+  try {
+    await fetch('/api/ingest/refresh', { method: 'POST' });
+    toast('Ingest started — watch progress under Jobs');
+    setTimeout(() => go('/jobs'), 700);
+  } catch (err) {
+    toast(String(err.message || err), true);
+  }
+}
 
 on('/repos/:id', async ({ id }, params) => {
   const tab = params.tab || 'files';
@@ -886,6 +850,9 @@ on('/repos/:id', async ({ id }, params) => {
 
   return wrap;
 });
+
+on('/repos', reposView);
+on('/accounts/:id', reposView);
 
 /** Impact rows, with the evidence tier always visible. */
 const impactTable = (rows, otherKey, selfId) =>
@@ -1628,6 +1595,151 @@ on('/insights/graph', async (_args, params) => {
 });
 
 /* ------------------------------------------------------------- measures -- */
+
+/* Callers: every call this deployment served, and what it returned.
+   The drill-down the rest of the app has -- a ranking, then a list, then the
+   thing itself -- applied to traffic: Overview ranks tools, this lists their
+   calls, and one call opens the arguments it was given and the reply that went
+   back. */
+on('/callers', async (_args, params) => {
+  const surface = params.surface || '';
+  const status = params.status || '';
+  const name = params.name || '';
+  const hours = Number(params.hours || 24);
+
+  const [summary, list] = await Promise.all([
+    api('/api/calls/summary', { hours }),
+    api('/api/calls', {
+      surface: surface || undefined,
+      status: status || undefined,
+      name: name || undefined,
+      limit: 200,
+    }),
+  ]);
+  const c = summary.summary || {};
+
+  const wrap = h('div');
+  wrap.append(crumbs(['Overview', '/'], ['Callers'], ...(name ? [[name]] : [])));
+  wrap.append(pageHead('Callers',
+    'Every call served, what it was asked, and what went back. Kept for 30 days.'));
+
+  wrap.append(h('div', { class: 'grid grid-stats' },
+    statTile('Calls', num(c.calls || 0), `in the last ${c.hours || hours}h`),
+    statTile('MCP', num(c.mcp_calls || 0), 'agent tool calls'),
+    statTile('HTTP', num(c.http_calls || 0), 'API requests'),
+    statTile('Errors', num(c.errors || 0), 'failed calls'),
+    statTile('Median', c.p50_ms == null ? '\u2014' : `${c.p50_ms}ms`,
+             c.p95_ms == null ? '' : `p95 ${c.p95_ms}ms`),
+    statTile('Distinct clients', num(c.clients || 0), 'by user-agent')));
+
+  if (c.dropped) {
+    wrap.append(h('div', { class: 'help', style: 'border-left-color:var(--warn)' },
+      `${num(c.dropped)} call(s) went unrecorded because the write queue was full. `
+      + 'Recording is dropped rather than allowed to slow a reply, so the counts '
+      + 'above are a floor, not a total.'));
+  }
+
+  const chip = (label, key, value) => h('button', {
+    class: `btn sm${(params[key] || '') === value ? ' primary' : ''}`,
+    onclick: () => {
+      const p = new URLSearchParams(params);
+      if (value) p.set(key, value); else p.delete(key);
+      go(`/callers${p.toString() ? '?' + p : ''}`);
+    },
+  }, label);
+
+  wrap.append(h('div', { class: 'toolbar' },
+    h('div', { class: 'field' }, h('label', {}, 'Surface'),
+      chip('All', 'surface', ''), chip('MCP', 'surface', 'mcp'), chip('HTTP', 'surface', 'http')),
+    h('div', { class: 'field' }, h('label', {}, 'Status'),
+      chip('Any', 'status', ''), chip('Errors only', 'status', 'error')),
+    h('div', { class: 'field' }, h('label', {}, 'Window'),
+      chip('1h', 'hours', '1'), chip('24h', 'hours', ''), chip('7d', 'hours', '168')),
+    name ? h('button', { class: 'btn sm', onclick: () => {
+      const p = new URLSearchParams(params); p.delete('name');
+      go(`/callers${p.toString() ? '?' + p : ''}`);
+    } }, `clear "${name}"`) : null));
+
+  wrap.append(card('By tool or route', dataTable(summary.by_name || [], [
+    { key: 'surface', label: 'Surface', render: (r) => h('span', { class: `badge ${r.surface === 'mcp' ? 'ok' : 'muted'}` }, r.surface) },
+    { key: 'name', label: 'Name', render: (r) => h('span', { class: 'mono' }, r.name) },
+    { key: 'calls', label: 'Calls', num: true, render: (r) => num(r.calls) },
+    { key: 'errors', label: 'Errors', num: true },
+    { key: 'avg_ms', label: 'Avg', num: true, render: (r) => `${fx(r.avg_ms, 0)}ms` },
+    { key: 'max_ms', label: 'Slowest', num: true, render: (r) => `${num(r.max_ms)}ms` },
+    { key: 'avg_rows', label: 'Avg rows', num: true, render: (r) => (r.avg_rows == null ? '\u2014' : fx(r.avg_rows, 0)) },
+  ], {
+    initialSort: 'calls',
+    onRow: (r) => {
+      const p = new URLSearchParams(params);
+      p.set('surface', r.surface); p.set('name', r.name);
+      go(`/callers?${p}`);
+    },
+    empty: 'No calls in this window.',
+  })));
+
+  wrap.append(h('div', { class: 'section-title' }, `${list.count} most recent`));
+  wrap.append(card('Calls', dataTable(list.calls || [], [
+    { key: 'at', label: 'When', render: (r) => when(r.at) },
+    { key: 'surface', label: 'Surface', render: (r) => h('span', { class: `badge ${r.surface === 'mcp' ? 'ok' : 'muted'}` }, r.surface) },
+    { key: 'name', label: 'Tool or route', render: (r) => h('span', { class: 'mono' }, r.name) },
+    { key: 'status', label: 'Status', render: (r) => h('span', { class: `badge ${r.status === 'ok' ? 'ok' : 'danger'}` }, r.status) },
+    { key: 'duration_ms', label: 'Took', num: true, render: (r) => `${num(r.duration_ms)}ms` },
+    { key: 'result_rows', label: 'Rows', num: true, render: (r) => (r.result_rows == null ? '\u2014' : num(r.result_rows)) },
+    { key: 'result_bytes', label: 'Size', num: true, render: (r) => (r.result_bytes == null ? '\u2014' : bytes(r.result_bytes / 1024)) },
+    { key: 'client', label: 'Client', render: (r) => h('span', { class: 'card-sub' }, (r.client || '\u2014').slice(0, 42)) },
+  ], {
+    initialSort: 'at',
+    onRow: (r) => go(`/callers/${r.id}`),
+    empty: 'No calls match those filters.',
+  }), 'Click a call to see exactly what it asked for and what it got back'));
+  return wrap;
+});
+
+on('/callers/:id', async ({ id }) => {
+  const call = await api(`/api/calls/${id}`);
+  const wrap = h('div');
+  wrap.append(crumbs(['Overview', '/'],
+                     ['Callers', `/callers?surface=${call.surface}`],
+                     [call.name]));
+  wrap.append(pageHead(h('span', { class: 'mono' }, call.name),
+    `${call.surface.toUpperCase()}${call.method ? ' ' + call.method : ''} · ${when(call.at)}`,
+    [h('a', { class: 'btn', href: `/callers?surface=${call.surface}&name=${encodeURIComponent(call.name)}`, 'data-nav': true },
+       'Other calls to this')]));
+
+  wrap.append(h('div', { class: 'grid grid-stats' },
+    statTile('Status', call.status, call.error || 'no error'),
+    statTile('Took', `${num(call.duration_ms)}ms`, 'server-side'),
+    statTile('Rows', call.result_rows == null ? '\u2014' : num(call.result_rows), 'in the reply'),
+    statTile('Size', call.result_bytes == null ? '\u2014' : bytes(call.result_bytes / 1024), 'of response body')));
+
+  if (call.error) {
+    wrap.append(h('div', { class: 'help', style: 'border-left-color:var(--danger)' },
+      h('strong', {}, 'Error: '), call.error));
+  }
+
+  const pre = (value) => h('pre', { class: 'payload' },
+    typeof value === 'string' ? value : JSON.stringify(value, null, 2));
+
+  wrap.append(card('What was asked',
+    h('div', { class: 'card-body' },
+      call.arguments ? pre(call.arguments)
+                     : h('div', { class: 'empty' }, 'No arguments.')),
+    call.surface === 'mcp' ? 'The tool arguments the agent supplied'
+                           : 'The query string the caller sent'));
+
+  const body = call.result_preview;
+  const truncated = body && typeof body === 'object' && body.truncated;
+  wrap.append(card('What came back',
+    h('div', { class: 'card-body' },
+      body == null ? h('div', { class: 'empty' }, 'No body recorded.')
+        : pre(truncated ? body.head : body)),
+    truncated
+      ? `Truncated: the reply was ${bytes(body.bytes / 1024)}, and the log keeps the first part`
+      : 'The reply exactly as it was returned'));
+  wrap.append(h('div', { class: 'card-sub' }, `Client: ${call.client || 'unknown'}`));
+  return wrap;
+});
 
 on('/measures', async () => {
   const wrap = h('div');

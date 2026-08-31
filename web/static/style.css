@@ -789,3 +789,13 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 .setting-row:last-child { border-bottom: 0; padding-bottom: 0; }
 .setting-row:first-child { padding-top: 0; }
 .setting-row > * + * { margin-top: 9px; }
+
+/* A recorded request or reply, shown as it was. Scrolls in its own box so a
+   thousand-line payload cannot stretch the page. */
+.payload {
+  margin: 0; max-height: 420px; overflow: auto;
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.5;
+  color: var(--text-dim); background: var(--bg-input);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 11px 13px; white-space: pre-wrap; word-break: break-word;
+}

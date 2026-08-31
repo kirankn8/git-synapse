@@ -21,6 +21,7 @@ database table and the decisions that materially change the numbers.
 | [**What the backtest is measured against**](#what-the-backtest-is-measured-against) | the baselines, and why a weak one is worse than none |
 | [What is incremental](#what-is-incremental-and-what-isnt) | what a refresh actually redoes |
 | [**How the UI is addressed**](#how-the-ui-is-addressed) | places nest in the path, analyses scope with a query |
+| [**What callers asked for**](#what-callers-asked-for) | the call log, and what it deliberately does not do |
 | [Bookkeeping](#bookkeeping) · [Portability](#portability) · [Layout](#layout) | operations and structure |
 | [Adding a measure](#adding-a-measure) | extending the registry |
 
@@ -757,6 +758,45 @@ The API, MCP server, CLI and UI all enumerate from the registry, so nothing else
 ---
 
 
+## What callers asked for
+
+Two surfaces consume this product — agents over MCP, and this UI over HTTP —
+and until recently neither left a trace, so *"is anything actually using this?"*
+had no answer, and *"what did it ask for, and what did it get back?"* had none
+either. `call_log` records every call on both surfaces: the arguments as given,
+the reply as returned, how long it took, how many rows came back, and which
+client asked.
+
+One interception point per surface, not one per entry point. MCP overrides
+`call_tool`, the single dispatch every tool passes through, so a tool added
+later is recorded without anyone remembering to. HTTP uses one middleware, and
+records the route *template* — `/api/repos/{repo_id}`, not the concrete path —
+so a thousand repositories are one row in a ranking rather than a thousand rows
+nobody can read.
+
+Three properties make the log safe to leave on:
+
+**It never blocks a caller.** A row goes to a bounded queue and one daemon
+thread batches the inserts. A page that got slower because it was being
+measured would be a bad trade, and one that could wedge on a database blip
+would be worse. When the queue fills, rows are dropped **and counted**, and the
+count is shown beside the totals — an under-report that says so is honest; a
+silent one is not.
+
+**It bounds what it stores.** The body is kept whole up to 64 KB
+(`CALL_LOG_BODY_BYTES`) and truncated beyond, with the true size and row count
+recorded either way, because "how much came back" is usually the question. It
+is the one table that grows with *traffic* rather than with history, so it is
+pruned by age and by count at the end of every ingest.
+
+**It does not read itself.** `/api/calls*` is excluded, or opening the Callers
+page would generate the traffic it displays and could never show a quiet
+system.
+
+Reading it is the same drill-down as everywhere else: Overview ranks tools and
+routes, Callers lists the individual calls, and one call opens the arguments it
+was given and the reply that went back.
+
 ## How the UI is addressed
 
 The application had ten tabs, and five of them were views onto two things —
@@ -777,7 +817,14 @@ can check rather than on taste:
 |---|---|
 | **Repositories** | the things — repositories, folders, files, pairs — and what is *in* them |
 | **Insights** | every analysis derived from history — impact, risk, drift, modules |
-| Overview · Accounts · Measures · Jobs · Feedback | dashboard, configuration, reference, operations |
+| **Overview** | is this deployment healthy, and is anything using it |
+| **Callers** | every call served, and what it returned |
+| Accounts · Measures · Jobs · Feedback | configuration, reference, operations |
+
+Overview used to carry a shortened copy of the repository list, the mining
+figures and the run history, plus three header buttons duplicating the nav one
+line above — half the page was a worse version of another tab. It now answers
+one question: corpus scale, ingest health, and who is calling.
 
 ```
 /accounts                                   /insights            -> /insights/impact

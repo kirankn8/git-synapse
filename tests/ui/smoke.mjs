@@ -80,6 +80,8 @@ const tree = await (await fetch(`${BASE}/api/repos/${repoId}/tree`)).json();
 const dirPath = (tree.directories[0] || {}).path || '';
 const runs = await (await fetch(BASE + '/api/runs?limit=1')).json();
 const runId = runs.runs[0].id;
+const logged = await (await fetch(BASE + '/api/calls?limit=1')).json();
+const callId = (logged.calls[0] || {}).id;
 
 // Edges are {source, target}; reading source_repo_id here quietly fell back to
 // a self-edge, so the impact routes rendered an empty page and asserted nothing.
@@ -116,10 +118,14 @@ const routes = [
   ['#/insights/drift',                     'Insights drift (emerging)'],
   ['#/insights/drift?trend=decaying',      'Insights drift (decaying)'],
   [`#/insights/modules?repo=${repoId}`,    'Insights modules'],
+  ['#/callers',                            'Callers'],
+  ['#/callers?surface=mcp',                'Callers (MCP only)'],
+  ['#/callers?status=error',               'Callers (errors)'],
   ['#/measures',                           'Measures catalogue'],
   ['#/jobs',                               'Jobs'],
   ['#/jobs?tab=settings',                  'Jobs settings'],
   [`#/jobs/${runId}`,                      'Run detail'],
+  callId ? [`#/callers/${callId}`,         'Call detail'] : null,
   ['#/feedback',                           'Feedback (open)'],
   ['#/feedback?status=all',                'Feedback (all)'],
 ].filter(Boolean);
@@ -138,8 +144,13 @@ for (const [hash, label] of routes) {
   const rows = view().querySelectorAll('table.data tbody tr').length;
   const tiles = view().querySelectorAll('.stat').length;
   const cards = view().querySelectorAll('.card, .measure-card').length;
-  report(label, !failed && text.trim().length > 40,
-         `${text.trim().length} chars, ${rows} rows, ${tiles} tiles, ${cards} cards`);
+  // On failure the page is usually saying exactly what went wrong -- "X is not
+  // defined" -- and reporting a character count instead threw that away and
+  // cost several rounds of guessing.
+  const detail = failed || text.trim().length <= 40
+    ? `${hash} -> ${text.trim().replace(/\s+/g, ' ').slice(0, 120) || '(empty)'}`
+    : `${text.trim().length} chars, ${rows} rows, ${tiles} tiles, ${cards} cards`;
+  report(label, !failed && text.trim().length > 40, detail);
 }
 
 // Interaction: clicking a table row must navigate.

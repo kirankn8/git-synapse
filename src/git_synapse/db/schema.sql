@@ -990,6 +990,47 @@ BEGIN
     END IF;
 END $$;
 
+-- ===========================================================================
+-- Who called, what they asked, and what came back.
+--
+-- The product is consumed by agents through MCP and by this UI over HTTP, and
+-- until now neither left a trace: there was no way to answer "is anything
+-- actually using this", let alone "what did it ask for and what did it get".
+--
+-- Written from a background flusher, never on the request path -- a page that
+-- got slower because it was being measured would be a bad trade. Rows are
+-- pruned by age and by count, because this table grows with traffic while
+-- everything else here grows with history.
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS call_log (
+    id            BIGSERIAL PRIMARY KEY,
+    at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- 'mcp' is an agent calling a tool; 'http' is this UI or a direct caller.
+    surface       TEXT        NOT NULL CHECK (surface IN ('mcp', 'http')),
+    -- Tool name, or the route template rather than the concrete path:
+    -- /api/repos/{repo_id}, so a thousand repositories are one row in a ranking.
+    name          TEXT        NOT NULL,
+    method        TEXT,
+    status        TEXT        NOT NULL CHECK (status IN ('ok', 'error')),
+    duration_ms   INTEGER     NOT NULL,
+    -- The arguments as given. Small by nature, and the whole point of the log:
+    -- "what was presented to it" is unanswerable without them.
+    arguments     JSONB,
+    -- Bounded: a reply can be a thousand rows, and storing every one would make
+    -- this table larger than the data it describes. Size and shape are kept in
+    -- full; the body is truncated with a marker saying so.
+    result_preview JSONB,
+    result_bytes  INTEGER,
+    result_rows   INTEGER,
+    error         TEXT,
+    -- User-agent, which is how an agent is told apart from a browser.
+    client        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS call_log_at_idx      ON call_log (at DESC);
+CREATE INDEX IF NOT EXISTS call_log_surface_idx ON call_log (surface, at DESC);
+CREATE INDEX IF NOT EXISTS call_log_name_idx    ON call_log (surface, name, at DESC);
+
 -- Simple key/value for schema version and other bookkeeping.
 CREATE TABLE IF NOT EXISTS meta (
     key         TEXT PRIMARY KEY,
@@ -1002,5 +1043,5 @@ CREATE TABLE IF NOT EXISTS meta (
 -- was not, so schema_is_current() was permanently false and every service boot
 -- re-ran the whole DDL, taking exactly the locks the fast path exists to avoid.
 INSERT INTO meta (key, value)
-VALUES ('schema_version', '25'::jsonb)
+VALUES ('schema_version', '26'::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
