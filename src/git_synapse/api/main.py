@@ -136,7 +136,7 @@ if _web_root.is_dir():
     #: catch-all so a genuine typo still returns 404 instead of silently
     #: rendering the shell.
     SPA_ROUTES = (
-        "repos", "repo", "impact", "repopair", "crossrepo", "changeset",
+        "repos", "repo", "accounts", "impact", "repopair", "crossrepo", "changeset",
         "insights", "validation", "explore", "graph", "measures", "runs",
         "run", "file", "pair", "dir", "feedback",
     )

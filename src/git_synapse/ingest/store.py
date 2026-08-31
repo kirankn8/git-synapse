@@ -48,7 +48,7 @@ log = logging.getLogger(__name__)
 COMMIT_FLUSH_SIZE = 5000
 
 
-def upsert_repo(record: RepoRecord, conn: psycopg.Connection | None = None) -> int:
+def upsert_repo(record: RepoRecord, conn: psycopg.Connection | None = None, account_id: int | None = None) -> int:
     """Insert or update a repository row and return its id.
 
     Every GitHub field is written, including the untouched payload in
@@ -64,7 +64,7 @@ def upsert_repo(record: RepoRecord, conn: psycopg.Connection | None = None) -> i
                 languages, topics, license_spdx, visibility, is_private, is_fork,
                 is_archived, is_template, is_disabled, disk_usage_kb, stargazers,
                 watchers, forks_count, open_issues, github_created_at,
-                github_updated_at, github_pushed_at, raw_github, updated_at
+                github_updated_at, github_pushed_at, raw_github, account_id, updated_at
             ) VALUES (
                 %(github_id)s, %(owner)s, %(name)s, %(full_name)s, %(description)s,
                 %(homepage)s, %(html_url)s, %(clone_url)s, %(ssh_url)s,
@@ -73,7 +73,7 @@ def upsert_repo(record: RepoRecord, conn: psycopg.Connection | None = None) -> i
                 %(is_archived)s, %(is_template)s, %(is_disabled)s, %(disk_usage_kb)s,
                 %(stargazers)s, %(watchers)s, %(forks_count)s, %(open_issues)s,
                 %(github_created_at)s, %(github_updated_at)s, %(github_pushed_at)s,
-                %(raw_github)s, now()
+                %(raw_github)s, %(account_id)s, now()
             )
             ON CONFLICT (full_name) DO UPDATE SET
                 github_id         = EXCLUDED.github_id,
@@ -102,6 +102,9 @@ def upsert_repo(record: RepoRecord, conn: psycopg.Connection | None = None) -> i
                 github_updated_at = EXCLUDED.github_updated_at,
                 github_pushed_at  = EXCLUDED.github_pushed_at,
                 raw_github        = EXCLUDED.raw_github,
+                -- COALESCE, so a discovery run that carries no account context
+                -- cannot strip attribution an earlier run established.
+                account_id        = COALESCE(EXCLUDED.account_id, repo.account_id),
                 updated_at        = now()
             RETURNING id
             """,
@@ -135,6 +138,7 @@ def upsert_repo(record: RepoRecord, conn: psycopg.Connection | None = None) -> i
                 "github_updated_at": record.github_updated_at,
                 "github_pushed_at": record.github_pushed_at,
                 "raw_github": json.dumps(record.raw, default=str),
+                "account_id": account_id,
             },
         ).fetchone()
         return int(row[0])

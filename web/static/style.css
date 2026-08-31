@@ -701,3 +701,32 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
   font-size: 11.5px; color: var(--text-faint); line-height: 1.5;
   border-left: 2px solid var(--border-strong); padding-left: 9px; margin-top: 8px;
 }
+
+/* ---------------------------------------------------------- forms ------ */
+/* Stacked labels rather than inline ones, so the control gets the whole
+   column. A wide input is the point: repository allowlists are long. */
+.form { padding: 16px 18px 18px; display: flex; flex-direction: column; gap: 16px; }
+.form-row { display: grid; gap: 16px; }
+.form-row.two { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.form-row.toggles { display: flex; flex-wrap: wrap; gap: 10px 24px; }
+
+.field-block { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.field-label {
+  font-size: 11px; color: var(--text-faint); text-transform: uppercase;
+  letter-spacing: .05em; font-weight: 600;
+}
+.field-block .input { width: 100%; padding: 9px 11px; font-size: 13px; }
+.field-hint { font-size: 11.5px; color: var(--text-faint); line-height: 1.45; }
+
+.toggle { display: inline-flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.toggle input { margin: 2px 0 0; accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+.toggle-label { font-size: 12.5px; color: var(--text); display: block; }
+.toggle-hint { font-size: 11px; color: var(--text-faint); display: block; }
+
+.form-actions { display: flex; gap: 10px; }
+.form-actions .btn { padding: 8px 18px; font-size: 13px; }
+
+.muted-cell { color: var(--text-faint); }
+.badge.clickable { cursor: pointer; font: inherit; font-size: 11px; }
+.badge.clickable:hover { filter: brightness(1.25); }
+.btn.danger-btn:hover { border-color: var(--danger); color: var(--danger); }

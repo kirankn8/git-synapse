@@ -65,10 +65,39 @@ Requires only a container runtime. No host Python, git, or Postgres.
 ```bash
 cp .env.example .env      # add a GITHUB_TOKEN with `repo` scope
 docker compose up -d      # postgres + api + scheduler + mcp
+```
+
+Then open **http://localhost** (or `:8080`) and add the organisations or user
+accounts to scan on the **Accounts** page — or from the CLI:
+
+```bash
+docker compose run --rm cli account add my-org
+docker compose run --rm cli account add my-org --no-forks --no-archived
+docker compose run --rm cli account add someone --kind user
 docker compose run --rm cli ingest --all
 ```
 
-Then open **http://localhost** (or `:8080`).
+### Which repositories get scanned
+
+Accounts live in the database, not the environment, so onboarding one is a write
+rather than a redeploy. Any number can be added, and each carries its own
+filters — the reason to skip forks in one org rarely applies to the next.
+
+| Per account | Effect |
+|---|---|
+| `only_repos` | Allowlist. When set, **overrides every filter below**. |
+| `skip_repos` | Denylist, applied after the include filters. |
+| include forks / archived / private | Default on; private needs a token with `repo` scope. |
+| enabled | Pause an account without deleting what it has already produced. |
+
+Removing an account **keeps** its repositories and everything mined from them —
+the statistics are the expensive part, and they stay valid whether or not the
+account that discovered them is still listed. Those repositories simply stop
+being refreshed.
+
+`GITHUB_ORG` still exists, but only as a seed: if it is set and no accounts are
+configured yet, it is adopted once on first discovery so an existing deployment
+keeps working after upgrading. It is ignored thereafter.
 
 ### Nicer URL, and keeping it running (macOS)
 
@@ -111,7 +140,7 @@ the previous one is still running, so a slow run can never overlap the next.
 
 Set `REFRESH_CRON=*/5 * * * *` for near-real-time, or `0 * * * *` to be gentler.
 
-### Measured on the Acme org
+### Measured on a 272-repository organisation
 
 | | |
 |---|---|
@@ -233,8 +262,8 @@ takes ~12 seconds.
 A Go pseudo-version embeds the upstream commit it was cut from:
 
 ```
-github.com/acme/signer/v3 v3.0.0-20260626221153-5fc63d6f3055
-                                                        ^^^^^^^^^^^^
+github.com/acme/signing/v3 v3.0.0-20260626221153-5fc63d6f3055
+                                                  ^^^^^^^^^^^^
 ```
 
 So a `go.mod` diff is a **dated, directional, provable** propagation edge.
@@ -501,7 +530,9 @@ docker compose run --rm cli <command>
 
 | Command | Purpose |
 |---|---|
-| `discover` | List org repos and the mirror mode each would use. Clones nothing. |
+| `account add LOGIN` | Add an org (`--kind user` for a user). `--no-forks`, `--no-archived`, `--no-private`, `--only`, `--skip`. |
+| `account list` / `remove ID` / `enable ID [--off]` | Inspect, drop or pause an account. |
+| `discover` | List every configured account's repos and the mirror mode each would use. Clones nothing. |
 | `ingest --all` | Full pipeline. `--repo NAME` to limit, `-j N` for concurrency, `--force-full` to ignore watermarks. |
 | `aggregate` | Rebuild pair tables from the atomic facts. |
 | `score` | Recompute the 29 measures. Run this after adding a measure. |

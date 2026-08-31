@@ -4,11 +4,11 @@ What this extracts
 ------------------
 A Go pseudo-version embeds the upstream commit it was cut from::
 
-    github.com/acme/signer/v3 v3.0.0-20260626221153-5fc63d6f3055
-                                                             ^^^^^^^^^^^^
+    github.com/acme/signing/v3 v3.0.0-20260626221153-5fc63d6f3055
+                                                       ^^^^^^^^^^^^
 
 So a ``go.mod`` diff raising that module is a dated, **directional** statement:
-"this consumer commit consumed that signer commit". Unlike the co-occurrence
+"this consumer commit consumed that upstream commit". Unlike the co-occurrence
 statistics elsewhere in this package, these rows are ground truth rather than
 inference.
 
@@ -43,6 +43,7 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import psycopg
@@ -52,30 +53,70 @@ from git_synapse.ingest.gitops import _base_env, mirror_path_for
 
 log = logging.getLogger(__name__)
 
-#: Internal module reference inside a go.mod line, e.g.
-#: "github.com/acme/signer/v3 v3.0.0-2026...". The optional /vN major
-#: suffix is stripped so the module maps back to a repository name.
-_MODULE = re.compile(r"github\.com/acme/([A-Za-z0-9._-]+)(?:/v\d+)?\s+(\S+)")
+@dataclass(frozen=True)
+class Patterns:
+    """The four manifest patterns, compiled for one set of internal owners.
 
-#: Same reference, but keeping everything after the repository name so an
-#: intra-repo submodule (platform/gateway) can be told from a cross-repo
-#: dependency (signer) rather than both collapsing to the leading segment.
-_MODULE_FULL = re.compile(
-    r"github\.com/acme/([A-Za-z0-9._-]+)((?:/[A-Za-z0-9._-]+)*?)(?:/v\d+)?\s+(\S+)"
-)
+    Which owners count as internal is a property of the deployment, not of this
+    module, so the patterns are built at call time from the owners actually
+    ingested rather than baked in.
+    """
 
-#: npm dependency on an internal scoped package, as it appears in package.json:
-#:     "@acme/console-design-system": "^1.2.3"
-#: Covers 75 repositories in this org that go.mod alone would miss entirely.
-_NPM = re.compile(r'"@acme/([A-Za-z0-9._-]+)"\s*:\s*"([^"]+)"')
+    module: re.Pattern[str]
+    module_full: re.Pattern[str]
+    npm: re.Pattern[str]
+    npm_git: re.Pattern[str]
 
-#: A git-URL npm dependency, which is how internal packages are often pinned
-#: before they are published:
-#:     "console-sdk": "github:acme/console-sdk-js#v1.2.0"
-_NPM_GIT = re.compile(
-    r'"[^"]+"\s*:\s*"(?:git\+https://github\.com/|github:)acme/'
-    r'([A-Za-z0-9._-]+?)(?:\.git)?(?:#([^"]*))?"'
-)
+
+def internal_owners(conn: psycopg.Connection | None = None) -> tuple[str, ...]:
+    """The distinct GitHub owners of ingested repositories.
+
+    Read from ``repo`` rather than ``account`` so that removing an account does
+    not silently reclassify its already-mined dependencies as third-party.
+    """
+    sql = "SELECT DISTINCT owner FROM repo WHERE owner <> '' ORDER BY owner"
+    if conn is not None:
+        return tuple(r[0] for r in conn.execute(sql).fetchall())
+    with connection() as own:
+        return tuple(r[0] for r in own.execute(sql).fetchall())
+
+
+@lru_cache(maxsize=8)
+def patterns_for(owners: tuple[str, ...]) -> Patterns:
+    """Compile the manifest patterns for the given internal owners.
+
+    A Go pseudo-version embeds the upstream commit it was cut from, so a
+    ``go.mod`` diff raising an internal module is a dated, directional statement
+    about which upstream commit a consumer absorbed.
+    """
+    if not owners:
+        # Match nothing rather than everything: an empty owner list means no
+        # repositories are ingested yet, and `github\.com//` would otherwise
+        # collapse into a pattern that treats every dependency as internal.
+        never = re.compile(r"(?!)")
+        return Patterns(never, never, never, never)
+
+    alt = "|".join(re.escape(o) for o in owners)
+    return Patterns(
+        # The optional /vN major suffix is stripped so the module maps back to a
+        # repository name.
+        module=re.compile(rf"github\.com/(?:{alt})/([A-Za-z0-9._-]+)(?:/v\d+)?\s+(\S+)"),
+        # Keeps everything after the repository name so an intra-repo submodule
+        # can be told from a cross-repo dependency, rather than both collapsing
+        # to the leading segment.
+        module_full=re.compile(
+            rf"github\.com/(?:{alt})/([A-Za-z0-9._-]+)((?:/[A-Za-z0-9._-]+)*?)(?:/v\d+)?\s+(\S+)"
+        ),
+        # An internal scoped package in package.json, which go.mod alone misses
+        # entirely for front-end repositories.
+        npm=re.compile(rf'"@(?:{alt})/([A-Za-z0-9._-]+)"\s*:\s*"([^"]+)"'),
+        # A git-URL dependency, how internal packages are often pinned before
+        # they are published.
+        npm_git=re.compile(
+            rf'"[^"]+"\s*:\s*"(?:git\+https://github\.com/|github:)(?:{alt})/'
+            r'([A-Za-z0-9._-]+?)(?:\.git)?(?:#([^"]*))?"'
+        ),
+    )
 
 #: Manifest basenames scanned, in (filename, ecosystem) form.
 MANIFESTS: tuple[tuple[str, str], ...] = (("go.mod", "go"), ("package.json", "npm"))
@@ -134,7 +175,7 @@ def manifest_paths(mirror: Path) -> list[tuple[str, str]]:
     return found
 
 
-def _parse_manifest_line(line: str, ecosystem: str) -> tuple[str, str] | None:
+def _parse_manifest_line(line: str, ecosystem: str, pats: Patterns) -> tuple[str, str] | None:
     """Extract an internal ``(dep_name, version)`` from one manifest line.
 
     A commented-out or excluded line is not a dependency. Both were being read as
@@ -150,13 +191,13 @@ def _parse_manifest_line(line: str, ecosystem: str) -> tuple[str, str] | None:
         # A trailing comment can still carry a module path; only the code before
         # it declares anything.
         line = line.split("//", 1)[0]
-        match = _MODULE.search(line)
+        match = pats.module.search(line)
         return (match.group(1), match.group(2)) if match else None
 
-    match = _NPM.search(line)
+    match = pats.npm.search(line)
     if match:
         return match.group(1), match.group(2)
-    match = _NPM_GIT.search(line)
+    match = pats.npm_git.search(line)
     if match:
         return match.group(1), match.group(2) or "git"
     return None
@@ -193,9 +234,7 @@ class BumpEdge:
     manifest: str
 
 
-def extract_from_mirror(
-    mirror: Path, repo_name: str, manifest: str = "go.mod", ecosystem: str = "go"
-) -> list[BumpEdge]:
+def extract_from_mirror(mirror: Path, repo_name: str, pats: Patterns, manifest: str = "go.mod", ecosystem: str = "go") -> list[BumpEdge]:
     """Walk a mirror's manifest history and return every internal bump.
 
     Only *added* lines are kept: they carry the version being moved **to**, which
@@ -228,7 +267,7 @@ def extract_from_mirror(
             continue
         if sha is None:
             continue
-        parsed = _parse_manifest_line(line, ecosystem)
+        parsed = _parse_manifest_line(line, ecosystem, pats)
         if parsed is None:
             continue
         dep_name, version = parsed
@@ -248,9 +287,7 @@ def extract_from_mirror(
     return edges
 
 
-def declared_at_head(
-    mirror: Path, repo_name: str, manifest: str = "go.mod", ecosystem: str = "go"
-) -> list[tuple[str, str]]:
+def declared_at_head(mirror: Path, repo_name: str, pats: Patterns, manifest: str = "go.mod", ecosystem: str = "go") -> list[tuple[str, str]]:
     """Internal dependencies declared in ``manifest`` at HEAD.
 
     Present-tense and structural, in contrast to :func:`extract_from_mirror`
@@ -277,7 +314,7 @@ def declared_at_head(
         # The `module` line names this repo, not a dependency.
         if stripped.startswith("module "):
             continue
-        parsed = _parse_manifest_line(line, ecosystem)
+        parsed = _parse_manifest_line(line, ecosystem, pats)
         if parsed is None:
             continue
         name, version = parsed
@@ -287,9 +324,7 @@ def declared_at_head(
     return sorted(out.items())
 
 
-def declared_modules_at_head(
-    mirror: Path, repo_name: str, manifest: str
-) -> list[tuple[str, str, str]]:
+def declared_modules_at_head(mirror: Path, repo_name: str, manifest: str, pats: Patterns) -> list[tuple[str, str, str]]:
     """Intra-repository module dependencies declared in one manifest.
 
     Returns ``(consumer_module, dep_module, version)`` for every reference the
@@ -316,7 +351,7 @@ def declared_modules_at_head(
     consumer = manifest.rsplit("/", 1)[0] if "/" in manifest else ""
     out: dict[str, tuple[str, str, str]] = {}
     for line in proc.stdout.splitlines():
-        match = _MODULE_FULL.search(line)
+        match = pats.module_full.search(line)
         if match is None:
             continue
         repo_part, sub, version = match.group(1), match.group(2) or "", match.group(3)
@@ -344,6 +379,7 @@ def refresh_modules(conn: psycopg.Connection | None = None) -> int:
             "SELECT id, full_name, name FROM repo WHERE is_enabled ORDER BY id"
         ).fetchall()
 
+        pats = patterns_for(internal_owners(c))
         payload = []
         for repo_id, full_name, name in rows:
             mirror = mirror_path_for(full_name)
@@ -354,7 +390,7 @@ def refresh_modules(conn: psycopg.Connection | None = None) -> int:
                 continue  # a single-module repo has no internal graph
             for manifest in manifests:
                 for consumer, dep, version in declared_modules_at_head(
-                    mirror, name, manifest
+                    mirror, name, manifest, pats
                 ):
                     payload.append(
                         (repo_id, consumer, dep, manifest, "go", version[:200])
@@ -443,13 +479,14 @@ def refresh_declared(
             row[0]: int(row[1]) for row in c.execute("SELECT name, id FROM repo").fetchall()
         }
 
+        pats = patterns_for(internal_owners(c))
         payload = []
         for repo_id, full_name, name in rows:
             mirror = mirror_path_for(full_name)
             if not mirror.is_dir():
                 continue
             for manifest, ecosystem in manifest_paths(mirror):
-                for dep_name, version in declared_at_head(mirror, name, manifest, ecosystem):
+                for dep_name, version in declared_at_head(mirror, name, pats, manifest, ecosystem):
                     payload.append(
                         (repo_id, name_to_id.get(dep_name), dep_name,
                          version[:200], manifest, ecosystem)
@@ -567,6 +604,7 @@ def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> Bump
             for row in c.execute("SELECT name, id FROM repo").fetchall()
         }
 
+        pats = patterns_for(internal_owners(c))
         payload: list[tuple] = []
         for repo_id, full_name, name in targets:
             mirror = mirror_path_for(full_name)
@@ -575,7 +613,7 @@ def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> Bump
             stats.repos_scanned += 1
             edges: list[BumpEdge] = []
             for manifest, ecosystem in manifest_paths(mirror):
-                edges.extend(extract_from_mirror(mirror, name, manifest, ecosystem))
+                edges.extend(extract_from_mirror(mirror, name, pats, manifest, ecosystem))
             stats.edges_found += len(edges)
             for edge in edges:
                 payload.append(
