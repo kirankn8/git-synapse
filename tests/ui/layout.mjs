@@ -32,6 +32,9 @@ const PAGES = [
   ['/jobs?tab=settings', 'Jobs settings'],
   ['/activity', 'Activity'],
   ['/measures', 'Measures'],
+  ['/repos/4?tab=meta', 'Repository metadata'],
+  ['/insights/modules?repo=5', 'Modules'],
+  ['/feedback', 'Feedback'],
 ];
 
 // Where the ranking measure orders something on screen, and where it does not.
@@ -150,6 +153,36 @@ for (const [path, label] of PAGES) {
   });
   if (ragged.length) bad(`${label} rows`, ragged.join('; '));
   else ok(`${label} rows`, 'every row full');
+}
+
+/* Every card is a way in. A summary always has a fuller view behind it, and a
+   card that gives no sign of one is a dead end the reader has to guess past.
+   Two are deliberately static and named here, so the exception is a decision on
+   the record rather than a gap the check quietly tolerates. */
+const STATIC_BY_DESIGN = new Set([
+  'GitHub token',                 // explains why it is not editable here
+  'Fixed for this deployment',    // reference values, changed only in .env
+]);
+
+console.log('\n=== every card leads somewhere ===');
+for (const [path, label] of PAGES) {
+  await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });
+  await settle();
+  const dead = await page.evaluate((allowed) => {
+    const out = [];
+    for (const c of document.querySelectorAll('#view .card')) {
+      const title = ((c.querySelector('.card-title') || {}).textContent || '?').trim();
+      if (allowed.includes(title)) continue;
+      // An empty card has nothing to lead to, which is not a dead end.
+      if (c.querySelector('.empty') && !c.querySelector('tbody tr')) continue;
+      const wayOut = c.classList.contains('is-link')
+        || c.querySelector('tbody tr.is-link, a[data-nav], .is-link, button, input, select');
+      if (!wayOut) out.push(title);
+    }
+    return out;
+  }, [...STATIC_BY_DESIGN]);
+  if (dead.length) bad(`${label} cards`, `no way out of: ${dead.join(', ')}`);
+  else ok(`${label} cards`, 'every card leads somewhere');
 }
 
 console.log('\n=== nothing overflows its container horizontally ===');

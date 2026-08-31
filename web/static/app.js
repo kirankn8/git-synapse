@@ -420,21 +420,38 @@ export const pageHead = (title, sub, actions = []) =>
 export const statTile = (label, value, meta, onclick) =>
   h(
     'div',
-    { class: 'stat', onclick: onclick || (() => {}), role: onclick ? 'button' : null },
+    { class: `stat${onclick ? ' is-link' : ''}`, onclick: onclick || (() => {}),
+      role: onclick ? 'button' : null, tabindex: onclick ? '0' : null },
     h('div', { class: 'stat-label' }, label),
     h('div', { class: 'stat-value' }, value),
     meta ? h('div', { class: 'stat-meta' }, meta) : null,
   );
 
-export const card = (title, body, sub, headExtra) =>
+/**
+ * A titled panel.
+ *
+ * `to` makes the whole card a way in: a summary always has a fuller view
+ * behind it, and a reader who wants it should not have to find a separate
+ * link. Clicking anything inside that already navigates -- a table row, a bar
+ * -- wins, so the card's own target is the fallback rather than an override.
+ */
+export const card = (title, body, sub, headExtra, to) =>
   h(
     'div',
-    { class: 'card' },
+    {
+      class: `card${to ? ' is-link' : ''}`,
+      role: to ? 'link' : null,
+      tabindex: to ? '0' : null,
+      onclick: to
+        ? (e) => { if (!e.target.closest('a,button,tr,.cbar,.hbar')) go(to); }
+        : null,
+      onkeydown: to ? (e) => { if (e.key === 'Enter') go(to); } : null,
+    },
     h(
       'div',
       { class: 'card-head' },
       h('div', {}, h('h3', { class: 'card-title' }, title), sub ? h('div', { class: 'card-sub' }, sub) : null),
-      headExtra || null,
+      headExtra || (to ? h('span', { class: 'card-go' }, '\u2192') : null),
     ),
     h('div', { class: 'card-body flush' }, body),
   );
@@ -510,12 +527,16 @@ export function dataTable(rows, cols, opts = {}) {
 
     tbody.replaceChildren(
       ...data.map((row) => {
-        const tr = h('tr', {
+        // Only rows that actually go somewhere are marked as links. Every row
+        // used to carry a handler and a pointer cursor whether or not one was
+        // given, so a table that led nowhere looked exactly like one that did.
+        const tr = h('tr', opts.onRow ? {
+          class: 'is-link',
           onclick: (ev) => {
             if (ev.target.closest('a,button')) return;
-            opts.onRow && opts.onRow(row);
+            opts.onRow(row);
           },
-        });
+        } : {});
         for (const c of cols) {
           const value = c.render ? c.render(row) : row[c.key];
           tr.appendChild(
@@ -680,42 +701,50 @@ on('/', async () => {
       h('div', { class: 'card-body chart-body' }, barChart(yearRows, { label: 'commits' })),
       years.length
         ? `${years.length} years of history; ${num(recent.n)} commits in ${recent.year}`
-        : 'No dated commits'),
+        : 'No dated commits',
+      null, '/repos?order_by=commit_count'),
 
     card('Evidence behind a coupling',
-      h('div', { class: 'card-body chart-body' }, barChart(support, { label: 'pairs' })),
+      h('div', { class: 'card-body chart-body' }, barChart(support, { label: 'pairs', scale: 'log' })),
       `${pct(thin / pairsTotal)} of pairs rest on just two co-changes \u2014 `
-      + 'the reason min support exists, and why a score on thin support means little'),
+      + 'the reason min support exists, and why a score on thin support means little',
+      null, '/measures'),
 
     card('Repositories by size',
       h('div', { class: 'card-body chart-body' }, hbars(sizes, { suffix: ' repos' })),
       biggest
         ? `${biggest.value} repositories hold ${pct(biggest.commits / allCommits)} of all commits`
-        : 'No repositories ingested'),
+        : 'No repositories ingested',
+      null, '/repos?order_by=commit_count'),
 
     card('Languages',
       h('div', { class: 'card-body chart-body' }, hbars(shown)),
-      `${langs2.length} languages across ${num(ov.repos)} repositories`),
+      `${langs2.length} languages across ${num(ov.repos)} repositories`,
+      null, '/repos'),
 
     card('Files per commit',
-      h('div', { class: 'card-body chart-body' }, barChart(width, { label: 'commits' })),
+      h('div', { class: 'card-body chart-body' }, barChart(width, { label: 'commits', scale: 'log' })),
       `${pct(wide / commitsTotal)} of commits touch 12 files or more \u2014 `
-      + 'wide commits pair everything with everything, which is why the fan-out is capped'),
+      + 'wide commits pair everything with everything, which is why the fan-out is capped',
+      null, '/jobs?tab=settings'),
 
     card('Authors per file',
-      h('div', { class: 'card-body chart-body' }, barChart(authors, { label: 'files' })),
-      `${pct(soleOwned / filesTotal)} of files have been touched by one author only`),
+      h('div', { class: 'card-body chart-body' }, barChart(authors, { label: 'files', scale: 'log' })),
+      `${pct(soleOwned / filesTotal)} of files have been touched by one author only`,
+      null, '/insights/risk'),
 
     card('How fast a bump is adopted',
       h('div', { class: 'card-body chart-body' }, hbars(adoption, { suffix: ' bumps' })),
       bumpsTotal > 1
         ? `${pct(fast / bumpsTotal)} of observed version bumps landed within two months`
-        : 'No resolved bumps yet'),
+        : 'No resolved bumps yet',
+      null, '/insights/impact'),
 
     card('When repositories last changed',
       h('div', { class: 'card-body chart-body' }, hbars(recency, { suffix: ' repos' })),
       `${dormant} of ${num(ov.repos)} have not been touched in a year \u2014 `
-      + 'their history still counts, but it no longer describes the code')));
+      + 'their history still counts, but it no longer describes the code',
+      null, '/repos?order_by=last_commit_at')));
 
   wrap.append(card('What history has produced',
     h('div', { class: 'card-body' },
@@ -724,7 +753,7 @@ on('/', async () => {
         miniStat('Impact edges', num(mining.impact_edges || 0), 'repository to repository'),
         miniStat('De-facto modules', num(mining.modules || 0), `${num(mining.cross_dir_modules || 0)} cross-directory`),
         miniStat('Manifest bumps', num(mining.dep_bumps || 0), 'observed version changes'))),
-    'The derived layers, in full under Insights'));
+    'The derived layers, in full under Insights', null, '/insights'));
 
   wrap.append(h('div', { class: 'section-title' }, 'Activity, last 24 hours'));
 
@@ -735,7 +764,7 @@ on('/', async () => {
   }));
   wrap.append(card('Calls per hour',
     h('div', { class: 'card-body' }, barChart(buckets, { label: 'calls' })),
-    'Bars turn red in an hour that contained a failed call'));
+    'Bars turn red in an hour that contained a failed call', null, '/activity'));
   wrap.append(h('div', { class: 'grid grid-stats' },
     statTile('MCP calls', num(c.mcp_calls || 0), 'tools invoked by agents', () => go('/activity?surface=mcp')),
     statTile('HTTP calls', num(c.http_calls || 0), 'API requests', () => go('/activity?surface=http')),
@@ -769,6 +798,10 @@ on('/', async () => {
     '; what history says about it is under ', h('a', { href: '/insights', 'data-nav': true }, 'Insights'), '.'));
   return wrap;
 });
+
+/** Columns of the repository table a link may ask to sort by. */
+const SORTABLE = new Set(['commit_count', 'file_count', 'pair_count', 'author_count',
+                          'last_commit_at', 'primary_language', 'name']);
 
 const reposView = async (args, params) => {
   const accountId = args.id ? Number(args.id) : null;
@@ -854,7 +887,10 @@ const reposView = async (args, params) => {
           { key: 'last_commit_at', label: 'Last commit', render: (r) => when(r.last_commit_at) },
           { key: 'ingest_status', label: 'Status', render: (r) => (r.ingest_error ? h('span', { class: 'badge danger', title: r.ingest_error }, 'failed') : statusBadge(r.ingest_status)) },
         ],
-        { initialSort: 'commit_count', onRow: (r) => go(`/repos/${r.id}`), empty: 'No repositories match those filters.' },
+        // Honour the sort a caller arrived with, so a chart that says "these
+        // repositories have gone quiet" lands on a list ordered by exactly that.
+        { initialSort: SORTABLE.has(params.order_by) ? params.order_by : 'commit_count',
+          onRow: (r) => go(`/repos/${r.id}`), empty: 'No repositories match those filters.' },
       ),
     ),
   );
@@ -1222,13 +1258,27 @@ async function treePanel(repoId, path, params) {
 }
 
 function metadataPanel(repo) {
+  // Facts about the repository, several of which are ways out: the fork's
+  // parent, the language, and the repository itself on GitHub.
   const rows = [
-    ['Full name', repo.full_name],
+    ['Full name', repo.html_url
+      ? h('a', { href: repo.html_url, target: '_blank', rel: 'noopener' }, repo.full_name)
+      : repo.full_name],
     ['GitHub id', repo.github_id],
     ['Default branch', repo.default_branch],
     ['Visibility', repo.visibility],
     ['License', repo.license_spdx],
-    ['Topics', (repo.topics || []).join(', ') || '—'],
+    ['Topics', (repo.topics || []).length
+      ? h('span', {}, ...(repo.topics || []).map((t) => h('span', {
+          class: 'badge muted is-link', style: 'margin-right:4px',
+          title: `Search repositories for ${t}`,
+          onclick: () => go(`/repos?q=${encodeURIComponent(t)}`),
+        }, t)))
+      : '—'],
+    ['Language', repo.primary_language
+      ? h('a', { href: `/repos?lang=${encodeURIComponent(repo.primary_language)}`,
+                 'data-nav': true }, repo.primary_language)
+      : '—'],
     ['Fork', String(repo.is_fork)],
     ['Archived', String(repo.is_archived)],
     ['Template', String(repo.is_template)],
@@ -1244,10 +1294,15 @@ function metadataPanel(repo) {
     ['Last ingested sha', repo.last_ingested_sha ? repo.last_ingested_sha.slice(0, 12) : '—'],
     ['Mirror path', repo.mirror_path],
     ['Ingest duration', repo.ingest_duration_s ? `${repo.ingest_duration_s.toFixed(1)}s` : '—'],
+    ['Ingest history', h('a', { href: '/jobs', 'data-nav': true }, 'every run')],
   ];
   const dl = h('dl', { class: 'kv' });
   for (const [k, v] of rows) {
-    dl.append(h('dt', {}, k), h('dd', {}, v === null || v === undefined ? '—' : String(v)));
+    // Elements pass through: several of these values are links, and String()
+    // turned them into "[object HTMLAnchorElement]".
+    const value = v === null || v === undefined ? '—'
+      : (v instanceof window.Node ? v : String(v));
+    dl.append(h('dt', {}, k), h('dd', {}, value));
   }
   return h('div', { class: 'grid grid-2' }, card('Repository metadata', h('div', { class: 'card-body' }, dl)));
 }
@@ -2313,7 +2368,8 @@ function chainNode(repos, hops, repoIds, reverse = false) {
   repos.forEach((name, i) => {
     wrap.appendChild(
       h('span', {
-        class: `node${i === 0 ? ' first' : ''}`,
+        class: `node${i === 0 ? ' first' : ''}${repoIds && repoIds[i] ? ' is-link' : ''}`,
+        title: repoIds && repoIds[i] ? `Open ${name}` : null,
         onclick: () => repoIds && repoIds[i] && go(`/repos/${repoIds[i]}`),
       }, name),
     );
@@ -2418,8 +2474,9 @@ on('/insights/impact', async (_args, params) => {
         h('span', { style: 'font-family:var(--mono);font-size:12px;color:var(--accent)' }, `${(c.path_score * 100).toFixed(1)}%`),
         h('span', { style: 'font-size:11px;color:var(--text-faint)' }, `${c.depth} hops`)));
     }
-    wrap.append(h('div', { class: 'card' },
-      h('div', { class: 'card-head' }, h('h3', { class: 'card-title' }, `${chains.chains.length} chains`)), body));
+    wrap.append(card(`${chains.chains.length} chains`, body,
+      'Each hop is a declared dependency or an observed bump \u2014 click a repository to open it',
+      null, '/insights/graph?mode=repos'));
   }
 
   wrap.append(h('div', { class: 'section-title' }, 'Declared dependencies and observed bumps'));
@@ -2430,7 +2487,12 @@ on('/insights/impact', async (_args, params) => {
         { key: 'dep_repo', label: 'Tracked repo', render: (d) => (d.dep_repo ? h('a', { href: `/repos/${d.dep_repo_id}`, 'data-nav': true, class: 'mono' }, d.dep_repo) : h('span', { class: 'badge muted' }, 'external')) },
         { key: 'manifest', label: 'Manifest', render: (d) => h('span', { class: 'badge muted' }, d.manifest) },
         { key: 'dep_version', label: 'Version', render: (d) => h('span', { class: 'mono', style: 'font-size:11px' }, (d.dep_version || '').slice(0, 34)) },
-      ], { empty: 'No manifest dependencies found.' }),
+      ], {
+        // Only a tracked dependency has somewhere to go; an external module is
+        // a name in a manifest and nothing more.
+        onRow: (d) => d.dep_repo_id && go(`/repos/${d.dep_repo_id}`),
+        empty: 'No manifest dependencies found.',
+      }),
       'Structural: the candidate set that lifts the base rate ~350×'),
     card(`Observed bumps (${deps.bumps.length})`,
       dataTable(deps.bumps, [
@@ -2679,7 +2741,11 @@ on('/insights/:section', async ({ section }, params) => {
 /** Horizontal bars with the value in line. `rows` need `label` and `value`. */
 function hbars(rows, { max = null, suffix = '', colour = true } = {}) {
   const top = max || Math.max(1, ...rows.map((r) => r.value));
-  return h('div', { class: 'hbars' }, ...rows.map((r, i) => h('div', { class: 'hbar' },
+  return h('div', { class: 'hbars' }, ...rows.map((r, i) => h('div', {
+    class: `hbar${r.to ? ' is-link' : ''}`,
+    onclick: r.to ? (e) => { e.stopPropagation(); go(r.to); } : null,
+    title: r.to ? `${r.label} \u2014 click to open` : null,
+  },
     h('span', { class: 'hbar-label', title: r.label }, r.label),
     h('span', { class: 'hbar-track' },
       h('span', {
@@ -2702,46 +2768,53 @@ const miniStat = (label, value, note) =>
    container so they survive a narrow window without a resize observer. */
 
 /** Hourly bars. `rows` need `label`, `value`, and optionally `alert`. */
-function barChart(rows, { height = 96, label = 'calls' } = {}) {
+/**
+ * A column chart, built from elements rather than SVG.
+ *
+ * The SVG version stretched a 100-unit viewBox to the card width with
+ * `preserveAspectRatio="none"`, which scales text non-uniformly: every axis
+ * label was drawn horizontally squashed. Elements avoid that entirely, and let
+ * each column carry its own value where there is room for one.
+ *
+ * `scale: 'log'` for a heavy tail. These distributions are power laws -- half
+ * the coupling pairs sit in the first bucket -- so on a linear axis one bar
+ * fills the card and the rest are two pixels tall and indistinguishable. A log
+ * axis shows the shape, and says so: read as linear, it makes the tail look far
+ * bigger than it is.
+ */
+function barChart(rows, { label = 'calls', scale = 'linear', height = 74 } = {}) {
   const max = Math.max(1, ...rows.map((r) => r.value));
-  const w = 100 / Math.max(rows.length, 1);
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('viewBox', `0 0 100 ${height}`);
-  svg.setAttribute('preserveAspectRatio', 'none');
-  svg.setAttribute('class', 'chart');
-  svg.style.height = `${height}px`;
+  const norm = scale === 'log'
+    ? (v) => (v > 0 ? Math.log10(v + 1) / Math.log10(max + 1) : 0)
+    : (v) => v / max;
+  // Values and per-column labels need room; past a dozen columns they collide,
+  // so the ends are labelled instead and the rest live in the tooltip.
+  const dense = rows.length > 12;
 
-  rows.forEach((r, i) => {
-    const h1 = Math.max(r.value ? 1.5 : 0, (r.value / max) * (height - 14));
-    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-    rect.setAttribute('x', String(i * w + w * 0.15));
-    rect.setAttribute('y', String(height - 12 - h1));
-    rect.setAttribute('width', String(w * 0.7));
-    rect.setAttribute('height', String(h1));
-    rect.setAttribute('rx', '0.6');
-    rect.setAttribute('fill', r.alert ? 'var(--danger)'
-      : (r.series ? `var(--series-${r.series})` : 'var(--accent)'));
-    rect.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'title'))
-        .textContent = `${r.label}: ${num(r.value)} ${label}`;
-    svg.appendChild(rect);
-  });
+  const cols = rows.map((r, i) => h('div', {
+    class: `cbar${r.to ? ' is-link' : ''}`,
+    title: r.to ? `${r.label}: ${num(r.value)} ${label} \u2014 click to open`
+                : `${r.label}: ${num(r.value)} ${label}`,
+    onclick: r.to ? (e) => { e.stopPropagation(); go(r.to); } : null,
+  },
+    dense ? null : h('span', { class: 'cbar-value' }, num(r.value)),
+    h('span', { class: 'cbar-track' },
+      h('span', {
+        class: 'cbar-fill',
+        style: `height:${Math.max(r.value ? 3 : 0, norm(r.value) * 100)}%;`
+             + `background:${r.alert ? 'var(--danger)'
+                : `var(--series-${r.series || ((i % 6) + 1)})`}`,
+      })),
+    h('span', { class: 'cbar-label' },
+      dense && i !== 0 && i !== rows.length - 1 ? '' : r.label)));
 
-  // Endpoints only: an axis label under every bar is unreadable at this size.
-  const tick = (x, text, anchorAt) => {
-    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-    t.setAttribute('x', String(x));
-    t.setAttribute('y', String(height - 2));
-    t.setAttribute('class', 'chart-tick');
-    t.setAttribute('text-anchor', anchorAt);
-    t.textContent = text;
-    svg.appendChild(t);
-    return t;
-  };
-  if (rows.length) {
-    tick(0.5, rows[0].label, 'start');
-    tick(99.5, rows[rows.length - 1].label, 'end');
-  }
-  return h('div', { class: 'chart-wrap' }, svg);
+  return h('div', { class: 'chart-wrap' },
+    h('div', { class: 'chart-scale' },
+      h('span', {}, `peak ${num(max)}`),
+      scale === 'log' ? h('span', { class: 'badge muted', title:
+        'Heights follow the logarithm of the count, so the small buckets stay '
+        + 'visible. Do not read one bar as a multiple of another.' }, 'log') : null),
+    h('div', { class: 'cbars', style: `--bar-h:${height}px` }, ...cols));
 }
 
 /** One horizontal bar split by category, with a legend underneath. */
