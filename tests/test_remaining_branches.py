@@ -8,10 +8,6 @@ from __future__ import annotations
 
 import pytest
 
-from git_synapse.analysis.depbump import patterns_for
-#: Patterns compiled for one internal owner. Passed explicitly so these tests
-#: describe the parser rather than whatever happens to be in the database.
-PATS = patterns_for(("acme",))
 
 
 
@@ -289,7 +285,7 @@ def test_declared_at_head_on_an_unreadable_mirror_is_empty(tmp_path):
 
     junk = tmp_path / "junk2"
     junk.mkdir()
-    assert declared_at_head(junk, "x", PATS, "go.mod", "go") == []
+    assert declared_at_head(junk, "x", "go.mod", "go") == []
 
 
 # ---------------------------------------------------------- engine defaults

@@ -48,168 +48,123 @@ from pathlib import Path
 
 import psycopg
 
+from git_synapse.analysis import manifests
 from git_synapse.db.engine import connection, copy_rows
 from git_synapse.ingest.gitops import _base_env, mirror_path_for
 
 log = logging.getLogger(__name__)
 
-@dataclass(frozen=True)
-class Patterns:
-    """The four manifest patterns, compiled for one set of internal owners.
+#: Go appends a major-version segment to a module path; it is not a repository.
+_MAJOR = re.compile(r"^v\d+$")
 
-    Which owners count as internal is a property of the deployment, not of this
-    module, so the patterns are built at call time from the owners actually
-    ingested rather than baked in.
+
+def repo_ref(dep_name: str) -> tuple[str | None, str]:
+    """Split a dependency reference into ``(owner, name)``.
+
+    Every ecosystem spells the same repository differently --
+    ``github.com/acme/signer``, ``@acme/signer``, ``acme/signer``, ``signer`` --
+    but the last two path segments are the owner and the repository in all of
+    them. The owner is None when the reference carries none, as with a bare
+    Cargo crate or an unscoped npm package.
     """
+    name = (dep_name or "").strip().strip("\"'").rstrip("/").lstrip("@")
+    if "://" in name:
+        name = name.split("://", 1)[1]
+    name = name.split("#", 1)[0].removesuffix(".git")
+    parts = [p for p in name.split("/") if p and not _MAJOR.match(p)]
+    if not parts:
+        return (None, "")
+    if len(parts) == 1:
+        return (None, parts[0].lower())
+    return (parts[-2].lower(), parts[-1].lower())
 
-    module: re.Pattern[str]
-    module_full: re.Pattern[str]
-    npm: re.Pattern[str]
-    npm_git: re.Pattern[str]
+
+def repo_key(dep_name: str) -> str:
+    """Just the repository name, for callers that cannot know the owner."""
+    return repo_ref(dep_name)[1]
 
 
-def internal_owners(conn: psycopg.Connection | None = None) -> tuple[str, ...]:
-    """The distinct GitHub owners of ingested repositories.
+def resolve_repo(dep_name: str, by_full_name: dict[tuple[str, str], int], by_name: dict[str, int]) -> int | None:
+    """The indexed repository a reference names, or None.
 
-    Read from ``repo`` rather than ``account`` so that removing an account does
-    not silently reclassify its already-mined dependencies as third-party.
+    Owner-aware on purpose. Matching on the repository name alone would make
+    ``gitlab.com/otherco/utils`` resolve to an indexed ``acme/utils`` -- an
+    unrelated company's library becoming an edge into this codebase. The name
+    alone is only trusted when the reference genuinely carries no owner.
     """
-    sql = "SELECT DISTINCT owner FROM repo WHERE owner <> '' ORDER BY owner"
-    if conn is not None:
-        return tuple(r[0] for r in conn.execute(sql).fetchall())
-    with connection() as own:
-        return tuple(r[0] for r in own.execute(sql).fetchall())
+    owner, name = repo_ref(dep_name)
+    if not name:
+        return None
+    if owner is not None:
+        return by_full_name.get((owner, name))
+    return by_name.get(name)
 
-
-@lru_cache(maxsize=8)
-def patterns_for(owners: tuple[str, ...]) -> Patterns:
-    """Compile the manifest patterns for the given internal owners.
-
-    A Go pseudo-version embeds the upstream commit it was cut from, so a
-    ``go.mod`` diff raising an internal module is a dated, directional statement
-    about which upstream commit a consumer absorbed.
-    """
-    if not owners:
-        # Match nothing rather than everything: an empty owner list means no
-        # repositories are ingested yet, and `github\.com//` would otherwise
-        # collapse into a pattern that treats every dependency as internal.
-        never = re.compile(r"(?!)")
-        return Patterns(never, never, never, never)
-
-    alt = "|".join(re.escape(o) for o in owners)
-    return Patterns(
-        # The optional /vN major suffix is stripped so the module maps back to a
-        # repository name.
-        module=re.compile(rf"github\.com/(?:{alt})/([A-Za-z0-9._-]+)(?:/v\d+)?\s+(\S+)"),
-        # Keeps everything after the repository name so an intra-repo submodule
-        # can be told from a cross-repo dependency, rather than both collapsing
-        # to the leading segment.
-        module_full=re.compile(
-            rf"github\.com/(?:{alt})/([A-Za-z0-9._-]+)((?:/[A-Za-z0-9._-]+)*?)(?:/v\d+)?\s+(\S+)"
-        ),
-        # An internal scoped package in package.json, which go.mod alone misses
-        # entirely for front-end repositories.
-        npm=re.compile(rf'"@(?:{alt})/([A-Za-z0-9._-]+)"\s*:\s*"([^"]+)"'),
-        # A git-URL dependency, how internal packages are often pinned before
-        # they are published.
-        npm_git=re.compile(
-            rf'"[^"]+"\s*:\s*"(?:git\+https://github\.com/|github:)(?:{alt})/'
-            r'([A-Za-z0-9._-]+?)(?:\.git)?(?:#([^"]*))?"'
-        ),
-    )
-
-#: Manifest basenames scanned, in (filename, ecosystem) form.
-MANIFESTS: tuple[tuple[str, str], ...] = (("go.mod", "go"), ("package.json", "npm"))
 
 #: Path prefixes and segments whose manifests describe third-party or fixture
 #: code rather than this repository's own dependencies.
+#: `docs/` earns its place here: django ships `docs/ref/models/constraints.txt`,
+#: which is prose about database constraints, and reading it as a pip
+#: constraints file invents dependencies out of English.
 _EXCLUDED_SEGMENTS = ("vendor/", "node_modules/", "testdata/", "third_party/",
-                      ".git/", "example/", "examples/")
+                      ".git/", "example/", "examples/", "docs/", "doc/", "website/")
 
 #: Ceiling on manifests read per repository. A monorepo legitimately has dozens;
 #: anything past this is a vendored tree that slipped the filter.
 MAX_MANIFESTS_PER_REPO = 200
 
 
+def _repo_lookups(conn: psycopg.Connection) -> tuple[dict[tuple[str, str], int], dict[str, int]]:
+    """Indexed repositories keyed by (owner, name) and, as a fallback, by name."""
+    rows = conn.execute("SELECT owner, name, id FROM repo").fetchall()
+    by_full = {(str(o).lower(), str(n).lower()): int(i) for o, n, i in rows}
+    by_name = {str(n).lower(): int(i) for _, n, i in rows}
+    return by_full, by_name
+
+
 def manifest_paths(mirror: Path) -> list[tuple[str, str]]:
     """Every manifest at HEAD, anywhere in the tree, as ``(path, ecosystem)``.
 
     Reading only the repository root was a real coverage gap, not a simplifying
-    assumption: this organisation's monorepos keep their real dependencies in
-    per-module manifests. `platform` has 14 go.mod files and declares nothing
-    internal at the root, so it looked like a repository with no internal
-    dependencies at all -- and a review of a change under `gateway/` concluded
-    there was no upstream to check, on the strength of data that was simply
-    absent. Across the org this hid 371 internal dependency references in 29
-    repositories.
+    assumption: monorepos keep their real dependencies in per-module manifests,
+    and a repository with fourteen go.mod files below the root looked like one
+    with no internal dependencies at all.
     """
     proc = subprocess.run(  # noqa: S603 - fixed executable
         ["git", "ls-tree", "-r", "--name-only", "HEAD"],
-        cwd=str(mirror),
-        env=_base_env(),
-        capture_output=True,
-        text=True,
-        errors="replace",
-        timeout=300,
+        cwd=str(mirror), env=_base_env(), capture_output=True,
+        text=True, errors="replace", timeout=300,
     )
     if proc.returncode != 0:
         return []
 
-    by_basename = {name: eco for name, eco in MANIFESTS}
     found: list[tuple[str, str]] = []
     for line in proc.stdout.splitlines():
         path = line.strip()
         if not path:
             continue
-        basename = path.rsplit("/", 1)[-1]
-        eco = by_basename.get(basename)
-        if eco is None:
-            continue
         lowered = path.lower()
         if any(seg in lowered for seg in _EXCLUDED_SEGMENTS):
             continue
-        found.append((path, eco))
+        eco = manifests.ecosystem_for(path)
+        if eco is None:
+            continue
+        found.append((path, eco.name))
         if len(found) >= MAX_MANIFESTS_PER_REPO:
             log.warning("manifest cap reached in %s; ignoring the rest", mirror.name)
             break
     return found
 
 
-def _parse_manifest_line(line: str, ecosystem: str, pats: Patterns) -> tuple[str, str] | None:
-    """Extract an internal ``(dep_name, version)`` from one manifest line.
-
-    A commented-out or excluded line is not a dependency. Both were being read as
-    one, and `declared` is the tier agents are told to trust above all others: a
-    line a developer commented out became the top-ranked impact edge for its
-    repository. ``exclude`` is the opposite of a requirement, so it must not
-    produce an edge either.
-    """
-    if ecosystem == "go":
-        stripped = line.lstrip()
-        if stripped.startswith("//") or stripped.startswith("exclude "):
-            return None
-        # A trailing comment can still carry a module path; only the code before
-        # it declares anything.
-        line = line.split("//", 1)[0]
-        match = pats.module.search(line)
-        return (match.group(1), match.group(2)) if match else None
-
-    match = pats.npm.search(line)
-    if match:
-        return match.group(1), match.group(2)
-    match = pats.npm_git.search(line)
-    if match:
-        return match.group(1), match.group(2) or "git"
-    return None
-
-#: Go pseudo-versions come in three shapes, and the separator before the
-#: timestamp is '-' in vX.0.0-<ts>-<sha> but '.' in vX.Y.Z-0.<ts>-<sha> and
-#: vX.Y.Z-pre.0.<ts>-<sha>. Accepting only '-' silently dropped 17% of edges.
-_PSEUDO = re.compile(r"[-.](\d{14})-([0-9a-f]{12})$")
-
-#: Marker prefixing each commit in the log stream. '@@' alone cannot collide
-#: with a diff hunk header, which is always followed by a space.
-_MARK = "@@"
+def _snapshot(mirror: Path, sha: str, path: str) -> dict[str, manifests.Reference]:
+    """Every reference a manifest declared at one commit, keyed by name."""
+    proc = subprocess.run(  # noqa: S603 - fixed executable
+        ["git", "show", f"{sha}:{path}"],
+        cwd=str(mirror), env=_base_env(), capture_output=True,
+        text=True, errors="replace", timeout=120,
+    )
+    if proc.returncode != 0:
+        return {}
+    return {r.name: r for r in manifests.references(path, proc.stdout)}
 
 
 @dataclass
@@ -234,136 +189,84 @@ class BumpEdge:
     manifest: str
 
 
-def extract_from_mirror(mirror: Path, repo_name: str, pats: Patterns, manifest: str = "go.mod", ecosystem: str = "go") -> list[BumpEdge]:
-    """Walk a mirror's manifest history and return every internal bump.
+def extract_from_mirror(mirror: Path, repo_name: str, manifest: str = "go.mod", ecosystem: str = "go", max_commits: int = 400) -> list[BumpEdge]:
+    """Walk a manifest's history and return every version change it records.
 
-    Only *added* lines are kept: they carry the version being moved **to**, which
-    is the one that identifies the upstream commit now being consumed.
+    Compares whole-file snapshots at consecutive commits rather than reading
+    added diff lines. A diff line carries no context -- ``version = "1.2.3"``
+    says nothing about which package it belongs to -- which is why the line
+    reading only ever worked for go.mod and package.json. Parsing the file at
+    each commit that touched it costs one `git show` per revision and works for
+    every format, structured ones included.
     """
     proc = subprocess.run(  # noqa: S603 - fixed executable
-        [
-            "git", "log", "--all", "--no-merges",
-            f"--format={_MARK}%H", "-p", "--unified=0", "--", manifest,
-        ],
-        cwd=str(mirror),
-        env=_base_env(),
-        capture_output=True,
-        text=True,
-        errors="replace",
-        timeout=900,
+        ["git", "log", "--all", "--no-merges", "--format=%H", "--", manifest],
+        cwd=str(mirror), env=_base_env(), capture_output=True,
+        text=True, errors="replace", timeout=900,
     )
     if proc.returncode != 0:
         log.warning("manifest scan failed for %s: %s", repo_name, proc.stderr[:200])
         return []
 
+    # Oldest first, so each snapshot is compared against what preceded it.
+    revisions = list(reversed(proc.stdout.split()))[:max_commits]
     edges: list[BumpEdge] = []
-    sha: str | None = None
-    for line in proc.stdout.splitlines():
-        # A commit marker, not a diff hunk header (which is "@@ -a,b +c,d @@").
-        if line.startswith(_MARK) and not line.startswith(_MARK + " "):
-            sha = line[len(_MARK):].strip()
-            continue
-        if not line.startswith("+") or line.startswith("+++"):
-            continue
-        if sha is None:
-            continue
-        parsed = _parse_manifest_line(line, ecosystem, pats)
-        if parsed is None:
-            continue
-        dep_name, version = parsed
-        # A module self-reference is the `module` line, not a dependency.
-        if dep_name == repo_name:
-            continue
-        pseudo = _PSEUDO.search(version)
-        edges.append(
-            BumpEdge(
+    previous: dict[str, manifests.Reference] = {}
+    for sha in revisions:
+        current = _snapshot(mirror, sha, manifest)
+        for name, ref in current.items():
+            was = previous.get(name)
+            if was is not None and was.raw == ref.raw:
+                continue                      # unchanged at this commit
+            if repo_key(name) == repo_key(repo_name):
+                continue                      # the module naming itself
+            edges.append(BumpEdge(
                 consumer_sha=sha,
-                dep_name=dep_name,
-                dep_version=version,
-                dep_sha=pseudo.group(2) if pseudo else None,
+                dep_name=name,
+                dep_version=ref.raw,
+                dep_sha=ref.sha,
                 manifest=manifest,
-            )
-        )
+            ))
+        previous = current
     return edges
 
 
-def declared_at_head(mirror: Path, repo_name: str, pats: Patterns, manifest: str = "go.mod", ecosystem: str = "go") -> list[tuple[str, str]]:
-    """Internal dependencies declared in ``manifest`` at HEAD.
+def declared_at_head(mirror: Path, repo_name: str, manifest: str = "go.mod", ecosystem: str = "go") -> list[tuple[str, str]]:
+    """Dependencies declared in ``manifest`` at HEAD.
 
     Present-tense and structural, in contrast to :func:`extract_from_mirror`
     which reads history. This is the candidate set for impact prediction.
-
-    Returns:
-        ``(dep_name, dep_version)`` pairs, excluding the module's own name.
     """
-    proc = subprocess.run(  # noqa: S603 - fixed executable
-        ["git", "show", f"HEAD:{manifest}"],
-        cwd=str(mirror),
-        env=_base_env(),
-        capture_output=True,
-        text=True,
-        errors="replace",
-        timeout=120,
-    )
-    if proc.returncode != 0:
-        return []
-
-    out: dict[str, str] = {}
-    for line in proc.stdout.splitlines():
-        stripped = line.strip()
-        # The `module` line names this repo, not a dependency.
-        if stripped.startswith("module "):
-            continue
-        parsed = _parse_manifest_line(line, ecosystem, pats)
-        if parsed is None:
-            continue
-        name, version = parsed
-        if name == repo_name:
-            continue
-        out.setdefault(name, version)
-    return sorted(out.items())
+    refs = _snapshot(mirror, "HEAD", manifest)
+    return [(r.name, r.raw) for r in refs.values() if repo_key(r.name) != repo_key(repo_name)]
 
 
-def declared_modules_at_head(mirror: Path, repo_name: str, manifest: str, pats: Patterns) -> list[tuple[str, str, str]]:
+def declared_modules_at_head(mirror: Path, repo_name: str, manifest: str) -> list[tuple[str, str, str]]:
     """Intra-repository module dependencies declared in one manifest.
 
     Returns ``(consumer_module, dep_module, version)`` for every reference the
     manifest makes to another module of the *same* repository. These are the
-    references :func:`declared_at_head` deliberately skips as self-references,
-    and in a monorepo they are the whole structural graph.
+    references :func:`declared_at_head` skips as self-references, and in a
+    monorepo they are the whole structural graph.
 
     ``consumer_module`` is the manifest's own directory, so ``gateway/go.mod``
-    yields ``gateway``. A module declaring itself is dropped: Go manifests name
-    their own module path on the `module` line and in `replace` directives.
+    yields ``gateway``. A module declaring itself is dropped.
     """
-    proc = subprocess.run(  # noqa: S603 - fixed executable
-        ["git", "show", f"HEAD:{manifest}"],
-        cwd=str(mirror),
-        env=_base_env(),
-        capture_output=True,
-        text=True,
-        errors="replace",
-        timeout=120,
-    )
-    if proc.returncode != 0:
-        return []
-
     consumer = manifest.rsplit("/", 1)[0] if "/" in manifest else ""
+    key = repo_key(repo_name)
     out: dict[str, tuple[str, str, str]] = {}
-    for line in proc.stdout.splitlines():
-        match = pats.module_full.search(line)
-        if match is None:
+    for ref in _snapshot(mirror, "HEAD", manifest).values():
+        segments = ref.name.split("/")
+        # Find where this repository's own name appears; what follows is the
+        # module path inside it. Anything else is a cross-repo dependency.
+        try:
+            at = next(i for i, seg in enumerate(segments) if seg.lower() == key)
+        except StopIteration:
             continue
-        repo_part, sub, version = match.group(1), match.group(2) or "", match.group(3)
-        if repo_part != repo_name:
-            continue  # cross-repo; declared_at_head owns that
-        dep_module = sub.lstrip("/")
-        if dep_module == consumer:
-            continue  # the module line, or a replace pointing at itself
-        # A `module` line has no version token; skip those explicitly.
-        if line.strip().startswith("module "):
+        dep_module = "/".join(segments[at + 1:])
+        if not dep_module or dep_module == consumer:
             continue
-        out.setdefault(dep_module, (consumer, dep_module, version))
+        out.setdefault(dep_module, (consumer, dep_module, ref.raw))
     return list(out.values())
 
 
@@ -379,7 +282,6 @@ def refresh_modules(conn: psycopg.Connection | None = None) -> int:
             "SELECT id, full_name, name FROM repo WHERE is_enabled ORDER BY id"
         ).fetchall()
 
-        pats = patterns_for(internal_owners(c))
         payload = []
         for repo_id, full_name, name in rows:
             mirror = mirror_path_for(full_name)
@@ -389,9 +291,7 @@ def refresh_modules(conn: psycopg.Connection | None = None) -> int:
             if len(manifests) < 2:
                 continue  # a single-module repo has no internal graph
             for manifest in manifests:
-                for consumer, dep, version in declared_modules_at_head(
-                    mirror, name, manifest, pats
-                ):
+                for consumer, dep, version in declared_modules_at_head(mirror, name, manifest):
                     payload.append(
                         (repo_id, consumer, dep, manifest, "go", version[:200])
                     )
@@ -468,27 +368,24 @@ def refresh_declared(
               {stale}
             ORDER BY r.id
             """,
-            {"manifests": [m for m, _ in MANIFESTS]},
+            {"manifests": list(manifests.MANIFEST_FILES)},
         ).fetchall()
         if not rows:
             total = int(c.execute("SELECT count(*) FROM repo_dependency"
                                   " WHERE dep_repo_id IS NOT NULL").fetchone()[0])
             log.info("declared dependencies: no repository manifests changed")
             return total
-        name_to_id = {
-            row[0]: int(row[1]) for row in c.execute("SELECT name, id FROM repo").fetchall()
-        }
+        by_full, by_name = _repo_lookups(c)
 
-        pats = patterns_for(internal_owners(c))
         payload = []
         for repo_id, full_name, name in rows:
             mirror = mirror_path_for(full_name)
             if not mirror.is_dir():
                 continue
             for manifest, ecosystem in manifest_paths(mirror):
-                for dep_name, version in declared_at_head(mirror, name, pats, manifest, ecosystem):
+                for dep_name, version in declared_at_head(mirror, name, manifest, ecosystem):
                     payload.append(
-                        (repo_id, name_to_id.get(dep_name), dep_name,
+                        (repo_id, resolve_repo(dep_name, by_full, by_name), dep_name,
                          version[:200], manifest, ecosystem)
                     )
 
@@ -575,7 +472,7 @@ def _repos_to_scan(conn: psycopg.Connection, force: bool) -> list[tuple[int, str
           {clause}
         ORDER BY r.id
         """,
-        {"manifests": [m for m, _ in MANIFESTS]},
+        {"manifests": list(manifests.MANIFEST_FILES)},
     ).fetchall()
     return [(int(r[0]), r[1], r[2]) for r in rows]
 
@@ -597,14 +494,9 @@ def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> Bump
             log.debug("no repositories need a manifest scan")
             return stats
 
-        # Map repository names to ids once, so a dependency can be resolved to a
-        # tracked repo without a query per edge.
-        name_to_id = {
-            row[0]: int(row[1])
-            for row in c.execute("SELECT name, id FROM repo").fetchall()
-        }
+        # Built once, so a dependency resolves without a query per edge.
+        by_full, by_name = _repo_lookups(c)
 
-        pats = patterns_for(internal_owners(c))
         payload: list[tuple] = []
         for repo_id, full_name, name in targets:
             mirror = mirror_path_for(full_name)
@@ -613,14 +505,14 @@ def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> Bump
             stats.repos_scanned += 1
             edges: list[BumpEdge] = []
             for manifest, ecosystem in manifest_paths(mirror):
-                edges.extend(extract_from_mirror(mirror, name, pats, manifest, ecosystem))
+                edges.extend(extract_from_mirror(mirror, name, manifest, ecosystem))
             stats.edges_found += len(edges)
             for edge in edges:
                 payload.append(
                     (
                         repo_id,
                         edge.consumer_sha,
-                        name_to_id.get(edge.dep_name),
+                        resolve_repo(edge.dep_name, by_full, by_name),
                         edge.dep_name,
                         edge.dep_version[:200],
                         edge.dep_sha,
