@@ -47,6 +47,26 @@ def test_release_versions_carry_no_sha(version):
 
 # ------------------------------------------------- manifests on a real repo
 
+def _history_repo(tmp_path, revisions: list[dict[str, str]]):
+    """A bare mirror with one commit per entry, so a manifest's *history* is
+    what gets read rather than a single snapshot."""
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e",
+           "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
+    work = tmp_path / "work"
+    work.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(work)], check=True)
+    for i, files in enumerate(revisions):
+        for rel, body in files.items():
+            (work / rel).write_text(body)
+        subprocess.run(["git", "add", "-A"], cwd=work, check=True, env=env)
+        subprocess.run(["git", "commit", "--quiet", "-m", f"r{i}"],
+                       cwd=work, check=True, env=env)
+    bare = tmp_path / "m.git"
+    subprocess.run(["git", "clone", "--quiet", "--bare", str(work), str(bare)], check=True)
+    return bare
+
+
 def _repo(tmp_path, files: dict[str, str]):
     """A real bare mirror containing `files`, so the git-facing code is exercised."""
     work = tmp_path / "work"
@@ -613,3 +633,37 @@ def test_a_coordinate_does_not_cross_ecosystems(bump_env):
         "SELECT id, dep_repo_id FROM dep_bump WHERE id = ANY(%s)", ([npm, php],)).fetchall())
     assert linked[npm] is None, "an npm package must not resolve to a PHP repository"
     assert linked[php] == dep
+
+
+# ------------------------------------------------------- reference parsing
+
+@pytest.mark.parametrize("ref", ["", "   ", "/", "@", "///"])
+def test_a_reference_with_no_name_resolves_to_nothing(ref):
+    """An empty coordinate must not fall through to whichever repository the
+    index happens to yield first."""
+    assert repo_ref(ref) == (None, "")
+    assert resolve_repo(ref, {("a", "b"): 1}, {"b": 1}) is None
+
+
+def test_an_unchanged_manifest_line_is_not_a_bump(tmp_path):
+    """A bump is a *change*. Re-reading the same version at every commit would
+    record one decision once per commit that followed it."""
+    from git_synapse.analysis.depbump import extract_from_mirror
+
+    repo = _history_repo(tmp_path, [
+        {"go.mod": "module github.com/acme/app\n\nrequire github.com/acme/lib v1.0.0\n"},
+        {"README.md": "unrelated"},                     # manifest untouched
+        {"go.mod": "module github.com/acme/app\n\nrequire github.com/acme/lib v1.1.0\n"},
+    ])
+    edges = extract_from_mirror(repo, "app", "go.mod", "go")
+    assert [e.dep_version for e in edges] == ["v1.0.0", "v1.1.0"]
+
+
+def test_a_module_naming_itself_is_not_a_dependency(tmp_path):
+    """A monorepo's module names itself in its own manifest; recording that
+    would make every repository depend on itself."""
+    from git_synapse.analysis.depbump import extract_from_mirror
+
+    repo = _repo(tmp_path, {
+        "go.mod": "module github.com/acme/app\n\nrequire github.com/acme/app v1.0.0\n"})
+    assert extract_from_mirror(repo, "app", "go.mod", "go") == []
