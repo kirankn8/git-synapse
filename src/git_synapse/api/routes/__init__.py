@@ -201,6 +201,21 @@ def repo_files(
     return {"count": len(rows), "files": rows}
 
 
+@router.get("/repos/{repo_id}/tree", tags=["repos"])
+def repo_tree(
+    repo_id: int,
+    path: str = "",
+    limit: int = Query(1000, ge=1, le=5000),
+) -> dict:
+    """One level of a repository's tree, for browsing it as it is laid out."""
+    if q.get_repo(repo_id) is None:
+        raise HTTPException(404, f"repository {repo_id} not found")
+    tree = q.directory_tree(repo_id, path.strip("/"), limit)
+    if tree["directory"] is None and tree["path"]:
+        raise HTTPException(404, f"no directory {path!r} in repository {repo_id}")
+    return tree
+
+
 @router.get("/repos/{repo_id}/directories", tags=["repos"])
 def repo_directories(repo_id: int, limit: int = Query(200, ge=1, le=1000)) -> dict:
     return {"directories": q.directories(repo_id, limit)}
@@ -263,11 +278,17 @@ def search_files(
 
 
 @router.get("/files/resolve", tags=["files"])
-def resolve_file(repo: str, path: str) -> dict:
-    """Look a file up by repo and path, following renames through the alias table."""
-    row = q.resolve_file(repo, path)
+def resolve_file(path: str, repo: str | None = None, repo_id: int | None = None) -> dict:
+    """Look a file up by repo and path, following renames through the alias table.
+
+    Name the repository either way: ``repo`` for humans and agents, ``repo_id``
+    for the UI, whose URLs address files by path so they survive a re-ingest.
+    """
+    if (repo is None) == (repo_id is None):
+        raise HTTPException(400, "give exactly one of repo or repo_id")
+    row = q.resolve_file(repo, path, repo_id)
     if row is None:
-        raise HTTPException(404, f"no file {path!r} in repository {repo!r}")
+        raise HTTPException(404, f"no file {path!r} in repository {repo or repo_id!r}")
     return row
 
 

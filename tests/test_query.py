@@ -183,6 +183,56 @@ def test_directories_listing_is_scoped(db):
     assert leaked["n"] == 0
 
 
+def test_the_tree_returns_one_level_and_nothing_below_it(corpus, db):
+    """Browsing descends a level at a time. A subdirectory two levels down
+    appearing at the root would make the folder page a flat dump."""
+    row = q.query_one(
+        "SELECT repo_id FROM directory WHERE depth >= 2 GROUP BY repo_id LIMIT 1"
+    )
+    if row is None:
+        pytest.skip("no repository with nested directories")
+    repo_id = row["repo_id"]
+
+    root = q.directory_tree(repo_id)
+    assert root["path"] == "" and root["directory"] is None
+    assert all(d["depth"] == 1 for d in root["directories"])
+    assert all(f["dir_path"] == "" for f in root["files"])
+    assert root["directories"], "a repository with depth-2 dirs has depth-1 dirs"
+
+    top = root["directories"][0]["path"]
+    child = q.directory_tree(repo_id, top)
+    assert child["directory"]["path"] == top
+    assert all(d["path"].startswith(f"{top}/") and d["depth"] == 2
+               for d in child["directories"])
+    assert all(f["dir_path"] == top for f in child["files"])
+
+
+def test_the_tree_reports_a_path_that_names_nothing(corpus, db):
+    """Distinguished from an empty directory, so the route can 404 rather than
+    render a folder page for a path that was never in the repository."""
+    row = q.query_one("SELECT id FROM repo LIMIT 1")
+    if row is None:
+        pytest.skip("no repositories")
+    missing = q.directory_tree(row["id"], "no/such/directory")
+    assert missing["directory"] is None
+    assert missing["directories"] == [] and missing["files"] == []
+
+
+def test_a_file_resolves_by_repository_id_as_well_as_by_name(corpus, db):
+    """The UI addresses files by path under a repository id, because ids
+    renumber on a re-ingest and a link keyed on one quietly changes meaning."""
+    row = q.query_one(
+        "SELECT f.repo_id, r.full_name AS repo, f.path"
+        " FROM file f JOIN repo r ON r.id = f.repo_id LIMIT 1"
+    )
+    if row is None:
+        pytest.skip("no files")
+    by_name = q.resolve_file(row["repo"], row["path"])
+    by_id = q.resolve_file(None, row["path"], repo_id=row["repo_id"])
+    assert by_name is not None and by_id == by_name
+    assert q.resolve_file(None, row["path"], repo_id=999999999) is None
+
+
 def test_file_authors_and_commits_are_bounded(db):
     row = q.query_one("SELECT id FROM file WHERE change_count > 5 LIMIT 1")
     if row is None:

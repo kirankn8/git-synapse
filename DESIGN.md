@@ -20,6 +20,7 @@ database table and the decisions that materially change the numbers.
 | [**From a declared version to a commit**](#from-a-declared-version-to-a-commit) | the four tiers, and what each is allowed to claim |
 | [**What the backtest is measured against**](#what-the-backtest-is-measured-against) | the baselines, and why a weak one is worse than none |
 | [What is incremental](#what-is-incremental-and-what-isnt) | what a refresh actually redoes |
+| [**How the UI is addressed**](#how-the-ui-is-addressed) | places nest in the path, analyses scope with a query |
 | [Bookkeeping](#bookkeeping) · [Portability](#portability) · [Layout](#layout) | operations and structure |
 | [Adding a measure](#adding-a-measure) | extending the registry |
 
@@ -755,6 +756,66 @@ The API, MCP server, CLI and UI all enumerate from the registry, so nothing else
 
 ---
 
+
+## How the UI is addressed
+
+The application had ten tabs, and five of them were views onto two things —
+files and pairs — at different scopes. The repository page alone reimplemented
+seven of the ten distinct things in the app, five of which were also a top-level
+tab. Every question had two homes, so no click could be predicted.
+
+One rule replaced them:
+
+> **Places nest in the path. Analyses scope with a query.**
+
+A file is *in* a repository, which is *in* an account: that nests, so it is a
+path. "Risk" is a question you can ask of any scope: that does not nest, so it
+is a filter. Two tabs carry the whole application, split on something a reader
+can check rather than on taste:
+
+| Tab | Owns |
+|---|---|
+| **Repositories** | the things — repositories, folders, files, pairs — and what is *in* them |
+| **Insights** | every analysis derived from history — impact, risk, drift, modules |
+| Overview · Accounts · Measures · Jobs · Feedback | dashboard, configuration, reference, operations |
+
+```
+/accounts                                   /insights            -> /insights/impact
+/accounts/7                                 /insights/impact       ?repo=5
+/repos                                      /insights/impact/5/12  one edge, with bump evidence
+/repos/5                                    /insights/impact/graph nodes are repositories
+/repos/5/tree/src/main/java                 /insights/risk         ?repo=5
+/repos/5/files/src/main/java/Cache.java     /insights/drift        ?repo=5
+/repos/5/pairs/36/91                        /insights/modules      ?repo=5
+/repos/5/graph
+```
+
+Three consequences worth stating, because each was a defect before:
+
+**Folders and files are addressed by path, not by id.** Ids renumber on a
+re-ingest, so a link keyed on one silently comes to mean a different file —
+worse than failing, because nothing looks wrong. `directory` is
+`UNIQUE (repo_id, path)` and `/api/files/resolve` follows the rename alias
+table, so a link to a path that has since moved still lands on the file it
+became, and the address is then corrected to the current path.
+
+**A lens result always lands back in the hierarchy.** Clicking a file in
+Insights opens `/repos/5/files/…`, because that is where the file lives. This
+only reads as a jump if clicking a *repository* went somewhere other than the
+repository — which is exactly the bug that prompted the restructure.
+
+**The graphs render data, they do not own it.** The file graph draws one
+repository's pairs, so it sits at `/repos/5/graph`; the repository graph draws
+impact edges, so it sits at `/insights/impact/graph`. Neither is a tab, because
+neither answers a question no other view answers.
+
+Two tests hold the shape. `tests/test_ui_links.py` checks every `href` and
+`go()` target in `app.js` against the client's own route table and against the
+server's `SPA_ROUTES` — a commit that renamed the routes once left eleven dead
+links behind, and the suite stayed green because the smoke test renders routes
+without ever following a link. `tests/ui/smoke.mjs` then walks
+account → repository → folder → file by *clicking*, asserting the breadcrumb
+grows a rung at each step.
 
 ## Layout
 
