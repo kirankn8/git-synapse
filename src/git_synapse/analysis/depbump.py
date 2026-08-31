@@ -41,6 +41,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+from collections import defaultdict
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -85,14 +86,39 @@ def repo_key(dep_name: str) -> str:
     return repo_ref(dep_name)[1]
 
 
-def resolve_repo(dep_name: str, by_full_name: dict[tuple[str, str], int], by_name: dict[str, int]) -> int | None:
+def published_at_head(mirror: Path) -> set[str]:
+    """Every package coordinate this repository publishes, from its manifests.
+
+    A monorepo publishes many, so this is a set. Both the full coordinate and
+    its last segment are recorded, because a consumer may write either:
+    Maven's pom names `com.google.guava:guava` and the dependency block that
+    consumes it writes `guava`.
+    """
+    names: set[str] = set()
+    for path, _ in manifest_paths(mirror):
+        text = _blob_at(mirror, "HEAD", path)
+        for full in manifests.published_names(path, text):
+            names.add(full.lower())
+            if (tail := re.split(r"[:/]", full)[-1]):
+                names.add(tail.lower())
+    return names
+
+
+def resolve_repo(dep_name: str, by_full_name: dict[tuple[str, str], int],
+                 by_name: dict[str, int], by_package: dict[str, int] | None = None) -> int | None:
     """The indexed repository a reference names, or None.
 
-    Owner-aware on purpose. Matching on the repository name alone would make
-    ``gitlab.com/otherco/utils`` resolve to an indexed ``acme/utils`` -- an
-    unrelated company's library becoming an edge into this codebase. The name
-    alone is only trusted when the reference genuinely carries no owner.
+    What a repository publishes is checked first, because that is a fact it
+    declared about itself rather than an inference from the strings agreeing.
+
+    The fallback is owner-aware on purpose. Matching on the repository name
+    alone would make ``gitlab.com/otherco/utils`` resolve to an indexed
+    ``acme/utils`` -- an unrelated company's library becoming an edge into this
+    codebase. The name alone is only trusted when the reference genuinely
+    carries no owner.
     """
+    if by_package and (hit := by_package.get((dep_name or "").strip().lower())):
+        return hit
     owner, name = repo_ref(dep_name)
     if not name:
         return None
@@ -114,12 +140,31 @@ _EXCLUDED_SEGMENTS = ("vendor/", "node_modules/", "testdata/", "third_party/",
 MAX_MANIFESTS_PER_REPO = 200
 
 
-def _repo_lookups(conn: psycopg.Connection) -> tuple[dict[tuple[str, str], int], dict[str, int]]:
-    """Indexed repositories keyed by (owner, name) and, as a fallback, by name."""
+def _record_packages(conn: psycopg.Connection, repo_id: int, names: set[str]) -> None:
+    """Replace what this repository is known to publish."""
+    conn.execute("DELETE FROM repo_package WHERE repo_id = %s", (repo_id,))
+    if names:
+        with conn.cursor() as cur:
+            cur.executemany("INSERT INTO repo_package (repo_id, name) VALUES (%s, %s) "
+                            "ON CONFLICT DO NOTHING", [(repo_id, n) for n in sorted(names)])
+
+
+def _repo_lookups(conn: psycopg.Connection) -> tuple[dict[tuple[str, str], int], dict[str, int], dict[str, int]]:
+    """Repositories by (owner, name), by name, and by what they publish.
+
+    A coordinate two repositories both claim is dropped rather than resolved to
+    whichever came first: two projects publishing an artifact called `core` is
+    ordinary, and picking one would invent an edge.
+    """
     rows = conn.execute("SELECT owner, name, id FROM repo").fetchall()
     by_full = {(str(o).lower(), str(n).lower()): int(i) for o, n, i in rows}
     by_name = {str(n).lower(): int(i) for _, n, i in rows}
-    return by_full, by_name
+
+    claims: dict[str, set[int]] = defaultdict(set)
+    for name, repo_id in conn.execute("SELECT name, repo_id FROM repo_package").fetchall():
+        claims[str(name).lower()].add(int(repo_id))
+    by_package = {n: next(iter(ids)) for n, ids in claims.items() if len(ids) == 1}
+    return by_full, by_name, by_package
 
 
 def manifest_paths(mirror: Path) -> list[tuple[str, str]]:
@@ -156,16 +201,19 @@ def manifest_paths(mirror: Path) -> list[tuple[str, str]]:
     return found
 
 
-def _snapshot(mirror: Path, sha: str, path: str) -> dict[str, manifests.Reference]:
-    """Every reference a manifest declared at one commit, keyed by name."""
+def _blob_at(mirror: Path, sha: str, path: str) -> str:
+    """One file as it stood at one commit, or "" if it was not there."""
     proc = subprocess.run(  # noqa: S603 - fixed executable
         ["git", "show", f"{sha}:{path}"],
         cwd=str(mirror), env=_base_env(), capture_output=True,
         text=True, errors="replace", timeout=120,
     )
-    if proc.returncode != 0:
-        return {}
-    return {r.name: r for r in manifests.references(path, proc.stdout)}
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def _snapshot(mirror: Path, sha: str, path: str) -> dict[str, manifests.Reference]:
+    """Every reference a manifest declared at one commit, keyed by name."""
+    return {r.name: r for r in manifests.references(path, _blob_at(mirror, sha, path))}
 
 
 @dataclass
@@ -376,7 +424,7 @@ def refresh_declared(
                                   " WHERE dep_repo_id IS NOT NULL").fetchone()[0])
             log.info("declared dependencies: no repository manifests changed")
             return total
-        by_full, by_name = _repo_lookups(c)
+        by_full, by_name, by_pkg = _repo_lookups(c)
 
         payload = []
         for repo_id, full_name, name in rows:
@@ -386,7 +434,7 @@ def refresh_declared(
             for manifest, ecosystem in manifest_paths(mirror):
                 for dep_name, version in declared_at_head(mirror, name, manifest, ecosystem):
                     payload.append(
-                        (repo_id, resolve_repo(dep_name, by_full, by_name), dep_name,
+                        (repo_id, resolve_repo(dep_name, by_full, by_name, by_pkg), dep_name,
                          version[:200], manifest, ecosystem)
                     )
 
@@ -503,6 +551,7 @@ def resolve_bumps(conn: psycopg.Connection | None = None) -> int:
     """
 
     def _run(c: psycopg.Connection) -> int:
+        linked = _link_repositories(c)
         _fill_version_keys(c)
 
         # Pins first: a reference naming a commit needs no interpretation.
@@ -551,15 +600,41 @@ def resolve_bumps(conn: psycopg.Connection | None = None) -> int:
                AND cc.sha = b.consumer_sha
             """
         )
-        log.info("bump resolution: %d by pinned sha, %d by tag or floor, "
-                 "%d by ceiling; %d rejected as impossible",
-                 by_sha, by_tag, by_ceiling, rejected)
+        log.info("bump resolution: %d newly linked to a repository, %d by pinned "
+                 "sha, %d by tag or floor, %d by ceiling; %d rejected as impossible",
+                 linked, by_sha, by_tag, by_ceiling, rejected)
         return by_sha + by_tag + by_ceiling
 
     if conn is not None:
         return _run(conn)
     with connection() as own:
         return _run(own)
+
+
+def _link_repositories(c: psycopg.Connection) -> int:
+    """Attach bumps to the repository that publishes what they name.
+
+    Re-runnable like the rest of this pass, and for the same reason: a bump is
+    recorded before the repository publishing it is necessarily indexed, and a
+    coordinate only becomes attributable once that repository's own manifests
+    have been read.
+
+    A coordinate two repositories both claim is left alone, and so is one
+    naming the consumer itself -- an intra-repository reference is a module
+    edge, not a dependency between repositories.
+    """
+    return c.execute(
+        """
+        UPDATE dep_bump b
+           SET dep_repo_id = p.repo_id
+          FROM (SELECT name, min(repo_id) AS repo_id
+                  FROM repo_package GROUP BY name
+                HAVING count(DISTINCT repo_id) = 1) p
+         WHERE b.dep_repo_id IS NULL
+           AND lower(b.dep_name) = p.name
+           AND p.repo_id <> b.consumer_repo_id
+        """
+    ).rowcount or 0
 
 
 def _fill_version_keys(c: psycopg.Connection) -> None:
@@ -683,7 +758,7 @@ def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> Bump
             return stats
 
         # Built once, so a dependency resolves without a query per edge.
-        by_full, by_name = _repo_lookups(c)
+        by_full, by_name, by_pkg = _repo_lookups(c)
 
         payload: list[tuple] = []
         for repo_id, full_name, name in targets:
@@ -692,6 +767,7 @@ def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> Bump
                 continue
             stats.repos_scanned += 1
             edges: list[BumpEdge] = []
+            _record_packages(c, repo_id, published_at_head(mirror))
             for manifest, ecosystem in manifest_paths(mirror):
                 edges.extend(extract_from_mirror(mirror, name, manifest, ecosystem))
             stats.edges_found += len(edges)
@@ -700,7 +776,7 @@ def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> Bump
                     (
                         repo_id,
                         edge.consumer_sha,
-                        resolve_repo(edge.dep_name, by_full, by_name),
+                        resolve_repo(edge.dep_name, by_full, by_name, by_pkg),
                         edge.dep_name,
                         edge.dep_version[:200],
                         edge.dep_sha,

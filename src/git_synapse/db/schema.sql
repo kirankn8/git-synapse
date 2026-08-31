@@ -921,6 +921,16 @@ CREATE INDEX IF NOT EXISTS dep_bump_version_key_idx ON dep_bump (dep_repo_id, ve
 -- least these commits arrived" -- is never read as an exact answer.
 ALTER TABLE dep_bump ADD COLUMN IF NOT EXISTS resolution TEXT;
 
+-- What each repository publishes, read from its own manifests. Answering
+-- "which repository is `com.google.guava:guava`?" from what that repository
+-- declares about itself, rather than from whether the strings happen to agree.
+CREATE TABLE IF NOT EXISTS repo_package (
+    repo_id BIGINT NOT NULL REFERENCES repo (id) ON DELETE CASCADE,
+    name    TEXT   NOT NULL,
+    PRIMARY KEY (repo_id, name)
+);
+CREATE INDEX IF NOT EXISTS repo_package_name_idx ON repo_package (name);
+
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -956,5 +966,5 @@ CREATE TABLE IF NOT EXISTS meta (
 -- was not, so schema_is_current() was permanently false and every service boot
 -- re-ran the whole DDL, taking exactly the locks the fast path exists to avoid.
 INSERT INTO meta (key, value)
-VALUES ('schema_version', '20'::jsonb)
+VALUES ('schema_version', '21'::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();

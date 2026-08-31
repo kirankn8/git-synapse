@@ -170,6 +170,71 @@ def bounds(raw: str) -> tuple[str | None, str | None]:
     return floor, ceiling
 
 
+#: Where a manifest states the package *it* publishes, rather than what it
+#: consumes. Every ecosystem records this, which turns "which repository is
+#: `com.google.guava:guava`?" from a guess about strings into something the
+#: repository itself declared.
+def _dig(doc: Any, path: tuple[str, ...]) -> list[str]:
+    for key in path:
+        if not isinstance(doc, dict):
+            return []
+        doc = doc.get(key)
+    return [doc] if isinstance(doc, str) else []
+
+
+def published_names(path: str, text: str) -> list[str]:
+    """The package coordinates this manifest publishes under.
+
+    Read from a repository's *own* manifests, this says "this repository is
+    `lodash`" -- a declared fact, where matching a dependency's name against
+    repository names is a guess that resolves another company's library to
+    yours whenever the names happen to agree.
+    """
+    base = path.rsplit("/", 1)[-1]
+    if base == "go.mod":
+        m = re.search(r"^\s*module\s+(\S+)", text, re.M)
+        return [m.group(1)] if m else []
+    if base == "pom.xml":
+        return _maven_coordinates(text)
+    if base.endswith(".gemspec"):
+        m = re.search(r"""\.name\s*=\s*["']([^"']+)["']""", text)
+        return [m.group(1)] if m else []
+    if base == "package.json" or base == "composer.json":
+        doc = _load_json(text)
+        return [doc["name"]] if isinstance(doc, dict) and isinstance(doc.get("name"), str) else []
+    if base == "Cargo.toml":
+        return _dig(_load_toml(text), ("package", "name"))
+    if base == "pyproject.toml":
+        doc = _load_toml(text)
+        return _dig(doc, ("project", "name")) or _dig(doc, ("tool", "poetry", "name"))
+    return []
+
+
+def _maven_coordinates(text: str) -> list[str]:
+    """`groupId:artifactId` for a pom, inheriting the group from its parent.
+
+    A child module usually omits `groupId`, which it inherits, so reading only
+    the top-level element finds nothing for exactly the modules a monorepo
+    publishes.
+    """
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return []
+    ns = {"m": root.tag.split("}")[0].strip("{")} if "}" in root.tag else {}
+
+    def find(parent: Any, tag: str) -> str | None:
+        node = parent.find(f"m:{tag}", ns) if ns else parent.find(tag)
+        return node.text.strip() if node is not None and node.text else None
+
+    artifact = find(root, "artifactId")
+    if not artifact:
+        return []
+    parent = root.find("m:parent", ns) if ns else root.find("parent")
+    group = find(root, "groupId") or (find(parent, "groupId") if parent is not None else None)
+    return [f"{group}:{artifact}"] if group else [artifact]
+
+
 def classify(name: str, raw: str, ecosystem: str) -> Reference:
     """Turn a raw version string into a reference of the right strength."""
     value = (raw or "").strip().strip("\"'")
