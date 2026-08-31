@@ -105,6 +105,71 @@ class Reference:
         return self.kind == "commit" and bool(self.sha)
 
 
+#: Suffixes that name a *build* of a release rather than a different release.
+#: Guava ships `33.4.0-jre` and `33.4.0-android` from one tag, `v33.4.0`.
+#: Strictly an allowlist: `-rc1` and `-beta` are separate releases with their
+#: own tags and their own commits, and collapsing them would resolve a release
+#: candidate to the final release while looking perfectly successful.
+_CLASSIFIERS = frozenset(("jre", "android", "ga", "final"))
+
+#: The version at the end of a string, ignoring whatever precedes it. Absorbs
+#: every component prefix a monorepo invents -- `guava-33.4.0`, `sub/v1.2.0`,
+#: `@babel/core@7.0.0` -- without needing to know the package's name.
+#: The separator before a suffix is optional because PEP 440 writes `2.0a1`
+#: with none; requiring one made that version canonicalise to its own trailing
+#: digit. Underscores separate numbers as well as dots, because the older Java
+#: and autotools convention tags `release_0_10` and `VERSION_1_2_3` -- without
+#: that, Truth's every tag reduced to its last number alone.
+_VERSION_AT_END = re.compile(
+    r"(\d+(?:[._]\d+)*)([-+._]?[A-Za-z][0-9A-Za-z.+-]*)?$")
+
+#: A comparator and the version it bounds, as ranges are written everywhere:
+#: `^4.17.21`, `~> 7.0`, `>=2, <3`, `<3.0`.
+_BOUND = re.compile(r"(>=|<=|==|>|<|\^|~>|~|=)?\s*(\d[0-9A-Za-z.+-]*)")
+
+
+def version_key(raw: str) -> str | None:
+    """Canonical form of a version or tag name, for matching one to the other.
+
+    A manifest names versions in the package registry's namespace and git names
+    them in the repository's, so the two are never equal as strings:
+    `33.4.0-jre` against `v33.4.0`. Reducing both to the same key makes the
+    match an indexed join rather than a pile of transformations at lookup time.
+
+    Trailing zeros are dropped so `1.2` and `1.2.0` agree, and a prerelease
+    suffix is kept so `1.0.0-rc1` never collapses onto `1.0.0`.
+
+    Returns None when there is no version in the string at all.
+    """
+    text = (raw or "").strip().strip("\"'")
+    if not (m := _VERSION_AT_END.search(text)):
+        return None
+    numbers = [int(part) for part in re.split(r"[._]", m.group(1))]
+    while len(numbers) > 1 and numbers[-1] == 0:
+        numbers.pop()
+    key = ".".join(str(n) for n in numbers)
+    suffix = (m.group(2) or "").lstrip("-+._").lower()
+    return f"{key}-{suffix}" if suffix and suffix not in _CLASSIFIERS else key
+
+
+def bounds(raw: str) -> tuple[str | None, str | None]:
+    """The `(floor, ceiling)` a range declares, as written.
+
+    Neither is inferred: `^4.17.21` states 4.17.21 as its own lower bound, and
+    that is the version taken. What actually got installed may have drifted
+    above it, but a manifest left untouched is one where nothing had to adapt --
+    so the floor is the last version anyone made a decision about.
+    """
+    text = (raw or "").strip().strip("\"'")
+    floor = ceiling = None
+    for comparator, version in _BOUND.findall(text):
+        if comparator in ("<", "<="):
+            ceiling = ceiling or version
+        else:                       # ^ ~ ~> >= > == = or a bare version
+            floor = floor or version
+    return floor, ceiling
+
+
 def classify(name: str, raw: str, ecosystem: str) -> Reference:
     """Turn a raw version string into a reference of the right strength."""
     value = (raw or "").strip().strip("\"'")

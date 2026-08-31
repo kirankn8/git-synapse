@@ -49,6 +49,7 @@ from pathlib import Path
 import psycopg
 
 from git_synapse.analysis import manifests
+from git_synapse.analysis.manifests import bounds, version_key
 from git_synapse.db.engine import connection, copy_rows
 from git_synapse.ingest.gitops import _base_env, mirror_path_for
 
@@ -483,19 +484,32 @@ def resolve_bumps(conn: psycopg.Connection | None = None) -> int:
     Separate from extraction, and re-runnable, because the inputs arrive at
     different times: a bump is recorded the moment a manifest changes, but the
     tag that dates it may only be mirrored later, and the upstream commit may
-    only be ingested later still. Resolving at insert time meant a bump seen
-    before its dependency was ingested stayed unresolved forever.
+    only be ingested later still.
+
+    Four tiers, strongest first, each recorded in ``resolution`` so a weaker one
+    is never read as an exact answer:
+
+    ``sha``      the manifest named the commit outright.
+    ``tag``      an exact version matched a tag.
+    ``floor``    a range's declared lower bound matched a tag. Says only "at
+                 least these commits arrived": what was installed may have
+                 drifted higher, but a manifest nobody edited is one where
+                 nothing had to adapt.
+    ``ceiling``  an upper bound with no floor, resolved to the newest release
+                 below it that existed when the bump was made.
 
     Returns:
         How many rows gained a commit.
     """
 
     def _run(c: psycopg.Connection) -> int:
+        _fill_version_keys(c)
+
         # Pins first: a reference naming a commit needs no interpretation.
         by_sha = c.execute(
             """
             UPDATE dep_bump b
-               SET dep_commit_id = dc.id
+               SET dep_commit_id = dc.id, resolution = 'sha'
               FROM commit dc
              WHERE b.dep_commit_id IS NULL
                AND b.dep_sha IS NOT NULL
@@ -504,87 +518,28 @@ def resolve_bumps(conn: psycopg.Connection | None = None) -> int:
             """
         ).rowcount or 0
 
-        # Then releases. Package version to tag name is a convention rather
-        # than anything git knows, and the conventions genuinely differ: Go
-        # writes `v1.2.3`, Maven's release plugin writes `gson-parent-2.9.1`,
-        # and a monorepo writes `pkg@1.2.3`. Rather than enumerate them all,
-        # an exact spelling is preferred and a boundary-anchored suffix match
-        # is the fallback -- so a tag counts when the version is the *end* of
-        # it and what precedes it is a separator, never a digit. Without that
-        # boundary, version 2.6 would happily match tag `gson-parent-12.6`.
+        # Then releases, by canonical key. `commit_id` is the tagged commit
+        # when the walk read it; `main_commit_id` is the shipping-branch commit
+        # the release was cut from, which is the only one that exists when a
+        # project tags on a release branch.
         by_tag = c.execute(
             r"""
-            WITH matched AS (
-                SELECT b.ctid,
-                       (SELECT rt.commit_id
-                          FROM ref_tag rt
-                         WHERE rt.repo_id = b.dep_repo_id
-                           AND rt.commit_id IS NOT NULL
-                           AND (
-                                 rt.name = b.dep_version
-                              OR rt.name = 'v' || ltrim(b.dep_version, 'v')
-                              OR rt.name ~ ('(^|[^0-9A-Za-z.])'
-                                            || replace(ltrim(b.dep_version, 'v'), '.', '\.')
-                                            || '$')
-                           )
-                      ORDER BY (rt.name = b.dep_version) DESC,
-                               (rt.name = 'v' || ltrim(b.dep_version, 'v')) DESC,
-                               length(rt.name)
-                         LIMIT 1) AS commit_id
-                  FROM dep_bump b
-                 WHERE b.dep_commit_id IS NULL
-                   AND b.dep_repo_id IS NOT NULL
-                   AND b.dep_version <> ''
-            )
             UPDATE dep_bump b
-               SET dep_commit_id = m.commit_id
-              FROM matched m
-             WHERE b.ctid = m.ctid AND m.commit_id IS NOT NULL
+               SET dep_commit_id = COALESCE(rt.commit_id, rt.main_commit_id),
+                   resolution = CASE WHEN b.dep_version ~ '^[\^~><=]'
+                                     THEN 'floor' ELSE 'tag' END
+              FROM ref_tag rt
+             WHERE b.dep_commit_id IS NULL
+               AND b.version_key IS NOT NULL
+               AND rt.repo_id = b.dep_repo_id
+               AND rt.version_key = b.version_key
+               AND COALESCE(rt.commit_id, rt.main_commit_id) IS NOT NULL
             """
         ).rowcount or 0
 
-        # A tag can name a commit the walk never read: the pair-generating walk
-        # follows only the branch that ships, and Java projects in particular
-        # cut releases from release branches. The tag still dates the release --
-        # that is what `tagged_at` is -- so the propagation lag is measurable
-        # even though the upstream commit itself was never ingested. Recorded
-        # separately from the commit-backed case, which stays stronger evidence.
-        by_tag_date = c.execute(
-            r"""
-            WITH matched AS (
-                SELECT b.ctid,
-                       (SELECT rt.tagged_at
-                          FROM ref_tag rt
-                         WHERE rt.repo_id = b.dep_repo_id
-                           AND rt.tagged_at IS NOT NULL
-                           AND (
-                                 rt.name = b.dep_version
-                              OR rt.name = 'v' || ltrim(b.dep_version, 'v')
-                              OR rt.name ~ ('(^|[^0-9A-Za-z.])'
-                                            || replace(ltrim(b.dep_version, 'v'), '.', '\.')
-                                            || '$')
-                           )
-                      ORDER BY (rt.name = b.dep_version) DESC,
-                               (rt.name = 'v' || ltrim(b.dep_version, 'v')) DESC,
-                               length(rt.name)
-                         LIMIT 1) AS tagged_at
-                  FROM dep_bump b
-                 WHERE b.lag_seconds IS NULL
-                   AND b.dep_repo_id IS NOT NULL
-                   AND b.dep_version <> ''
-            )
-            UPDATE dep_bump b
-               SET lag_seconds = EXTRACT(EPOCH FROM (cc.committed_at - m.tagged_at))::bigint
-              FROM matched m, commit cc
-             WHERE b.ctid = m.ctid
-               AND m.tagged_at IS NOT NULL
-               AND cc.repo_id = b.consumer_repo_id
-               AND cc.sha = b.consumer_sha
-               AND cc.committed_at >= m.tagged_at
-            """
-        ).rowcount or 0
+        by_ceiling = _resolve_ceilings(c)
+        rejected = _reject_impossible(c)
 
-        # The lag is only meaningful once both ends are known.
         c.execute(
             """
             UPDATE dep_bump b
@@ -596,15 +551,118 @@ def resolve_bumps(conn: psycopg.Connection | None = None) -> int:
                AND cc.sha = b.consumer_sha
             """
         )
-        log.info("bump resolution: %d by pinned sha, %d by tag, "
-                 "%d dated from a tag whose commit was never ingested",
-                 by_sha, by_tag, by_tag_date)
-        return by_sha + by_tag
+        log.info("bump resolution: %d by pinned sha, %d by tag or floor, "
+                 "%d by ceiling; %d rejected as impossible",
+                 by_sha, by_tag, by_ceiling, rejected)
+        return by_sha + by_tag + by_ceiling
 
     if conn is not None:
         return _run(conn)
     with connection() as own:
         return _run(own)
+
+
+def _fill_version_keys(c: psycopg.Connection) -> None:
+    """Give every bump the canonical key it should be matched on.
+
+    For an exact version that is the version itself; for a range it is the
+    declared floor. Computed here rather than in SQL because one parser has to
+    serve both sides of the match, and it already exists.
+    """
+    rows = c.execute(
+        "SELECT DISTINCT dep_version FROM dep_bump "
+        " WHERE version_key IS NULL AND dep_version <> ''").fetchall()
+    keyed = []
+    for (raw,) in rows:
+        floor, ceiling = bounds(raw)
+        # An upper bound names a version that was explicitly *excluded*. Keying
+        # on it would match the one release we know was never taken.
+        if ceiling and not floor:
+            continue
+        if key := version_key(floor or raw):
+            keyed.append((key, raw))
+    if keyed:
+        with c.cursor() as cur:
+            cur.executemany(
+                "UPDATE dep_bump SET version_key = %s "
+                " WHERE version_key IS NULL AND dep_version = %s", keyed)
+
+
+def _resolve_ceilings(c: psycopg.Connection) -> int:
+    """Resolve `<3.0` to the newest release below it that already existed.
+
+    Ordering versions is the reason this is not SQL: `1.10` sorts below `1.9`
+    as text and above it as a version. Bounded by the bump's own date so the
+    answer cannot drift as later tags arrive, and so it can never name a
+    release published after the commit that consumed it.
+    """
+    rows = c.execute(
+        """
+        SELECT b.ctid, b.dep_version, b.dep_repo_id, cc.committed_at
+          FROM dep_bump b
+          JOIN commit cc ON cc.repo_id = b.consumer_repo_id AND cc.sha = b.consumer_sha
+         WHERE b.dep_commit_id IS NULL AND b.dep_repo_id IS NOT NULL
+        """
+    ).fetchall()
+
+    resolved = []
+    for ctid, raw, dep_repo_id, bumped_at in rows:
+        floor, ceiling = bounds(raw)
+        if floor or not ceiling or not (limit := _ordinal(version_key(ceiling))):
+            continue
+        candidates = c.execute(
+            """
+            SELECT version_key, COALESCE(commit_id, main_commit_id) AS cid
+              FROM ref_tag
+             WHERE repo_id = %s AND version_key IS NOT NULL
+               AND COALESCE(commit_id, main_commit_id) IS NOT NULL
+               AND (tagged_at IS NULL OR tagged_at <= %s)
+            """, (dep_repo_id, bumped_at)).fetchall()
+        below = [(o, cid) for key, cid in candidates
+                 if (o := _ordinal(key)) and o < limit]
+        if below:
+            resolved.append((max(below)[1], ctid))
+    if resolved:
+        with c.cursor() as cur:
+            cur.executemany("UPDATE dep_bump SET dep_commit_id = %s, "
+                            "resolution = 'ceiling' WHERE ctid = %s", resolved)
+    return len(resolved)
+
+
+def _ordinal(key: str | None) -> tuple[int, ...] | None:
+    """A version key as comparable numbers, or None when it is a prerelease.
+
+    A prerelease sorts below its own release and has no total order against
+    other prereleases worth relying on, so it is simply not a candidate for
+    "the newest release below this bound".
+    """
+    if not key or "-" in key:
+        return None
+    try:
+        return tuple(int(part) for part in key.split("."))
+    except ValueError:
+        return None
+
+
+def _reject_impossible(c: psycopg.Connection) -> int:
+    """Undo any resolution naming a commit written after the bump consumed it.
+
+    Nothing can depend on a commit that does not exist yet, so a violation is
+    proof the match is wrong -- a bad key, a bad repo mapping, or a tag that
+    moved. Cheaper and more general than trying to enumerate the ways each
+    could happen.
+    """
+    return c.execute(
+        """
+        UPDATE dep_bump b
+           SET dep_commit_id = NULL, resolution = NULL, lag_seconds = NULL
+          FROM commit dc, commit cc
+         WHERE b.dep_commit_id = dc.id
+           AND cc.repo_id = b.consumer_repo_id
+           AND cc.sha = b.consumer_sha
+           AND dc.committed_at > cc.committed_at
+        """
+    ).rowcount or 0
 
 
 def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> BumpStats:
