@@ -117,8 +117,25 @@ a:hover { text-decoration: underline; }
   flex-shrink: 0;
 }
 .brand:hover { text-decoration: none; }
-.brand-mark { width: 22px; height: 22px; fill: var(--accent); stroke: var(--border-strong); stroke-width: 1.1; }
-.brand-mark path { stroke: var(--text-faint); }
+/* The nodes are rings rather than filled discs so the mark sits on any
+   background without needing a plate behind it. */
+.brand-mark { width: 23px; height: 23px; overflow: visible; }
+.brand-mark .bm-arc { fill: none; stroke: var(--accent); stroke-width: 2.1; stroke-linecap: round; }
+.brand-mark .bm-node { fill: none; stroke: var(--accent); stroke-width: 2.4; }
+.brand-mark .bm-spark { fill: var(--accent); }
+.brand-mark .bm-spark-1 { opacity: .45; }
+.brand-mark .bm-spark-2 { opacity: .8; }
+
+/* The signal crosses the gap on hover -- the whole idea of the mark. */
+.brand:hover .bm-spark-1 { animation: bm-fire 1.1s ease-in-out infinite; }
+.brand:hover .bm-spark-2 { animation: bm-fire 1.1s ease-in-out .18s infinite; }
+@keyframes bm-fire {
+  0%, 100% { opacity: .3; }
+  50%      { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .brand:hover .bm-spark-1, .brand:hover .bm-spark-2 { animation: none; }
+}
 
 .mainnav { display: flex; gap: 2px; flex: 1; min-width: 0; }
 .mainnav a {
