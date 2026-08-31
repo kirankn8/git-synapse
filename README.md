@@ -312,33 +312,74 @@ Set `REFRESH_CRON=*/5 * * * *` for near-real-time, or `0 * * * *` to be gentler.
 
 ```mermaid
 flowchart TB
-    GH["GitHub API"] -->|discover| REPO["account · repo<br/><i>metadata + raw payload</i>"]
-    REPO -->|"clone --bare (blobless above a size threshold)"| MIRROR["git mirror on disk"]
-    MIRROR -->|"git log -z --raw --numstat<br/>streamed, oldest first"| ATOM
+    GH["GitHub API"] -->|discover| REPO["account · repo"]
+    REPO -->|"clone --bare, blobless above a size threshold"| MIRROR["git mirror on disk"]
+    MIRROR -->|"git log -z --raw --numstat"| ATOM
+    MIRROR -->|"go.mod / package.json history"| declared
 
     ATOM["<b>commit + commit_file</b><br/>THE ATOMIC FACT<br/><i>one row per (commit, file)</i>"]
 
-    ATOM --> FP["file_pair<br/><i>same commit</i>"]
-    ATOM --> CS["change_set<br/><i>ticket / session</i>"]
-    ATOM --> LAG["repo_lag_metric<br/><i>time-binned, DIRECTED</i>"]
-    ATOM --> DB["dep_bump<br/><i>manifest bumps</i>"]
+    subgraph within["WITHIN a repository — unit of co-occurrence: the commit"]
+        FP["file_pair"] --> FPM["file_pair_metric<br/><i>29 measures</i>"]
+        DP["dir_pair"] --> DPM["dir_pair_metric"]
+    end
 
-    FP --> FPM["file_pair_metric<br/><i>29 measures</i>"]
-    CS --> RPM["repo_pair_metric<br/>xrepo_file_pair"]
-    LAG --> IMP["repo_impact<br/><i>ensemble, evidence-tiered</i>"]
-    DB --> IMP
+    subgraph across["ACROSS repositories — unit: the change set"]
+        CS["change_set<br/>change_set_commit<br/><i>ticket key or author session</i>"]
+        CS --> RP["repo_pair"] --> RPM["repo_pair_metric<br/><i>same 29 measures</i>"]
+        CS --> XF["xrepo_file_pair"] --> XFM["xrepo_file_pair_metric"]
+        LAG["repo_lag_metric<br/><i>time-binned, DIRECTED</i>"]
+    end
+
+    subgraph declared["DECLARED — parsed from manifests, provable"]
+        DECL["dep_bump<br/><i>pseudo-version to exact upstream commit</i>"]
+        RD["repo_dependency<br/><i>declared at HEAD</i>"]
+        MD["module_dependency<br/><i>intra-repo module graph</i>"]
+    end
+
+    ATOM --> FP
+    ATOM --> DP
+    ATOM --> CS
+    ATOM --> LAG
+
+    RPM --> IMPACT
+    XFM --> IMPACT
+    LAG --> IMPACT
+    declared -->|"candidate set: base rate 0.23% → 82%"| IMPACT
+
+    IMPACT["<b>repo_impact</b><br/><i>ensemble, evidence-tiered</i><br/>AUC 0.80 → 0.88 within the declared set"]
+
     FPM --> MINE["file_cluster · pair_drift · file_risk"]
-
-    FPM --> OUT["Web UI · REST API · MCP server"]
-    RPM --> OUT
-    IMP --> OUT
+    FPM --> OUT
+    IMPACT --> OUT
     MINE --> OUT
+    OUT["Web UI · REST API · MCP server"]
 
     style ATOM stroke:#14b8a6,stroke-width:4px
+    style IMPACT stroke:#f59e0b,stroke-width:3px
     style OUT stroke:#8b5cf6,stroke-width:3px
 ```
 
-Everything below the atomic fact is **derived and rebuildable**.
+Two repositories never share a commit, so cross-repo coupling cannot reuse the
+commit as its unit. It uses a **change set** instead — commits grouped by ticket
+key or by one author's work session — and the *same* 29 measures then apply
+untouched. Those are separate tables, not the same ones widened:
+
+| | Within a repository | Across repositories |
+|---|---|---|
+| Unit of co-occurrence | one commit | one change set |
+| Repo level | — | `repo_pair` → `repo_pair_metric` |
+| File level | `file_pair` → `file_pair_metric` | `xrepo_file_pair` → `xrepo_file_pair_metric` |
+| Directory level | `dir_pair` → `dir_pair_metric` | — |
+| Direction | `P(B\|A)` vs `P(A\|B)` | `repo_lag_metric`, genuinely time-lagged |
+
+**The dependency graph is a third, independent stream.** `dep_bump`,
+`repo_dependency` and `module_dependency` are *parsed from manifests*, not
+inferred from co-change — a Go pseudo-version names the exact upstream commit it
+was cut from, which makes those rows ground truth rather than correlation. They
+are not used to replace the statistics but to **restrict the candidate set**:
+ranking within declared pairs lifts the base rate from 0.23% to 82%, and the
+ensemble from AUC 0.80 to 0.88.
 
 ### Store the atom, derive the rest
 
