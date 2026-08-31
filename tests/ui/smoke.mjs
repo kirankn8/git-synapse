@@ -88,25 +88,25 @@ const routes = [
   ['#/',                                  'Overview'],
   ['#/repos',                             'Repositories'],
   ['#/accounts',                          'Accounts'],
-  [`#/repo/${repoId}`,                    'Repo (lands on files)'],
-  [`#/repo/${repoId}?tab=overview`,       'Repo overview'],
-  [`#/repo/${repoId}?tab=pairs`,          'Repo pairs'],
-  [`#/repo/${repoId}?tab=files`,          'Repo files'],
+  [`#/repos/${repoId}`,                    'Repo (lands on files)'],
+  [`#/repos/${repoId}?tab=overview`,       'Repo overview'],
+  [`#/repos/${repoId}?tab=pairs`,          'Repo pairs'],
+  [`#/repos/${repoId}?tab=files`,          'Repo files'],
   ['#/insights?tab=files&repo=5',         'Insights files'],
-  [`#/repo/${repoId}?tab=dirs`,           'Repo dirs'],
-  [`#/repo/${impactRepoId}?tab=impact`,   'Repo cross-repo impact'],
-  [`#/repo/${repoId}?tab=modules`,        'Repo de-facto modules'],
-  [`#/repo/${repoId}?tab=risk`,           'Repo risk'],
-  [`#/repo/${repoId}?tab=meta`,           'Repo metadata'],
-  [`#/file/${fileId}`,                    'File coupled'],
-  [`#/file/${fileId}?tab=history`,        'File history'],
-  [`#/file/${fileId}?tab=authors`,        'File authors'],
-  otherId ? [`#/pair/${fileId}/${otherId}`, 'Pair detail'] : null,
-  [`#/dir/${dirId}`,                      'Directory coupling'],
+  [`#/repos/${repoId}?tab=dirs`,           'Repo dirs'],
+  [`#/repos/${impactRepoId}?tab=impact`,  'Repo cross-repo impact'],
+  [`#/repos/${repoId}?tab=modules`,        'Repo de-facto modules'],
+  [`#/repos/${repoId}?tab=risk`,           'Repo risk'],
+  [`#/repos/${repoId}?tab=meta`,           'Repo metadata'],
+  [`#/repos/${repoId}/files/${fileId}`,                    'File coupled'],
+  [`#/repos/${repoId}/files/${fileId}?tab=history`,        'File history'],
+  [`#/repos/${repoId}/files/${fileId}?tab=authors`,        'File authors'],
+  otherId ? [`#/repos/${repoId}/pairs/${fileId}/${otherId}`, 'Pair detail'] : null,
+  [`#/repos/${repoId}/dirs/${dirId}`,     'Directory coupling'],
   ['#/impact',                            'Impact (org-wide)'],
   [`#/impact?repo=${impactRepoId}&dir=upstream`,   'Impact upstream'],
   [`#/impact?repo=${impactSrcId}&dir=downstream`,  'Impact downstream'],
-  [`#/repopair/${impactSrcId}/${impactRepoId}`,    'Repo pair detail'],
+  [`#/impact/${impactSrcId}/${impactRepoId}`,    'Repo pair detail'],
   ['#/insights?tab=risk',                 'Insights risk'],
   ['#/insights?tab=drift',                'Insights drift (emerging)'],
   ['#/insights?tab=drift&trend=decaying', 'Insights drift (decaying)'],
@@ -116,8 +116,8 @@ const routes = [
   [`#/graph?repo=${repoId}&limit=60&min=5`, 'Graph (files)'],
   ['#/graph?mode=repos&min=0.4',          'Graph (repositories)'],
   ['#/measures',                          'Measures catalogue'],
-  ['#/runs',                              'Jobs'],
-  [`#/run/${runId}`,                      'Run detail'],
+  ['#/jobs',                              'Jobs'],
+  [`#/jobs/${runId}`,                      'Run detail'],
   ['#/feedback',                          'Feedback (open)'],
   ['#/feedback?status=all',               'Feedback (all)'],
 ].filter(Boolean);
@@ -143,8 +143,8 @@ for (const [hash, label] of routes) {
 // Interaction: clicking a table row must navigate.
 console.log('\n=== drill-down trail ===');
 for (const [path, label, expect] of [
-  ['/repo/5',  'repository', ['Accounts', 'google']],
-  ['/dir/1',   'directory',  ['Accounts', 'google', 'brotli']],
+  ['/repos/5', 'repository', ['Accounts', 'google']],
+  ['/repos/3/dirs/1', 'directory',  ['Accounts', 'google', 'brotli']],
   ['/insights?repo=5', 'scoped insights', ['Accounts', 'google', 'guava', 'Insights']],
   ['/impact?repo=5',   'scoped impact',   ['Accounts', 'google', 'guava', 'Impact']],
   ['/graph?repo=5',    'scoped graph',    ['Accounts', 'google', 'guava']],
@@ -245,3 +245,31 @@ if (errors.length) {
 }
 console.log('  none');
 console.log('\nRESULT: UI renders every route with no JS errors');
+
+// Every deep view names its place. A path like /file/584531 says nothing about
+// which repository the file is in, so a link cannot be read, shared or trusted.
+console.log('\n=== canonical paths ===');
+{
+  const cases = [
+    ['/accounts/7',                     'account'],
+    ['/repos/5',                        'repository'],
+    [`/repos/999/files/${fileId}`,      'file (wrong repo corrects itself)'],
+    [`/repos/${repoId}/dirs/${dirId}`,  'directory'],
+    ['/jobs',                           'jobs'],
+  ];
+  for (const [path, label] of cases) {
+    window.history.pushState({}, '', path);
+    window.dispatchEvent(new window.PopStateEvent('popstate'));
+    let text = '';
+    for (let i = 0; i < 60; i++) {
+      await sleep(120);
+      text = view().textContent || '';
+      if (!text.includes('Loading…') && text.trim().length > 40) break;
+    }
+    // The address must also end up naming what is actually on screen: a path
+    // claiming the wrong repository is worse than none, being confidently wrong.
+    const landed = window.location.pathname;
+    report(`${label} path`, !text.includes('Not found') && text.trim().length > 40,
+           `${path}${landed === path ? '' : ' → ' + landed}`);
+  }
+}
