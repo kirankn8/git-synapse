@@ -44,6 +44,16 @@ export const num = (n) => {
   return v.toLocaleString();
 };
 
+/** `num` without the decimal, for a label that has to fit a narrow column. */
+export const numTight = (n) => {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '—';
+  if (Math.abs(v) >= 1e9) return Math.round(v / 1e9) + 'B';
+  if (Math.abs(v) >= 1e6) return Math.round(v / 1e6) + 'M';
+  if (Math.abs(v) >= 1e3) return Math.round(v / 1e3) + 'k';
+  return v.toLocaleString();
+};
+
 /** Fixed-precision float that degrades gracefully on null. */
 export const fx = (v, d = 3) =>
   v === null || v === undefined || !Number.isFinite(Number(v)) ? '—' : Number(v).toFixed(d);
@@ -316,13 +326,24 @@ async function route() {
     const match = path.match(rx);
     if (!match) continue;
     const args = Object.fromEntries(keys.map((k, i) => [k, decodeURIComponent(match[i + 1])]));
-    view.replaceChildren(h('div', { class: 'loading' }, h('span', { class: 'spinner' }), 'Loading…'));
+    // A view that arrives within a blink should not flash a spinner at the
+    // reader; one that takes longer should say something. The bar waits.
+    const slow = setTimeout(() => token === navToken && progress(true), 140);
     try {
       const node = await handler(args, params);
+      clearTimeout(slow);
       if (token !== navToken) return; // a newer navigation won
+      progress(false);
+      settled();
       view.replaceChildren(node);
+      view.classList.remove('view-enter');
+      void view.offsetWidth;            // restart the animation on every view
+      view.classList.add('view-enter');
       window.scrollTo(0, 0);
     } catch (err) {
+      clearTimeout(slow);
+      progress(false);
+      settled();
       if (token !== navToken) return;
       console.error(err);
       view.replaceChildren(
@@ -333,7 +354,40 @@ async function route() {
     return;
   }
 
+  progress(false);
+  settled();
   view.replaceChildren(notFound(`No view for ${path}`));
+}
+
+/* The splash covers the first paint, when the script has not run and the first
+   query has not returned. It is removed by the first view that renders --
+   success or failure -- so a broken deployment shows its error rather than an
+   animation that never ends. */
+function settled() {
+  const splash = document.getElementById('splash');
+  if (!splash || splash.classList.contains('gone')) return;
+  splash.classList.add('gone');
+  // Removed rather than left hidden: it is fixed and full-screen, and a stray
+  // overlay that stops swallowing clicks only because of a class is fragile.
+  setTimeout(() => splash.remove(), 400);
+}
+
+/** A thin bar for a navigation slow enough to notice. */
+function progress(on) {
+  let el = document.getElementById('progress');
+  if (!el) {
+    el = h('div', { id: 'progress' });
+    document.body.appendChild(el);
+  }
+  if (on) {
+    el.classList.add('busy');
+    el.style.width = '18%';
+    requestAnimationFrame(() => { el.style.width = '72%'; });
+  } else {
+    el.style.width = '100%';
+    el.classList.remove('busy');
+    setTimeout(() => { el.style.width = '0'; }, 260);
+  }
 }
 
 /** The empty state for something that was addressed but does not exist. */
@@ -729,18 +783,30 @@ const SHAPE = {
 };
 
 /** One distribution, drawn at whatever size the caller has room for. */
-function shapeChart(spec, rows, { small = true } = {}) {
-  const shown = small && spec.limit && rows.length > spec.limit
-    ? [...rows.slice(0, spec.limit), {
-        label: `${rows.length - spec.limit} others`,
-        value: rows.slice(spec.limit).reduce((n, r) => n + r.value, 0),
-        to: '/repos',
+/**
+ * `values` says whether there is room for a number above each column, which is
+ * a question about width and therefore about the caller: a card gives 32px a
+ * column, a half-width panel 31 to 55, and the full view 66. Guessing it from
+ * the row count alone drew 21 numbers into 31px and clipped every one.
+ */
+function shapeChart(spec, rows, { small = true, values } = {}) {
+  // Five horizontal rows is what a card holds: each is about 21px and the body
+  // is 124px less its padding. Six were drawn and the last was sliced in half
+  // by the card's own clipping, which is worse than aggregating it away. The
+  // full view has room for every one.
+  const cap = spec.kind === 'hbar' ? 4 : spec.limit;
+  const shown = small && cap && rows.length > cap
+    ? [...rows.slice(0, cap), {
+        label: `${rows.length - cap} more`,
+        value: rows.slice(cap).reduce((n, r) => n + r.value, 0),
+        to: rows[0] && rows[0].to,
       }]
     : rows;
   return spec.kind === 'hbar'
     ? hbars(shown, { suffix: '' })
     : barChart(shown, { label: spec.unit, scale: spec.scale || 'linear',
-                        height: small ? 66 : 190 });
+                        height: small ? 66 : 190,
+                        values: values === undefined ? (small ? null : true) : values });
 }
 
 on('/', async () => {
@@ -1783,7 +1849,8 @@ on('/insights/shape', async () => {
     ...Object.entries(SHAPE).map(([key, spec]) => {
       const rows = spec.rows(shape);
       return card(spec.title,
-        h('div', { class: 'card-body' }, shapeChart(spec, rows, { small: false })),
+        h('div', { class: 'card-body' },
+          shapeChart(spec, rows, { small: false, values: rows.length <= 12 })),
         rows.length ? spec.says(rows) : 'No data yet',
         null, `/insights/shape/${key}`);
     })));
@@ -2892,6 +2959,11 @@ on('/insights/:section', async ({ section }, params) => {
 /* ------------------------------------------------------------ accounts -- */
 
 /** Horizontal bars with the value in line. `rows` need `label` and `value`. */
+/* Position along the ramp, in degrees of hue. Teal through blue to violet: one
+   family, so a chart reads as a single object, but far enough apart that
+   neighbouring bars never blur together. */
+const ramp = (i, n) => 172 + (n > 1 ? (i / (n - 1)) * 96 : 0);
+
 function hbars(rows, { max = null, suffix = '', colour = true } = {}) {
   const top = max || Math.max(1, ...rows.map((r) => r.value));
   return h('div', { class: 'hbars' }, ...rows.map((r, i) => h('div', {
@@ -2904,7 +2976,7 @@ function hbars(rows, { max = null, suffix = '', colour = true } = {}) {
       h('span', {
         class: 'hbar-fill',
         style: `width:${Math.max(1.5, (r.value / top) * 100)}%;`
-             + `background:var(--series-${colour ? (i % 6) + 1 : 1})`,
+             + `--hue:${colour ? ramp(i, rows.length) : 172};--i:${i}`,
       })),
     h('span', { class: 'hbar-value' }, `${num(r.value)}${suffix}`))));
 }
@@ -2935,7 +3007,8 @@ const miniStat = (label, value, note) =>
  * axis shows the shape, and says so: read as linear, it makes the tail look far
  * bigger than it is.
  */
-function barChart(rows, { label = 'calls', scale = 'linear', height = 66 } = {}) {
+function barChart(rows, { label = 'calls', scale = 'linear', height = 66,
+                         values = null } = {}) {
   const max = Math.max(1, ...rows.map((r) => r.value));
   const norm = scale === 'log'
     ? (v) => (v > 0 ? Math.log10(v + 1) / Math.log10(max + 1) : 0)
@@ -2944,25 +3017,31 @@ function barChart(rows, { label = 'calls', scale = 'linear', height = 66 } = {})
   // 42px, and at twelve columns in a card there are 23. Past that the numbers
   // were drawn and then clipped, which is worse than not drawing them -- the
   // full chart, one click away, has the room to show every one.
-  const wide = rows.length <= 8;
+  // Room, measured rather than assumed: "149.8k" needs about 42px, and twelve
+  // columns in a card leave 23. A caller with room says so rather than being
+  // held to the card's limit -- the full view has 200px a column.
+  const wide = values === null ? rows.length <= 8 : values;
   const dense = rows.length > 12;
+  const fmt = values === true && rows.length <= 9 ? num : numTight;
 
   const cols = rows.map((r, i) => h('div', {
     class: `cbar${r.to ? ' is-link' : ''}`,
     title: r.to ? `${r.label}: ${num(r.value)} ${label} \u2014 click to open`
                 : `${r.label}: ${num(r.value)} ${label}`,
     onclick: r.to ? (e) => { e.stopPropagation(); go(r.to); } : null,
+    style: `--i:${i}`,
   },
-    wide ? h('span', { class: 'cbar-value' }, num(r.value)) : null,
+    // Precision costs width: "142.9k" needs 38px and "143k" needs 26. Nine
+    // columns or fewer have the room even at half width; more do not, at any
+    // size this app draws.
+    wide ? h('span', { class: 'cbar-value' }, fmt(r.value)) : null,
     h('span', { class: 'cbar-track' },
       h('span', {
-        class: 'cbar-fill',
+        class: `cbar-fill${r.alert ? ' alert' : ''}`,
         style: `height:${Math.max(r.value ? 3 : 0, norm(r.value) * 100)}%;`
-             + `background:${r.alert ? 'var(--danger)'
-                : `var(--series-${r.series || ((i % 6) + 1)})`}`,
+             + `--hue:${ramp(i, rows.length)}`,
       })),
-    h('span', { class: 'cbar-label' },
-      dense && i !== 0 && i !== rows.length - 1 ? '' : r.label)));
+    dense ? null : h('span', { class: 'cbar-label' }, r.label)));
 
   return h('div', { class: 'chart-wrap' },
     h('div', { class: 'chart-scale' },
@@ -2970,7 +3049,12 @@ function barChart(rows, { label = 'calls', scale = 'linear', height = 66 } = {})
       scale === 'log' ? h('span', { class: 'badge muted', title:
         'Heights follow the logarithm of the count, so the small buckets stay '
         + 'visible. Do not read one bar as a multiple of another.' }, 'log') : null),
-    h('div', { class: 'cbars', style: `--bar-h:${height}px` }, ...cols));
+    h('div', { class: 'cbars', style: `--bar-h:${height}px` }, ...cols),
+    // The ends of a dense chart belong to the axis, not to a 11px column that
+    // clips them: "2026" was rendering as "026".
+    dense ? h('div', { class: 'cbars-axis' },
+      h('span', {}, rows[0].label),
+      h('span', {}, rows[rows.length - 1].label)) : null);
 }
 
 /** One horizontal bar split by category, with a legend underneath. */

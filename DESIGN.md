@@ -848,13 +848,30 @@ them, what the chart claims, and where a bucket leads. The card and the full
 view render the same definition, so the small one cannot drift into saying
 something the large one does not.
 
-Bars use a log axis where the distribution is a power law — half the coupling
+Bars carry a hue ramp from teal to violet across the chart, so a distribution
+reads as one object rather than six colours cycling, and neighbouring bars stay
+distinguishable. They use a log axis where the distribution is a power law — half the coupling
 pairs sit in the first bucket, so on a linear axis one bar filled the card and
 the rest were two pixels tall and indistinguishable. The axis says `log` on the
 chart: read as linear it makes the tail look far larger than it is. The columns
 are HTML rather than SVG, because the SVG version stretched a 100-unit viewBox
 to the card width with `preserveAspectRatio="none"`, which scales text
 non-uniformly and drew every axis label horizontally squashed.
+
+How much a chart says depends on the room it has, measured rather than assumed:
+a card column is 32px and fits `143k`, a half-width panel 28 to 46, the full
+view 66 and fits `142.9k`. Past nine columns the precise figure does not fit at
+any size this app draws, so the tight form is used; past twelve, values are
+dropped and the ends become an axis line — a per-column label was rendering
+`2026` as `026`. Five horizontal rows are what a card holds; the rest aggregate
+into a *more* row rather than being sliced in half by the card's own clipping.
+
+A splash covers the first paint — the mark drawing itself, which is about as
+long as the first query takes — and is **removed**, not hidden, once a view
+renders, successfully or not: it is fixed and full-screen, and an overlay that
+stops swallowing clicks only because of a class is one bug away from hiding the
+whole application. A navigation slower than 140ms raises a progress bar; faster
+than that it shows nothing, because a spinner that flashes is worse than none.
 
 | Chart | What it says on this corpus |
 |---|---|
