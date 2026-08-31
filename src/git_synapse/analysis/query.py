@@ -781,6 +781,23 @@ def corpus_shape() -> dict:
             FROM file WHERE change_count > 0 GROUP BY 1 ORDER BY 1
             """
         ),
+        # Operationally the sharpest of these: a repository nobody has touched
+        # in a year contributes history that no longer describes the code.
+        "repo_recency": query(
+            """
+            SELECT CASE
+                     WHEN last_commit_at IS NULL                        THEN 'never'
+                     WHEN last_commit_at > now() - interval '30 days'   THEN 'past month'
+                     WHEN last_commit_at > now() - interval '180 days'  THEN 'past 6 months'
+                     WHEN last_commit_at > now() - interval '365 days'  THEN 'past year'
+                     ELSE 'over a year'
+                   END AS bucket,
+                   count(*) AS n
+            FROM repo
+            GROUP BY 1
+            ORDER BY min(coalesce(last_commit_at, '1970-01-01'::timestamptz)) DESC
+            """
+        ),
         # Ground truth: how long a dependency took to adopt an upstream commit.
         "adoption_days": query(
             """

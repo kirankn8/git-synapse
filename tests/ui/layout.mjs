@@ -121,6 +121,37 @@ for (const [path, shouldShow] of MEASURE_BAR) {
   else bad(`measure bar on ${path}`, visible ? `still ${box.h}px tall (display:${box.display})` : 'missing but expected');
 }
 
+/* A row that ends short reads as broken layout even when every card in it is
+   correct. auto-fit chose five columns for seven charts and left a thousand
+   pixels of gap, and seven columns for eight tiles, orphaning the eighth. */
+console.log('\n=== rows are full, not ragged ===');
+for (const [path, label] of PAGES) {
+  await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });
+  await settle();
+  const ragged = await page.evaluate(() => {
+    const bad = [];
+    for (const grid of document.querySelectorAll('#view .grid-stats, #view .grid-charts')) {
+      const rows = new Map();
+      for (const cell of grid.children) {
+        const r = cell.getBoundingClientRect();
+        if (!r.height) continue;
+        const key = Math.round(r.top);
+        rows.set(key, (rows.get(key) || 0) + 1);
+      }
+      const counts = [...rows.values()];
+      // Only the last row may be short, and never by more than half.
+      const full = counts[0] || 0;
+      const last = counts[counts.length - 1] || 0;
+      if (counts.length > 1 && last * 2 <= full) {
+        bad.push(`${grid.className.split(' ').pop()} ${counts.join('+')}`);
+      }
+    }
+    return bad;
+  });
+  if (ragged.length) bad(`${label} rows`, ragged.join('; '));
+  else ok(`${label} rows`, 'every row full');
+}
+
 console.log('\n=== nothing overflows its container horizontally ===');
 for (const [path, label] of PAGES) {
   await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });

@@ -640,9 +640,9 @@ on('/', async () => {
   const allCommits = sizes.reduce((n, r) => n + r.commits, 0) || 1;
 
   const langs2 = (shape.languages || []);
-  const shown = langs2.slice(0, 7).map((l) => ({ label: l.language, value: Number(l.n) }));
-  const tail = langs2.slice(7).reduce((n, l) => n + Number(l.n), 0);
-  if (tail) shown.push({ label: `${langs2.length - 7} others`, value: tail });
+  const shown = langs2.slice(0, 5).map((l) => ({ label: l.language, value: Number(l.n) }));
+  const tail = langs2.slice(5).reduce((n, l) => n + Number(l.n), 0);
+  if (tail) shown.push({ label: `${langs2.length - 5} others`, value: tail });
 
   const width = (shape.commit_width || []).map((r, i) => ({
     label: Number(r.files) >= 12 ? '12+' : String(r.files),
@@ -661,6 +661,13 @@ on('/', async () => {
   // width_bucket numbers from 1, so bucket 1 is the first 60-day band. Indexing
   // these labels from zero shifted every bar one band later and reported "0%
   // within two months" for a corpus where most bumps land inside it.
+  const recency = (shape.repo_recency || []).map((r) => ({
+    label: r.bucket, value: Number(r.n),
+  }));
+  const dormant = recency
+    .filter((r) => r.label === 'over a year' || r.label === 'never')
+    .reduce((n, r) => n + r.value, 0);
+
   const ADOPTION = ['<2mo', '2-4mo', '4-6mo', '6-8mo', '8-10mo', '10-12mo', '1yr+'];
   const adoption = (shape.adoption_days || []).map((r) => ({
     label: ADOPTION[Math.max(0, Number(r.bucket) - 1)] || '1yr+', value: Number(r.n),
@@ -668,42 +675,47 @@ on('/', async () => {
   const bumpsTotal = adoption.reduce((n, r) => n + r.value, 0) || 1;
   const fast = (adoption.find((r) => r.label === '<2mo') || { value: 0 }).value;
 
-  wrap.append(h('div', { class: 'grid grid-3' },
+  wrap.append(h('div', { class: 'grid grid-charts' },
     card('Commits per year',
-      h('div', { class: 'card-body' }, barChart(yearRows, { label: 'commits' })),
+      h('div', { class: 'card-body chart-body' }, barChart(yearRows, { label: 'commits' })),
       years.length
         ? `${years.length} years of history; ${num(recent.n)} commits in ${recent.year}`
         : 'No dated commits'),
 
     card('Evidence behind a coupling',
-      h('div', { class: 'card-body' }, barChart(support, { label: 'pairs' })),
+      h('div', { class: 'card-body chart-body' }, barChart(support, { label: 'pairs' })),
       `${pct(thin / pairsTotal)} of pairs rest on just two co-changes \u2014 `
       + 'the reason min support exists, and why a score on thin support means little'),
 
     card('Repositories by size',
-      h('div', { class: 'card-body' }, hbars(sizes, { suffix: ' repos' })),
+      h('div', { class: 'card-body chart-body' }, hbars(sizes, { suffix: ' repos' })),
       biggest
         ? `${biggest.value} repositories hold ${pct(biggest.commits / allCommits)} of all commits`
         : 'No repositories ingested'),
 
     card('Languages',
-      h('div', { class: 'card-body' }, hbars(shown)),
+      h('div', { class: 'card-body chart-body' }, hbars(shown)),
       `${langs2.length} languages across ${num(ov.repos)} repositories`),
 
     card('Files per commit',
-      h('div', { class: 'card-body' }, barChart(width, { label: 'commits' })),
+      h('div', { class: 'card-body chart-body' }, barChart(width, { label: 'commits' })),
       `${pct(wide / commitsTotal)} of commits touch 12 files or more \u2014 `
       + 'wide commits pair everything with everything, which is why the fan-out is capped'),
 
     card('Authors per file',
-      h('div', { class: 'card-body' }, barChart(authors, { label: 'files' })),
+      h('div', { class: 'card-body chart-body' }, barChart(authors, { label: 'files' })),
       `${pct(soleOwned / filesTotal)} of files have been touched by one author only`),
 
     card('How fast a bump is adopted',
-      h('div', { class: 'card-body' }, hbars(adoption, { suffix: ' bumps' })),
+      h('div', { class: 'card-body chart-body' }, hbars(adoption, { suffix: ' bumps' })),
       bumpsTotal > 1
         ? `${pct(fast / bumpsTotal)} of observed version bumps landed within two months`
-        : 'No resolved bumps yet')));
+        : 'No resolved bumps yet'),
+
+    card('When repositories last changed',
+      h('div', { class: 'card-body chart-body' }, hbars(recency, { suffix: ' repos' })),
+      `${dormant} of ${num(ov.repos)} have not been touched in a year \u2014 `
+      + 'their history still counts, but it no longer describes the code')));
 
   wrap.append(card('What history has produced',
     h('div', { class: 'card-body' },
@@ -2690,7 +2702,7 @@ const miniStat = (label, value, note) =>
    container so they survive a narrow window without a resize observer. */
 
 /** Hourly bars. `rows` need `label`, `value`, and optionally `alert`. */
-function barChart(rows, { height = 84, label = 'calls' } = {}) {
+function barChart(rows, { height = 96, label = 'calls' } = {}) {
   const max = Math.max(1, ...rows.map((r) => r.value));
   const w = 100 / Math.max(rows.length, 1);
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');

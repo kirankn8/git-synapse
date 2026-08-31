@@ -321,7 +321,22 @@ a:hover { text-decoration: underline; }
 
 .grid { display: grid; gap: 14px; }
 .grid > .card, .grid > .grid { margin-bottom: 0; }
-.grid-stats { grid-template-columns: repeat(auto-fit, minmax(158px, 1fr)); }
+/* Four columns rather than auto-fit. Every strip on the page holds four or
+   eight tiles, and auto-fit chose seven at 1280px wide -- leaving the eighth
+   alone on a row of its own, which is the ragged look this exists to avoid. */
+.grid-stats { grid-template-columns: repeat(2, 1fr); }
+@media (min-width: 560px) {
+  .grid-stats { grid-template-columns: repeat(4, 1fr); }
+  /* A strip of six divides into three, not four -- otherwise the last two sit
+     alone against two columns of nothing. Matched by "the sixth tile is also
+     the last", which needs no class from the code that builds the strip. */
+  .grid-stats:has(> .stat:nth-child(6):last-child) { grid-template-columns: repeat(3, 1fr); }
+  /* Fewer than four: as many columns as there are tiles, so the row is full
+     rather than trailing off into empty cells. */
+  .grid-stats:has(> .stat:nth-child(3):last-child) { grid-template-columns: repeat(3, 1fr); }
+  .grid-stats:has(> .stat:nth-child(2):last-child) { grid-template-columns: repeat(2, 1fr); }
+  .grid-stats:has(> .stat:only-child) { grid-template-columns: 1fr; }
+}
 .grid-2 { grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
 .grid-3 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
 
@@ -863,3 +878,17 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 .hbars { gap: 5px; }
 .hbar { grid-template-columns: 88px 1fr auto; gap: 9px; }
 .hbar-track { height: 8px; }
+
+/* Eight charts, and a column count that always divides them: four across, two
+   down on a wide screen, two across on a laptop, one on a phone. auto-fit was
+   choosing five and leaving a thousand pixels of gap in the second row. */
+.grid-charts { grid-template-columns: 1fr; }
+@media (min-width: 680px)  { .grid-charts { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 1180px) { .grid-charts { grid-template-columns: repeat(4, 1fr); } }
+
+/* One height for every chart, so a grid row cannot stretch a short card to
+   match a tall one and leave a hundred pixels of nothing inside it. */
+.chart-body {
+  height: 116px;
+  display: flex; flex-direction: column; justify-content: center;
+}

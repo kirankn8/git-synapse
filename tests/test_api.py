@@ -937,5 +937,5 @@ def test_the_shape_endpoint_serves_every_distribution(client):
     body = client.get("/api/overview/shape").json()
     assert set(body) == {
         "commits_by_year", "pair_support", "repo_sizes", "languages",
-        "commit_width", "authors_per_file", "adoption_days",
+        "commit_width", "authors_per_file", "adoption_days", "repo_recency",
     }
