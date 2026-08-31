@@ -745,7 +745,7 @@ on('/repos', async (_args, params) => {
 /* ---------------------------------------------------------- repo detail -- */
 
 on('/repo/:id', async ({ id }, params) => {
-  const tab = params.tab || 'overview';
+  const tab = params.tab || 'files';
   const repo = await api(`/api/repos/${id}`);
 
   const wrap = h('div');
@@ -780,9 +780,11 @@ on('/repo/:id', async ({ id }, params) => {
     'div',
     { class: 'tabs' },
     ...[
+      // Files first, and the default: opening a repository should show what is
+      // in it. Everything else is an answer about it, one tab away.
+      ['files', 'Files'],
       ['overview', 'Overview'],
       ['pairs', 'Coupled pairs'],
-      ['files', 'Files'],
       ['dirs', 'Directories'],
       ['impact', 'Cross-repo impact'],
       ['modules', 'De-facto modules'],
@@ -1009,52 +1011,77 @@ const pairTable = (rows, spec, wide = false) =>
     { initialSort: 'score', onRow: (r) => go(`/pair/${r.file_a_id}/${r.file_b_id}`), empty: 'No pairs above the support threshold.' },
   );
 
-/* A repository is a tree of directories, and a flat list of 500 paths hides
-   that completely. Built from the paths the API already returns, so it needs no
-   endpoint of its own; `<details>` gives collapsing without any state to keep. */
+/* A repository is a tree of directories, and a flat list of five hundred paths
+   hides that completely. Built from the paths the API already returns, so it
+   needs no endpoint of its own, and `<details>` gives collapsing with no state
+   to keep.
+
+   Every row carries what the table row carries. Indentation is applied to the
+   name cell alone rather than to the whole subtree, so the numeric columns stay
+   on the same axis however deep the nesting goes -- a tree whose columns drift
+   right with depth is unreadable exactly where a repository is most nested. */
 function fileTreeNode(files) {
-  const root = { dirs: new Map(), files: [], changes: 0 };
+  const root = { dirs: new Map(), files: [], changes: 0, ins: 0, del: 0, last: null };
+  const roll = (node, f) => {
+    node.changes += Number(f.change_count || 0);
+    node.ins += Number(f.insertions || 0);
+    node.del += Number(f.deletions || 0);
+    if (f.last_change_at && (!node.last || f.last_change_at > node.last)) node.last = f.last_change_at;
+  };
   for (const f of files) {
     const parts = String(f.path || '').split('/');
     const name = parts.pop();
     let node = root;
-    node.changes += Number(f.change_count || 0);
+    roll(node, f);
     for (const part of parts) {
-      if (!node.dirs.has(part)) node.dirs.set(part, { dirs: new Map(), files: [], changes: 0 });
+      if (!node.dirs.has(part)) {
+        node.dirs.set(part, { dirs: new Map(), files: [], changes: 0, ins: 0, del: 0, last: null });
+      }
       node = node.dirs.get(part);
-      node.changes += Number(f.change_count || 0);
+      roll(node, f);
     }
     node.files.push({ ...f, basename: name });
   }
   return root;
 }
 
+const countFiles = (node) =>
+  node.files.length + [...node.dirs.values()].reduce((n, c) => n + countFiles(c), 0);
+
+/** One row of the grid: the cells after the name line up at every depth. */
+const treeRow = (nameCell, cells, cls) =>
+  h('div', { class: `tree-row ${cls}` }, nameCell,
+    ...cells.map((c) => h('span', { class: 'tree-cell' }, c)));
+
 function renderTree(node, depth) {
   const out = [];
+  const pad = { style: `padding-left:${depth * 14}px` };
   // Directories first and busiest first, so the parts of a repository that move
-  // most are the parts you see without opening anything.
+  // most are visible without opening anything.
   const dirs = [...node.dirs.entries()].sort((a, b) => b[1].changes - a[1].changes);
   for (const [name, child] of dirs) {
-    const count = countFiles(child);
+    const n = countFiles(child);
     out.push(h('details', { class: 'tree-dir', open: depth === 0 },
       h('summary', {},
-        h('span', { class: 'mono' }, name + '/'),
-        h('span', { class: 'card-sub', style: 'margin-left:8px' },
-          `${num(count)} file${count === 1 ? '' : 's'} · ${num(child.changes)} changes`)),
+        treeRow(
+          h('span', { class: 'tree-name', ...pad },
+            h('span', { class: 'mono' }, name + '/')),
+          [`${num(n)} file${n === 1 ? '' : 's'}`, num(child.changes),
+           num(child.ins), num(child.del), '', when(child.last) || '—'],
+          'is-dir')),
       h('div', { class: 'tree-children' }, ...renderTree(child, depth + 1))));
   }
   for (const f of [...node.files].sort((a, b) => b.change_count - a.change_count)) {
-    out.push(h('div', { class: 'tree-file' },
-      h('a', { href: `/file/${f.id}`, 'data-nav': true, class: 'mono' }, f.basename),
-      f.is_deleted ? h('span', { class: 'badge muted', style: 'margin-left:6px' }, 'deleted') : null,
-      h('span', { class: 'card-sub', style: 'margin-left:8px' },
-        `${num(f.change_count)} changes`)));
+    out.push(treeRow(
+      h('span', { class: 'tree-name', style: `padding-left:${(depth + 1) * 14}px` },
+        h('a', { href: `/file/${f.id}`, 'data-nav': true, class: 'mono' }, f.basename),
+        f.is_deleted ? h('span', { class: 'badge muted', style: 'margin-left:6px' }, 'deleted') : null),
+      [f.extension || '—', num(f.change_count), num(f.insertions), num(f.deletions),
+       num(f.author_count), when(f.last_change_at) || '—'],
+      'is-file'));
   }
   return out;
 }
-
-const countFiles = (node) =>
-  node.files.length + [...node.dirs.values()].reduce((n, c) => n + countFiles(c), 0);
 
 async function repoFilesPanel(repoId, params) {
   const [files, exts] = await Promise.all([
@@ -1097,9 +1124,12 @@ async function repoFilesPanel(repoId, params) {
   if (view === 'tree') {
     box.append(card('Files',
       files.files.length
-        ? h('div', { class: 'tree' }, ...renderTree(fileTreeNode(files.files), 0))
+        ? h('div', { class: 'tree' },
+            treeRow(h('span', { class: 'tree-name' }, 'Path'),
+                    ['Ext', 'Changes', '+', '\u2212', 'Authors', 'Last change'], 'is-head'),
+            ...renderTree(fileTreeNode(files.files), 0))
         : h('div', { class: 'empty' }, 'No files match those filters.'),
-      'Directories are ordered by how much they change, so the busiest parts are visible unopened'));
+      'Folders carry the totals of everything beneath them, ordered by how much they change'));
     return box;
   }
 

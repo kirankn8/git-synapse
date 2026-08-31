@@ -749,23 +749,49 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 .btn.danger-btn:hover { border-color: var(--danger); color: var(--danger); }
 
 /* ---- file tree -------------------------------------------------------- */
-/* A repository is a tree of directories; a flat list of paths hides that.
-   Indentation comes from nesting rather than from a computed depth, so the
-   markup stays the shape of the data. */
+/* One grid shared by every row at every depth, so the numeric columns sit on
+   the same axis no matter how deep the nesting. Indentation lives on the name
+   cell alone; indenting the subtree would drag the numbers right with it and
+   make the columns unreadable exactly where a repository is most nested. */
 .tree { font-size: 13px; }
-.tree-children { margin-left: 16px; border-left: 1px solid var(--border); padding-left: 10px; }
+.tree-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 64px 90px 80px 80px 78px 120px;
+  gap: 8px;
+  align-items: center;
+  padding: 3px 6px;
+  border-radius: 4px;
+}
+.tree-cell { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tree-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.tree-row.is-head {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  color: var(--muted);
+  z-index: 1;
+}
+.tree-row.is-head .tree-cell { color: var(--muted); }
+
 .tree-dir > summary {
   cursor: pointer;
-  padding: 3px 4px;
-  border-radius: 4px;
   list-style: none;
   user-select: none;
 }
 .tree-dir > summary::-webkit-details-marker { display: none; }
-.tree-dir > summary::before { content: "▸"; display: inline-block; width: 14px; color: var(--muted); }
-.tree-dir[open] > summary::before { content: "▾"; }
-.tree-dir > summary:hover { background: var(--surface-2); }
-.tree-file { padding: 3px 4px 3px 18px; border-radius: 4px; }
-.tree-file:hover { background: var(--surface-2); }
-.tree-file a { text-decoration: none; }
-.tree-file a:hover { text-decoration: underline; }
+.tree-dir > summary .tree-name::before {
+  content: "\25B8";
+  display: inline-block;
+  width: 14px;
+  margin-left: -14px;
+  color: var(--muted);
+}
+.tree-dir[open] > summary .tree-name::before { content: "\25BE"; }
+.tree-dir > summary:hover .tree-row,
+.tree-row.is-file:hover { background: var(--surface-2); }
+.tree-row.is-dir .tree-name { font-weight: 600; }
+.tree-row.is-file a { text-decoration: none; }
+.tree-row.is-file a:hover { text-decoration: underline; }
