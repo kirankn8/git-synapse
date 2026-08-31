@@ -9,6 +9,9 @@ __pycache__/
 .env
 .claude/settings.local.json
 
+# Repo-local Claude rules, never pushed
+/CLAUDE.md
+
 # Bare git mirrors and any local scratch data
 data/
 
