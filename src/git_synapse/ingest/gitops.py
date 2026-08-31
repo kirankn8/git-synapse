@@ -556,12 +556,16 @@ def _anchor_to_branch(path: Path, tags: list[Tag], branch: str | None) -> list[T
     point off the branch that ships. The merge-base is the commit the release
     was cut from, which is on the branch and therefore already ingested.
 
-    One `rev-list` establishes what is on the branch, so `merge-base` runs only
-    for the tags that actually need it.
+    One `rev-list` establishes which commits are both on the branch and stored,
+    so the slower path runs only for the tags that actually need it. It asks for
+    `--no-merges` because a tag pointing straight at a merge commit -- which is
+    how Prometheus tags nearly half its releases -- is on the branch yet names a
+    row that was never written, and treating "on the branch" as "resolvable"
+    left 247 of its tags anchored to nothing.
     """
     if not branch or not tags:
         return tags
-    proc = run_git(["rev-list", branch], cwd=path, check=False, timeout=300)
+    proc = run_git(["rev-list", "--no-merges", branch], cwd=path, check=False, timeout=300)
     if proc.returncode != 0:
         return tags
     on_branch = set(proc.stdout.split())

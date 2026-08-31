@@ -800,63 +800,40 @@ def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> Bump
                 payload,
                 conn=c,
             )
-            # Resolve the consumer commit for its timestamp, and the dependency
-            # commit from the embedded sha. A pseudo-version sha is a 12-char
-            # prefix, so the join is a prefix match against the full sha.
+            # Only what is free at insert time: the consumer's timestamp, and
+            # the dependency commit when the manifest named it outright. A
+            # pseudo-version sha is a 12-char prefix, so that join is a prefix
+            # match.
+            #
+            # Version-to-tag matching deliberately does *not* happen here. It
+            # lived in this statement as a list of spellings to try, which
+            # duplicated the resolution pass, could not see a release tagged off
+            # the shipping branch, knew nothing of ranges, and recorded no tier --
+            # so a row resolved here was indistinguishable from one resolved
+            # exactly. `resolve_bumps` owns it, and is re-runnable because tags
+            # and upstream commits arrive later than the bump does.
             stats.edges_written = int(
                 c.execute(
                     """
                     INSERT INTO dep_bump (
                         consumer_repo_id, consumer_sha, dep_repo_id, dep_name,
                         dep_version, dep_sha, dep_commit_id, manifest,
-                        bumped_at, lag_seconds
+                        bumped_at, resolution
                     )
                     SELECT DISTINCT ON (t.consumer_repo_id, t.consumer_sha,
                                         t.dep_name, t.dep_version)
                            t.consumer_repo_id, t.consumer_sha, t.dep_repo_id,
                            t.dep_name, t.dep_version, t.dep_sha,
-                           COALESCE(dc.id, tag.commit_id), t.manifest,
-                           cc.committed_at,
-                           CASE WHEN cc.committed_at IS NOT NULL
-                                THEN EXTRACT(EPOCH FROM (cc.committed_at
-                                     - COALESCE(dc.committed_at, tc.committed_at)))::bigint
-                           END
+                           dc.id, t.manifest, cc.committed_at,
+                           CASE WHEN dc.id IS NOT NULL THEN 'sha' END
                     FROM tmp_bump t
                     LEFT JOIN commit cc
                            ON cc.repo_id = t.consumer_repo_id
                           AND cc.sha = t.consumer_sha
-                    -- A reference that pins a commit outright: a Go
-                    -- pseudo-version, a submodule, or any lockfile revision.
-                    -- The sha is a 12-char prefix, so this is a prefix match.
                     LEFT JOIN commit dc
                            ON dc.repo_id = t.dep_repo_id
                           AND t.dep_sha IS NOT NULL
                           AND dc.sha LIKE t.dep_sha || '%'
-                    -- A reference that names a release instead. Package version
-                    -- to tag name is a convention rather than anything git
-                    -- knows, so the usual spellings are tried and the one that
-                    -- matched is recorded. Without this every ecosystem that
-                    -- pins by version -- Maven, NuGet, Gradle, plain npm --
-                    -- resolved to nothing at all.
-                    LEFT JOIN LATERAL (
-                        SELECT rt.commit_id, rt.name
-                          FROM ref_tag rt
-                         WHERE t.dep_sha IS NULL
-                           AND rt.repo_id = t.dep_repo_id
-                           AND rt.commit_id IS NOT NULL
-                           AND rt.name IN (
-                                 t.dep_version,
-                                 'v' || t.dep_version,
-                                 ltrim(t.dep_version, 'v'),
-                                 'release-' || ltrim(t.dep_version, 'v'),
-                                 t.dep_name || '-' || ltrim(t.dep_version, 'v'),
-                                 t.dep_name || '@' || ltrim(t.dep_version, 'v'),
-                                 t.dep_name || '/v' || ltrim(t.dep_version, 'v'))
-                      ORDER BY rt.name = t.dep_version DESC,
-                               rt.name = 'v' || t.dep_version DESC
-                         LIMIT 1
-                    ) tag ON TRUE
-                    LEFT JOIN commit tc ON tc.id = tag.commit_id
                     ON CONFLICT (consumer_repo_id, consumer_sha, dep_name, dep_version)
                     DO NOTHING
                     """
