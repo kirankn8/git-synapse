@@ -635,3 +635,77 @@ def test_a_run_that_exists_is_returned(client):
         with connection() as conn:
             conn.execute("DELETE FROM ingest_run WHERE id = %s", (run_id,))
             conn.commit()
+
+
+def test_a_repository_pair_lists_every_bump_not_just_a_count(client, db):
+    """"13 bumps, median lag 41.8 days" is a summary of something the page never
+    showed. This is the something: which version, on what date, and the upstream
+    commit it consumed."""
+    from git_synapse.db.engine import connection
+
+    with connection() as conn:
+        a = conn.execute("INSERT INTO repo (full_name, name, owner) VALUES "
+                         "('acme/app','app','acme') RETURNING id").fetchone()[0]
+        b = conn.execute("INSERT INTO repo (full_name, name, owner) VALUES "
+                         "('acme/lib','lib','acme') RETURNING id").fetchone()[0]
+        up = conn.execute(
+            "INSERT INTO commit (repo_id, sha, authored_at, committed_at, subject) "
+            "VALUES (%s, %s, '2024-01-01', '2024-01-01', 'upstream work') RETURNING id",
+            (b, "c" * 40)).fetchone()[0]
+        for version, at in (("1.0.0", "2024-02-01"), ("1.1.0", "2024-03-01")):
+            conn.execute(
+                "INSERT INTO dep_bump (consumer_repo_id, consumer_sha, dep_repo_id, "
+                "dep_name, dep_version, manifest, bumped_at, dep_commit_id, resolution, "
+                "lag_seconds) VALUES (%s,%s,%s,'lib',%s,'pom.xml',%s,%s,'tag',86400)",
+                (a, version.replace(".", "") + "a" * 34, b, version, at, up))
+        conn.commit()
+    try:
+        r = client.get(f"/api/repos/{a}/bumps/{b}")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["count"] == 2
+        newest = body["bumps"][0]
+        assert newest["dep_version"] == "1.1.0", "newest first"
+        assert newest["upstream_subject"] == "upstream work"
+        assert newest["lag_days"] == 1.0
+        assert newest["resolution"] == "tag"
+    finally:
+        with connection() as conn:
+            conn.execute("DELETE FROM repo WHERE id IN (%s, %s)", (a, b))
+            conn.commit()
+
+
+def test_a_pair_with_no_bumps_returns_an_empty_list_not_an_error(client, db):
+    """A declared dependency that has never moved is a real state, and the page
+    says so rather than showing a failure."""
+    r = client.get("/api/repos/-1/bumps/-2")
+    assert r.status_code == 200 and r.json()["count"] == 0
+
+
+def test_lag_is_a_number_in_json_not_a_string(client, db):
+    """Postgres NUMERIC becomes a Decimal, which serialises as a string -- so a
+    field that looks numeric raises a TypeError the moment anyone does
+    arithmetic on it."""
+    from git_synapse.db.engine import connection
+
+    with connection() as conn:
+        a = conn.execute("INSERT INTO repo (full_name, name, owner) VALUES "
+                         "('acme/n1','n1','acme') RETURNING id").fetchone()[0]
+        b = conn.execute("INSERT INTO repo (full_name, name, owner) VALUES "
+                         "('acme/n2','n2','acme') RETURNING id").fetchone()[0]
+        conn.execute(
+            "INSERT INTO dep_bump (consumer_repo_id, consumer_sha, dep_repo_id, "
+            "dep_name, dep_version, manifest, bumped_at, lag_seconds) "
+            "VALUES (%s,%s,%s,'n2','1.0.0','pom.xml','2024-01-01',172800)",
+            (a, "e" * 40, b))
+        conn.commit()
+    try:
+        lag = client.get(f"/api/repos/{a}/bumps/{b}").json()["bumps"][0]["lag_days"]
+        assert isinstance(lag, (int, float)) and lag == 2.0
+
+        median = client.get(f"/api/repos/{a}/dependencies").json()["bumps"][0]["median_lag_days"]
+        assert isinstance(median, (int, float))
+    finally:
+        with connection() as conn:
+            conn.execute("DELETE FROM repo WHERE id IN (%s, %s)", (a, b))
+            conn.commit()
