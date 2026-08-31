@@ -719,6 +719,80 @@ def directory_tree(repo_id: int, path: str = "", limit: int = 1000) -> dict:
     return {"path": path, "directory": directory, "directories": dirs, "files": files}
 
 
+def corpus_shape() -> dict:
+    """Distributions an operator needs before trusting anything derived.
+
+    Four questions, one query each: how far back does the history go and is it
+    still moving; how thin is the evidence behind the average pair; is the
+    corpus dominated by a handful of giants; and what is it written in. Each is
+    a full-table aggregate, so this is the most expensive read the landing page
+    makes -- roughly 700ms on 163 repositories, which is why it is one endpoint
+    called once rather than four called per card.
+    """
+    return {
+        "commits_by_year": query(
+            """
+            SELECT extract(year FROM authored_at)::int AS year, count(*) AS n
+            FROM commit WHERE authored_at IS NOT NULL
+            GROUP BY 1 ORDER BY 1
+            """
+        ),
+        # Capped: the tail runs to thousands and the question is only ever
+        # "how much of this rests on almost nothing".
+        "pair_support": query(
+            """
+            SELECT least(n_ab, 10) AS support, count(*) AS n
+            FROM file_pair_metric GROUP BY 1 ORDER BY 1
+            """
+        ),
+        "repo_sizes": query(
+            """
+            SELECT CASE
+                     WHEN commit_count <    100 THEN '<100'
+                     WHEN commit_count <   1000 THEN '100-1k'
+                     WHEN commit_count <  10000 THEN '1k-10k'
+                     ELSE '10k+'
+                   END AS bucket,
+                   count(*) AS n, sum(commit_count) AS commits
+            FROM repo WHERE commit_count > 0
+            GROUP BY 1
+            ORDER BY min(commit_count)
+            """
+        ),
+        "languages": query(
+            """
+            SELECT coalesce(primary_language, 'unknown') AS language, count(*) AS n
+            FROM repo GROUP BY 1 ORDER BY 2 DESC
+            """
+        ),
+        # How wide a typical commit is. Directly explains the fan-out cap: a
+        # commit touching hundreds of files pairs every one of them with every
+        # other, which is combinatorial noise rather than design coupling.
+        "commit_width": query(
+            """
+            SELECT least(n_files, 12) AS files, count(*) AS n
+            FROM commit WHERE pair_eligible GROUP BY 1 ORDER BY 1
+            """
+        ),
+        # The bus-factor shape of the whole corpus, before any risk scoring.
+        "authors_per_file": query(
+            """
+            SELECT least(author_count, 8) AS authors, count(*) AS n
+            FROM file WHERE change_count > 0 GROUP BY 1 ORDER BY 1
+            """
+        ),
+        # Ground truth: how long a dependency took to adopt an upstream commit.
+        "adoption_days": query(
+            """
+            SELECT width_bucket(adoption_seconds / 86400.0, 0, 360, 6) AS bucket,
+                   count(*) AS n
+            FROM dep_bump WHERE adoption_seconds IS NOT NULL
+            GROUP BY 1 ORDER BY 1
+            """
+        ),
+    }
+
+
 def recent_runs(limit: int = 20) -> list[dict]:
     """Ingest run history for the status page."""
     return query(

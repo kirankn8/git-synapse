@@ -432,3 +432,44 @@ def test_feedback_refuses_a_severity_it_does_not_know(db, severity):
 def test_resolving_feedback_refuses_an_unknown_status(db, status):
     with pytest.raises(ValueError, match="status"):
         q.resolve_feedback(1, status, "")
+
+
+def test_the_corpus_shape_returns_every_distribution_the_landing_page_draws(corpus, db):
+    """Seven aggregates in one call rather than seven calls, because this is the
+    most expensive read the landing page makes."""
+    shape = q.corpus_shape()
+    assert set(shape) == {
+        "commits_by_year", "pair_support", "repo_sizes", "languages",
+        "commit_width", "authors_per_file", "adoption_days",
+    }
+    for name, rows in shape.items():
+        assert isinstance(rows, list), name
+        for row in rows:
+            assert row["n"] >= 0, name
+
+
+def test_adoption_buckets_are_numbered_from_one(corpus, db):
+    """width_bucket numbers from 1: bucket 1 is the first band, not the second.
+    Labelling these from zero shifted every bar one band later and reported "0%
+    adopted within two months" for a corpus where most land inside it."""
+    rows = q.corpus_shape()["adoption_days"]
+    if not rows:
+        pytest.skip("no resolved bumps")
+    assert min(r["bucket"] for r in rows) >= 1, "bucket 0 means a negative delay"
+
+    # The first band must agree with the plain question asked directly.
+    first = sum(r["n"] for r in rows if r["bucket"] == 1)
+    direct = q.query_one(
+        "SELECT count(*) AS n FROM dep_bump"
+        " WHERE adoption_seconds IS NOT NULL AND adoption_seconds < 60 * 86400"
+    )["n"]
+    assert first == direct
+
+
+def test_distribution_buckets_are_capped_so_the_tail_cannot_dominate(corpus, db):
+    """The tails run to thousands; the question is only ever how much sits at
+    the thin end."""
+    shape = q.corpus_shape()
+    assert all(r["support"] <= 10 for r in shape["pair_support"])
+    assert all(r["files"] <= 12 for r in shape["commit_width"])
+    assert all(r["authors"] <= 8 for r in shape["authors_per_file"])

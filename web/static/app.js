@@ -566,12 +566,12 @@ export function scoreCell(value, spec) {
    run history to Jobs, and the shortcut buttons duplicated the nav one line
    above. What is left is corpus scale, ingest health, and activity. */
 on('/', async () => {
-  const [ov, runs, activity, timeline, langs, mining] = await Promise.all([
+  const [ov, runs, activity, timeline, shape, mining] = await Promise.all([
     api('/api/overview'),
     api('/api/runs', { limit: 12 }),
     api('/api/calls/summary', { hours: 24 }).catch(() => ({ summary: {}, by_name: [] })),
     api('/api/calls/timeline', { hours: 24 }).catch(() => ({ buckets: [] })),
-    api('/api/repos/languages').catch(() => ({ languages: [] })),
+    api('/api/overview/shape').catch(() => ({})),
     api('/api/mining/overview').catch(() => ({})),
   ]);
   const wrap = h('div');
@@ -615,24 +615,104 @@ on('/', async () => {
   }
 
   // ---- who is calling -----------------------------------------------------
-  // ---- what the corpus is made of ----------------------------------------
-  const top = (langs.languages || []).slice(0, 6);
-  const others = (langs.languages || []).slice(6).reduce((n, l) => n + l.n, 0);
-  wrap.append(h('div', { class: 'grid grid-2' },
+  // ---- the shape behind the headline numbers ------------------------------
+  // Four questions an operator has before trusting anything derived from this:
+  // how deep is the history and is it still moving, how thin is the evidence
+  // behind an average pair, is the corpus a few giants, and what is it written
+  // in. Each chart states its own answer rather than leaving it to be read off.
+  wrap.append(h('div', { class: 'section-title' }, 'Shape of the data'));
+
+  const years = (shape.commits_by_year || []);
+  const recent = years.slice(-1)[0];
+  const yearRows = years.map((y, i) => ({ label: String(y.year), value: Number(y.n), series: (i % 6) + 1 }));
+
+  const support = (shape.pair_support || []).map((r, i) => ({
+    label: Number(r.support) >= 10 ? '10+' : String(r.support),
+    value: Number(r.n), series: (i % 6) + 1,
+  }));
+  const pairsTotal = support.reduce((n, r) => n + r.value, 0) || 1;
+  const thin = (support.find((r) => r.label === '2') || { value: 0 }).value;
+
+  const sizes = (shape.repo_sizes || []).map((r) => ({
+    label: r.bucket, value: Number(r.n), commits: Number(r.commits),
+  }));
+  const biggest = sizes.slice(-1)[0];
+  const allCommits = sizes.reduce((n, r) => n + r.commits, 0) || 1;
+
+  const langs2 = (shape.languages || []);
+  const shown = langs2.slice(0, 7).map((l) => ({ label: l.language, value: Number(l.n) }));
+  const tail = langs2.slice(7).reduce((n, l) => n + Number(l.n), 0);
+  if (tail) shown.push({ label: `${langs2.length - 7} others`, value: tail });
+
+  const width = (shape.commit_width || []).map((r, i) => ({
+    label: Number(r.files) >= 12 ? '12+' : String(r.files),
+    value: Number(r.n), series: (i % 6) + 1,
+  }));
+  const wide = width.filter((r) => r.label === '12+').reduce((n, r) => n + r.value, 0);
+  const commitsTotal = width.reduce((n, r) => n + r.value, 0) || 1;
+
+  const authors = (shape.authors_per_file || []).map((r, i) => ({
+    label: Number(r.authors) >= 8 ? '8+' : String(r.authors),
+    value: Number(r.n), series: (i % 6) + 1,
+  }));
+  const soleOwned = (authors.find((r) => r.label === '1') || { value: 0 }).value;
+  const filesTotal = authors.reduce((n, r) => n + r.value, 0) || 1;
+
+  // width_bucket numbers from 1, so bucket 1 is the first 60-day band. Indexing
+  // these labels from zero shifted every bar one band later and reported "0%
+  // within two months" for a corpus where most bumps land inside it.
+  const ADOPTION = ['<2mo', '2-4mo', '4-6mo', '6-8mo', '8-10mo', '10-12mo', '1yr+'];
+  const adoption = (shape.adoption_days || []).map((r) => ({
+    label: ADOPTION[Math.max(0, Number(r.bucket) - 1)] || '1yr+', value: Number(r.n),
+  }));
+  const bumpsTotal = adoption.reduce((n, r) => n + r.value, 0) || 1;
+  const fast = (adoption.find((r) => r.label === '<2mo') || { value: 0 }).value;
+
+  wrap.append(h('div', { class: 'grid grid-3' },
+    card('Commits per year',
+      h('div', { class: 'card-body' }, barChart(yearRows, { label: 'commits' })),
+      years.length
+        ? `${years.length} years of history; ${num(recent.n)} commits in ${recent.year}`
+        : 'No dated commits'),
+
+    card('Evidence behind a coupling',
+      h('div', { class: 'card-body' }, barChart(support, { label: 'pairs' })),
+      `${pct(thin / pairsTotal)} of pairs rest on just two co-changes \u2014 `
+      + 'the reason min support exists, and why a score on thin support means little'),
+
+    card('Repositories by size',
+      h('div', { class: 'card-body' }, hbars(sizes, { suffix: ' repos' })),
+      biggest
+        ? `${biggest.value} repositories hold ${pct(biggest.commits / allCommits)} of all commits`
+        : 'No repositories ingested'),
+
     card('Languages',
-      h('div', { class: 'card-body' },
-        stackedBar([...top.map((l) => ({ label: l.language || 'unknown', value: l.n })),
-                    ...(others ? [{ label: 'other', value: others }] : [])],
-                   { total: ov.repos })),
-      `${(langs.languages || []).length} languages across ${num(ov.repos)} repositories`),
-    card('What history has produced',
-      h('div', { class: 'card-body' },
-        h('div', { class: 'grid grid-2' },
-          miniStat('Coupled pairs', num(ov.file_pairs), 'file pairs that change together'),
-          miniStat('Impact edges', num(mining.impact_edges || 0), 'repository to repository'),
-          miniStat('De-facto modules', num(mining.modules || 0), `${num(mining.cross_dir_modules || 0)} cross-directory`),
-          miniStat('Manifest bumps', num(mining.dep_bumps || 0), 'observed version changes'))),
-      'The derived layers, in full under Insights')));
+      h('div', { class: 'card-body' }, hbars(shown)),
+      `${langs2.length} languages across ${num(ov.repos)} repositories`),
+
+    card('Files per commit',
+      h('div', { class: 'card-body' }, barChart(width, { label: 'commits' })),
+      `${pct(wide / commitsTotal)} of commits touch 12 files or more \u2014 `
+      + 'wide commits pair everything with everything, which is why the fan-out is capped'),
+
+    card('Authors per file',
+      h('div', { class: 'card-body' }, barChart(authors, { label: 'files' })),
+      `${pct(soleOwned / filesTotal)} of files have been touched by one author only`),
+
+    card('How fast a bump is adopted',
+      h('div', { class: 'card-body' }, hbars(adoption, { suffix: ' bumps' })),
+      bumpsTotal > 1
+        ? `${pct(fast / bumpsTotal)} of observed version bumps landed within two months`
+        : 'No resolved bumps yet')));
+
+  wrap.append(card('What history has produced',
+    h('div', { class: 'card-body' },
+      h('div', { class: 'grid grid-4' },
+        miniStat('Coupled pairs', num(ov.file_pairs), 'file pairs that change together'),
+        miniStat('Impact edges', num(mining.impact_edges || 0), 'repository to repository'),
+        miniStat('De-facto modules', num(mining.modules || 0), `${num(mining.cross_dir_modules || 0)} cross-directory`),
+        miniStat('Manifest bumps', num(mining.dep_bumps || 0), 'observed version changes'))),
+    'The derived layers, in full under Insights'));
 
   wrap.append(h('div', { class: 'section-title' }, 'Activity, last 24 hours'));
 
@@ -651,7 +731,11 @@ on('/', async () => {
     statTile('Median', c.p50_ms == null ? '\u2014' : `${c.p50_ms}ms`,
              c.p95_ms == null ? 'no calls recorded' : `p95 ${c.p95_ms}ms`, () => go('/activity'))));
 
-  wrap.append(card('Most-called', dataTable(activity.by_name || [], [
+  // Capped: the full ranking runs to fifty rows and 1800 pixels, which is a
+  // page of its own, not a summary. Activity holds it.
+  const ranked = (activity.by_name || []).slice()
+    .sort((a, b) => (b.calls || 0) - (a.calls || 0)).slice(0, 8);
+  wrap.append(card('Most-called', dataTable(ranked, [
     { key: 'surface', label: 'Surface', render: (r) => h('span', { class: `badge ${r.surface === 'mcp' ? 'ok' : 'muted'}` }, r.surface) },
     { key: 'name', label: 'Tool or route', render: (r) => h('span', { class: 'mono' }, r.name) },
     { key: 'calls', label: 'Calls', num: true, render: (r) => num(r.calls) },
@@ -664,7 +748,9 @@ on('/', async () => {
     initialSort: 'calls',
     onRow: (r) => (r.calls ? go(`/activity?surface=${r.surface}&name=${encodeURIComponent(r.name)}`) : null),
     empty: 'Nothing has called this deployment in the last 24 hours.',
-  }), `Every MCP tool is listed, called or not (${activity.mcp_tools || 0} registered)`));
+  }), h('span', {}, `Top 8 of ${(activity.by_name || []).length}. `,
+        h('a', { href: '/activity', 'data-nav': true }, 'All activity'),
+        `, including the ${activity.mcp_tools || 0} MCP tools and which have never been called.`)));
 
   wrap.append(h('div', { class: 'help' },
     'The corpus itself is under ', h('a', { href: '/repos', 'data-nav': true }, 'Repositories'),
@@ -2578,6 +2664,20 @@ on('/insights/:section', async ({ section }, params) => {
 
 /* ------------------------------------------------------------ accounts -- */
 
+/** Horizontal bars with the value in line. `rows` need `label` and `value`. */
+function hbars(rows, { max = null, suffix = '', colour = true } = {}) {
+  const top = max || Math.max(1, ...rows.map((r) => r.value));
+  return h('div', { class: 'hbars' }, ...rows.map((r, i) => h('div', { class: 'hbar' },
+    h('span', { class: 'hbar-label', title: r.label }, r.label),
+    h('span', { class: 'hbar-track' },
+      h('span', {
+        class: 'hbar-fill',
+        style: `width:${Math.max(1.5, (r.value / top) * 100)}%;`
+             + `background:var(--series-${colour ? (i % 6) + 1 : 1})`,
+      })),
+    h('span', { class: 'hbar-value' }, `${num(r.value)}${suffix}`))));
+}
+
 /** A small labelled figure for use inside a card. */
 const miniStat = (label, value, note) =>
   h('div', { class: 'ministat' },
@@ -2607,7 +2707,8 @@ function barChart(rows, { height = 84, label = 'calls' } = {}) {
     rect.setAttribute('width', String(w * 0.7));
     rect.setAttribute('height', String(h1));
     rect.setAttribute('rx', '0.6');
-    rect.setAttribute('fill', r.alert ? 'var(--danger)' : 'var(--accent)');
+    rect.setAttribute('fill', r.alert ? 'var(--danger)'
+      : (r.series ? `var(--series-${r.series})` : 'var(--accent)'));
     rect.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'title'))
         .textContent = `${r.label}: ${num(r.value)} ${label}`;
     svg.appendChild(rect);

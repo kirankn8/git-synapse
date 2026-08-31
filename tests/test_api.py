@@ -931,3 +931,11 @@ def test_the_timeline_endpoint_bounds_its_window(client):
     assert client.get("/api/calls/timeline", params={"hours": 6}).json()["buckets"].__len__() == 6
     assert client.get("/api/calls/timeline", params={"hours": 0}).status_code == 422
     assert client.get("/api/calls/timeline", params={"hours": 999}).status_code == 422
+
+
+def test_the_shape_endpoint_serves_every_distribution(client):
+    body = client.get("/api/overview/shape").json()
+    assert set(body) == {
+        "commits_by_year", "pair_support", "repo_sizes", "languages",
+        "commit_width", "authors_per_file", "adoption_days",
+    }

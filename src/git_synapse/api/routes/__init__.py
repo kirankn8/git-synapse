@@ -311,6 +311,12 @@ def list_repos(
     return {"count": len(rows), "repos": rows}
 
 
+@router.get("/overview/shape", tags=["meta"])
+def corpus_shape() -> dict:
+    """Distributions behind the headline numbers, for the landing page."""
+    return q.corpus_shape()
+
+
 @router.get("/repos/languages", tags=["repos"])
 def languages() -> dict:
     return {"languages": q.repo_languages()}
