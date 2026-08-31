@@ -281,6 +281,8 @@ def test_xcoupled_rejects_an_unknown_measure(db):
     from git_synapse.db.engine import query_one
 
     row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
+    if row is None:
+        pytest.skip("needs an ingested repository")
     r = runner.invoke(app, [row["name"], "-m", "not_a_measure"])
     assert r.exit_code != 0 or "measure" in r.stdout.lower()
 
@@ -769,6 +771,22 @@ def test_status_renders_recent_runs(db, monkeypatch):
         {"id": 1, "kind": "fast", "trigger": "schedule", "status": "running",
          "started_at": None, "duration_s": None, "commits_added": 0},
     ]
-    monkeypatch.setattr("git_synapse.cli.query", lambda sql, *a, **k: rows)
+    from git_synapse.analysis import query as q
+
+    monkeypatch.setattr(q, "overview", lambda: {"repos": 3, "commits": 120})
+    monkeypatch.setattr(q, "recent_runs", lambda n: rows)
     r = runner.invoke(app, ["status"])
     assert r.exit_code == 0
+    flat = " ".join(r.stdout.split())
+    assert "recent runs" in flat
+    assert "success" in flat and "running" in flat
+
+
+def test_status_without_any_runs_still_shows_the_corpus(monkeypatch):
+    from git_synapse.analysis import query as q
+
+    monkeypatch.setattr(q, "overview", lambda: {"repos": 3, "commits": 120})
+    monkeypatch.setattr(q, "recent_runs", lambda n: [])
+    r = runner.invoke(app, ["status"])
+    assert r.exit_code == 0
+    assert "commits" in " ".join(r.stdout.split())

@@ -242,3 +242,43 @@ def test_owners_are_read_from_ingested_repos_not_configured_accounts(clean):
     from git_synapse.db.engine import query
     owners = {r["owner"].lower() for r in query("SELECT owner FROM repo")}
     assert "acme-owner" in owners
+
+
+# ------------------------------------------------- updating an account's fields
+
+def test_changing_the_kind_is_validated_like_creation(db):
+    """`kind` decides which API listing is used, so a bad value fails the run
+    later rather than here unless it is checked on update too."""
+    acct = accounts.add_account("kindly")
+    try:
+        with pytest.raises(accounts.AccountError):
+            accounts.update_account(acct["id"], kind="neither")
+        assert accounts.update_account(acct["id"], kind="user")["kind"] == "user"
+    finally:
+        accounts.remove_account(acct["id"])
+
+
+def test_an_allowlist_is_normalised_on_update(db):
+    """Whitespace and empty entries in a pasted list would otherwise become
+    repository names that match nothing."""
+    acct = accounts.add_account("listy")
+    try:
+        row = accounts.update_account(acct["id"], only_repos=" one , , two ")
+        assert row["only_repos"] == ["one", "two"]
+    finally:
+        accounts.remove_account(acct["id"])
+
+
+def test_a_blank_api_url_is_stored_as_absent(db):
+    """An empty string would be used as a base URL and fail every request."""
+    acct = accounts.add_account("blanky")
+    try:
+        assert accounts.update_account(acct["id"], api_url="   ")["api_url"] is None
+    finally:
+        accounts.remove_account(acct["id"])
+
+
+def test_updating_nothing_still_reports_an_unknown_account(db):
+    """A no-op update on an id that does not exist must not look like success."""
+    with pytest.raises(accounts.AccountError, match="not found"):
+        accounts.update_account(-1)
