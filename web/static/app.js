@@ -271,7 +271,14 @@ async function route() {
     window.history.replaceState({}, '', legacy);
   }
   const raw = currentPath();
-  const [path, qs] = raw.split('?');
+  const [rawPath, qs] = raw.split('?');
+  // "/repos/4/tree/" and "/repos/4/tree" are the same address. Normalising here
+  // means no route pattern has to tolerate it, and the address bar is tidied to
+  // match without a history entry.
+  const path = rawPath.length > 1 ? rawPath.replace(/\/+$/, '') || '/' : rawPath;
+  if (path !== rawPath) {
+    window.history.replaceState({}, '', path + (qs ? `?${qs}` : ''));
+  }
   const params = Object.fromEntries(new URLSearchParams(qs || ''));
 
   for (const link of document.querySelectorAll('#mainnav a')) {
@@ -1082,7 +1089,8 @@ async function treePanel(repoId, path, params) {
           render: (d) => scoreCell(d.score, spec) },
       ], {
         initialSort: 'score',
-        onRow: (d) => go(`/repos/${repoId}/tree/${d.path}`),
+        onRow: (d) => go(d.path ? `/repos/${repoId}/tree/${d.path}`
+                                : `/repos/${repoId}?tab=files`),
         empty: 'No directory-level coupling recorded for this folder.',
       }),
       'A directory changes in a commit if any file beneath it changed.'));
@@ -1482,6 +1490,13 @@ on('/repos/:repo/tree/*path', async ({ repo, path }, params) => {
      h('a', { class: 'btn', href: `/repos/${repoId}/graph`, 'data-nav': true }, 'Coupling graph')]));
   wrap.append(await treePanel(repoId, clean, params));
   return wrap;
+});
+
+// The repository root is a folder too, but it already has an address: the
+// repository itself. Redirect rather than render it twice.
+on('/repos/:repo/tree', ({ repo }) => {
+  go(`/repos/${repo}?tab=files`);
+  return h('div');
 });
 
 /** Every ancestor of a folder, each one clickable -- the way back up. */
