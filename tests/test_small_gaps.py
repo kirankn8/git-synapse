@@ -80,30 +80,6 @@ def test_the_sqlalchemy_url_names_the_psycopg_driver():
 
 # --------------------------------------------------------------- validate
 
-def test_evaluate_warns_and_returns_nothing_without_ground_truth(db, monkeypatch):
-    """With no labels there is nothing to score; saying so beats an empty table
-    that looks like a measured result of zero."""
-    from git_synapse.analysis import validate
-
-    monkeypatch.setattr(validate, "ground_truth_edges", lambda *a, **kw: set())
-    out = validate.evaluate(lag_bins=1)
-    assert out == [] or out == {} or not out
-
-
-def test_compare_to_symmetric_without_ground_truth_is_empty(db, monkeypatch):
-    from git_synapse.analysis import validate
-
-    monkeypatch.setattr(validate, "ground_truth_edges", lambda *a, **kw: set())
-    assert validate.compare_to_symmetric() == {}
-
-
-def test_auc_counts_a_tie_as_half_a_win():
-    """The tie branch is what makes the rank-sum agree with the definition."""
-    from git_synapse.analysis.validate import _auc
-
-    # One positive and one negative with identical scores: exactly a coin flip.
-    assert _auc(np.array([0.5, 0.5]), np.array([1, 0])) == pytest.approx(0.5)
-
 
 # ------------------------------------------- the "should never happen" arguments
 
@@ -122,15 +98,6 @@ def test_scoring_knows_both_levels_it_claims_to():
 
     assert _level_sql("file")[0] == "file_pair"
     assert _level_sql("dir")[0] == "dir_pair"
-
-
-@pytest.mark.parametrize("level", ["", "file_pair", "files", None])
-def test_the_crossrepo_writer_refuses_a_level_it_does_not_know(level, db):
-    from git_synapse.analysis import crossrepo
-    from git_synapse.db.engine import connection
-
-    with connection() as conn, pytest.raises(ValueError, match="unknown level"):
-        crossrepo._score(conn, level)
 
 
 def test_a_timestamp_github_did_not_send_is_none_not_an_error():

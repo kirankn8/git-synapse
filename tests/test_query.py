@@ -199,19 +199,6 @@ def test_measure_catalog_is_self_describing(db):
 
 # ------------------------------------------------------------- cross-repo
 
-def test_crossrepo_overview_is_present(db):
-    ov = q.crossrepo_overview()
-    assert isinstance(ov, dict) and ov
-
-
-def test_repo_partners_are_ranked_and_scoped(db):
-    row = q.query_one("SELECT repo_a_id a FROM repo_pair LIMIT 1")
-    if row is None:
-        pytest.skip("no repo pairs")
-    rows = q.repo_partners(row["a"], limit=10)
-    assert all(r["other_id"] != row["a"] for r in rows)
-
-
 def test_recent_runs_and_run_detail(db):
     runs = q.recent_runs(limit=3)
     assert isinstance(runs, list)
@@ -273,14 +260,6 @@ def test_strongest_pairs_can_be_scoped_to_one_repository(db):
     # Unscoped must span more than the one repository, or the filter is a no-op.
     everywhere = q.strongest_pairs(limit=50, min_support=2)
     assert len({r["repo_id"] for r in everywhere}) >= 1
-
-
-def test_change_sets_can_be_filtered_by_signal(db):
-    from git_synapse.analysis import query as q
-
-    for signal in ("ticket", "temporal"):
-        rows = q.recent_change_sets(signal=signal, limit=5)
-        assert all(r["signal"] == signal for r in rows)
 
 
 def test_module_context_normalises_a_leading_slash_or_dot(db):
@@ -350,26 +329,6 @@ def test_the_coupling_graph_honours_a_score_floor(db):
     loose = q.coupling_graph(row["repo_id"], min_support=1, limit=200)
     tight = q.coupling_graph(row["repo_id"], min_support=1, min_score=0.99, limit=200)
     assert len(tight["edges"]) <= len(loose["edges"])
-
-
-def test_the_crossrepo_graph_can_be_centred_on_one_repository(db):
-    from git_synapse.db.engine import query_one
-
-    row = query_one("SELECT repo_a_id FROM repo_pair_metric ORDER BY n_ab DESC LIMIT 1")
-    if row is None:
-        pytest.skip("no repo pairs")
-    graph = q.crossrepo_graph(center_repo_id=row["repo_a_id"], min_support=1, limit=50)
-    for edge in graph["edges"]:
-        assert row["repo_a_id"] in (edge["source"], edge["target"])
-
-
-def test_top_crossrepo_pairs_answers_at_file_level_as_well_as_repo_level(db):
-    """Git Synapse answers at file level and no finer; both levels must work."""
-    at_repo = q.top_crossrepo_pairs(level="repo", limit=5)
-    at_file = q.top_crossrepo_pairs(level="file", limit=5)
-    assert isinstance(at_repo, list) and isinstance(at_file, list)
-    for row in at_file:
-        assert "path_a" in row and "path_b" in row
 
 
 @pytest.mark.parametrize("path", ["gateway/main.go", "./gateway/main.go",

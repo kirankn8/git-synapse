@@ -27,7 +27,7 @@ from pathlib import Path
 
 import psycopg
 
-from git_synapse.analysis import crossrepo, depbump, lagged, mining, predict
+from git_synapse.analysis import depbump, mining, predict
 from git_synapse.analysis.aggregate import rebuild_repo
 from git_synapse.analysis.score import score_repo
 from git_synapse.config import get_config
@@ -35,7 +35,7 @@ from git_synapse.db.engine import connection, copy_rows
 from git_synapse.ingest import accounts, gitops
 from git_synapse.ingest.github import GitHubClient, RepoRecord, select_repos
 from git_synapse.ingest.parser import iter_commits
-from git_synapse.ingest.store import load_commits, upsert_repo
+from git_synapse.ingest.store import load_commits, load_tags, upsert_repo
 
 log = logging.getLogger(__name__)
 
@@ -529,6 +529,9 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
 
         with connection() as conn:
             stats = load_commits(repo_id, commits, conn)
+            # After the commits, so each tag resolves to a row rather than
+            # leaving commit_id null on the first run.
+            load_tags(repo_id, gitops.read_tags(gitops.mirror_path_for(record.full_name)), conn)
             # Record the default branch tip as the next run's exclusion point.
             # This was every branch tip when the walk covered every branch;
             # excluding more than the walk visits would skip commits that must
@@ -744,26 +747,12 @@ def _run_ingest_locked(
                 " (blobless)" if result.blobless else "",
             )
 
-    # Cross-repo coupling is inherently global -- a change set spans
-    # repositories -- so it runs once after all per-repo work completes, rather
-    # than inside the per-repo fan-out. Skipped when nothing changed, and a
-    # failure here must not fail the whole run: the per-repo results are already
-    # committed and useful on their own.
+    # The dependency graph is global -- an edge spans repositories -- so it runs
+    # once after all per-repo work completes. A failure here must not fail the
+    # whole run: the per-repo results are already committed and useful alone.
     if cfg.crossrepo.enabled and (run.commits_added > 0 or force_full):
-        # Each stage is independent and guarded separately: a failure in one
-        # must not discard the others, and none of them can invalidate the
-        # per-repo results that are already committed.
-        try:
-            xr = crossrepo.rebuild(force=force_full)
-            log.info(
-                "cross-repo: %d change sets, %d repo pairs, %d file pairs in %.1fs",
-                xr.change_sets, xr.repo_pairs, xr.file_pairs, xr.duration_s,
-            )
-        except Exception:  # noqa: BLE001 - per-repo results stay valid
-            log.exception("cross-repo rebuild failed; per-repo data is unaffected")
-
-        # Manifest bumps first: they are incremental per repository, and the
-        # propagation lags they measure are what justify the lag windows below.
+        # Manifest bumps first: they are incremental per repository, and they
+        # are what dates every edge the graph below carries.
         try:
             db = depbump.rebuild(force=force_full)
             log.info(
@@ -773,25 +762,13 @@ def _run_ingest_locked(
         except Exception:  # noqa: BLE001
             log.exception("manifest bump scan failed")
 
-        # Directed lagged coupling is a full rebuild rather than a delta: it is
-        # a few seconds of matrix arithmetic over the whole corpus, so an
-        # incremental variant would add complexity for no measurable gain.
         try:
             depbump.refresh_declared(force=force_full)
             depbump.refresh_modules()
         except Exception:  # noqa: BLE001
             log.exception("declared dependency refresh failed")
 
-        try:
-            lg = lagged.rebuild(force=force_full)
-            log.info(
-                "lagged coupling: %d rows over %d bins in %.1fs",
-                lg.rows_written, lg.n_bins, lg.duration_s,
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("lagged coupling rebuild failed")
-
-        # Impact prediction depends on all three of the above, so it runs last.
+        # Impact ranks the declared graph, so it runs after both stages above.
         try:
             pr = predict.rebuild(force=force_full)
             log.info(

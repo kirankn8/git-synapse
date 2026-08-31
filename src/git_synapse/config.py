@@ -35,6 +35,16 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+
+
 def _env_list(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -195,56 +205,23 @@ class AnalysisConfig:
 
 
 @dataclass(frozen=True)
-class CrossRepoConfig:
-    """Tuning for cross-repository coupling.
+class DependencyConfig:
+    """Tuning for the cross-repository dependency graph.
 
-    Within a repo, "changed together" means "same commit". Across repos that is
-    impossible, so commits are grouped into *change sets* -- see the CROSS-
-    REPOSITORY COUPLING section of ``schema.sql`` for the full rationale.
+    The graph is read from what repositories declare about each other in their
+    manifests. It replaced a change-set model that grouped commits by ticket key
+    or author session: that inferred relationships from calendar time, and two
+    public repositories sharing no code at all scored G2 = 570 against each other
+    because both were busy in the same years.
     """
 
     enabled: bool = field(default_factory=lambda: _env_bool("CROSSREPO_ENABLED", True))
-    #: Regex for an issue key in a commit subject. The default matches the
-    #: JIRA-style keys used across this org (ACME-2330, ACME-11803).
-    ticket_pattern: str = field(
-        default_factory=lambda: _env_str("TICKET_PATTERN", r"([A-Z][A-Z0-9]{1,9}-[0-9]{1,6})")
-    )
-    #: Commits by one author with no larger gap than this form one work session.
-    #: Four hours approximates a working block without merging a whole day.
-    session_gap_hours: int = field(default_factory=lambda: _env_int("SESSION_GAP_HOURS", 4))
-    #: Change sets touching more repos than this are recorded but excluded from
-    #: pairing. An org-wide dependabot sweep across 61 repos carries no design
-    #: signal and would contribute O(k^2) repo pairs on its own.
-    max_repos_per_changeset: int = field(
-        default_factory=lambda: _env_int("MAX_REPOS_PER_CHANGESET", 8)
-    )
-    #: Per change set, per repo, cap on files considered for *file-level*
-    #: cross-repo pairing. Uncapped this is O(files_a * files_b) per change set.
-    #: A safety valve against a sprawling change set, not a routine filter: at 200
-    #: it clips 5 of 24,994 (change set, repo) groups on this org for 3.5M
-    #: intermediate instances, where 25 clipped 1,211 of them and dropped ~16,800
-    #: real pairs. The cap also defines the population the marginals are counted
-    #: over, so lowering it narrows coverage rather than biasing the scores.
-    max_files_per_repo_per_changeset: int = field(
-        default_factory=lambda: _env_int("MAX_FILES_PER_REPO_PER_CHANGESET", 200)
-    )
-    #: Minimum shared change sets before a cross-repo pair is persisted.
-    min_support: int = field(default_factory=lambda: _env_int("MIN_XREPO_SUPPORT", 2))
-    #: Confidence floor for a hop when following transitive chains.
+    #: Confidence below which a transitive chain hop is not traversed.
     chain_min_confidence: float = field(
-        default_factory=lambda: float(_env_str("CHAIN_MIN_CONFIDENCE", "0.15"))
+        default_factory=lambda: _env_float("CHAIN_MIN_CONFIDENCE", 0.3)
     )
-    #: Maximum hops when following chains (A -> B -> C is depth 2).
+    #: How many hops a chain may compose before it stops being actionable.
     chain_max_depth: int = field(default_factory=lambda: _env_int("CHAIN_MAX_DEPTH", 3))
-    #: Time-bin width for the directed lagged analysis. Smaller bins sharpen
-    #: direction but reduce the number of observed co-occurrences. Six hours is
-    #: the validated setting: at 24h, directional accuracy was 0.64, and the
-    #: motivating case (34 minutes between two repos) was invisible.
-    lag_bin_hours: int = field(default_factory=lambda: _env_int("LAG_BIN_HOURS", 6))
-    #: Minimum joint count before a lagged ordered pair is persisted. Kept at 1
-    #: because impact prediction needs a score for every declared-dependency
-    #: candidate; a floor of 5 left 30% of them unscored, which cost AUC.
-    lag_min_support: int = field(default_factory=lambda: _env_int("LAG_MIN_SUPPORT", 1))
 
 
 @dataclass(frozen=True)
@@ -293,7 +270,7 @@ class Config:
     github: GitHubConfig = field(default_factory=GitHubConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
-    crossrepo: CrossRepoConfig = field(default_factory=CrossRepoConfig)
+    crossrepo: DependencyConfig = field(default_factory=DependencyConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     log_level: str = field(default_factory=lambda: _env_str("LOG_LEVEL", "INFO"))

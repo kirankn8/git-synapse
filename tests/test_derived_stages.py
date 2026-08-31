@@ -11,15 +11,6 @@ from __future__ import annotations
 import pytest
 
 
-def test_every_stage_ran_without_leaving_the_tables_empty(corpus):
-    from git_synapse.db.engine import query_one
-
-    ids = [v for v in corpus.values() if isinstance(v, int)]
-    assert query_one("SELECT count(*) AS n FROM file_pair WHERE repo_id=ANY(%s)",
-                     (ids,))["n"] > 0
-    assert query_one("SELECT count(*) AS n FROM change_set")["n"] > 0
-
-
 def test_the_declared_dependency_is_discovered_from_the_manifest(corpus):
     """dsx-app's go.mod requires dsx-lib; that is the `declared` tier."""
     from git_synapse.db.engine import query_one
@@ -48,48 +39,6 @@ def test_pseudo_version_bumps_are_recorded(corpus):
     assert row["n"] > 0, "six pseudo-version bumps produced no dep_bump rows"
 
 
-def test_shared_ticket_keys_group_commits_across_repositories(corpus):
-    """DSX-0..5 appear in both repositories, which is the cross-repo unit."""
-    from git_synapse.db.engine import query_one
-
-    row = query_one(
-        """
-        SELECT count(*) AS n FROM change_set cs
-        WHERE cs.ticket LIKE 'DSX-%' AND cs.n_repos > 1
-        """
-    )
-    assert row["n"] > 0, "tickets spanning both repos formed no multi-repo change set"
-
-
-def test_cross_repo_contingency_tables_are_feasible(corpus):
-    from git_synapse.db.engine import query
-
-    assert not query(
-        """
-        SELECT * FROM xrepo_file_pair_metric
-        WHERE n_ab > n_a OR n_ab > n_b OR n_a > n_total OR n_b > n_total
-        """
-    )
-
-
-def test_the_lagged_table_is_populated_and_directional(corpus):
-    from git_synapse.db.engine import query_one
-
-    row = query_one("SELECT count(*) AS n FROM repo_lag_metric")
-    if row["n"] == 0:
-        pytest.skip("too little history for lag bins")
-    both = query_one(
-        """
-        SELECT count(*) AS n FROM repo_lag_metric a
-        JOIN repo_lag_metric b
-          ON a.repo_a_id = b.repo_b_id AND a.repo_b_id = b.repo_a_id
-         AND a.lag_bins = b.lag_bins
-        WHERE a.repo_a_id <> a.repo_b_id
-        """
-    )
-    assert both["n"] > 0, "a directional table must hold both orientations"
-
-
 def test_impact_prefers_the_declared_edge(corpus):
     from git_synapse.db.engine import query
 
@@ -116,30 +65,6 @@ def test_mining_produces_clusters_and_risk_without_impossible_values(corpus):
     assert not query(
         "SELECT * FROM pair_drift WHERE trend NOT IN ('emerging','decaying','stable')"
     )
-
-
-def test_running_every_stage_twice_is_idempotent(corpus):
-    """The scheduler reruns these every 15 minutes; a second pass must not
-    accumulate rows or change any number."""
-    from git_synapse.analysis import crossrepo, depbump, lagged, mining, predict
-    from git_synapse.db.engine import query_one
-
-    def snapshot():
-        return {
-            t: query_one(f"SELECT count(*) AS n FROM {t}")["n"]
-            for t in ("change_set", "repo_pair", "xrepo_file_pair",
-                      "repo_lag_metric", "repo_impact", "file_cluster",
-                      "repo_dependency", "dep_bump")
-        }
-
-    before = snapshot()
-    crossrepo.rebuild(force=True)
-    depbump.rebuild(force=True)
-    depbump.refresh_declared(force=True)
-    lagged.rebuild(force=True)
-    predict.rebuild(force=True)
-    mining.rebuild(force=True)
-    assert snapshot() == before
 
 
 def test_a_full_run_through_run_ingest_drives_every_stage(corpus, monkeypatch):
@@ -208,58 +133,6 @@ def test_repo_results_are_recorded_per_repository(corpus, monkeypatch):
     n = query_one("SELECT count(*) AS n FROM ingest_run_repo WHERE run_id=%s",
                   (result.run_id,))["n"]
     assert n == 1, "each repository's outcome must be recorded, not just the total"
-
-
-def test_a_failing_global_stage_does_not_discard_the_per_repo_work(corpus, monkeypatch):
-    """Each global stage is guarded separately on purpose.
-
-    The per-repo results are already committed and useful on their own, so one
-    stage blowing up must not fail the run or undo the others -- otherwise a
-    transient fault in mining would throw away a completed ingest.
-    """
-    from git_synapse.analysis import crossrepo
-    from git_synapse.db.engine import query_one
-    from git_synapse.ingest import pipeline
-    from git_synapse.ingest.github import RepoRecord
-
-    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
-
-    def explode(*a, **kw):
-        raise RuntimeError("cross-repo stage failed")
-
-    monkeypatch.setattr(crossrepo, "rebuild", explode)
-
-    before = query_one("SELECT count(*) AS n FROM file_pair")["n"]
-    result = pipeline.run_ingest(
-        records=[RepoRecord(github_id=920001, owner="acme", name="dsx-lib",
-                            full_name="acme/dsx-lib",
-                            clone_url=corpus["_lib_remote"], default_branch="main")],
-        trigger="test", force_full=True,
-    )
-    assert result.status in ("success", "partial"), result.status
-    assert query_one("SELECT count(*) AS n FROM file_pair")["n"] >= before, (
-        "a failing global stage discarded per-repo work"
-    )
-
-
-def test_global_stages_are_skipped_when_nothing_moved(corpus, monkeypatch):
-    """The 15-minute tick must not redo the whole corpus for zero commits."""
-    from git_synapse.analysis import crossrepo
-    from git_synapse.ingest import pipeline
-    from git_synapse.ingest.github import RepoRecord
-
-    monkeypatch.setattr(pipeline, "verify_credentials", lambda: "ok")
-    calls = []
-    monkeypatch.setattr(crossrepo, "rebuild",
-                        lambda *a, **kw: calls.append("ran") or _Stats())
-
-    pipeline.run_ingest(
-        records=[RepoRecord(github_id=920001, owner="acme", name="dsx-lib",
-                            full_name="acme/dsx-lib",
-                            clone_url=corpus["_lib_remote"], default_branch="main")],
-        trigger="test",
-    )
-    assert not calls, "no new commits, so the global rebuild should not have run"
 
 
 class _Stats:

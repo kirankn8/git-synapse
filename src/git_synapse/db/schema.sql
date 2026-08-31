@@ -266,6 +266,32 @@ CREATE TABLE IF NOT EXISTS commit_parent (
 );
 
 -- ===========================================================================
+-- Release tags: the bridge from a declared version to a commit.
+--
+-- A manifest that says `v1.2.3` names a release, not a commit, so without this
+-- table every ecosystem that pins by version rather than by SHA -- Maven, NuGet,
+-- Gradle, plain npm -- resolves to nothing at all. Filled from `for-each-ref`,
+-- which peels annotated tags to their commit for us.
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS ref_tag (
+    repo_id     BIGINT      NOT NULL REFERENCES repo (id) ON DELETE CASCADE,
+    name        TEXT        NOT NULL,
+    commit_sha  TEXT        NOT NULL,
+    -- The tagger's date for an annotated tag, the committer's otherwise: when
+    -- the release was cut, which is not the same as when the commit was written.
+    tagged_at   TIMESTAMPTZ,
+    annotated   BOOLEAN     NOT NULL DEFAULT FALSE,
+    -- Resolved once the commit is ingested. Nullable because a tag can point at
+    -- a commit outside the branch that ships, which the walk never reads.
+    commit_id   BIGINT      REFERENCES commit (id) ON DELETE SET NULL,
+    PRIMARY KEY (repo_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS ref_tag_sha_idx    ON ref_tag (repo_id, commit_sha);
+CREATE INDEX IF NOT EXISTS ref_tag_commit_idx ON ref_tag (commit_id);
+
+-- ===========================================================================
 -- commit_file: THE ATOMIC FACT TABLE.
 --
 -- Everything else in this schema is derivable from this table joined to
@@ -548,298 +574,9 @@ CREATE TABLE IF NOT EXISTS ingest_run_repo (
     PRIMARY KEY (run_id, repo_id)
 );
 
--- ===========================================================================
--- CROSS-REPOSITORY COUPLING
---
--- Within one repository, "changed together" means "in the same commit". Two
--- repositories never share a commit, so cross-repo coupling needs a wider unit
--- of work: the CHANGE SET, which is to cross-repo analysis exactly what
--- `commit` is to within-repo analysis.
---
--- Every pair-eligible commit belongs to exactly one change set, so the change
--- sets form a partition and the population size N is unambiguous. Two ways a
--- change set is formed, in priority order:
---
---   1. `ticket`   -- the commit subject carries an issue key (ACME-1234). All
---                    commits sharing that key are one change set. Precise, but
---                    only ~14% of commits are keyed, and coverage is very
---                    uneven (telemetry 37%, signer 0%).
---   2. `temporal` -- otherwise, consecutive commits by the same author with no
---                    gap longer than SESSION_GAP_HOURS form a work session.
---                    Catches repos with no commit-message discipline, at the
---                    cost of noise when someone touches unrelated repos in one
---                    afternoon.
---
--- SINGLE-REPO CHANGE SETS ARE DELIBERATELY KEPT. It is tempting to store only
--- the multi-repo ones, but the contingency table needs the cells where repo A
--- changed *without* repo B (b and c). Dropping single-repo change sets would
--- make every change set multi-repo, drive b and c toward zero, and inflate
--- every coupling score toward 1.0.
--- ===========================================================================
-
-CREATE TABLE IF NOT EXISTS change_set (
-    id              BIGSERIAL PRIMARY KEY,
-    -- Stable natural key: 'ticket:ACME-1234' or 'session:<author>:<n>'.
-    key             TEXT        NOT NULL UNIQUE,
-    signal          TEXT        NOT NULL,          -- ticket | temporal
-    ticket          TEXT,                           -- issue key, when signal='ticket'
-    author_id       BIGINT      REFERENCES author (id) ON DELETE SET NULL,
-    n_commits       INTEGER     NOT NULL DEFAULT 0,
-    n_repos         INTEGER     NOT NULL DEFAULT 0,
-    n_files         INTEGER     NOT NULL DEFAULT 0,
-    first_at        TIMESTAMPTZ,
-    last_at         TIMESTAMPTZ,
-    -- FALSE when the change set spans more than MAX_REPOS_PER_CHANGESET. An
-    -- org-wide dependabot sweep touching 61 repos is not a design signal, and
-    -- it would contribute O(k^2) repo pairs. Stored either way, so the
-    -- exclusion stays auditable -- same contract as commit.pair_eligible.
-    pair_eligible   BOOLEAN     NOT NULL DEFAULT TRUE,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS change_set_signal_idx   ON change_set (signal);
-CREATE INDEX IF NOT EXISTS change_set_ticket_idx   ON change_set (ticket);
-CREATE INDEX IF NOT EXISTS change_set_repos_idx    ON change_set (n_repos DESC);
-CREATE INDEX IF NOT EXISTS change_set_eligible_idx ON change_set (pair_eligible) WHERE pair_eligible;
-CREATE INDEX IF NOT EXISTS change_set_time_idx     ON change_set (last_at DESC);
-
--- Which commits make up a change set. Files are reached through commit_file,
--- so no file ids are duplicated here.
-CREATE TABLE IF NOT EXISTS change_set_commit (
-    change_set_id   BIGINT NOT NULL REFERENCES change_set (id) ON DELETE CASCADE,
-    commit_id       BIGINT NOT NULL REFERENCES commit (id) ON DELETE CASCADE,
-    repo_id         BIGINT NOT NULL REFERENCES repo (id) ON DELETE CASCADE,
-    PRIMARY KEY (change_set_id, commit_id)
-);
-
-CREATE INDEX IF NOT EXISTS change_set_commit_commit_idx ON change_set_commit (commit_id);
-CREATE INDEX IF NOT EXISTS change_set_commit_repo_idx   ON change_set_commit (repo_id, change_set_id);
-
--- Marginal: how many eligible change sets touched each repository. This is the
--- n_a of every repo-level contingency table.
-CREATE TABLE IF NOT EXISTS repo_change_stats (
-    repo_id             BIGINT PRIMARY KEY REFERENCES repo (id) ON DELETE CASCADE,
-    change_set_count    BIGINT NOT NULL DEFAULT 0,
-    ticket_set_count    BIGINT NOT NULL DEFAULT 0,
-    first_at            TIMESTAMPTZ,
-    last_at             TIMESTAMPTZ
-);
-
--- ---------------------------------------------------------------------------
--- Repo-level coupling: "changing signer implies changing packager".
--- ---------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS repo_pair (
-    repo_a_id       BIGINT NOT NULL REFERENCES repo (id) ON DELETE CASCADE,
-    repo_b_id       BIGINT NOT NULL REFERENCES repo (id) ON DELETE CASCADE,
-    n_ab            BIGINT NOT NULL DEFAULT 0,
-    -- How much of the joint evidence came from precise ticket links rather
-    -- than temporal proximity. Lets the UI show "12 of 47 are ticket-linked"
-    -- so a reader can discount a pair built purely on same-afternoon activity.
-    n_ab_ticket     BIGINT NOT NULL DEFAULT 0,
-    w_ab            DOUBLE PRECISION NOT NULL DEFAULT 0,
-    first_co_change TIMESTAMPTZ,
-    last_co_change  TIMESTAMPTZ,
-    distinct_authors INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (repo_a_id, repo_b_id),
-    CHECK (repo_a_id < repo_b_id)
-);
-
-CREATE INDEX IF NOT EXISTS repo_pair_a_idx ON repo_pair (repo_a_id);
-CREATE INDEX IF NOT EXISTS repo_pair_b_idx ON repo_pair (repo_b_id);
-CREATE INDEX IF NOT EXISTS repo_pair_support_idx ON repo_pair (n_ab DESC);
-
-CREATE TABLE IF NOT EXISTS repo_pair_metric (
-    repo_a_id   BIGINT NOT NULL REFERENCES repo (id) ON DELETE CASCADE,
-    repo_b_id   BIGINT NOT NULL REFERENCES repo (id) ON DELETE CASCADE,
-    n_ab        BIGINT NOT NULL,
-    n_a         BIGINT NOT NULL,
-    n_b         BIGINT NOT NULL,
-    n_total     BIGINT NOT NULL,
-    jaccard                     DOUBLE PRECISION,
-    dice                        DOUBLE PRECISION,
-    sorensen                    DOUBLE PRECISION,
-    ochiai                      DOUBLE PRECISION,
-    simpson                     DOUBLE PRECISION,
-    braun_blanquet              DOUBLE PRECISION,
-    kulczynski                  DOUBLE PRECISION,
-    fager                       DOUBLE PRECISION,
-    russell_rao                 DOUBLE PRECISION,
-    sokal_michener              DOUBLE PRECISION,
-    rogers_tanimoto             DOUBLE PRECISION,
-    hamann                      DOUBLE PRECISION,
-    faith                       DOUBLE PRECISION,
-    mutual_information          DOUBLE PRECISION,
-    pmi                         DOUBLE PRECISION,
-    npmi                        DOUBLE PRECISION,
-    ppmi                        DOUBLE PRECISION,
-    chi_square                  DOUBLE PRECISION,
-    log_likelihood_ratio        DOUBLE PRECISION,
-    t_score                     DOUBLE PRECISION,
-    z_score                     DOUBLE PRECISION,
-    poisson_significance        DOUBLE PRECISION,
-    hypergeometric_significance DOUBLE PRECISION,
-    phi                         DOUBLE PRECISION,
-    cramers_v                   DOUBLE PRECISION,
-    yules_q                     DOUBLE PRECISION,
-    yules_y                     DOUBLE PRECISION,
-    michael                     DOUBLE PRECISION,
-    association_strength        DOUBLE PRECISION,
-    confidence_ab               DOUBLE PRECISION,
-    confidence_ba               DOUBLE PRECISION,
-    computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (repo_a_id, repo_b_id)
-);
-
-CREATE INDEX IF NOT EXISTS rpm_npmi_idx ON repo_pair_metric (npmi DESC);
-CREATE INDEX IF NOT EXISTS rpm_llr_idx  ON repo_pair_metric (log_likelihood_ratio DESC);
--- Directional index for chain traversal, which walks outward from one repo.
-CREATE INDEX IF NOT EXISTS rpm_conf_a_idx ON repo_pair_metric (repo_a_id, confidence_ab DESC);
-CREATE INDEX IF NOT EXISTS rpm_conf_b_idx ON repo_pair_metric (repo_b_id, confidence_ba DESC);
-
--- ---------------------------------------------------------------------------
--- File-level coupling across repositories: which specific file in repo A goes
--- with which specific file in repo B. This is what an agent actually needs --
--- "the contracts spec changed, so this telemetry handler probably needs updating".
--- ---------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS xrepo_file_pair (
-    file_a_id       BIGINT NOT NULL REFERENCES file (id) ON DELETE CASCADE,
-    file_b_id       BIGINT NOT NULL REFERENCES file (id) ON DELETE CASCADE,
-    repo_a_id       BIGINT NOT NULL REFERENCES repo (id) ON DELETE CASCADE,
-    repo_b_id       BIGINT NOT NULL REFERENCES repo (id) ON DELETE CASCADE,
-    n_ab            BIGINT NOT NULL DEFAULT 0,
-    n_ab_ticket     BIGINT NOT NULL DEFAULT 0,
-    w_ab            DOUBLE PRECISION NOT NULL DEFAULT 0,
-    first_co_change TIMESTAMPTZ,
-    last_co_change  TIMESTAMPTZ,
-    PRIMARY KEY (file_a_id, file_b_id),
-    -- Ordered by file id, which also guarantees each unordered pair once.
-    CHECK (file_a_id < file_b_id),
-    -- Same-repo pairs belong in file_pair, not here.
-    CHECK (repo_a_id <> repo_b_id)
-);
-
-CREATE INDEX IF NOT EXISTS xfp_a_idx     ON xrepo_file_pair (file_a_id);
-CREATE INDEX IF NOT EXISTS xfp_b_idx     ON xrepo_file_pair (file_b_id);
-CREATE INDEX IF NOT EXISTS xfp_repos_idx ON xrepo_file_pair (repo_a_id, repo_b_id);
-CREATE INDEX IF NOT EXISTS xfp_support_idx ON xrepo_file_pair (n_ab DESC);
-
-CREATE TABLE IF NOT EXISTS xrepo_file_pair_metric (
-    file_a_id   BIGINT NOT NULL REFERENCES file (id) ON DELETE CASCADE,
-    file_b_id   BIGINT NOT NULL REFERENCES file (id) ON DELETE CASCADE,
-    repo_a_id   BIGINT NOT NULL REFERENCES repo (id) ON DELETE CASCADE,
-    repo_b_id   BIGINT NOT NULL REFERENCES repo (id) ON DELETE CASCADE,
-    n_ab        BIGINT NOT NULL,
-    n_a         BIGINT NOT NULL,
-    n_b         BIGINT NOT NULL,
-    n_total     BIGINT NOT NULL,
-    jaccard                     DOUBLE PRECISION,
-    dice                        DOUBLE PRECISION,
-    sorensen                    DOUBLE PRECISION,
-    ochiai                      DOUBLE PRECISION,
-    simpson                     DOUBLE PRECISION,
-    braun_blanquet              DOUBLE PRECISION,
-    kulczynski                  DOUBLE PRECISION,
-    fager                       DOUBLE PRECISION,
-    russell_rao                 DOUBLE PRECISION,
-    sokal_michener              DOUBLE PRECISION,
-    rogers_tanimoto             DOUBLE PRECISION,
-    hamann                      DOUBLE PRECISION,
-    faith                       DOUBLE PRECISION,
-    mutual_information          DOUBLE PRECISION,
-    pmi                         DOUBLE PRECISION,
-    npmi                        DOUBLE PRECISION,
-    ppmi                        DOUBLE PRECISION,
-    chi_square                  DOUBLE PRECISION,
-    log_likelihood_ratio        DOUBLE PRECISION,
-    t_score                     DOUBLE PRECISION,
-    z_score                     DOUBLE PRECISION,
-    poisson_significance        DOUBLE PRECISION,
-    hypergeometric_significance DOUBLE PRECISION,
-    phi                         DOUBLE PRECISION,
-    cramers_v                   DOUBLE PRECISION,
-    yules_q                     DOUBLE PRECISION,
-    yules_y                     DOUBLE PRECISION,
-    michael                     DOUBLE PRECISION,
-    association_strength        DOUBLE PRECISION,
-    confidence_ab               DOUBLE PRECISION,
-    confidence_ba               DOUBLE PRECISION,
-    computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (file_a_id, file_b_id)
-);
-
-CREATE INDEX IF NOT EXISTS xfpm_npmi_idx  ON xrepo_file_pair_metric (npmi DESC);
-CREATE INDEX IF NOT EXISTS xfpm_llr_idx   ON xrepo_file_pair_metric (log_likelihood_ratio DESC);
-CREATE INDEX IF NOT EXISTS xfpm_a_idx     ON xrepo_file_pair_metric (file_a_id, confidence_ab DESC);
-CREATE INDEX IF NOT EXISTS xfpm_b_idx     ON xrepo_file_pair_metric (file_b_id, confidence_ba DESC);
-CREATE INDEX IF NOT EXISTS xfpm_repos_idx ON xrepo_file_pair_metric (repo_a_id, repo_b_id);
-
 -- Cross-repo marginal for a file: how many eligible change sets touched it.
 -- Distinct from file.pair_change_count, which counts commits, not change sets.
 ALTER TABLE file ADD COLUMN IF NOT EXISTS xrepo_change_count BIGINT NOT NULL DEFAULT 0;
-
--- ---------------------------------------------------------------------------
--- Directed, time-lagged coupling.
---
--- Unlike every other pair table here, this one is DIRECTED: (A, B) and (B, A)
--- are different rows, and there is no a < b constraint. The lag is what makes
--- direction meaningful -- "A changed, and B changed `lag_bins` later".
---
--- See git-synapse/analysis/lagged.py for the construction. In short: time is binned,
--- each repo becomes a binary vector over bins, and the 2x2 table is formed
--- between A's vector and B's vector shifted by `lag_bins`. All 29 measures then
--- apply unchanged, but become directional.
--- ---------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS repo_lag_metric (
-    repo_a_id   BIGINT   NOT NULL REFERENCES repo (id) ON DELETE CASCADE,
-    repo_b_id   BIGINT   NOT NULL REFERENCES repo (id) ON DELETE CASCADE,
-    -- Bins that B lags behind A. 0 means the same bin (simultaneous).
-    lag_bins    SMALLINT NOT NULL,
-    bin_hours   SMALLINT NOT NULL,
-    n_ab        BIGINT   NOT NULL,
-    n_a         BIGINT   NOT NULL,
-    n_b         BIGINT   NOT NULL,
-    n_total     BIGINT   NOT NULL,
-    jaccard                     DOUBLE PRECISION,
-    dice                        DOUBLE PRECISION,
-    sorensen                    DOUBLE PRECISION,
-    ochiai                      DOUBLE PRECISION,
-    simpson                     DOUBLE PRECISION,
-    braun_blanquet              DOUBLE PRECISION,
-    kulczynski                  DOUBLE PRECISION,
-    fager                       DOUBLE PRECISION,
-    russell_rao                 DOUBLE PRECISION,
-    sokal_michener              DOUBLE PRECISION,
-    rogers_tanimoto             DOUBLE PRECISION,
-    hamann                      DOUBLE PRECISION,
-    faith                       DOUBLE PRECISION,
-    mutual_information          DOUBLE PRECISION,
-    pmi                         DOUBLE PRECISION,
-    npmi                        DOUBLE PRECISION,
-    ppmi                        DOUBLE PRECISION,
-    chi_square                  DOUBLE PRECISION,
-    log_likelihood_ratio        DOUBLE PRECISION,
-    t_score                     DOUBLE PRECISION,
-    z_score                     DOUBLE PRECISION,
-    poisson_significance        DOUBLE PRECISION,
-    hypergeometric_significance DOUBLE PRECISION,
-    phi                         DOUBLE PRECISION,
-    cramers_v                   DOUBLE PRECISION,
-    yules_q                     DOUBLE PRECISION,
-    yules_y                     DOUBLE PRECISION,
-    michael                     DOUBLE PRECISION,
-    association_strength        DOUBLE PRECISION,
-    confidence_ab               DOUBLE PRECISION,
-    confidence_ba               DOUBLE PRECISION,
-    computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (repo_a_id, repo_b_id, lag_bins)
-);
-
-CREATE INDEX IF NOT EXISTS rlm_forward_idx ON repo_lag_metric (repo_a_id, lag_bins, npmi DESC);
-CREATE INDEX IF NOT EXISTS rlm_reverse_idx ON repo_lag_metric (repo_b_id, lag_bins, npmi DESC);
-CREATE INDEX IF NOT EXISTS rlm_lag_idx     ON repo_lag_metric (lag_bins);
 
 -- ---------------------------------------------------------------------------
 -- Dependency-bump edges recovered from manifest history.
@@ -1171,5 +908,5 @@ CREATE TABLE IF NOT EXISTS meta (
 -- was not, so schema_is_current() was permanently false and every service boot
 -- re-ran the whole DDL, taking exactly the locks the fast path exists to avoid.
 INSERT INTO meta (key, value)
-VALUES ('schema_version', '15'::jsonb)
+VALUES ('schema_version', '17'::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();

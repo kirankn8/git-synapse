@@ -26,8 +26,7 @@ def test_help_lists_every_command():
 
 @pytest.mark.parametrize(
     "cmd",
-    ["ingest", "aggregate", "score", "coupled", "xcoupled", "chains",
-     "measures", "status", "feedback", "validate", "impact", "mine", "reset"],
+    ["ingest", "aggregate", "score", "coupled", "measures", "status", "feedback", "impact", "mine", "reset"],
 )
 def test_every_command_has_usable_help(cmd):
     """A renamed or broken option shows up here before a user hits it."""
@@ -123,31 +122,18 @@ def test_score_accepts_a_repo_id(scratch_db):
     assert r.exit_code == 0, r.stdout
 
 
-def test_crossrepo_and_lagged_and_mine_run_on_an_empty_scratch(scratch_db):
-    """These are global rebuilds; on an empty corpus they must be no-ops, not
-    crashes, or a fresh install fails on its first schedule tick."""
-    for cmd in (["crossrepo"], ["lagged"], ["mine"], ["depbump"]):
-        r = runner.invoke(app, cmd)
-        assert r.exit_code == 0, f"{cmd}: {r.stdout}"
-
-
-def test_validate_reports_or_says_there_is_nothing_to_validate(scratch_db):
-    r = runner.invoke(app, ["validate"])
-    assert r.exit_code == 0, r.stdout
-
-
 def test_init_applies_the_schema_idempotently(scratch_db):
     assert runner.invoke(app, ["init"]).exit_code == 0
     assert runner.invoke(app, ["init"]).exit_code == 0
 
 
 def test_xcoupled_on_an_unknown_repo_is_handled(db):
-    r = runner.invoke(app, ["xcoupled", "definitely-not-a-repo"])
+    r = runner.invoke(app, ["definitely-not-a-repo"])
     assert r.exit_code != 0 or "no repositor" in r.stdout.lower()
 
 
 def test_chains_on_an_unknown_repo_is_handled(db):
-    r = runner.invoke(app, ["chains", "definitely-not-a-repo"])
+    r = runner.invoke(app, ["definitely-not-a-repo"])
     assert r.exit_code != 0 or "no repositor" in r.stdout.lower()
 
 
@@ -290,56 +276,12 @@ def test_ingest_with_an_unmatched_repo_name_does_not_silently_do_everything(db, 
 
 # ------------------------------------------------- the reporting commands
 
-def test_chains_prints_a_chain_when_one_exists(db):
-    """`chains` is the multi-hop view; it printed nothing in every observed
-    session, so it is worth asserting it can print something."""
-    from git_synapse.db.engine import query_one
-
-    row = query_one(
-        """
-        SELECT r.name FROM repo r
-        WHERE EXISTS (
-            SELECT 1 FROM repo_impact a
-            JOIN repo_impact b ON b.source_repo_id = a.target_repo_id
-            WHERE a.target_repo_id = r.id
-              AND (a.is_declared OR a.has_bump_history)
-              AND (b.is_declared OR b.has_bump_history)
-        ) LIMIT 1
-        """
-    )
-    if row is None:
-        pytest.skip("no repository with a validated two-hop path")
-    r = runner.invoke(app, ["chains", row["name"]])
-    assert r.exit_code == 0, r.stdout
-    assert "<-" in r.stdout or "->" in r.stdout or "no chains" in r.stdout.lower()
-
-
-def test_chains_honours_its_depth_and_confidence_options(db):
-    from git_synapse.db.engine import query_one
-
-    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
-    for args in (["--depth", "2"], ["--min-confidence", "0.9"], ["-n", "3"]):
-        r = runner.invoke(app, ["chains", row["name"], *args])
-        assert r.exit_code == 0, f"{args}: {r.stdout}"
-
-
-def test_xcoupled_reports_cross_repo_partners(db):
-    from git_synapse.db.engine import query_one
-
-    row = query_one(
-        "SELECT r.name FROM xrepo_file_pair x JOIN repo r ON r.id = x.repo_a_id LIMIT 1"
-    )
-    if row is None:
-        pytest.skip("no cross-repo pairs")
-    r = runner.invoke(app, ["xcoupled", row["name"], "-n", "3"])
-    assert r.exit_code == 0, r.stdout
-
 
 def test_xcoupled_rejects_an_unknown_measure(db):
     from git_synapse.db.engine import query_one
 
     row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
-    r = runner.invoke(app, ["xcoupled", row["name"], "-m", "not_a_measure"])
+    r = runner.invoke(app, [row["name"], "-m", "not_a_measure"])
     assert r.exit_code != 0 or "measure" in r.stdout.lower()
 
 
@@ -444,27 +386,6 @@ def test_aggregate_says_so_when_there_is_nothing_to_do(scratch_db):
     assert r.exit_code == 0, r.stdout
 
 
-def test_validate_prints_the_measure_table_when_there_is_ground_truth(db):
-    from git_synapse.analysis.validate import ground_truth_edges
-    from git_synapse.db.engine import query_one
-
-    # Needs both halves: labels to score against and a lag table to score.
-    # Checking only one of them made this depend on which database the module
-    # happened to be pointed at.
-    if not ground_truth_edges(min_bumps=2):
-        pytest.skip("no ground truth")
-    # `validate` scores lag 1 by default, and having rows at *some* lag is not
-    # the same as having them at that one -- the scratch corpus has the former
-    # and not the latter, which is what made this pass alone and fail in the
-    # suite.
-    if query_one("SELECT count(*) AS n FROM repo_lag_metric WHERE lag_bins = 1")["n"] == 0:
-        pytest.skip("no lagged rows at the default lag")
-
-    r = runner.invoke(app, ["validate"])
-    assert r.exit_code == 0, r.stdout
-    assert "auc" in r.stdout.lower()
-
-
 def test_impact_marks_the_evidence_tier_on_each_row(db):
     """The tier is the whole point of the row; a table without it invites
     acting on a discovery edge as though it were declared."""
@@ -481,28 +402,6 @@ def test_impact_marks_the_evidence_tier_on_each_row(db):
     r = runner.invoke(app, ["impact", row["name"]])
     assert r.exit_code == 0, r.stdout
     assert "declared" in r.stdout.lower() or "bumps" in r.stdout.lower()
-
-
-def test_chains_renders_the_hop_path(db):
-    from git_synapse.db.engine import query_one
-
-    row = query_one(
-        """
-        SELECT r.name FROM repo r
-        WHERE EXISTS (
-            SELECT 1 FROM repo_impact a
-            JOIN repo_impact b ON b.source_repo_id = a.target_repo_id
-            WHERE a.target_repo_id = r.id
-              AND (a.is_declared OR a.has_bump_history)
-              AND (b.is_declared OR b.has_bump_history)
-        ) LIMIT 1
-        """
-    )
-    if row is None:
-        pytest.skip("no two-hop path")
-    r = runner.invoke(app, ["chains", row["name"], "-n", "3"])
-    assert r.exit_code == 0, r.stdout
-    assert row["name"] in r.stdout or "chain" in r.stdout.lower()
 
 
 # ------------------------------------------------- render paths on real rows
@@ -610,42 +509,6 @@ def test_impact_labels_each_evidence_tier(db, monkeypatch, direction, patched):
         assert tier in r.stdout
 
 
-def test_validate_renders_the_measure_quality_table(db, monkeypatch):
-    class _Scored:
-        measure = "cosine"
-        auc = 0.8593
-        precision_at = {10: 0.7, 25: 0.6}
-        directional_accuracy = 0.71
-        n_true = 402
-        n_candidates = 75562
-
-    monkeypatch.setattr("git_synapse.analysis.validate.evaluate",
-                        lambda lag_bins=1, min_bumps=2: [_Scored()])
-    r = runner.invoke(app, ["validate"])
-    assert r.exit_code == 0, r.stdout
-    assert "cosine" in r.stdout and "0.8593" in r.stdout
-    assert "402" in r.stdout
-
-
-def test_validate_says_so_when_there_is_no_ground_truth(db, monkeypatch):
-    monkeypatch.setattr("git_synapse.analysis.validate.evaluate",
-                        lambda lag_bins=1, min_bumps=2: [])
-    r = runner.invoke(app, ["validate"])
-    assert r.exit_code == 0
-    assert "no ground truth" in r.stdout
-
-
-def test_chains_renders_a_multi_hop_path(db, monkeypatch):
-    monkeypatch.setattr("git_synapse.cli.q.repo_chains", lambda *a, **k: [
-        {"repo_names": ["httpkit", "telemetry", "console"], "hops": [0.8, 0.5],
-         "path_conf": 0.4, "depth": 2, "supports": [40, 12]},
-    ])
-    repo = _any_repo_name()
-    r = runner.invoke(app, ["chains", repo])
-    assert r.exit_code == 0, r.stdout
-    assert "httpkit" in r.stdout and "console" in r.stdout
-
-
 def test_reset_with_yes_truncates_only_the_atom_tables(monkeypatch):
     """Runs against a recording stub: pointing this at the real database would
     delete every ingested commit, which is exactly what it is meant to do."""
@@ -718,16 +581,3 @@ def test_score_recomputes_one_repo_or_every_repo(monkeypatch):
     assert "s/a: 3 pairs" in r.stdout
 
 
-def test_xcoupled_renders_its_table_including_the_ticket_backed_share(db,
-                                                                     monkeypatch):
-    """The None guards on score and confidence are the point: a pair with no
-    value for the chosen measure must print 0, not crash the command."""
-    monkeypatch.setattr("git_synapse.cli.q.repo_partners", lambda *a, **k: [
-        {"score": 0.62, "confidence_out": 0.5, "confidence_in": 0.3, "n_ab": 40,
-         "n_ab_ticket": 12, "ticket_ratio": 0.3, "name": "acme/console"},
-        {"score": None, "confidence_out": None, "confidence_in": None, "n_ab": 4,
-         "n_ab_ticket": 0, "ticket_ratio": None, "name": "acme/runtime"},
-    ])
-    r = runner.invoke(app, ["xcoupled", _any_repo_name()])
-    assert r.exit_code == 0, r.stdout
-    assert "console" in r.stdout and "runtime" in r.stdout

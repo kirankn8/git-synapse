@@ -14,7 +14,7 @@ from rich.console import Console
 from rich.table import Table
 
 from git_synapse.analysis import query as q
-from git_synapse.analysis import crossrepo, depbump, lagged, mining, predict
+from git_synapse.analysis import depbump, mining, predict
 from git_synapse.analysis.aggregate import rebuild_repo, repos_needing_aggregation
 from git_synapse.analysis.score import score_repo
 from git_synapse.config import get_config
@@ -158,32 +158,6 @@ def score(repo_id: int = typer.Option(0, "--repo-id", help="0 means every repo."
         console.print(f"{row['full_name']}: {stats.file_pairs} pairs in {stats.duration_s:.1f}s")
 
 
-@app.command("crossrepo")
-def crossrepo_cmd(
-    force: bool = typer.Option(False, "--force",
-                               help="Re-partition every change set from scratch."),
-) -> None:
-    """Rebuild cross-repository coupling: change sets, repo pairs, file pairs.
-
-    Incremental by default: only the tickets and authors touched by new commits
-    are re-partitioned. Use --force after changing SESSION_GAP_HOURS or
-    TICKET_PATTERN, since those alter every change set.
-    """
-    _setup()
-    stats = crossrepo.rebuild(force=force)
-    table = Table(box=None, show_header=False)
-    table.add_column("metric", style="dim")
-    table.add_column("value", justify="right")
-    table.add_row("change sets", f"{stats.change_sets:,}")
-    table.add_row("  ticket-linked", f"{stats.ticket_sets:,}")
-    table.add_row("  temporal sessions", f"{stats.temporal_sets:,}")
-    table.add_row("  pair-eligible", f"{stats.eligible_sets:,}")
-    table.add_row("repo pairs", f"{stats.repo_pairs:,}")
-    table.add_row("cross-repo file pairs", f"{stats.file_pairs:,}")
-    table.add_row("duration", f"{stats.duration_s:.1f}s")
-    console.print(table)
-
-
 @app.command("depbump")
 def depbump_cmd(
     force: bool = typer.Option(False, "--force", help="Rescan every repo, ignoring watermarks."),
@@ -217,30 +191,6 @@ def depbump_cmd(
                        f"{r['p90_lag_days']}d" if r["p90_lag_days"] is not None else "-",
                        str(r["last_bump"]))
         console.print(lt)
-
-
-@app.command("lagged")
-def lagged_cmd(
-    bin_hours: int = typer.Option(0, "--bin-hours", help="Time bin width; 0 uses config."),
-) -> None:
-    """Compute directed, time-lagged coupling between repositories.
-
-    Bins time, turns each repo into a binary vector over bins, and forms the 2x2
-    table between A and B shifted by each lag. All 29 measures then apply, but
-    become directional -- which is what distinguishes 'A precedes B' from the
-    reverse.
-    """
-    _setup()
-    stats = lagged.rebuild(bin_hours=bin_hours or None)
-    table = Table(box=None, show_header=False)
-    table.add_column("metric", style="dim")
-    table.add_column("value", justify="right")
-    table.add_row("repositories", f"{stats.n_repos:,}")
-    table.add_row("time bins", f"{stats.n_bins:,} x {stats.bin_hours}h")
-    table.add_row("lags evaluated", ", ".join(str(x) for x in stats.lags))
-    table.add_row("directed rows", f"{stats.rows_written:,}")
-    table.add_row("duration", f"{stats.duration_s:.1f}s")
-    console.print(table)
 
 
 @app.command("mine")
@@ -350,112 +300,6 @@ def backtest_cmd(
         console.print("[dim]hit rate = share of prompts where a correct file appeared "
                       "in the top k. Intervals assume independent prompts; those from "
                       "one commit are not, so the true interval is wider.[/dim]")
-
-
-@app.command("validate")
-def validate_cmd(
-    lag: int = typer.Option(1, "--lag"),
-    top: int = typer.Option(12, "--top", "-n"),
-) -> None:
-    """Measure how well each association measure predicts real propagation."""
-    _setup()
-    from git_synapse.analysis.validate import evaluate
-    scored = evaluate(lag_bins=lag, min_bumps=2)[:top]
-    if not scored:
-        console.print("[yellow]no ground truth; run `git-synapse depbump` and `git-synapse lagged`[/yellow]")
-        return
-    t = Table(title=f"measure quality at lag={lag} (ground truth: manifest bumps)",
-              box=None, title_style="bold")
-    for c in ("measure", "AUC", "P@10", "P@25", "dir.acc"):
-        t.add_column(c, justify="right" if c != "measure" else "left")
-    for s in scored:
-        t.add_row(s.measure, f"{s.auc:.4f}", f"{s.precision_at[10]:.2f}",
-                  f"{s.precision_at[25]:.2f}",
-                  f"{s.directional_accuracy:.3f}" if s.directional_accuracy else "-")
-    console.print(t)
-    console.print(f"[dim]{scored[0].n_true} true edges among {scored[0].n_candidates:,} "
-                  f"candidate ordered pairs[/dim]")
-
-
-@app.command("chains")
-def chains(
-    repo: str = typer.Argument(..., help="Repository name to walk outward from."),
-    depth: int = typer.Option(3, "--depth", "-d", help="Maximum hops."),
-    min_confidence: float = typer.Option(0.15, "--min-confidence", "-c"),
-    min_support: int = typer.Option(3, "--min-support"),
-    limit: int = typer.Option(15, "--limit", "-n"),
-) -> None:
-    """Show transitive coupling chains: changing A implies B implies C."""
-    _setup()
-    matches = [r for r in q.list_repos(search=repo, limit=8) if r["name"] == repo] or \
-              q.list_repos(search=repo, limit=1)
-    if not matches:
-        console.print(f"[red]no repository matching {repo!r}[/red]")
-        raise typer.Exit(1)
-    target = matches[0]
-
-    rows = q.repo_chains(
-        target["id"], max_depth=depth, min_confidence=min_confidence,
-        limit=limit, min_support=min_support,
-    )
-    if not rows:
-        console.print(
-            f"[yellow]no chains from {target['name']} with per-hop confidence "
-            f">= {min_confidence:.0%} and support >= {min_support}[/yellow]"
-        )
-        console.print("[dim]lower --min-confidence or --min-support to widen the search[/dim]")
-        return
-
-    table = Table(title=f"coupling chains from {target['name']}", box=None, title_style="bold")
-    table.add_column("chain")
-    table.add_column("path conf", justify="right", style="cyan")
-    table.add_column("hops", justify="right")
-    table.add_column("support", justify="right", style="dim")
-    for c in rows:
-        names = c["repo_names"]
-        hops = [float(h) for h in c["hops"]]
-        chain = " ".join(
-            f"[bold]{names[i]}[/bold] →{hops[i]:.0%}→" for i in range(len(hops))
-        ) + f" [bold]{names[-1]}[/bold]"
-        table.add_row(chain, f"{float(c['path_conf']):.2%}", str(c["depth"]),
-                      ",".join(str(x) for x in c["supports"]))
-    console.print(table)
-
-
-@app.command("xcoupled")
-def xcoupled(
-    repo: str = typer.Argument(..., help="Repository name."),
-    measure: str = typer.Option(DEFAULT_MEASURE, "--measure", "-m"),
-    limit: int = typer.Option(15, "--limit", "-n"),
-    min_support: int = typer.Option(3, "--min-support"),
-) -> None:
-    """Which other repositories change together with this one."""
-    _setup()
-    matches = [r for r in q.list_repos(search=repo, limit=8) if r["name"] == repo] or \
-              q.list_repos(search=repo, limit=1)
-    if not matches:
-        console.print(f"[red]no repository matching {repo!r}[/red]")
-        raise typer.Exit(1)
-    target = matches[0]
-
-    rows = q.repo_partners(target["id"], measure, limit, min_support)
-    table = Table(title=f"repositories coupled to {target['name']}", box=None, title_style="bold")
-    table.add_column(measure, justify="right", style="cyan")
-    table.add_column("P(it|this)", justify="right")
-    table.add_column("P(this|it)", justify="right")
-    table.add_column("shared", justify="right")
-    table.add_column("ticket-backed", justify="right", style="dim")
-    table.add_column("repository")
-    for r in rows:
-        table.add_row(
-            f"{(r.get('score') or 0):.3f}",
-            f"{(r.get('confidence_out') or 0):.0%}",
-            f"{(r.get('confidence_in') or 0):.0%}",
-            str(r["n_ab"]),
-            f"{r['n_ab_ticket']} ({(r['ticket_ratio'] or 0):.0%})",
-            r["name"],
-        )
-    console.print(table)
 
 
 @app.command("measures")

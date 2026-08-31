@@ -592,46 +592,6 @@ def coupling_chain(
 
 
 @server.tool(
-    name="crossrepo_files",
-    title="Files in other repositories that change with this file",
-    description=(
-        "Given a specific file, find files in OTHER repositories that historically "
-        "changed as part of the same unit of work -- the same ticket, or the same "
-        "burst of activity. Use it when a change looks like it needs a matching "
-        "edit somewhere else in the organisation."
-    ),
-)
-def crossrepo_files(repo: str, path: str, limit: int = 12, min_support: int = 2) -> dict:
-    """Cross-repository file-level coupling for one file."""
-    target = q.resolve_file(repo, path)
-    if target is None:
-        return {"error": f"no file {path!r} in repository {repo!r}"}
-
-    rows = q.crossrepo_file_partners(target["id"], "npmi", limit, min_support)
-    return {
-        "file": {"repo": target["repo"], "path": target["path"]},
-        "partners": [
-            {
-                "repo": r["repo_name"],
-                "path": r["path"],
-                "shared_change_sets": r["n_ab"],
-                "ticket_backed": r["n_ab_ticket"],
-                "ticket_ratio": round(float(r["ticket_ratio"] or 0), 3),
-                "probability_also_changes": _round(r.get("confidence_out"), 3),
-                "npmi": _round(r.get("npmi"), 3),
-                "last_together": str(r["last_co_change"]) if r.get("last_co_change") else None,
-                "deleted": bool(r.get("is_deleted")),
-                "evidence": (
-                    "ticket-linked" if (r["ticket_ratio"] or 0) >= 0.5
-                    else "mostly temporal proximity -- weaker evidence"
-                ),
-            }
-            for r in rows
-        ],
-    }
-
-
-@server.tool(
     name="explain_repo_pair",
     title="Explain the coupling between two repositories",
     description=(
