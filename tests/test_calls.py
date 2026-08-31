@@ -301,3 +301,26 @@ def test_the_timeline_window_is_clamped(db):
     four million rows in it."""
     assert len(calls.timeline(hours=10_000)) == 168
     assert len(calls.timeline(hours=0)) == 1
+
+
+def test_expired_sessions_are_pruned_with_the_call_log(db, caplog, monkeypatch):
+    """Kept forever they are dead weight, and a record of who was signed in
+    from where long after it could matter."""
+    import logging
+
+    from git_synapse import auth
+    from git_synapse.ingest import pipeline
+
+    monkeypatch.setattr(calls, "prune", lambda: 0)
+    monkeypatch.setattr(auth, "prune_sessions", lambda: 4)
+    with caplog.at_level(logging.INFO, logger="git_synapse.ingest.pipeline"):
+        pipeline._prune_call_log()
+    assert "pruned 4 expired" in caplog.text
+
+    def boom():
+        raise RuntimeError("gone")
+
+    monkeypatch.setattr(auth, "prune_sessions", boom)
+    with caplog.at_level(logging.WARNING, logger="git_synapse.ingest.pipeline"):
+        pipeline._prune_call_log()      # must not raise
+    assert "could not prune expired sessions" in caplog.text

@@ -18,6 +18,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from git_synapse.analysis import calls
+from git_synapse import auth
+from git_synapse.api import routes
 from git_synapse.api.routes import router
 from git_synapse.config import get_config
 from git_synapse.db.engine import apply_schema, close_pool, wait_for_database
@@ -84,6 +86,30 @@ app.include_router(router, prefix="/api")
 #: Reading the log through the log would make every visit to the activity page
 #: generate the traffic it is displaying.
 _UNLOGGED = ("/api/calls", "/api/health", "/api/openapi.json", "/api/docs")
+
+#: Reachable without a caller, always. Everything else follows the access mode.
+#: `/api/auth/*` because you cannot sign in through a door that needs you to be
+#: signed in; `/api/health` because a probe has no credentials to offer.
+_ALWAYS_OPEN = ("/api/auth/", "/api/health")
+
+
+@app.middleware("http")
+async def _require_caller(request, call_next):
+    """Turn the access policy into a closed door, or not, per request.
+
+    Read live rather than at startup: an administrator switching sign-in on
+    expects it to apply to the next request, not the next deployment. The SPA
+    shell is always served -- it is the thing that renders the sign-in form --
+    so only /api/* is gated.
+    """
+    path = request.url.path
+    if not path.startswith("/api/") or path.startswith(_ALWAYS_OPEN):
+        return await call_next(request)
+    if auth.access_mode("dashboard") != "required":
+        return await call_next(request)
+    if routes.caller(request) is None:
+        return JSONResponse(status_code=401, content={"detail": "sign in to continue"})
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -238,6 +264,8 @@ if _web_root.is_dir():
     #: /repos/{id}/files/{id}, not /file/{id} -- so this is exactly the nav.
     SPA_ROUTES = (
         "accounts", "repos", "insights", "activity", "measures", "jobs", "feedback",
+        # Reachable while signed out: the shell renders the sign-in form.
+        "people", "tokens",
     )
 
     @app.get("/{segment}", include_in_schema=False)

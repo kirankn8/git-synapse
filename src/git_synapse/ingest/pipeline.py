@@ -194,6 +194,17 @@ def _prune_call_log() -> None:
     except Exception:
         log.warning("could not prune the call log", exc_info=True)
 
+    # Expired sessions are dead weight and, kept forever, a record of who was
+    # signed in from where long after it could matter.
+    try:
+        from git_synapse import auth
+
+        gone = auth.prune_sessions()
+        if gone:
+            log.info("sessions: pruned %d expired", gone)
+    except Exception:
+        log.warning("could not prune expired sessions", exc_info=True)
+
 
 def _finish_run(run: RunResult) -> None:
     status = "success"

@@ -34,6 +34,8 @@ const PAGES = [
   ['/jobs?tab=settings', 'Jobs settings'],
   ['/activity', 'Activity'],
   ['/measures', 'Measures'],
+  ['/people', 'People'],
+  ['/tokens', 'API tokens'],
   ['/repos/4?tab=meta', 'Repository metadata'],
   ['/insights/modules?repo=5', 'Modules'],
   ['/feedback', 'Feedback'],
@@ -49,12 +51,45 @@ const problems = [];
 const ok = (label, detail) => console.log(`  ok   ${label.padEnd(36)} ${detail}`);
 const bad = (label, detail) => { console.log(`  FAIL ${label.padEnd(36)} ${detail}`); problems.push(`${label}: ${detail}`); };
 
+/* The deployment may be behind a sign-in. Get a session cookie first and give
+   it to the browser, so these pages render rather than showing the door. */
+const TEST_EMAIL = process.env.GS_TEST_EMAIL || 'ui-tests@git-synapse.local';
+const TEST_PASSWORD = process.env.GS_TEST_PASSWORD || 'ui-tests-password-1234';
+
+async function sessionCookie() {
+  const me = await (await fetch(BASE + '/api/auth/me')).json();
+  if (!me.auth_required && !me.needs_setup) return null;
+  const res = await fetch(BASE + (me.needs_setup ? '/api/auth/setup' : '/api/auth/login'), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(me.needs_setup
+      ? { email: TEST_EMAIL, name: 'UI tests', password: TEST_PASSWORD }
+      : { email: TEST_EMAIL, password: TEST_PASSWORD }),
+  });
+  if (!res.ok) {
+    throw new Error(`could not sign in as ${TEST_EMAIL} (${res.status}). `
+      + 'Set GS_TEST_EMAIL and GS_TEST_PASSWORD to an account on this deployment.');
+  }
+  const raw = (res.headers.getSetCookie?.() || [])[0] || '';
+  const [pair] = raw.split(';');
+  const [name, value] = pair.split('=');
+  return { name, value };
+}
+
+const AUTH_COOKIE = await sessionCookie();
+
 const browser = await puppeteer.launch({
   executablePath: '/usr/bin/chromium-browser',
   args: ['--no-sandbox', '--disable-dev-shm-usage'],
 });
 const page = await browser.newPage();
 await page.setViewport({ width: 1440, height: 1000 });
+if (AUTH_COOKIE) {
+  // page.setCookie, not browser.setCookie: this puppeteer is older than the
+  // browser-level API, and the difference is a TypeError rather than a warning.
+  const { hostname } = new URL(BASE);
+  await page.setCookie({ ...AUTH_COOKIE, domain: hostname, path: '/' });
+}
 
 async function settle() {
   for (let i = 0; i < 50; i++) {
@@ -256,6 +291,31 @@ console.log('\n=== the splash covers the load and then leaves ===');
   if (!after.splash && after.rendered) ok('splash after load', 'removed once the view rendered');
   else bad('splash after load', JSON.stringify(after));
   await probe.close();
+}
+
+/* The door itself. Rendered for a visitor with no session, on a deployment
+   that has people -- which is every page they can reach until they sign in. */
+console.log('\n=== the sign-in screen ===');
+{
+  const anon = await browser.createIncognitoBrowserContext
+    ? await (await browser.createIncognitoBrowserContext()).newPage()
+    : await browser.newPage();
+  await anon.deleteCookie(...(await anon.cookies(BASE)));
+  await anon.goto(BASE + '/repos/4', { waitUntil: 'domcontentloaded' });
+  await new Promise((r) => setTimeout(r, 1800));
+  const seen = await anon.evaluate(() => ({
+    gated: document.body.classList.contains('gated'),
+    form: !!document.querySelector('.gate-form input[type=password]'),
+    // The chrome is hidden: a nav that leads nowhere and a search that cannot.
+    nav: (document.querySelector('.mainnav') || {}).offsetHeight || 0,
+    leaked: (document.getElementById('view').textContent || '').includes('closure-compiler'),
+  }));
+  if (seen.gated && seen.form && !seen.nav && !seen.leaked) {
+    ok('sign-in screen', 'shown instead of the page, with no data behind it');
+  } else {
+    bad('sign-in screen', JSON.stringify(seen));
+  }
+  await anon.close();
 }
 
 console.log('\n=== nothing overflows its container horizontally ===');

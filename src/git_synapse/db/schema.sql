@@ -1031,6 +1031,70 @@ CREATE INDEX IF NOT EXISTS call_log_at_idx      ON call_log (at DESC);
 CREATE INDEX IF NOT EXISTS call_log_surface_idx ON call_log (surface, at DESC);
 CREATE INDEX IF NOT EXISTS call_log_name_idx    ON call_log (surface, name, at DESC);
 
+-- ===========================================================================
+-- People who may read this dashboard, and their live sessions.
+--
+-- Everything here is derived from public repositories, but the deployment
+-- itself is not public: it says which repositories an organisation tracks and
+-- where its coupling is weakest. So the UI is behind a sign-in, and adding a
+-- person is an administrator's act.
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS app_user (
+    id            BIGSERIAL PRIMARY KEY,
+    email         TEXT        NOT NULL,
+    name          TEXT        NOT NULL,
+    -- 'admin' may add and remove people; 'member' may read everything, which is
+    -- the whole application. There is nothing in between, because a third role
+    -- nobody can describe is a role nobody applies consistently.
+    role          TEXT        NOT NULL DEFAULT 'member'
+                  CHECK (role IN ('admin', 'member')),
+    -- scrypt$n$r$p$salt$hash -- the parameters travel with the hash so they can
+    -- be raised later without invalidating everyone's password.
+    password_hash TEXT        NOT NULL,
+    is_active     BOOLEAN     NOT NULL DEFAULT TRUE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by    BIGINT      REFERENCES app_user (id) ON DELETE SET NULL,
+    last_login_at TIMESTAMPTZ
+);
+
+-- Case-insensitive: people type their address in whatever case they please,
+-- and two rows differing only in case are two accounts for one person.
+CREATE UNIQUE INDEX IF NOT EXISTS app_user_email_idx ON app_user (lower(email));
+
+CREATE TABLE IF NOT EXISTS user_session (
+    -- The SHA-256 of the cookie value, never the value: a database dump then
+    -- yields no live session, only the fact that one existed.
+    token_hash   TEXT        PRIMARY KEY,
+    user_id      BIGINT      NOT NULL REFERENCES app_user (id) ON DELETE CASCADE,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at   TIMESTAMPTZ NOT NULL,
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    user_agent   TEXT
+);
+
+-- A token is a person's key, not a service's: it carries their identity and
+-- their role, and dies with their account. Agents calling the HTTP API use
+-- these; the cookie is for browsers.
+CREATE TABLE IF NOT EXISTS api_token (
+    id           BIGSERIAL PRIMARY KEY,
+    -- SHA-256 of the token. The value itself is shown once, at creation, and
+    -- is not recoverable afterwards -- including by whoever runs the database.
+    token_hash   TEXT        NOT NULL UNIQUE,
+    -- The first characters, so a person can tell their tokens apart in a list
+    -- without the list being a set of working credentials.
+    prefix       TEXT        NOT NULL,
+    user_id      BIGINT      NOT NULL REFERENCES app_user (id) ON DELETE CASCADE,
+    name         TEXT        NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at   TIMESTAMPTZ,
+    last_used_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS api_token_user_idx ON api_token (user_id);
+
+CREATE INDEX IF NOT EXISTS user_session_user_idx    ON user_session (user_id);
+CREATE INDEX IF NOT EXISTS user_session_expiry_idx  ON user_session (expires_at);
+
 -- Simple key/value for schema version and other bookkeeping.
 CREATE TABLE IF NOT EXISTS meta (
     key         TEXT PRIMARY KEY,
@@ -1043,5 +1107,5 @@ CREATE TABLE IF NOT EXISTS meta (
 -- was not, so schema_is_current() was permanently false and every service boot
 -- re-ran the whole DDL, taking exactly the locks the fast path exists to avoid.
 INSERT INTO meta (key, value)
-VALUES ('schema_version', '26'::jsonb)
+VALUES ('schema_version', '27'::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();

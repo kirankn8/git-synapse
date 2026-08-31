@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
+from git_synapse import auth
 from git_synapse.analysis import calls, mining, predict
 from git_synapse.analysis import query as q
 from git_synapse.analysis import settings
@@ -85,7 +86,7 @@ def config() -> dict:
                    "overridden": settings.get(name) is not None,
                    "from_env": getattr(cfg.schedule, "cron" if name == "refresh_cron"
                                        else "discover_cron")}
-            for name in settings.WRITABLE
+            for name in settings.SCHEDULES
         },
         # Never the token itself -- only whether one is present and how it got
         # here, so the UI can say "set" without being able to read it back.
@@ -116,10 +117,14 @@ class SettingIn(BaseModel):
 
 
 @router.get("/settings", tags=["meta"])
-def list_settings() -> dict:
+def list_settings(request: Request) -> dict:
     """The operational settings the UI may change, and what they are now."""
+    _require(request)
     cfg = get_config().schedule
     return {
+        "access": {
+            surface: auth.access_mode(surface) for surface in ("dashboard", "mcp")
+        },
         "settings": [
             {
                 "name": name,
@@ -127,23 +132,36 @@ def list_settings() -> dict:
                 "overridden": settings.get(name) is not None,
                 "from_env": cfg.cron if name == "refresh_cron" else cfg.discover_cron,
             }
-            for name in settings.WRITABLE
+            for name in settings.SCHEDULES
         ]
     }
 
 
 @router.put("/settings/{name}", tags=["meta"])
-def put_setting(name: str, body: SettingIn) -> dict:
+def put_setting(name: str, body: SettingIn, request: Request) -> dict:
     """Store an operational setting, or clear it back to the environment's.
 
     Validated here rather than at the scheduler: a cron that does not parse
     would otherwise be accepted, stored, and then silently ignored once a
     minute by a process the reader is not watching.
     """
+    # Changing the schedule affects the corpus; changing the access policy
+    # affects who can see it. Both are an administrator's call.
+    _require(request, admin=True)
     if name not in settings.WRITABLE:
         raise HTTPException(404, f"{name!r} is not a settable option")
 
     value = body.value.strip()
+    if name.endswith("_auth"):
+        if value and value not in auth.ACCESS_MODES:
+            raise HTTPException(422, f"access must be one of {', '.join(auth.ACCESS_MODES)}")
+        if name == "dashboard_auth" and value == "open":
+            log.warning("dashboard sign-in switched OFF by %s", _require(request)["email"])
+        if value:
+            settings.set(name, value)
+        else:
+            settings.clear(name)
+        return {"name": name, "value": auth.access_mode(name[:-5]), "overridden": bool(value)}
     if not value:
         settings.clear(name)
         return {"name": name, "value": live_cron(name.removesuffix("_cron")),
@@ -158,6 +176,213 @@ def put_setting(name: str, body: SettingIn) -> dict:
 
     settings.set(name, value)
     return {"name": name, "value": value, "overridden": True}
+
+
+# ---------------------------------------------------------------------------
+# Sign-in, and the people who may sign in
+# ---------------------------------------------------------------------------
+
+#: The session cookie. Host-only, so it is never sent to a sibling subdomain.
+COOKIE = "gs_session"
+
+
+class Credentials(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class NewUser(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    name: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=auth.MIN_PASSWORD, max_length=200)
+    role: str = "member"
+
+
+class UserPatch(BaseModel):
+    name: str | None = None
+    role: str | None = None
+    is_active: bool | None = None
+    password: str | None = Field(default=None, min_length=auth.MIN_PASSWORD, max_length=200)
+
+
+def _set_cookie(response: Response, token: str, secure: bool) -> None:
+    response.set_cookie(
+        COOKIE, token,
+        max_age=auth.SESSION_DAYS * 86400,
+        httponly=True,          # script cannot read it, so XSS cannot lift it
+        samesite="lax",         # sent on navigation, not on a cross-site POST
+        secure=secure,          # only withheld on plain http, where it is moot
+        path="/",
+    )
+
+
+@router.get("/auth/me", tags=["auth"])
+def whoami(request: Request) -> dict:
+    """Who is signed in, and whether anyone exists yet.
+
+    Answers for the signed-out caller too: the UI needs to know whether to show
+    a sign-in form or a first-run setup screen, and that must not require being
+    signed in already.
+    """
+    user = caller(request)
+    return {
+        "user": user,
+        "authenticated": user is not None,
+        "needs_setup": auth.count_users() == 0,
+        # The UI needs this to know whether a signed-out visitor should see a
+        # sign-in form or the dashboard.
+        "auth_required": auth.access_mode("dashboard") == "required",
+    }
+
+
+@router.post("/auth/login", tags=["auth"])
+def login(body: Credentials, request: Request, response: Response) -> dict:
+    try:
+        token, user = auth.sign_in(body.email, body.password,
+                                   request.headers.get("user-agent"))
+    except auth.AuthError as exc:
+        # 401 rather than 400: the credentials were the problem, and the client
+        # distinguishes the two.
+        raise HTTPException(401, str(exc)) from exc
+    _set_cookie(response, token, request.url.scheme == "https")
+    return {"user": user}
+
+
+@router.post("/auth/logout", tags=["auth"])
+def logout(request: Request, response: Response) -> dict:
+    auth.sign_out(request.cookies.get(COOKIE))
+    response.delete_cookie(COOKIE, path="/")
+    return {"signed_out": True}
+
+
+@router.post("/auth/setup", tags=["auth"], status_code=201)
+def setup(body: NewUser, request: Request, response: Response) -> dict:
+    """Create the first administrator, once.
+
+    A password in the environment would sit in a shell history, a compose file
+    and every process listing; this asks for one at the console instead. The
+    endpoint refuses as soon as a single user exists, so it cannot be used to
+    add a second administrator later.
+    """
+    if auth.count_users() > 0:
+        raise HTTPException(409, "this deployment already has users")
+    try:
+        user = auth.create_user(body.email, body.name, body.password, role="admin")
+        token, _ = auth.sign_in(body.email, body.password,
+                                request.headers.get("user-agent"))
+    except auth.AuthError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    _set_cookie(response, token, request.url.scheme == "https")
+    return {"user": user}
+
+
+def caller(request: Request) -> dict | None:
+    """Whoever is making this request: a browser session, or a bearer token.
+
+    Both carry a person, so everything downstream -- roles, the call log, the
+    audit of who added whom -- works the same either way.
+    """
+    header = request.headers.get("authorization") or ""
+    if header.lower().startswith("bearer "):
+        user = auth.token_user(header[7:].strip())
+        if user is not None:
+            return user
+    return auth.session_user(request.cookies.get(COOKIE))
+
+
+def _require(request: Request, admin: bool = False) -> dict:
+    user = caller(request)
+    if user is None:
+        # With sign-in switched off there is still nobody to attribute an
+        # administrative act to, so these endpoints always need a caller.
+        raise HTTPException(401, "sign in to continue")
+    if admin and user["role"] != "admin":
+        raise HTTPException(403, "only an administrator can do that")
+    return user
+
+
+class NewToken(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    #: Optional lifetime. A token that never expires is a key left in a door.
+    days: int | None = Field(default=None, ge=1, le=730)
+
+
+@router.get("/auth/tokens", tags=["auth"])
+def my_tokens(request: Request) -> dict:
+    me = _require(request)
+    return {"tokens": auth.list_tokens(me["id"]), "prefix": auth.TOKEN_PREFIX}
+
+
+@router.post("/auth/tokens", tags=["auth"], status_code=201)
+def mint_token(body: NewToken, request: Request) -> dict:
+    """Create a personal token. The secret is returned once and never again.
+
+    It carries the maker's identity and role, so it can do what they can do and
+    nothing more, and it stops working when their account does.
+    """
+    me = _require(request)
+    try:
+        secret, row = auth.create_token(me["id"], body.name, body.days)
+    except auth.AuthError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"token": secret, "detail": row,
+            "note": "Copy this now — it is stored only as a hash and cannot be shown again."}
+
+
+@router.delete("/auth/tokens/{token_id}", tags=["auth"])
+def revoke_token(token_id: int, request: Request) -> dict:
+    me = _require(request)
+    if not auth.delete_token(token_id, me["id"]):
+        raise HTTPException(404, f"token {token_id} not found")
+    return {"deleted": token_id}
+
+
+@router.get("/users", tags=["auth"])
+def list_users(request: Request) -> dict:
+    """Everyone may see who has access; only an administrator may change it."""
+    _require(request)
+    return {"users": auth.list_users(), "roles": list(auth.ROLES)}
+
+
+@router.post("/users", tags=["auth"], status_code=201)
+def create_user(body: NewUser, request: Request) -> dict:
+    me = _require(request, admin=True)
+    try:
+        return auth.create_user(body.email, body.name, body.password,
+                                role=body.role, created_by=me["id"])
+    except auth.AuthError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.patch("/users/{user_id}", tags=["auth"])
+def patch_user(user_id: int, body: UserPatch, request: Request) -> dict:
+    me = _require(request, admin=True)
+    if auth.get_user(user_id) is None:
+        raise HTTPException(404, f"user {user_id} not found")
+    # Demoting or deactivating the last administrator leaves a deployment
+    # nobody can add a person to, and no way back except the database.
+    losing_admin = body.role == "member" or body.is_active is False
+    if losing_admin and auth.admin_count(exclude=user_id) == 0:
+        raise HTTPException(409, "this is the only administrator")
+    try:
+        return auth.update_user(user_id, **body.model_dump(exclude_unset=True))
+    except auth.AuthError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.delete("/users/{user_id}", tags=["auth"])
+def delete_user(user_id: int, request: Request) -> dict:
+    me = _require(request, admin=True)
+    if user_id == me["id"]:
+        raise HTTPException(409, "you cannot remove your own account")
+    if auth.get_user(user_id) is None:
+        raise HTTPException(404, f"user {user_id} not found")
+    # No "last administrator" check here, unlike the patch above: the caller is
+    # an active administrator by definition, and cannot be the person being
+    # removed, so one always remains. Demotion is the case that needs guarding,
+    # because there you can demote yourself.
+    auth.delete_user(user_id)
+    return {"deleted": user_id}
 
 
 # ---------------------------------------------------------------------------

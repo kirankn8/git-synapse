@@ -379,7 +379,8 @@ def _a_real_file() -> dict | None:
     return {"repo": row["repo"], "path": row["path"]} if row else None
 
 
-def test_every_get_route_answers_with_real_arguments(corpus, client):
+def test_every_get_route_answers_with_real_arguments(corpus, admin_client):
+    client = admin_client
     """A sweep over the routes the app actually declares.
 
     Enumerating them from the app rather than a hand-written list means a new
@@ -797,15 +798,22 @@ def _spa_routes():
 
 # ---------------------------------------------------------- runtime settings
 
-def test_settings_lists_only_what_may_be_changed(client):
-    body = client.get("/api/settings").json()["settings"]
-    names = {s["name"] for s in body}
-    assert names == {"refresh_cron", "discover_cron"}
-    for s in body:
+def test_settings_lists_only_what_may_be_changed(admin_client):
+    client = admin_client
+    payload = client.get("/api/settings").json()
+    names = {s["name"] for s in payload["settings"]}
+    assert names == {"refresh_cron", "discover_cron"}, "schedules only; access is reported apart"
+    for s in payload["settings"]:
         assert s["value"] and "from_env" in s and "overridden" in s
 
+    # The access policy is not a cron and must not be described as one: a single
+    # writable list had /api/settings reporting "0 * * * *" for dashboard_auth.
+    assert set(payload["access"]) == {"dashboard", "mcp"}
+    assert all(v in ("required", "open") for v in payload["access"].values())
 
-def test_a_setting_can_be_stored_and_cleared(client):
+
+def test_a_setting_can_be_stored_and_cleared(admin_client):
+    client = admin_client
     try:
         put = client.put("/api/settings/refresh_cron", json={"value": "*/9 * * * *"})
         assert put.status_code == 200
@@ -817,7 +825,8 @@ def test_a_setting_can_be_stored_and_cleared(client):
     assert cleared.json()["overridden"] is False
 
 
-def test_a_cron_that_does_not_parse_is_refused_rather_than_stored(client):
+def test_a_cron_that_does_not_parse_is_refused_rather_than_stored(admin_client):
+    client = admin_client
     """Accepted and stored, it would be read once a minute by a process nobody
     is watching, and silently ignored."""
     r = client.put("/api/settings/refresh_cron", json={"value": "every tuesday"})
@@ -825,7 +834,8 @@ def test_a_cron_that_does_not_parse_is_refused_rather_than_stored(client):
     assert client.get("/api/settings").json()["settings"][0]["overridden"] is False
 
 
-def test_an_unknown_setting_is_not_silently_accepted(client):
+def test_an_unknown_setting_is_not_silently_accepted(admin_client):
+    client = admin_client
     assert client.put("/api/settings/github_token",
                       json={"value": "ghp_x"}).status_code == 404
 
@@ -939,3 +949,255 @@ def test_the_shape_endpoint_serves_every_distribution(client):
         "commits_by_year", "pair_support", "repo_sizes", "languages",
         "commit_width", "authors_per_file", "adoption_days", "repo_recency",
     }
+
+
+# ------------------------------------------------------------------ the door
+
+def test_the_api_is_open_until_somebody_has_an_account(client):
+    """A fresh deployment must be reachable, or the screen that creates the
+    first administrator is itself behind a sign-in."""
+    from git_synapse import auth
+
+    assert auth.count_users() == 0, "this test needs a deployment with no users"
+    assert client.get("/api/overview").status_code == 200
+    me = client.get("/api/auth/me").json()
+    assert me["needs_setup"] is True and me["auth_required"] is False
+
+
+def test_the_door_shuts_as_soon_as_anyone_exists(client):
+    from git_synapse import auth
+
+    user = auth.create_user("pytest-door@example.com", "Door", "a-sufficiently-long-pass")
+    try:
+        assert client.get("/api/overview").status_code == 401
+        assert client.get("/api/auth/me").status_code == 200, \
+            "asking who you are must work while signed out"
+    finally:
+        auth.delete_user(user["id"])
+    assert client.get("/api/overview").status_code == 200
+
+
+def test_setup_creates_the_first_administrator_once(client):
+    body = {"email": "pytest-first@example.com", "name": "First",
+            "password": "a-sufficiently-long-pass"}
+    created = client.post("/api/auth/setup", json=body)
+    try:
+        assert created.status_code == 201
+        assert created.json()["user"]["role"] == "admin", "the first account must be able to add others"
+        assert client.cookies.get("gs_session"), "setup signs you in"
+        # It cannot be replayed to mint a second administrator later.
+        again = client.post("/api/auth/setup", json={**body, "email": "pytest-second@example.com"})
+        assert again.status_code == 409
+    finally:
+        from git_synapse import auth
+
+        for row in auth.list_users():
+            auth.delete_user(row["id"])
+        client.cookies.clear()
+
+
+def test_a_member_reads_everything_and_administers_nothing(client):
+    from git_synapse import auth
+
+    admin = auth.create_user("pytest-a@example.com", "A", "a-sufficiently-long-pass", role="admin")
+    member = auth.create_user("pytest-m@example.com", "M", "a-sufficiently-long-pass")
+    try:
+        client.post("/api/auth/login",
+                    json={"email": "pytest-m@example.com", "password": "a-sufficiently-long-pass"})
+        assert client.get("/api/overview").status_code == 200
+        assert client.get("/api/users").status_code == 200, "everyone may see who has access"
+        assert client.post("/api/users", json={
+            "email": "pytest-x@example.com", "name": "X",
+            "password": "a-sufficiently-long-pass"}).status_code == 403
+        assert client.put("/api/settings/dashboard_auth",
+                          json={"value": "open"}).status_code == 403
+    finally:
+        client.post("/api/auth/logout")
+        auth.delete_user(admin["id"])
+        auth.delete_user(member["id"])
+        client.cookies.clear()
+
+
+def test_a_bearer_token_is_the_person_who_made_it(client):
+    from git_synapse import auth
+
+    member = auth.create_user("pytest-t@example.com", "T", "a-sufficiently-long-pass")
+    secret, _ = auth.create_token(member["id"], "pytest token")
+    try:
+        headers = {"Authorization": f"Bearer {secret}"}
+        assert client.get("/api/overview", headers=headers).status_code == 200
+        assert client.get("/api/auth/me", headers=headers).json()["user"]["email"] \
+            == "pytest-t@example.com"
+        # A token cannot exceed its owner: this one belongs to a member.
+        assert client.post("/api/users", headers=headers, json={
+            "email": "pytest-y@example.com", "name": "Y",
+            "password": "a-sufficiently-long-pass"}).status_code == 403
+        assert client.get("/api/overview",
+                          headers={"Authorization": "Bearer gss_nope"}).status_code == 401
+    finally:
+        auth.delete_user(member["id"])
+        client.cookies.clear()
+
+
+def test_an_open_dashboard_still_needs_an_account_to_administer(admin_client):
+    """Switching sign-in off makes the data readable by anyone who can reach
+    the address. It must not make the deployment administrable by them."""
+    from git_synapse.analysis import settings
+
+    anon = admin_client.__class__(admin_client.app)  # a client with no cookies
+    try:
+        admin_client.put("/api/settings/dashboard_auth", json={"value": "open"})
+        assert anon.get("/api/overview").status_code == 200
+        assert anon.get("/api/users").status_code == 401
+        assert anon.post("/api/users", json={
+            "email": "pytest-z@example.com", "name": "Z",
+            "password": "a-sufficiently-long-pass"}).status_code == 401
+    finally:
+        settings.clear("dashboard_auth")
+
+
+def test_the_last_administrator_cannot_be_removed_or_demoted(admin_client):
+    """Otherwise the deployment has nobody who can add a person, and no way
+    back except the database."""
+    me = admin_client.get("/api/auth/me").json()["user"]
+    assert admin_client.patch(f"/api/users/{me['id']}",
+                              json={"role": "member"}).status_code == 409
+    assert admin_client.patch(f"/api/users/{me['id']}",
+                              json={"is_active": False}).status_code == 409
+    assert admin_client.delete(f"/api/users/{me['id']}").status_code == 409
+
+
+def test_signing_out_closes_the_door_again(admin_client):
+    assert admin_client.get("/api/overview").status_code == 200
+    admin_client.post("/api/auth/logout")
+    assert admin_client.get("/api/overview").status_code == 401
+
+
+def test_the_access_mode_endpoint_validates_and_clears(admin_client):
+    from git_synapse.analysis import settings
+
+    try:
+        bad = admin_client.put("/api/settings/dashboard_auth", json={"value": "maybe"})
+        assert bad.status_code == 422 and "required, open" in bad.json()["detail"]
+
+        assert admin_client.put("/api/settings/mcp_auth",
+                                json={"value": "open"}).json()["value"] == "open"
+        # Blank clears the override and the default applies again.
+        cleared = admin_client.put("/api/settings/mcp_auth", json={"value": ""})
+        assert cleared.json() == {"name": "mcp_auth", "value": "required", "overridden": False}
+    finally:
+        settings.clear("mcp_auth")
+        settings.clear("dashboard_auth")
+
+
+def test_setup_refuses_what_it_cannot_store(client):
+    """Order matters here: a valid attempt creates the first administrator and
+    every later attempt is then a 409, so the invalid cases go first."""
+    too_short = client.post("/api/auth/setup", json={
+        "email": "pytest-weak@example.com", "name": "W", "password": "short"})
+    assert too_short.status_code == 422, "the model refuses it before the handler"
+
+    bad_email = client.post("/api/auth/setup", json={
+        "email": "not-an-email", "name": "W", "password": "a-sufficiently-long-pass"})
+    assert bad_email.status_code == 400 and "email" in bad_email.json()["detail"]
+
+    from git_synapse import auth
+
+    assert auth.count_users() == 0, "nothing above may have created an account"
+
+
+def test_signing_in_with_the_wrong_password_is_a_401(client):
+    from git_synapse import auth
+
+    user = auth.create_user("pytest-w@example.com", "W", "a-sufficiently-long-pass")
+    try:
+        r = client.post("/api/auth/login",
+                        json={"email": "pytest-w@example.com", "password": "wrong"})
+        assert r.status_code == 401 and r.json()["detail"] == "wrong email or password"
+    finally:
+        auth.delete_user(user["id"])
+        client.cookies.clear()
+
+
+def test_tokens_are_listed_minted_and_revoked_over_http(admin_client):
+    listed = admin_client.get("/api/auth/tokens").json()
+    assert listed["prefix"] == "gss_" and listed["tokens"] == []
+
+    made = admin_client.post("/api/auth/tokens", json={"name": "pytest", "days": 30})
+    assert made.status_code == 201
+    body = made.json()
+    assert body["token"].startswith("gss_") and "cannot be shown again" in body["note"]
+
+    assert len(admin_client.get("/api/auth/tokens").json()["tokens"]) == 1
+    assert admin_client.delete(f"/api/auth/tokens/{body['detail']['id']}").status_code == 200
+    assert admin_client.get("/api/auth/tokens").json()["tokens"] == []
+    assert admin_client.delete("/api/auth/tokens/999999").status_code == 404
+
+
+def test_a_nameless_token_is_refused_over_http(admin_client):
+    assert admin_client.post("/api/auth/tokens", json={"name": " "}).status_code == 400
+
+
+def test_administering_an_unknown_person_is_a_404(admin_client):
+    assert admin_client.patch("/api/users/999999", json={"name": "X"}).status_code == 404
+    assert admin_client.delete("/api/users/999999").status_code == 404
+
+
+def test_a_person_can_be_renamed_and_deactivated(admin_client):
+    from git_synapse import auth
+
+    other = auth.create_user("pytest-o@example.com", "O", "a-sufficiently-long-pass")
+    try:
+        renamed = admin_client.patch(f"/api/users/{other['id']}", json={"name": "Renamed"})
+        assert renamed.status_code == 200 and renamed.json()["name"] == "Renamed"
+        off = admin_client.patch(f"/api/users/{other['id']}", json={"is_active": False})
+        assert off.json()["is_active"] is False
+        bad = admin_client.patch(f"/api/users/{other['id']}", json={"name": "  "})
+        assert bad.status_code == 400
+        assert admin_client.delete(f"/api/users/{other['id']}").status_code == 200
+    finally:
+        if auth.get_user(other["id"]):
+            auth.delete_user(other["id"])
+
+
+def test_an_administrator_cannot_remove_their_own_account(admin_client):
+    me = admin_client.get("/api/auth/me").json()["user"]
+    r = admin_client.delete(f"/api/users/{me['id']}")
+    assert r.status_code == 409
+
+
+def test_an_administrator_adds_a_person_and_is_recorded_as_having_done_so(admin_client):
+    """Who added whom is worth keeping: it is the audit trail for access."""
+    from git_synapse import auth
+
+    made = admin_client.post("/api/users", json={
+        "email": "pytest-added@example.com", "name": "Added",
+        "password": "a-sufficiently-long-pass", "role": "member"})
+    assert made.status_code == 201
+    added = made.json()
+    try:
+        assert added["role"] == "member"
+        row = next(u for u in auth.list_users() if u["id"] == added["id"])
+        assert row["created_by_email"] == admin_client.admin["email"]
+
+        clash = admin_client.post("/api/users", json={
+            "email": "PYTEST-ADDED@example.com", "name": "Again",
+            "password": "a-sufficiently-long-pass"})
+        assert clash.status_code == 400 and "already has an account" in clash.json()["detail"]
+    finally:
+        auth.delete_user(added["id"])
+
+
+def test_promoting_and_removing_a_second_administrator_is_allowed(admin_client):
+    """The guard is about the *last* administrator, not about administrators."""
+    from git_synapse import auth
+
+    other = auth.create_user("pytest-second-admin@example.com", "Second",
+                             "a-sufficiently-long-pass")
+    try:
+        promoted = admin_client.patch(f"/api/users/{other['id']}", json={"role": "admin"})
+        assert promoted.status_code == 200 and promoted.json()["role"] == "admin"
+        assert admin_client.delete(f"/api/users/{other['id']}").status_code == 200
+    finally:
+        if auth.get_user(other["id"]):
+            auth.delete_user(other["id"])

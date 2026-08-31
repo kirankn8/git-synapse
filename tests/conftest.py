@@ -209,3 +209,30 @@ def settled_calls():
         raise AssertionError("queued calls never reached the database")
 
     return wait
+
+
+@pytest.fixture
+def admin_client(client):
+    """A signed-in administrator, removed again afterwards.
+
+    Creating any user flips a deployment from open to sign-in-required, so this
+    has to clean up: leaving the account behind would put a door in front of
+    every later test in the session, which none of them know about.
+    """
+    from uuid import uuid4
+
+    from git_synapse import auth
+
+    email = f"pytest-{uuid4().hex[:10]}@example.com"
+    password = "pytest-administrator-password"
+    user = auth.create_user(email, "Pytest Administrator", password, role="admin")
+    signed_in = client.post("/api/auth/login", json={"email": email, "password": password})
+    assert signed_in.status_code == 200, signed_in.text
+    client.admin = user
+    client.admin_password = password
+    try:
+        yield client
+    finally:
+        client.post("/api/auth/logout")
+        auth.delete_user(user["id"])
+        client.cookies.clear()
