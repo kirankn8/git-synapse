@@ -586,6 +586,163 @@ export function scoreCell(value, spec) {
    repository list belongs to Repositories, the mining figures to Insights, the
    run history to Jobs, and the shortcut buttons duplicated the nav one line
    above. What is left is corpus scale, ingest health, and activity. */
+/* Every distribution defined once: how to shape the rows, how to scale them,
+   what the chart is saying, and where a bucket leads when it maps to something
+   the reader can open. Overview draws these small; /insights/shape/:metric
+   draws the same definition at full size with a table of every bucket. Two
+   copies of this would drift, and the small one would start lying. */
+const SHAPE = {
+  commits_by_year: {
+    title: 'Commits per year',
+    unit: 'commits',
+    axis: 'Year',
+    rows: (d) => (d.commits_by_year || []).map((r, i) => ({
+      label: String(r.year), value: Number(r.n), series: (i % 6) + 1,
+    })),
+    says: (rows) => (rows.length
+      ? `${rows.length} years of history; ${num(rows[rows.length - 1].value)} commits in ${rows[rows.length - 1].label}`
+      : 'No dated commits'),
+    means: 'How far back the corpus reaches, and whether it is still moving. '
+      + 'A coupling drawn from history that stopped years ago describes code as it was, not as it is.',
+    more: '/repos?order_by=commit_count',
+  },
+  pair_support: {
+    title: 'Evidence behind a coupling',
+    unit: 'pairs', scale: 'log',
+    axis: 'Times the pair changed together',
+    rows: (d) => (d.pair_support || []).map((r, i) => ({
+      label: Number(r.support) >= 10 ? '10+' : String(r.support),
+      value: Number(r.n), series: (i % 6) + 1,
+    })),
+    says: (rows) => {
+      const total = rows.reduce((n, r) => n + r.value, 0) || 1;
+      const thin = (rows.find((r) => r.label === '2') || { value: 0 }).value;
+      return `${pct(thin / total)} of pairs rest on just two co-changes`;
+    },
+    means: 'A score computed from two shared commits is arithmetic, not evidence. '
+      + 'This is why a minimum support exists, and why every measure is reported beside its support count.',
+    more: '/measures',
+  },
+  repo_sizes: {
+    title: 'Repositories by size',
+    unit: 'repositories', kind: 'hbar',
+    axis: 'Commits in the repository',
+    rows: (d) => (d.repo_sizes || []).map((r) => ({
+      label: r.bucket, value: Number(r.n), commits: Number(r.commits),
+      to: '/repos?order_by=commit_count',
+    })),
+    says: (rows) => {
+      const all = rows.reduce((n, r) => n + r.commits, 0) || 1;
+      const big = rows[rows.length - 1];
+      return big ? `${big.value} repositories hold ${pct(big.commits / all)} of all commits`
+                 : 'No repositories ingested';
+    },
+    means: 'A few very large repositories can dominate any corpus-wide ranking, '
+      + 'which is why most views are scoped to one repository by default.',
+    more: '/repos?order_by=commit_count',
+  },
+  languages: {
+    title: 'Languages',
+    unit: 'repositories', kind: 'hbar', limit: 5,
+    axis: 'Primary language',
+    rows: (d) => (d.languages || []).map((l) => ({
+      label: l.language, value: Number(l.n),
+      to: `/repos?lang=${encodeURIComponent(l.language)}`,
+    })),
+    says: (rows) => `${rows.length} languages across ${num(rows.reduce((n, r) => n + r.value, 0))} repositories`,
+    means: 'Coupling is computed from commit co-occurrence, so it is language-agnostic. '
+      + 'The mix matters for manifest parsing, which is per-ecosystem.',
+    more: '/repos',
+  },
+  commit_width: {
+    title: 'Files per commit',
+    unit: 'commits', scale: 'log',
+    axis: 'Files touched',
+    rows: (d) => (d.commit_width || []).map((r, i) => ({
+      label: Number(r.files) >= 12 ? '12+' : String(r.files),
+      value: Number(r.n), series: (i % 6) + 1,
+    })),
+    says: (rows) => {
+      const total = rows.reduce((n, r) => n + r.value, 0) || 1;
+      const w = (rows.find((r) => r.label === '12+') || { value: 0 }).value;
+      return `${pct(w / total)} of commits touch 12 files or more`;
+    },
+    means: 'A commit touching n files pairs every one of them with every other, '
+      + 'so a sweeping change contributes n\u00b2 pairs of pure noise. That is what the fan-out cap exists to exclude.',
+    more: '/jobs?tab=settings',
+  },
+  authors_per_file: {
+    title: 'Authors per file',
+    unit: 'files', scale: 'log',
+    axis: 'Distinct authors',
+    rows: (d) => (d.authors_per_file || []).map((r, i) => ({
+      label: Number(r.authors) >= 8 ? '8+' : String(r.authors),
+      value: Number(r.n), series: (i % 6) + 1,
+    })),
+    says: (rows) => {
+      const total = rows.reduce((n, r) => n + r.value, 0) || 1;
+      const one = (rows.find((r) => r.label === '1') || { value: 0 }).value;
+      return `${pct(one / total)} of files have been touched by one author only`;
+    },
+    means: 'The bus-factor shape of the corpus before any scoring. '
+      + 'Risk sharpens this with ownership concentration, which sees 98/1/1 as close to one author, not three.',
+    more: '/insights/risk',
+  },
+  adoption_days: {
+    title: 'How fast a bump is adopted',
+    unit: 'bumps', kind: 'hbar',
+    axis: 'Time from the upstream commit to the bump',
+    rows: (d) => {
+      const B = ['<2mo', '2-4mo', '4-6mo', '6-8mo', '8-10mo', '10-12mo', '1yr+'];
+      return (d.adoption_days || []).map((r) => ({
+        label: B[Math.max(0, Number(r.bucket) - 1)] || '1yr+', value: Number(r.n),
+        to: '/insights/impact',
+      }));
+    },
+    says: (rows) => {
+      const total = rows.reduce((n, r) => n + r.value, 0) || 1;
+      const fast = (rows.find((r) => r.label === '<2mo') || { value: 0 }).value;
+      return total > 1 ? `${pct(fast / total)} of bumps landed within two months`
+                       : 'No resolved bumps yet';
+    },
+    means: 'Ground truth, not inference: each of these is a manifest version change '
+      + 'resolved to the upstream commit it consumed. The spread is how long a fix actually takes to travel.',
+    more: '/insights/impact',
+  },
+  repo_recency: {
+    title: 'When repositories last changed',
+    unit: 'repositories', kind: 'hbar',
+    axis: 'Last commit',
+    rows: (d) => (d.repo_recency || []).map((r) => ({
+      label: r.bucket, value: Number(r.n), to: '/repos?order_by=last_commit_at',
+    })),
+    says: (rows) => {
+      const total = rows.reduce((n, r) => n + r.value, 0) || 1;
+      const cold = rows.filter((r) => r.label === 'over a year' || r.label === 'never')
+                       .reduce((n, r) => n + r.value, 0);
+      return `${cold} of ${num(total)} untouched in a year`;
+    },
+    means: 'A dormant repository still contributes history, and that history no longer '
+      + 'describes code anyone is changing. Worth knowing before reading a corpus-wide ranking.',
+    more: '/repos?order_by=last_commit_at',
+  },
+};
+
+/** One distribution, drawn at whatever size the caller has room for. */
+function shapeChart(spec, rows, { small = true } = {}) {
+  const shown = small && spec.limit && rows.length > spec.limit
+    ? [...rows.slice(0, spec.limit), {
+        label: `${rows.length - spec.limit} others`,
+        value: rows.slice(spec.limit).reduce((n, r) => n + r.value, 0),
+        to: '/repos',
+      }]
+    : rows;
+  return spec.kind === 'hbar'
+    ? hbars(shown, { suffix: '' })
+    : barChart(shown, { label: spec.unit, scale: spec.scale || 'linear',
+                        height: small ? 66 : 190 });
+}
+
 on('/', async () => {
   const [ov, runs, activity, timeline, shape, mining] = await Promise.all([
     api('/api/overview'),
@@ -601,17 +758,28 @@ on('/', async () => {
   wrap.append(pageHead('Overview',
     'The state of the corpus and of the deployment serving it.'));
 
+  // Every figure opens the thing it counts, or the distribution behind it.
+  // A number with no way in is a dead end, and these are the first eight a
+  // reader sees.
   wrap.append(h('div', { class: 'section-title' }, 'Data'));
   wrap.append(h('div', { class: 'grid grid-stats' },
-    statTile('Repositories', num(ov.repos), `${num(ov.repos_ready)} ready · ${num(ov.repos_failed)} failed`, () => go('/repos')),
-    statTile('Commits', num(ov.commits), 'analysed'),
-    statTile('Files tracked', num(ov.files), `${num(ov.directories)} directories`),
-    statTile('Coupling pairs', num(ov.file_pairs), `${num(ov.dir_pairs)} directory pairs`),
-    statTile('Contributors', num(ov.authors), 'distinct authors'),
-    statTile('Mirror size', bytes(ov.mirror_kb), 'bare git mirrors'),
+    statTile('Repositories', num(ov.repos), `${num(ov.repos_ready)} ready · ${num(ov.repos_failed)} failed`,
+             () => go('/repos')),
+    statTile('Commits', num(ov.commits), 'analysed',
+             () => go('/insights/shape/commits_by_year')),
+    statTile('Files tracked', num(ov.files), `${num(ov.directories)} directories`,
+             () => go('/repos?order_by=file_count')),
+    statTile('Coupling pairs', num(ov.file_pairs), `${num(ov.dir_pairs)} directory pairs`,
+             () => go('/insights/shape/pair_support')),
+    statTile('Contributors', num(ov.authors), 'distinct authors',
+             () => go('/insights/shape/authors_per_file')),
+    statTile('Mirror size', bytes(ov.mirror_kb), 'bare git mirrors',
+             () => go('/repos?order_by=commit_count')),
     statTile('History span', ov.first_commit_at ? `${dateStr(ov.first_commit_at).slice(0, 4)}\u2192` : '\u2014',
-             `to ${dateStr(ov.last_commit_at)}`),
-    statTile('File changes', num(ov.file_changes), 'atomic (commit \u00d7 file) facts')));
+             `to ${dateStr(ov.last_commit_at)}`,
+             () => go('/insights/shape/repo_recency')),
+    statTile('File changes', num(ov.file_changes), 'atomic (commit \u00d7 file) facts',
+             () => go('/insights/shape/commit_width'))));
 
   // ---- ingest health ------------------------------------------------------
   const rows = runs.runs || [];
@@ -637,114 +805,20 @@ on('/', async () => {
 
   // ---- who is calling -----------------------------------------------------
   // ---- the shape behind the headline numbers ------------------------------
-  // Four questions an operator has before trusting anything derived from this:
-  // how deep is the history and is it still moving, how thin is the evidence
-  // behind an average pair, is the corpus a few giants, and what is it written
-  // in. Each chart states its own answer rather than leaving it to be read off.
-  wrap.append(h('div', { class: 'section-title' }, 'Shape of the data'));
-
-  const years = (shape.commits_by_year || []);
-  const recent = years.slice(-1)[0];
-  const yearRows = years.map((y, i) => ({ label: String(y.year), value: Number(y.n), series: (i % 6) + 1 }));
-
-  const support = (shape.pair_support || []).map((r, i) => ({
-    label: Number(r.support) >= 10 ? '10+' : String(r.support),
-    value: Number(r.n), series: (i % 6) + 1,
-  }));
-  const pairsTotal = support.reduce((n, r) => n + r.value, 0) || 1;
-  const thin = (support.find((r) => r.label === '2') || { value: 0 }).value;
-
-  const sizes = (shape.repo_sizes || []).map((r) => ({
-    label: r.bucket, value: Number(r.n), commits: Number(r.commits),
-  }));
-  const biggest = sizes.slice(-1)[0];
-  const allCommits = sizes.reduce((n, r) => n + r.commits, 0) || 1;
-
-  const langs2 = (shape.languages || []);
-  const shown = langs2.slice(0, 5).map((l) => ({ label: l.language, value: Number(l.n) }));
-  const tail = langs2.slice(5).reduce((n, l) => n + Number(l.n), 0);
-  if (tail) shown.push({ label: `${langs2.length - 5} others`, value: tail });
-
-  const width = (shape.commit_width || []).map((r, i) => ({
-    label: Number(r.files) >= 12 ? '12+' : String(r.files),
-    value: Number(r.n), series: (i % 6) + 1,
-  }));
-  const wide = width.filter((r) => r.label === '12+').reduce((n, r) => n + r.value, 0);
-  const commitsTotal = width.reduce((n, r) => n + r.value, 0) || 1;
-
-  const authors = (shape.authors_per_file || []).map((r, i) => ({
-    label: Number(r.authors) >= 8 ? '8+' : String(r.authors),
-    value: Number(r.n), series: (i % 6) + 1,
-  }));
-  const soleOwned = (authors.find((r) => r.label === '1') || { value: 0 }).value;
-  const filesTotal = authors.reduce((n, r) => n + r.value, 0) || 1;
-
-  // width_bucket numbers from 1, so bucket 1 is the first 60-day band. Indexing
-  // these labels from zero shifted every bar one band later and reported "0%
-  // within two months" for a corpus where most bumps land inside it.
-  const recency = (shape.repo_recency || []).map((r) => ({
-    label: r.bucket, value: Number(r.n),
-  }));
-  const dormant = recency
-    .filter((r) => r.label === 'over a year' || r.label === 'never')
-    .reduce((n, r) => n + r.value, 0);
-
-  const ADOPTION = ['<2mo', '2-4mo', '4-6mo', '6-8mo', '8-10mo', '10-12mo', '1yr+'];
-  const adoption = (shape.adoption_days || []).map((r) => ({
-    label: ADOPTION[Math.max(0, Number(r.bucket) - 1)] || '1yr+', value: Number(r.n),
-  }));
-  const bumpsTotal = adoption.reduce((n, r) => n + r.value, 0) || 1;
-  const fast = (adoption.find((r) => r.label === '<2mo') || { value: 0 }).value;
+  // Eight questions an operator has before trusting anything derived from this.
+  // Each card states its own answer and opens the full chart, where every
+  // bucket is listed with its count rather than squeezed into a card.
+  wrap.append(h('div', { class: 'section-title' }, 'Shape of the data',
+    h('a', { class: 'section-more', href: '/insights/shape', 'data-nav': true }, 'all eight in full \u2192')));
 
   wrap.append(h('div', { class: 'grid grid-charts' },
-    card('Commits per year',
-      h('div', { class: 'card-body chart-body' }, barChart(yearRows, { label: 'commits' })),
-      years.length
-        ? `${years.length} years of history; ${num(recent.n)} commits in ${recent.year}`
-        : 'No dated commits',
-      null, '/repos?order_by=commit_count'),
-
-    card('Evidence behind a coupling',
-      h('div', { class: 'card-body chart-body' }, barChart(support, { label: 'pairs', scale: 'log' })),
-      `${pct(thin / pairsTotal)} of pairs rest on just two co-changes \u2014 `
-      + 'the reason min support exists, and why a score on thin support means little',
-      null, '/measures'),
-
-    card('Repositories by size',
-      h('div', { class: 'card-body chart-body' }, hbars(sizes, { suffix: ' repos' })),
-      biggest
-        ? `${biggest.value} repositories hold ${pct(biggest.commits / allCommits)} of all commits`
-        : 'No repositories ingested',
-      null, '/repos?order_by=commit_count'),
-
-    card('Languages',
-      h('div', { class: 'card-body chart-body' }, hbars(shown)),
-      `${langs2.length} languages across ${num(ov.repos)} repositories`,
-      null, '/repos'),
-
-    card('Files per commit',
-      h('div', { class: 'card-body chart-body' }, barChart(width, { label: 'commits', scale: 'log' })),
-      `${pct(wide / commitsTotal)} of commits touch 12 files or more \u2014 `
-      + 'wide commits pair everything with everything, which is why the fan-out is capped',
-      null, '/jobs?tab=settings'),
-
-    card('Authors per file',
-      h('div', { class: 'card-body chart-body' }, barChart(authors, { label: 'files', scale: 'log' })),
-      `${pct(soleOwned / filesTotal)} of files have been touched by one author only`,
-      null, '/insights/risk'),
-
-    card('How fast a bump is adopted',
-      h('div', { class: 'card-body chart-body' }, hbars(adoption, { suffix: ' bumps' })),
-      bumpsTotal > 1
-        ? `${pct(fast / bumpsTotal)} of observed version bumps landed within two months`
-        : 'No resolved bumps yet',
-      null, '/insights/impact'),
-
-    card('When repositories last changed',
-      h('div', { class: 'card-body chart-body' }, hbars(recency, { suffix: ' repos' })),
-      `${dormant} of ${num(ov.repos)} have not been touched in a year \u2014 `
-      + 'their history still counts, but it no longer describes the code',
-      null, '/repos?order_by=last_commit_at')));
+    ...Object.entries(SHAPE).map(([key, spec]) => {
+      const rows = spec.rows(shape);
+      return card(spec.title,
+        h('div', { class: 'card-body chart-body' }, shapeChart(spec, rows)),
+        rows.length ? spec.says(rows) : 'No data yet',
+        null, `/insights/shape/${key}`);
+    })));
 
   wrap.append(card('What history has produced',
     h('div', { class: 'card-body' },
@@ -950,14 +1024,23 @@ on('/repos/:id', async ({ id }, params) => {
     h(
       'div',
       { class: 'grid grid-stats' },
-      statTile('Commits', num(repo.commit_count), `${num(repo.pair_population)} pair-eligible`),
-      statTile('Files', num(repo.file_count), `${num(repo.pair_count)} coupling pairs`, () => go(`/repos/${id}?tab=files`)),
-      statTile('Authors', num(repo.author_count), 'distinct contributors'),
-      statTile('Churn', repo.has_churn ? `+${num(repo.total_insertions)}` : 'n/a', repo.has_churn ? `−${num(repo.total_deletions)} lines` : 'blobless mirror'),
-      statTile('Stars', num(repo.stargazers), `${num(repo.forks_count)} forks`),
-      statTile('Mirror', bytes(repo.mirror_size_kb), repo.clone_mode || '—'),
-      statTile('First commit', dateStr(repo.first_commit_at), `last ${when(repo.last_commit_at)}`),
-      statTile('Last ingest', when(repo.last_ingest_at), repo.ingest_status),
+      statTile('Commits', num(repo.commit_count), `${num(repo.pair_population)} pair-eligible`,
+               () => go(`/repos/${id}?tab=overview`)),
+      statTile('Files', num(repo.file_count), `${num(repo.pair_count)} coupling pairs`,
+               () => go(`/repos/${id}?tab=files`)),
+      statTile('Authors', num(repo.author_count), 'distinct contributors',
+               () => go(`/insights/risk?repo=${id}`)),
+      statTile('Churn', repo.has_churn ? `+${num(repo.total_insertions)}` : 'n/a',
+               repo.has_churn ? `−${num(repo.total_deletions)} lines` : 'blobless mirror',
+               () => go(`/repos/${id}?tab=files`)),
+      statTile('Stars', num(repo.stargazers), `${num(repo.forks_count)} forks`,
+               () => go(`/repos/${id}?tab=meta`)),
+      statTile('Mirror', bytes(repo.mirror_size_kb), repo.clone_mode || '—',
+               () => go(`/repos/${id}?tab=meta`)),
+      statTile('First commit', dateStr(repo.first_commit_at), `last ${when(repo.last_commit_at)}`,
+               () => go(`/repos/${id}?tab=overview`)),
+      statTile('Last ingest', when(repo.last_ingest_at), repo.ingest_status,
+               () => go('/jobs')),
     ),
   );
 
@@ -1690,6 +1773,64 @@ const folderTrail = (repoId, path) => {
    the corpus. Neither owns data -- each draws couplings computed elsewhere --
    but drawing them is a question in its own right, so it is a section rather
    than a button hidden on a page. */
+/* Every distribution at full size. The card on Overview is a thumbnail of the
+   same definition; this is where there is room to show each bucket with its
+   count, and to say what the chart is actually claiming. */
+on('/insights/shape', async () => {
+  const shape = await api('/api/overview/shape');
+  const wrap = await insightsShell('shape', null);
+  wrap.append(h('div', { class: 'grid grid-2' },
+    ...Object.entries(SHAPE).map(([key, spec]) => {
+      const rows = spec.rows(shape);
+      return card(spec.title,
+        h('div', { class: 'card-body' }, shapeChart(spec, rows, { small: false })),
+        rows.length ? spec.says(rows) : 'No data yet',
+        null, `/insights/shape/${key}`);
+    })));
+  return wrap;
+});
+
+on('/insights/shape/:metric', async ({ metric }) => {
+  const spec = SHAPE[metric];
+  if (!spec) return notFound(`No distribution called ${metric}`);
+  const shape = await api('/api/overview/shape');
+  const rows = spec.rows(shape);
+  const total = rows.reduce((n, r) => n + r.value, 0) || 1;
+
+  const wrap = await insightsShell('shape', null, [[spec.title]],
+    pageHead(spec.title, spec.says(rows),
+      spec.more ? [h('a', { class: 'btn primary', href: spec.more, 'data-nav': true },
+                      'Open the full analysis')] : []));
+
+  // No stat strip here: buckets, total, largest and scale are all already on
+  // the chart or in the table below it, and a figure that opens nothing is a
+  // dead end. Restating them would be decoration standing between the reader
+  // and the diagram they came for.
+
+  wrap.append(card(spec.title,
+    h('div', { class: 'card-body' }, shapeChart(spec, rows, { small: false })),
+    spec.means, null, spec.more || '/insights/shape'));
+
+  // Every bucket, with its share -- the part a card has no room for.
+  wrap.append(card('Every bucket', dataTable(
+    rows.map((r) => ({ ...r, share: r.value / total })), [
+      { key: 'label', label: spec.axis, render: (r) => h('span', { class: 'mono' }, r.label) },
+      { key: 'value', label: spec.unit.replace(/^./, (c) => c.toUpperCase()),
+        num: true, render: (r) => num(r.value) },
+      { key: 'share', label: 'Share', num: true,
+        render: (r) => h('div', { class: 'confbar', style: 'justify-content:flex-end' },
+          h('span', {}, pct(r.share)), bar(r.share)) },
+    ], {
+      initialSort: 'value',
+      onRow: rows.some((r) => r.to) ? (r) => r.to && go(r.to) : undefined,
+      empty: 'Nothing recorded yet.',
+    }),
+    rows.some((r) => r.to) ? 'Click a bucket to open what it counts'
+                           : 'Counted across the whole corpus',
+    null, spec.more || '/insights/shape'));
+  return wrap;
+});
+
 on('/insights/graph', async (_args, params) => {
   // No repository chosen means the question is about the corpus, so that is
   // what is drawn. Choosing one in Scope zooms to its files.
@@ -1813,14 +1954,23 @@ on('/activity', async (_args, params) => {
   wrap.append(pageHead('Activity',
     'Every call served, what it was asked, and what went back. Kept for 30 days.'));
 
+  // Each figure is a filter of the list below it, so a number leads to the
+  // calls it counts rather than being read and left.
+  const filtered = (over) => () => {
+    const q = new URLSearchParams(params);
+    for (const [k, v] of Object.entries(over)) { if (v) q.set(k, v); else q.delete(k); }
+    go(`/activity${q.toString() ? '?' + q : ''}`);
+  };
   wrap.append(h('div', { class: 'grid grid-stats' },
-    statTile('Calls', num(c.calls || 0), `in the last ${c.hours || hours}h`),
-    statTile('MCP', num(c.mcp_calls || 0), 'agent tool calls'),
-    statTile('HTTP', num(c.http_calls || 0), 'API requests'),
-    statTile('Errors', num(c.errors || 0), 'failed calls'),
+    statTile('Calls', num(c.calls || 0), `in the last ${c.hours || hours}h`,
+             filtered({ surface: '', status: '' })),
+    statTile('MCP', num(c.mcp_calls || 0), 'agent tool calls', filtered({ surface: 'mcp' })),
+    statTile('HTTP', num(c.http_calls || 0), 'API requests', filtered({ surface: 'http' })),
+    statTile('Errors', num(c.errors || 0), 'failed calls', filtered({ status: 'error' })),
     statTile('Median', c.p50_ms == null ? '\u2014' : `${c.p50_ms}ms`,
-             c.p95_ms == null ? '' : `p95 ${c.p95_ms}ms`),
-    statTile('Distinct clients', num(c.clients || 0), 'by user-agent')));
+             c.p95_ms == null ? '' : `p95 ${c.p95_ms}ms`, filtered({ status: '' })),
+    statTile('Distinct clients', num(c.clients || 0), 'by user-agent',
+             filtered({ surface: '', status: '' }))));
 
   if (c.dropped) {
     wrap.append(h('div', { class: 'help', style: 'border-left-color:var(--warn)' },
@@ -2596,6 +2746,7 @@ on('/insights/impact/:a/:b', async ({ a, b }) => {
    and a query parameter cannot express where you are inside that. */
 const INSIGHT_SECTIONS = [
   ['graph', 'Map'],
+  ['shape', 'Distributions'],
   ['impact', 'Cross-repo impact'],
   ['risk', 'Risk & bus factor'],
   ['drift', 'Coupling drift'],
@@ -2607,7 +2758,7 @@ const INSIGHT_SECTIONS = [
  * section tabs and the scope selector. Scoped to a repository it is a rung of
  * the drill-down, so it breadcrumbs under that repository.
  */
-async function insightsShell(section, repoId, trail = []) {
+async function insightsShell(section, repoId, trail = [], head = null) {
   const [ov, repos] = await Promise.all([
     api('/api/mining/overview'),
     api('/api/repos', { limit: 1000, order_by: 'commit_count' }),
@@ -2621,7 +2772,9 @@ async function insightsShell(section, repoId, trail = []) {
   } else if (trail.length) {
     wrap.append(crumbs(['Insights', `/insights/${section}`], ...trail));
   }
-  wrap.append(pageHead('Insights', 'What history says about the code.'));
+  // A section that is about one specific thing titles itself; the generic
+  // heading would otherwise sit above it and the page would carry two.
+  wrap.append(head || pageHead('Insights', 'What history says about the code.'));
 
   const repoSel = h('select', { class: 'input', style: 'min-width:230px' },
     h('option', { value: '' }, 'All repositories'),
@@ -2782,13 +2935,16 @@ const miniStat = (label, value, note) =>
  * axis shows the shape, and says so: read as linear, it makes the tail look far
  * bigger than it is.
  */
-function barChart(rows, { label = 'calls', scale = 'linear', height = 74 } = {}) {
+function barChart(rows, { label = 'calls', scale = 'linear', height = 66 } = {}) {
   const max = Math.max(1, ...rows.map((r) => r.value));
   const norm = scale === 'log'
     ? (v) => (v > 0 ? Math.log10(v + 1) / Math.log10(max + 1) : 0)
     : (v) => v / max;
-  // Values and per-column labels need room; past a dozen columns they collide,
-  // so the ends are labelled instead and the rest live in the tooltip.
+  // Room, measured rather than assumed: a value like "149.8k" needs about
+  // 42px, and at twelve columns in a card there are 23. Past that the numbers
+  // were drawn and then clipped, which is worse than not drawing them -- the
+  // full chart, one click away, has the room to show every one.
+  const wide = rows.length <= 8;
   const dense = rows.length > 12;
 
   const cols = rows.map((r, i) => h('div', {
@@ -2797,7 +2953,7 @@ function barChart(rows, { label = 'calls', scale = 'linear', height = 74 } = {})
                 : `${r.label}: ${num(r.value)} ${label}`,
     onclick: r.to ? (e) => { e.stopPropagation(); go(r.to); } : null,
   },
-    dense ? null : h('span', { class: 'cbar-value' }, num(r.value)),
+    wide ? h('span', { class: 'cbar-value' }, num(r.value)) : null,
     h('span', { class: 'cbar-track' },
       h('span', {
         class: 'cbar-fill',

@@ -25,6 +25,8 @@ const PAGES = [
   ['/repos/4/tree/src', 'Folder'],
   ['/insights/graph', 'Insights map'],
   ['/insights/impact?repo=5&dir=upstream', 'Impact'],
+  ['/insights/shape', 'Distributions'],
+  ['/insights/shape/commit_width', 'One distribution'],
   ['/insights/risk', 'Risk'],
   ['/insights/drift', 'Drift'],
   ['/accounts', 'Accounts'],
@@ -183,6 +185,19 @@ for (const [path, label] of PAGES) {
   }, [...STATIC_BY_DESIGN]);
   if (dead.length) bad(`${label} cards`, `no way out of: ${dead.join(', ')}`);
   else ok(`${label} cards`, 'every card leads somewhere');
+}
+
+/* A figure with no way in is a dead end, and on Overview they are the first
+   thing a reader sees. Every tile opens what it counts. */
+console.log('\n=== every figure opens what it counts ===');
+for (const path of ['/', '/repos/4', '/activity', '/insights/shape/pair_support']) {
+  await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });
+  await settle();
+  const inert = await page.evaluate(() => [...document.querySelectorAll('#view .stat')]
+    .filter((t) => !t.classList.contains('is-link'))
+    .map((t) => (t.querySelector('.stat-label') || {}).textContent));
+  if (inert.length) bad(`${path} tiles`, `lead nowhere: ${inert.join(', ')}`);
+  else ok(`${path} tiles`, 'every figure opens what it counts');
 }
 
 console.log('\n=== nothing overflows its container horizontally ===');

@@ -850,8 +850,12 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 .cbar:hover .cbar-fill { opacity: .72; }
 .cbar-label {
   font-size: 9.5px; color: var(--text-faint); font-family: var(--mono);
-  white-space: nowrap; overflow: hidden; text-overflow: clip; max-width: 100%;
+  white-space: nowrap; max-width: 100%;
 }
+/* The end labels of a dense chart sit outside their own column, so they are
+   allowed to reach past it rather than being cut in half. */
+.cbars > .cbar:first-child .cbar-label { align-self: flex-start; max-width: none; }
+.cbars > .cbar:last-child  .cbar-label { align-self: flex-end;   max-width: none; }
 
 .stack {
   display: flex; height: 10px; border-radius: 5px; overflow: hidden;
@@ -908,8 +912,11 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 
 /* One height for every chart, so a grid row cannot stretch a short card to
    match a tall one and leave a hundred pixels of nothing inside it. */
+/* Tall enough for the whole column -- value, bar and label -- plus the card's
+   own padding. It was 116px against 109px of content inside a card that clips,
+   so every chart was shaved off at the bottom. */
 .chart-body {
-  height: 116px;
+  height: 124px;
   display: flex; flex-direction: column; justify-content: center;
 }
 
@@ -938,3 +945,7 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 /* A chain hop opens the repository it names, so it has to look like it does. */
 .chain .node.is-link { cursor: pointer; }
 .chain .node.is-link:hover { color: var(--accent); border-color: var(--accent); }
+
+/* A section heading that also offers the way in to everything under it. */
+.section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.section-more { font-size: 11.5px; font-weight: 500; letter-spacing: 0; text-transform: none; }
