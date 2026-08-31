@@ -260,6 +260,12 @@ def calls_summary(
     }
 
 
+@router.get("/calls/timeline", tags=["calls"])
+def calls_timeline(hours: int = Query(24, ge=1, le=168)) -> dict:
+    """Calls per hour, empty hours included, for the activity chart."""
+    return {"buckets": calls.timeline(hours)}
+
+
 @router.get("/calls", tags=["calls"])
 def list_calls(
     surface: str | None = Query(None, pattern="^(mcp|http)$"),

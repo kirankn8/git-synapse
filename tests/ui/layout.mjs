@@ -30,13 +30,13 @@ const PAGES = [
   ['/accounts', 'Accounts'],
   ['/jobs', 'Jobs'],
   ['/jobs?tab=settings', 'Jobs settings'],
-  ['/callers', 'Callers'],
+  ['/activity', 'Activity'],
   ['/measures', 'Measures'],
 ];
 
 // Where the ranking measure orders something on screen, and where it does not.
 const MEASURE_BAR = [
-  ['/', true], ['/repos/4?tab=pairs', true],
+  ['/', false], ['/repos/4?tab=pairs', true],
   ['/repos', false], ['/insights/risk', false], ['/jobs', false],
 ];
 

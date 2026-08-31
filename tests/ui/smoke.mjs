@@ -118,14 +118,14 @@ const routes = [
   ['#/insights/drift',                     'Insights drift (emerging)'],
   ['#/insights/drift?trend=decaying',      'Insights drift (decaying)'],
   [`#/insights/modules?repo=${repoId}`,    'Insights modules'],
-  ['#/callers',                            'Callers'],
-  ['#/callers?surface=mcp',                'Callers (MCP only)'],
-  ['#/callers?status=error',               'Callers (errors)'],
+  ['#/activity',                            'Activity'],
+  ['#/activity?surface=mcp',                'Activity (MCP only)'],
+  ['#/activity?status=error',               'Activity (errors)'],
   ['#/measures',                           'Measures catalogue'],
   ['#/jobs',                               'Jobs'],
   ['#/jobs?tab=settings',                  'Jobs settings'],
   [`#/jobs/${runId}`,                      'Run detail'],
-  callId ? [`#/callers/${callId}`,         'Call detail'] : null,
+  callId ? [`#/activity/${callId}`,         'Call detail'] : null,
   ['#/feedback',                           'Feedback (open)'],
   ['#/feedback?status=all',                'Feedback (all)'],
 ].filter(Boolean);
@@ -303,7 +303,8 @@ console.log('\n=== canonical paths ===');
    is what the route-driving loop above cannot see. */
 console.log('\n=== measure bar shows only where it ranks something ===');
 for (const [path, shouldShow] of [
-  ['/', true],
+  // Overview ranks nothing by measure since it became an operator page.
+  ['/', false],
   [`/repos/${repoId}?tab=pairs`, true],
   [`/repos/${repoId}/files/${filePath}`, true],
   [`/repos/${repoId}`, false],
