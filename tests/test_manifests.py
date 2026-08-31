@@ -202,6 +202,11 @@ def test_a_string_with_no_version_has_no_key(raw):
     (">1.0",     "1.0",     None),
     ("4.17.21",  "4.17.21", None),
     ("*",        None,      None),
+    ("5.5.*",    "5.5",     None),   # Composer and npm wildcards state a floor
+    ("4.1.*",    "4.1",     None),
+    ("1.0.x",    "1.0",     None),
+    # A suffix merely ending in the letter is not a wildcard.
+    ("1.0.0-linux", "1.0.0-linux", None),
 ])
 def test_a_range_declares_its_own_bounds(raw, floor, ceiling):
     """The floor is parsed, never guessed: `^4.17.21` states 4.17.21 itself."""

@@ -388,14 +388,14 @@ def _tag(conn, repo_id, name, commit_id, main_commit_id, key, at="2024-01-01"):
         (repo_id, name, "0" * 40, at, commit_id, main_commit_id, key))
 
 
-def _bump(conn, repo_id, dep_repo_id, version, at, name="library"):
+def _bump(conn, repo_id, dep_repo_id, version, at, name="library", ecosystem="maven"):
     sha = f"{abs(hash((version, at, name))):040x}"[:40]
     _commit(conn, repo_id, sha, at)
     return conn.execute(
         "INSERT INTO dep_bump (consumer_repo_id, consumer_sha, dep_repo_id, "
-        "dep_name, dep_version, manifest, bumped_at) "
-        "VALUES (%s, %s, %s, %s, %s, 'pom.xml', %s) RETURNING id",
-        (repo_id, sha, dep_repo_id, name, version, at)).fetchone()[0]
+        "dep_name, dep_version, manifest, bumped_at, ecosystem) "
+        "VALUES (%s, %s, %s, %s, %s, 'pom.xml', %s, %s) RETURNING id",
+        (repo_id, sha, dep_repo_id, name, version, at, ecosystem)).fetchone()[0]
 
 
 def _resolved(conn, bump_id):
@@ -525,8 +525,11 @@ def test_what_a_repository_publishes_beats_a_name_that_merely_matches():
     else. A declaration outranks the coincidence."""
     by_full = {("acme", "utils"): 1}
     by_name = {"utils": 1}
-    assert resolve_repo("utils", by_full, by_name, {"utils": 7}) == 7
-    assert resolve_repo("utils", by_full, by_name, {}) == 1
+    claimed = {("cargo", "utils"): 7}
+    assert resolve_repo("utils", by_full, by_name, claimed, "cargo") == 7
+    # The same name in another ecosystem is a different package entirely.
+    assert resolve_repo("utils", by_full, by_name, claimed, "npm") == 1
+    assert resolve_repo("utils", by_full, by_name, {}, "cargo") == 1
 
 
 def test_a_coordinate_two_repositories_claim_resolves_to_neither():
@@ -541,7 +544,8 @@ def test_a_coordinate_two_repositories_claim_resolves_to_neither():
         def execute(self, sql, *a):
             self.calls += 1
             rows = ([("acme", "core", 1), ("other", "core", 2)] if "FROM repo" in sql
-                    and "repo_package" not in sql else [("core", 1), ("core", 2)])
+                    and "repo_package" not in sql
+                    else [("maven", "core", 1), ("maven", "core", 2)])
             return type("R", (), {"fetchall": lambda _self: rows})()
 
     _, _, by_package = _repo_lookups(_Conn())
@@ -552,7 +556,8 @@ def test_a_bump_is_linked_to_the_repository_that_publishes_the_coordinate(bump_e
     """A coordinate becomes attributable only once the repository publishing it
     has had its own manifests read, which can happen long after the bump."""
     conn, repo, dep = bump_env
-    conn.execute("INSERT INTO repo_package (repo_id, name) VALUES (%s, 'geocoder')", (dep,))
+    conn.execute("INSERT INTO repo_package (repo_id, ecosystem, name) "
+                 "VALUES (%s, 'maven', 'geocoder')", (dep,))
     row = _bump(conn, repo, None, version="1.0.0", at="2024-01-01", name="geocoder")
 
     depbump.resolve_bumps(conn)
@@ -564,7 +569,8 @@ def test_a_reference_to_the_consumer_itself_is_not_a_repository_edge(bump_env):
     """A monorepo names its own modules. That is a module edge, not a
     dependency between two repositories."""
     conn, repo, _ = bump_env
-    conn.execute("INSERT INTO repo_package (repo_id, name) VALUES (%s, 'geocoder')", (repo,))
+    conn.execute("INSERT INTO repo_package (repo_id, ecosystem, name) "
+                 "VALUES (%s, 'maven', 'geocoder')", (repo,))
     row = _bump(conn, repo, None, version="1.0.0", at="2024-01-01", name="geocoder")
 
     depbump.resolve_bumps(conn)
@@ -587,3 +593,23 @@ def test_every_resolved_bump_records_how_it_was_resolved(bump_env):
         "SELECT count(*) FROM dep_bump "
         " WHERE dep_commit_id IS NOT NULL AND resolution IS NULL").fetchone()[0]
     assert orphans == 0
+
+
+def test_a_coordinate_does_not_cross_ecosystems(bump_env):
+    """`illuminate/events` is a PHP package published by laravel/framework;
+    `events` is an unrelated npm one. Indexing the bare tail without its
+    ecosystem made every npm dependency on `events` an edge into a PHP
+    repository."""
+    conn, repo, dep = bump_env
+    conn.execute("INSERT INTO repo_package (repo_id, ecosystem, name) "
+                 "VALUES (%s, 'composer', 'events')", (dep,))
+    npm = _bump(conn, repo, None, version="3.3.0", at="2024-01-01",
+                name="events", ecosystem="npm")
+    php = _bump(conn, repo, None, version="9.0.0", at="2024-01-01",
+                name="events", ecosystem="composer")
+
+    depbump.resolve_bumps(conn)
+    linked = dict(conn.execute(
+        "SELECT id, dep_repo_id FROM dep_bump WHERE id = ANY(%s)", ([npm, php],)).fetchall())
+    assert linked[npm] is None, "an npm package must not resolve to a PHP repository"
+    assert linked[php] == dep

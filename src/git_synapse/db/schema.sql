@@ -924,12 +924,28 @@ ALTER TABLE dep_bump ADD COLUMN IF NOT EXISTS resolution TEXT;
 -- What each repository publishes, read from its own manifests. Answering
 -- "which repository is `com.google.guava:guava`?" from what that repository
 -- declares about itself, rather than from whether the strings happen to agree.
+-- `repo_package` is a cache, rebuilt from the manifests on every scan, and its
+-- key gained an ecosystem -- so it is dropped rather than migrated. A `DO`
+-- block guarding the drop looks tidier and does not work: the whole file is
+-- sent to the server as one batch, where the `CREATE INDEX` below is analysed
+-- against the catalogue as it stood *before* the block ran, and fails on a
+-- column the block was about to create. This runs only when the schema version
+-- moves, and the next scan repopulates it.
+DROP TABLE IF EXISTS repo_package;
+
+-- Scoped by ecosystem, because a coordinate only means anything inside its own.
+-- `illuminate/events` is a PHP package published by laravel/framework; `events`
+-- is an unrelated npm package. Indexing the bare tail without the ecosystem
+-- made every npm `events` dependency an edge into a PHP repository.
 CREATE TABLE IF NOT EXISTS repo_package (
-    repo_id BIGINT NOT NULL REFERENCES repo (id) ON DELETE CASCADE,
-    name    TEXT   NOT NULL,
-    PRIMARY KEY (repo_id, name)
+    repo_id   BIGINT NOT NULL REFERENCES repo (id) ON DELETE CASCADE,
+    ecosystem TEXT   NOT NULL,
+    name      TEXT   NOT NULL,
+    PRIMARY KEY (repo_id, ecosystem, name)
 );
-CREATE INDEX IF NOT EXISTS repo_package_name_idx ON repo_package (name);
+CREATE INDEX IF NOT EXISTS repo_package_name_idx ON repo_package (ecosystem, name);
+
+ALTER TABLE dep_bump ADD COLUMN IF NOT EXISTS ecosystem TEXT;
 
 DO $$
 BEGIN
@@ -966,5 +982,5 @@ CREATE TABLE IF NOT EXISTS meta (
 -- was not, so schema_is_current() was permanently false and every service boot
 -- re-ran the whole DDL, taking exactly the locks the fast path exists to avoid.
 INSERT INTO meta (key, value)
-VALUES ('schema_version', '21'::jsonb)
+VALUES ('schema_version', '22'::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();

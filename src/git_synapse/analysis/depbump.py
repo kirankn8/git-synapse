@@ -86,26 +86,33 @@ def repo_key(dep_name: str) -> str:
     return repo_ref(dep_name)[1]
 
 
-def published_at_head(mirror: Path) -> set[str]:
-    """Every package coordinate this repository publishes, from its manifests.
+def published_at_head(mirror: Path) -> set[tuple[str, str]]:
+    """Every `(ecosystem, coordinate)` this repository publishes.
 
     A monorepo publishes many, so this is a set. Both the full coordinate and
-    its last segment are recorded, because a consumer may write either:
-    Maven's pom names `com.google.guava:guava` and the dependency block that
-    consumes it writes `guava`.
+    its last segment are recorded, because a consumer may write either: Maven's
+    pom names `com.google.guava:guava` while the dependency block consuming it
+    writes `guava`.
+
+    The ecosystem travels with the name and is not decoration. `illuminate/events`
+    is a PHP package published by laravel/framework and `events` is an unrelated
+    npm one; without the scope, every npm dependency on `events` became an edge
+    into a PHP repository.
     """
-    names: set[str] = set()
-    for path, _ in manifest_paths(mirror):
+    found: set[tuple[str, str]] = set()
+    for path, ecosystem in manifest_paths(mirror):
         text = _blob_at(mirror, "HEAD", path)
         for full in manifests.published_names(path, text):
-            names.add(full.lower())
-            if (tail := re.split(r"[:/]", full)[-1]):
-                names.add(tail.lower())
-    return names
+            found.add((ecosystem, full.lower()))
+            if tail := re.split(r"[:/]", full)[-1]:
+                found.add((ecosystem, tail.lower()))
+    return found
 
 
 def resolve_repo(dep_name: str, by_full_name: dict[tuple[str, str], int],
-                 by_name: dict[str, int], by_package: dict[str, int] | None = None) -> int | None:
+                 by_name: dict[str, int],
+                 by_package: dict[tuple[str, str], int] | None = None,
+                 ecosystem: str = "") -> int | None:
     """The indexed repository a reference names, or None.
 
     What a repository publishes is checked first, because that is a fact it
@@ -117,7 +124,7 @@ def resolve_repo(dep_name: str, by_full_name: dict[tuple[str, str], int],
     codebase. The name alone is only trusted when the reference genuinely
     carries no owner.
     """
-    if by_package and (hit := by_package.get((dep_name or "").strip().lower())):
+    if by_package and (hit := by_package.get((ecosystem, (dep_name or "").strip().lower()))):
         return hit
     owner, name = repo_ref(dep_name)
     if not name:
@@ -140,13 +147,15 @@ _EXCLUDED_SEGMENTS = ("vendor/", "node_modules/", "testdata/", "third_party/",
 MAX_MANIFESTS_PER_REPO = 200
 
 
-def _record_packages(conn: psycopg.Connection, repo_id: int, names: set[str]) -> None:
+def _record_packages(conn: psycopg.Connection, repo_id: int, claims: set[tuple[str, str]]) -> None:
     """Replace what this repository is known to publish."""
     conn.execute("DELETE FROM repo_package WHERE repo_id = %s", (repo_id,))
-    if names:
+    if claims:
         with conn.cursor() as cur:
-            cur.executemany("INSERT INTO repo_package (repo_id, name) VALUES (%s, %s) "
-                            "ON CONFLICT DO NOTHING", [(repo_id, n) for n in sorted(names)])
+            cur.executemany(
+                "INSERT INTO repo_package (repo_id, ecosystem, name) VALUES (%s, %s, %s) "
+                "ON CONFLICT DO NOTHING",
+                [(repo_id, eco, name) for eco, name in sorted(claims)])
 
 
 def _repo_lookups(conn: psycopg.Connection) -> tuple[dict[tuple[str, str], int], dict[str, int], dict[str, int]]:
@@ -160,10 +169,11 @@ def _repo_lookups(conn: psycopg.Connection) -> tuple[dict[tuple[str, str], int],
     by_full = {(str(o).lower(), str(n).lower()): int(i) for o, n, i in rows}
     by_name = {str(n).lower(): int(i) for _, n, i in rows}
 
-    claims: dict[str, set[int]] = defaultdict(set)
-    for name, repo_id in conn.execute("SELECT name, repo_id FROM repo_package").fetchall():
-        claims[str(name).lower()].add(int(repo_id))
-    by_package = {n: next(iter(ids)) for n, ids in claims.items() if len(ids) == 1}
+    claims: dict[tuple[str, str], set[int]] = defaultdict(set)
+    for eco, name, repo_id in conn.execute(
+            "SELECT ecosystem, name, repo_id FROM repo_package").fetchall():
+        claims[(str(eco), str(name).lower())].add(int(repo_id))
+    by_package = {k: next(iter(v)) for k, v in claims.items() if len(v) == 1}
     return by_full, by_name, by_package
 
 
@@ -236,6 +246,7 @@ class BumpEdge:
     dep_version: str
     dep_sha: str | None
     manifest: str
+    ecosystem: str = ""
 
 
 def extract_from_mirror(mirror: Path, repo_name: str, manifest: str = "go.mod", ecosystem: str = "go", max_commits: int = 400) -> list[BumpEdge]:
@@ -270,12 +281,8 @@ def extract_from_mirror(mirror: Path, repo_name: str, manifest: str = "go.mod", 
             if repo_key(name) == repo_key(repo_name):
                 continue                      # the module naming itself
             edges.append(BumpEdge(
-                consumer_sha=sha,
-                dep_name=name,
-                dep_version=ref.raw,
-                dep_sha=ref.sha,
-                manifest=manifest,
-            ))
+                consumer_sha=sha, dep_name=name, dep_version=ref.raw,
+                dep_sha=ref.sha, manifest=manifest, ecosystem=ecosystem))
         previous = current
     return edges
 
@@ -627,11 +634,12 @@ def _link_repositories(c: psycopg.Connection) -> int:
         """
         UPDATE dep_bump b
            SET dep_repo_id = p.repo_id
-          FROM (SELECT name, min(repo_id) AS repo_id
-                  FROM repo_package GROUP BY name
+          FROM (SELECT ecosystem, name, min(repo_id) AS repo_id
+                  FROM repo_package GROUP BY ecosystem, name
                 HAVING count(DISTINCT repo_id) = 1) p
          WHERE b.dep_repo_id IS NULL
            AND lower(b.dep_name) = p.name
+           AND b.ecosystem = p.ecosystem
            AND p.repo_id <> b.consumer_repo_id
         """
     ).rowcount or 0
@@ -776,11 +784,12 @@ def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> Bump
                     (
                         repo_id,
                         edge.consumer_sha,
-                        resolve_repo(edge.dep_name, by_full, by_name, by_pkg),
+                        resolve_repo(edge.dep_name, by_full, by_name, by_pkg, edge.ecosystem),
                         edge.dep_name,
                         edge.dep_version[:200],
                         edge.dep_sha,
                         edge.manifest,
+                        edge.ecosystem,
                     )
                 )
 
@@ -789,14 +798,15 @@ def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> Bump
                 """
                 CREATE TEMP TABLE tmp_bump (
                     consumer_repo_id BIGINT, consumer_sha TEXT, dep_repo_id BIGINT,
-                    dep_name TEXT, dep_version TEXT, dep_sha TEXT, manifest TEXT
+                    dep_name TEXT, dep_version TEXT, dep_sha TEXT, manifest TEXT,
+                    ecosystem TEXT
                 ) ON COMMIT DROP
                 """
             )
             copy_rows(
                 "tmp_bump",
                 ["consumer_repo_id", "consumer_sha", "dep_repo_id", "dep_name",
-                 "dep_version", "dep_sha", "manifest"],
+                 "dep_version", "dep_sha", "manifest", "ecosystem"],
                 payload,
                 conn=c,
             )
@@ -818,14 +828,14 @@ def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> Bump
                     INSERT INTO dep_bump (
                         consumer_repo_id, consumer_sha, dep_repo_id, dep_name,
                         dep_version, dep_sha, dep_commit_id, manifest,
-                        bumped_at, resolution
+                        bumped_at, resolution, ecosystem
                     )
                     SELECT DISTINCT ON (t.consumer_repo_id, t.consumer_sha,
                                         t.dep_name, t.dep_version)
                            t.consumer_repo_id, t.consumer_sha, t.dep_repo_id,
                            t.dep_name, t.dep_version, t.dep_sha,
                            dc.id, t.manifest, cc.committed_at,
-                           CASE WHEN dc.id IS NOT NULL THEN 'sha' END
+                           CASE WHEN dc.id IS NOT NULL THEN 'sha' END, t.ecosystem
                     FROM tmp_bump t
                     LEFT JOIN commit cc
                            ON cc.repo_id = t.consumer_repo_id

@@ -127,6 +127,11 @@ _VERSION_AT_END = re.compile(
 #: `^4.17.21`, `~> 7.0`, `>=2, <3`, `<3.0`.
 _BOUND = re.compile(r"(>=|<=|==|>|<|\^|~>|~|=)?\s*(\d[0-9A-Za-z.+-]*)")
 
+#: A wildcard occupying a whole segment: `5.5.*` and `1.0.x` both state 5.5 and
+#: 1.0 as their floor. The separator is required so a suffix that merely ends in
+#: the letter -- `1.0.0-linux` -- is left alone.
+_WILDCARD_TAIL = re.compile(r"[.\-][*xX]$")
+
 
 def version_key(raw: str) -> str | None:
     """Canonical form of a version or tag name, for matching one to the other.
@@ -162,7 +167,10 @@ def bounds(raw: str) -> tuple[str | None, str | None]:
     """
     text = (raw or "").strip().strip("\"'")
     floor = ceiling = None
-    for comparator, version in _BOUND.findall(text):
+    for comparator, raw_version in _BOUND.findall(text):
+        version = _WILDCARD_TAIL.sub("", raw_version).rstrip(".")
+        if not version:
+            continue
         if comparator in ("<", "<="):
             ceiling = ceiling or version
         else:                       # ^ ~ ~> >= > == = or a bare version

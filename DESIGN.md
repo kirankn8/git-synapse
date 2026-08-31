@@ -61,7 +61,7 @@ everything after it is a materialised cache.
 |---|---|
 | `ref_tag` | Every release tag, peeled to its commit, carrying a canonical `version_key` and the shipping-branch commit it was cut from. Without the latter a release tagged on a release branch resolves to nothing, which was 116 of guava's 123 tags. |
 | `dep_bump` | One version change recorded in a manifest, resolved where possible to the upstream commit it consumed, with the tier that resolution came from. Ground truth rather than correlation. |
-| `repo_package` | What each repository publishes, read from its own manifests. Answers "which repository *is* `com.google.guava:guava`?" from a declaration rather than from whether the strings agree. |
+| `repo_package` | What each repository publishes, read from its own manifests, scoped by ecosystem. Answers "which repository *is* `com.google.guava:guava`?" from a declaration rather than from whether the strings agree. |
 | `repo_dependency` | What each repository declares at HEAD. **This is the answer to "which repositories depend on each other".** |
 | `module_dependency` | The intra-repository module graph, for monorepos whose real structure lives in submodules rather than cross-repo edges. |
 | `repo_impact` | The ranked answer to "I am changing X, what else?", carrying the evidence behind each score so any number can be explained. |
@@ -495,8 +495,17 @@ of one release. `-rc1` and `-beta` are separate releases with their own tags and
 their own commits, and collapsing them would resolve a release candidate to the
 final release while looking successful. `-SNAPSHOT` was never tagged at all.
 
+**A coordinate never crosses ecosystems.** `illuminate/events` is a PHP package
+published by laravel/framework; `events` is an unrelated npm one. Both the full
+coordinate and its last segment are indexed, because a consumer writes either --
+but without the ecosystem travelling alongside, every npm dependency on `events`
+became an edge into a PHP repository. Scoping removed some 290 such edges across
+the corpus and lifted Rust from 74% to 92%, having previously been credited with
+edges it never had.
+
 **A range resolves to its declared floor**, which is parsed rather than guessed:
-`^4.17.21` states 4.17.21 as its own lower bound. What was installed may have
+`^4.17.21` states 4.17.21 as its own lower bound, and a wildcard segment states
+one too -- `5.5.*` and `1.0.x` mean 5.5 and 1.0. What was installed may have
 drifted higher, but a manifest nobody edited is one where nothing had to adapt,
 so the floor is the last version anyone made a decision about. A range that never
 changes produces no bump, which makes silent drift invisible by construction —
