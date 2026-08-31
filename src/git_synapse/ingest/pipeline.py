@@ -560,7 +560,8 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
             stats = load_commits(repo_id, commits, conn)
             # After the commits, so each tag resolves to a row rather than
             # leaving commit_id null on the first run.
-            load_tags(repo_id, gitops.read_tags(gitops.mirror_path_for(record.full_name)), conn)
+            mirror = gitops.mirror_path_for(record.full_name)
+            load_tags(repo_id, gitops.read_tags(mirror, gitops.default_branch(mirror)), conn)
             # Record the default branch tip as the next run's exclusion point.
             # This was every branch tip when the walk covered every branch;
             # excluding more than the walk visits would skip commits that must

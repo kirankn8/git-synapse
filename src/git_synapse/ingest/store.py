@@ -62,12 +62,16 @@ def load_tags(repo_id: int, tags: list, conn: psycopg.Connection) -> int:
     with conn.cursor() as cur:
         cur.executemany(
             """
-            INSERT INTO ref_tag (repo_id, name, commit_sha, tagged_at, annotated, commit_id)
+            INSERT INTO ref_tag (repo_id, name, commit_sha, tagged_at, annotated,
+                                 commit_id, main_sha, main_commit_id)
             VALUES (%s, %s, %s, %s, %s,
+                    (SELECT id FROM commit WHERE repo_id = %s AND sha = %s),
+                    %s,
                     (SELECT id FROM commit WHERE repo_id = %s AND sha = %s))
             ON CONFLICT (repo_id, name) DO NOTHING
             """,
-            [(repo_id, t.name, t.commit_sha, t.tagged_at, t.annotated, repo_id, t.commit_sha)
+            [(repo_id, t.name, t.commit_sha, t.tagged_at, t.annotated,
+              repo_id, t.commit_sha, t.main_sha, repo_id, t.main_sha)
              for t in tags],
         )
     return len(tags)

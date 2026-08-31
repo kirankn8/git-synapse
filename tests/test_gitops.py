@@ -503,3 +503,107 @@ def test_tags_are_mirrored(tmp_path):
     # An annotated tag points at a tag object; the commit is what matters.
     assert tags["v1.0.0"].commit_sha == tags["v1.1.0"].commit_sha
     assert len(tags["v1.1.0"].commit_sha) == 40
+
+
+ENV = {"GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@e",
+       "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@e",
+       "PATH": "/usr/bin:/bin:/usr/local/bin", "GIT_CONFIG_GLOBAL": "/dev/null",
+       "GIT_CONFIG_SYSTEM": "/dev/null"}
+
+
+def g(repo, *args):
+    import subprocess
+    return subprocess.run(["git", *args], cwd=repo, check=True, env=ENV,
+                          capture_output=True, text=True)
+
+
+def worktree(tmp_path, name):
+    """A non-bare repository, since tags on branches need a working tree."""
+    import subprocess
+    work = tmp_path / name
+    work.mkdir()
+    subprocess.run(["git", "init", "--quiet", "-b", "main", str(work)], check=True, env=ENV)
+    (work / "a.txt").write_text("x")
+    g(work, "add", "-A"); g(work, "commit", "--quiet", "-m", "one")
+    return work
+
+
+def add_commit(repo, name, body):
+    (repo / name).write_text(body)
+    g(repo, "add", "-A"); g(repo, "commit", "--quiet", "-m", name)
+
+
+def test_a_tag_on_the_shipping_branch_anchors_to_itself(tmp_path):
+    """Most projects tag on the branch they ship. The anchor is then the tag's
+    own commit, and no merge-base is needed."""
+    work = worktree(tmp_path, "on-branch")
+    g(work, "tag", "v1.0.0")
+
+    tag = {t.name: t for t in gitops.read_tags(work, "main")}["v1.0.0"]
+    assert tag.main_sha == tag.commit_sha
+
+
+def test_a_tag_on_a_release_branch_anchors_to_where_it_was_cut(tmp_path):
+    """Guava tags on a release branch, so 116 of its 123 tags point at commits
+    the walk never reads. The merge-base is on the shipping branch and is
+    therefore already ingested."""
+    work = worktree(tmp_path, "release-branch")
+    cut = g(work, "rev-parse", "HEAD").stdout.strip()
+
+    g(work, "checkout", "-q", "-b", "release-1.0")
+    add_commit(work, "pom.xml", "1.0.0")            # release-only work
+    g(work, "tag", "v1.0.0")
+    g(work, "checkout", "-q", "main")
+    add_commit(work, "b.txt", "2")                  # the branch moves on
+
+    tag = {t.name: t for t in gitops.read_tags(work, "main")}["v1.0.0"]
+    assert tag.commit_sha != cut, "the tag is not on the shipping branch"
+    assert tag.main_sha == cut, "it was cut from here"
+
+
+def test_an_unrelated_history_gets_no_anchor(tmp_path):
+    """An imported tree or orphan branch shares no ancestor, so there is no
+    commit it was cut from. Left unset rather than anchored to something
+    arbitrary."""
+    work = worktree(tmp_path, "orphan")
+    g(work, "checkout", "-q", "--orphan", "imported")
+    add_commit(work, "vendor.txt", "x")
+    g(work, "tag", "vendored-1.0")
+    g(work, "checkout", "-q", "main")
+
+    tag = {t.name: t for t in gitops.read_tags(work, "main")}["vendored-1.0"]
+    assert tag.main_sha is None
+
+
+def test_tags_are_read_without_a_branch_too(tmp_path):
+    """The anchor is optional: callers that do not know the shipping branch
+    still get every tag."""
+    work = worktree(tmp_path, "nobranch")
+    g(work, "tag", "v1.0.0")
+    assert [t.name for t in gitops.read_tags(work)] == ["v1.0.0"]
+
+
+def test_an_anchor_that_lands_on_a_merge_moves_to_a_real_commit(tmp_path):
+    """The walk skips merges, so anchoring a tag to one names a commit that was
+    deliberately never stored. 27 of auto's tags landed exactly there."""
+    work = worktree(tmp_path, "merge-anchor")
+    base = g(work, "rev-parse", "HEAD").stdout.strip()
+
+    g(work, "checkout", "-q", "-b", "feature")
+    add_commit(work, "feature.txt", "f")
+    g(work, "checkout", "-q", "main")
+    add_commit(work, "main.txt", "m")
+    g(work, "merge", "-q", "--no-ff", "-m", "merge feature", "feature")
+    merge_sha = g(work, "rev-parse", "HEAD").stdout.strip()
+
+    # Tag a release branch cut from the merge commit itself.
+    g(work, "checkout", "-q", "-b", "release-1.0")
+    add_commit(work, "pom.xml", "1.0.0")
+    g(work, "tag", "v1.0.0")
+    g(work, "checkout", "-q", "main")
+
+    tag = {t.name: t for t in gitops.read_tags(work, "main")}["v1.0.0"]
+    assert tag.main_sha != merge_sha, "a merge commit is never stored"
+    assert tag.main_sha != base
+    assert len(g(work, "rev-list", "--parents", "-n", "1", tag.main_sha)
+               .stdout.split()) == 2, "the anchor must be a single-parent commit"
