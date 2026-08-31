@@ -355,3 +355,30 @@ def test_a_minimum_score_filters_both_orientations(db):
 
     assert q.coupled_files(file_id=-1, measure="jaccard", limit=5,
                            min_support=1, min_score=0.9) == []
+
+
+def test_repositories_can_be_listed_by_the_account_that_owns_them(db):
+    """The rung that makes the hierarchy navigable. Without it the Accounts page
+    can only send a reader to every repository in the corpus."""
+    from git_synapse.analysis import query as q
+    from git_synapse.db.engine import connection
+
+    with connection() as conn:
+        acct = conn.execute(
+            "INSERT INTO account (login, kind) VALUES ('owner-test','org') RETURNING id"
+        ).fetchone()[0]
+        mine = conn.execute(
+            "INSERT INTO repo (full_name, name, owner, account_id) VALUES "
+            "('owner-test/a','a','owner-test',%s) RETURNING id", (acct,)).fetchone()[0]
+        conn.execute("INSERT INTO repo (full_name, name, owner) VALUES "
+                     "('someone/else','else','someone')")
+        conn.commit()
+    try:
+        got = {r["id"] for r in q.list_repos(account_id=acct)}
+        assert got == {mine}, "only the account's own repositories"
+        assert len(q.list_repos()) > 1, "and no filter still lists everything"
+    finally:
+        with connection() as conn:
+            conn.execute("DELETE FROM repo WHERE owner IN ('owner-test','someone')")
+            conn.execute("DELETE FROM account WHERE id = %s", (acct,))
+            conn.commit()

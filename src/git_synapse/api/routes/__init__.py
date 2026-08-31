@@ -166,9 +166,11 @@ def list_repos(
     descending: bool = True,
     limit: int = Query(500, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    account_id: int | None = None,
 ) -> dict:
     """List repositories with ingest state and history summary."""
-    rows = q.list_repos(search, language, status, order_by, descending, limit, offset)
+    rows = q.list_repos(search, language, status, order_by, descending, limit,
+                        offset, account_id)
     return {"count": len(rows), "repos": rows}
 
 
@@ -330,7 +332,26 @@ def pair_commits(
 def coupled_dirs(
     dir_id: int, measure: str = DEFAULT_MEASURE, limit: int = Query(25, ge=1, le=500)
 ) -> dict:
-    return {"measure": measure, "partners": q.coupled_directories(dir_id, measure, limit)}
+    """Directories that change with this one, and which directory it is.
+
+    The identity is returned because without it the page is an orphan: it can
+    rank partners but cannot say whose directory this is, so a reader arriving
+    from anywhere has no way back up to the repository or its account.
+    """
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        """
+        SELECT d.id, d.path, d.repo_id, r.name AS repo, r.full_name, r.account_id
+          FROM directory d JOIN repo r ON r.id = d.repo_id
+         WHERE d.id = %(dir)s
+        """,
+        {"dir": dir_id},
+    )
+    if row is None:
+        raise HTTPException(404, f"no directory {dir_id}")
+    return {"measure": measure, "directory": row,
+            "partners": q.coupled_directories(dir_id, measure, limit)}
 
 
 @router.get("/pairs", tags=["coupling"])
