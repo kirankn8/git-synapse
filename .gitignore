@@ -16,3 +16,6 @@ data/
 tests/ui/node_modules
 tests/ui/bundle.js
 tests/ui/package-lock.json
+.coverage
+coverage.xml
+htmlcov/
