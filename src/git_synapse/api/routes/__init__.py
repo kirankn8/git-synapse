@@ -242,9 +242,22 @@ def delete_account(account_id: int) -> dict:
 
 
 @router.get("/calls/summary", tags=["calls"])
-def calls_summary(hours: int = Query(24, ge=1, le=8760)) -> dict:
-    """Volume, failures and latency over a window, for the operator view."""
-    return {"summary": calls.summary(hours), "by_name": calls.by_name(hours=hours)}
+def calls_summary(
+    hours: int = Query(24, ge=1, le=8760),
+    surface: str | None = Query(None, pattern="^(mcp|http)$"),
+    status: str | None = Query(None, pattern="^(ok|error)$"),
+) -> dict:
+    """Volume, failures and latency over a window, for the operator view.
+
+    Honours ``surface``: without it the figures ignored the filter the reader
+    had just set, so the page looked broken -- the list narrowed and everything
+    above it stayed the same.
+    """
+    return {
+        "summary": calls.summary(hours, surface=surface),
+        "by_name": calls.by_name(surface=surface, hours=hours, status=status),
+        "mcp_tools": len(calls.known_mcp_tools()),
+    }
 
 
 @router.get("/calls", tags=["calls"])
@@ -252,10 +265,12 @@ def list_calls(
     surface: str | None = Query(None, pattern="^(mcp|http)$"),
     name: str | None = None,
     status: str | None = Query(None, pattern="^(ok|error)$"),
+    hours: int | None = Query(None, ge=1, le=8760),
     limit: int = Query(100, ge=1, le=1000),
 ) -> dict:
     """The call list, newest first, without payloads."""
-    rows = calls.recent(surface=surface, name=name, status=status, limit=limit)
+    rows = calls.recent(surface=surface, name=name, status=status,
+                        hours=hours, limit=limit)
     return {"count": len(rows), "calls": rows}
 
 

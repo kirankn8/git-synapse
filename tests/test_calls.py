@@ -87,13 +87,11 @@ def test_recording_never_raises_even_when_everything_is_wrong(monkeypatch):
     calls.record("mcp", "x")       # must not raise
 
 
-def test_rows_reach_the_database_and_read_back(db):
+def test_rows_reach_the_database_and_read_back(db, settled_calls):
     calls.record("mcp", "test_tool", arguments={"a": 1},
                  result={"items": [1, 2]}, duration_ms=7, client="pytest")
-    assert calls._flush_once() == 1
-
-    rows = calls.recent(surface="mcp", name="test_tool", limit=5)
-    assert rows and rows[0]["name"] == "test_tool"
+    rows = settled_calls(lambda: calls.recent(surface="mcp", name="test_tool", limit=5))
+    assert rows[0]["name"] == "test_tool"
     full = calls.detail(rows[0]["id"])
     assert full["arguments"] == {"a": 1}
     assert full["result_preview"] == {"items": [1, 2]}
@@ -121,11 +119,10 @@ def test_the_log_is_pruned_by_age(db):
     assert query_one("SELECT count(*) AS n FROM call_log WHERE name='ancient'")["n"] == 0
 
 
-def test_filters_narrow_the_list(db):
+def test_filters_narrow_the_list(db, settled_calls):
     calls.record("http", "/api/a", status="ok")
     calls.record("http", "/api/b", status="error", error="boom")
-    calls._flush_once()
-    only_errors = calls.recent(status="error", limit=50)
+    only_errors = settled_calls(lambda: calls.recent(status="error", limit=50))
     assert only_errors and all(r["status"] == "error" for r in only_errors)
     assert calls.detail(-1) is None
 
@@ -223,3 +220,65 @@ def test_two_threads_racing_to_start_the_flusher_start_only_one(monkeypatch):
     monkeypatch.setattr(calls.threading, "Thread", CountingThread)
     calls._ensure_worker()
     assert started == [], "the loser of the race must not start a second flusher"
+
+
+def test_every_registered_tool_is_listed_even_when_never_called(db, monkeypatch, settled_calls):
+    """Two tools had been called and fourteen exist, so the page showed two and
+    read as "this server has two tools". A tool nobody uses is the row worth
+    seeing, and it cannot come from a table built out of calls."""
+    monkeypatch.setattr(calls, "known_mcp_tools",
+                        lambda: ["called_one", "never_one", "never_two"])
+    calls.record("mcp", "called_one", result={"x": [1]})
+    settled_calls(lambda: calls.recent(surface="mcp", name="called_one", limit=1))
+
+    rows = calls.by_name(surface="mcp", hours=1)
+    by_name = {r["name"]: r for r in rows}
+    assert set(by_name) >= {"called_one", "never_one", "never_two"}
+    assert by_name["called_one"]["calls"] >= 1
+    assert by_name["never_one"]["calls"] == 0
+    assert by_name["never_one"]["last_call"] is None
+
+
+def test_the_idle_inventory_is_left_out_where_it_would_mislead(db, monkeypatch):
+    """Under "errors only", a tool that has never run has never failed either;
+    listing it with zero would read as a passing tool in a failure report."""
+    monkeypatch.setattr(calls, "known_mcp_tools", lambda: ["never_one"])
+    assert not [r for r in calls.by_name(surface="mcp", hours=1, status="error")
+                if r["name"] == "never_one"]
+    assert not [r for r in calls.by_name(surface="http", hours=1)
+                if r["name"] == "never_one"]
+
+
+def test_the_summary_narrows_with_the_surface_the_reader_chose(db, settled_calls):
+    """It ignored the filter, so the list narrowed and every figure above it
+    stayed put -- which reads as the filters not working."""
+    calls.record("mcp", "a_tool", result={"x": [1]})
+    calls.record("http", "/api/thing", result={"x": [1]})
+    settled_calls(lambda: calls.recent(surface="http", name="/api/thing", limit=1))
+
+    everything = calls.summary(hours=1)
+    just_mcp = calls.summary(hours=1, surface="mcp")
+    assert just_mcp["surface"] == "mcp"
+    assert just_mcp["http_calls"] == 0
+    assert just_mcp["calls"] < everything["calls"]
+
+
+def test_the_window_reaches_the_call_list(db):
+    """The window chips were setting a parameter the list never read."""
+    from git_synapse.db.engine import execute
+
+    execute(
+        "INSERT INTO call_log (at, surface, name, status, duration_ms)"
+        " VALUES (now() - interval '5 hours', 'http', '/api/old', 'ok', 1)"
+    )
+    assert not [r for r in calls.recent(hours=1, limit=500) if r["name"] == "/api/old"]
+    assert [r for r in calls.recent(hours=24, limit=500) if r["name"] == "/api/old"]
+
+
+def test_an_unpublished_inventory_is_empty_rather_than_an_error(db):
+    """The API reads what the MCP container published. Before it has started,
+    or if it never does, the activity page must still render."""
+    from git_synapse.db.engine import execute
+
+    execute("DELETE FROM meta WHERE key = 'watermark:mcp_tools'")
+    assert calls.known_mcp_tools() == []

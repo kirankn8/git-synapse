@@ -843,13 +843,13 @@ def test_an_unknown_call_id_is_a_404(client):
     assert client.get("/api/calls/999999999").status_code == 404
 
 
-def test_one_call_can_be_opened_in_full(client):
+def test_one_call_can_be_opened_in_full(client, settled_calls):
     """The drill-down's last rung: a row in the list, then exactly what that
     call was asked and exactly what it returned."""
     from git_synapse.analysis import calls
 
     client.get("/api/overview")
-    calls._flush_once()
+    settled_calls(lambda: calls.recent(surface="http", limit=1))
     listed = client.get("/api/calls", params={"surface": "http", "limit": 1}).json()
     assert listed["count"] == 1
 
@@ -860,21 +860,19 @@ def test_one_call_can_be_opened_in_full(client):
     assert "result_preview" in body and "arguments" in body
 
 
-def test_the_api_records_its_own_traffic(client):
+def test_the_api_records_its_own_traffic(client, settled_calls):
     """The whole point: a request served leaves a row saying what was asked and
     what came back. The route template is recorded, not the concrete path, so a
     thousand repositories are one row in a ranking."""
     from git_synapse.analysis import calls
 
     client.get("/api/repos", params={"limit": 1})
-    assert calls._flush_once() >= 1
-
     # Filtered in the query, not in a window afterwards: by the time this runs
     # the suite has served hundreds of requests, and a slice of the most recent
     # would not contain this one.
-    rows = calls.recent(surface="http", name="/api/repos", limit=5)
-    match = rows[0] if rows else None
-    assert match is not None
+    rows = settled_calls(
+        lambda: calls.recent(surface="http", name="/api/repos", limit=5))
+    match = rows[0]
     assert match["status"] == "ok" and match["method"] == "GET"
 
     full = calls.detail(match["id"])
@@ -883,25 +881,25 @@ def test_the_api_records_its_own_traffic(client):
     assert full["result_bytes"] and full["result_bytes"] > 0
 
 
-def test_reading_the_log_does_not_write_to_the_log(client):
+def test_reading_the_log_does_not_write_to_the_log(client, settled_calls):
     """Otherwise opening the activity page generates the traffic it displays,
     and the page can never be quiet."""
     from git_synapse.analysis import calls
 
     client.get("/api/calls", params={"limit": 1})
     client.get("/api/calls/summary")
-    calls._flush_once()
+    client.get("/api/overview")
+    settled_calls(lambda: calls.recent(surface="http", name="/api/overview", limit=1))
     assert not [r for r in calls.recent(limit=50) if r["name"].startswith("/api/calls")]
 
 
-def test_a_failing_request_is_recorded_as_an_error(client):
+def test_a_failing_request_is_recorded_as_an_error(client, settled_calls):
     from git_synapse.analysis import calls
 
     client.get("/api/repos/999999999")
-    calls._flush_once()
-    rows = calls.recent(surface="http", name="/api/repos/{repo_id}",
-                        status="error", limit=5)
-    assert rows and rows[0]["error"] == "HTTP 404"
+    rows = settled_calls(lambda: calls.recent(
+        surface="http", name="/api/repos/{repo_id}", status="error", limit=5))
+    assert rows[0]["error"] == "HTTP 404"
 
 
 @pytest.mark.parametrize(("body", "expected_rows"), [

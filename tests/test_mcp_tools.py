@@ -895,3 +895,30 @@ def test_a_tool_returning_an_error_object_is_counted_as_a_failure(monkeypatch):
     asyncio.run(srv.server.call_tool("upstream_repos", {"repo": "nope"}))
     assert recorded[0]["status"] == "error"
     assert recorded[0]["error"] == "no repository matching 'nope'"
+
+
+def test_the_server_publishes_its_tool_inventory(db):
+    """Written by the MCP process rather than read by the API, which would mean
+    the API importing this module to answer a question about another container."""
+    from git_synapse.analysis import calls
+    from git_synapse.mcp import server as srv
+
+    names = srv.tool_names()
+    assert len(names) >= 10 and "coupled_files" in names
+
+    srv._publish_tool_inventory()
+    assert calls.known_mcp_tools() == names
+
+
+def test_publishing_the_inventory_never_stops_the_server(monkeypatch, caplog):
+    import logging
+
+    from git_synapse.mcp import server as srv
+
+    def boom(*_a, **_k):
+        raise RuntimeError("database gone")
+
+    monkeypatch.setattr("git_synapse.db.engine.set_watermark", boom)
+    with caplog.at_level(logging.WARNING, logger="git_synapse.mcp.server"):
+        srv._publish_tool_inventory()
+    assert "could not publish the tool inventory" in caplog.text

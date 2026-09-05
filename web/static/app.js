@@ -625,12 +625,13 @@ on('/', async () => {
     { key: 'errors', label: 'Errors', num: true, render: (r) => h('span', { style: `color:${r.errors ? 'var(--danger)' : 'inherit'}` }, num(r.errors)) },
     { key: 'avg_ms', label: 'Avg', num: true, render: (r) => `${fx(r.avg_ms, 0)}ms` },
     { key: 'avg_rows', label: 'Avg rows', num: true, render: (r) => (r.avg_rows == null ? '\u2014' : fx(r.avg_rows, 0)) },
-    { key: 'last_call', label: 'Last', render: (r) => when(r.last_call) },
+    { key: 'last_call', label: 'Last', render: (r) => (r.last_call ? when(r.last_call)
+        : h('span', { class: 'badge muted' }, 'never called')) },
   ], {
     initialSort: 'calls',
-    onRow: (r) => go(`/callers?surface=${r.surface}&name=${encodeURIComponent(r.name)}`),
+    onRow: (r) => (r.calls ? go(`/callers?surface=${r.surface}&name=${encodeURIComponent(r.name)}`) : null),
     empty: 'Nothing has called this deployment in the last 24 hours.',
-  }), 'Click a row for the individual calls'));
+  }), `Every MCP tool is listed, called or not (${callers.mcp_tools || 0} registered)`));
 
   wrap.append(h('div', { class: 'help' },
     'The corpus itself is under ', h('a', { href: '/repos', 'data-nav': true }, 'Repositories'),
@@ -1608,11 +1609,14 @@ on('/callers', async (_args, params) => {
   const hours = Number(params.hours || 24);
 
   const [summary, list] = await Promise.all([
-    api('/api/calls/summary', { hours }),
+    api('/api/calls/summary', {
+      hours, surface: surface || undefined, status: status || undefined,
+    }),
     api('/api/calls', {
       surface: surface || undefined,
       status: status || undefined,
       name: name || undefined,
+      hours,
       limit: 200,
     }),
   ]);
@@ -1644,6 +1648,10 @@ on('/callers', async (_args, params) => {
     onclick: () => {
       const p = new URLSearchParams(params);
       if (value) p.set(key, value); else p.delete(key);
+      // A tool name belongs to one surface, so keeping it while switching
+      // surface asks for MCP calls to an HTTP route and returns nothing --
+      // which reads as the filter being broken rather than empty.
+      if (key === 'surface') p.delete('name');
       go(`/callers${p.toString() ? '?' + p : ''}`);
     },
   }, label);
@@ -1668,15 +1676,20 @@ on('/callers', async (_args, params) => {
     { key: 'avg_ms', label: 'Avg', num: true, render: (r) => `${fx(r.avg_ms, 0)}ms` },
     { key: 'max_ms', label: 'Slowest', num: true, render: (r) => `${num(r.max_ms)}ms` },
     { key: 'avg_rows', label: 'Avg rows', num: true, render: (r) => (r.avg_rows == null ? '\u2014' : fx(r.avg_rows, 0)) },
+    { key: 'last_call', label: 'Last used', render: (r) => (r.last_call ? when(r.last_call)
+        : h('span', { class: 'badge muted' }, 'never called')) },
   ], {
     initialSort: 'calls',
     onRow: (r) => {
+      if (!r.calls) return;
       const p = new URLSearchParams(params);
       p.set('surface', r.surface); p.set('name', r.name);
       go(`/callers?${p}`);
     },
     empty: 'No calls in this window.',
-  })));
+  }),
+    `Every MCP tool is listed, called or not \u2014 ${summary.mcp_tools || 0} are registered, `
+    + 'and a tool nobody uses is the row worth seeing'));
 
   wrap.append(h('div', { class: 'section-title' }, `${list.count} most recent`));
   wrap.append(card('Calls', dataTable(list.calls || [], [
