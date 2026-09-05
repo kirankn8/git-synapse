@@ -200,6 +200,64 @@ for (const path of ['/', '/repos/4', '/activity', '/insights/shape/pair_support'
   else ok(`${path} tiles`, 'every figure opens what it counts');
 }
 
+/* A chart drawn into a card that clips is worse than no chart: the reader sees
+   a number cut in half and cannot tell it is cut. Both were shipped -- bars
+   overflowing the body, and values drawn into columns too narrow for them. */
+console.log('\n=== charts fit inside their cards ===');
+for (const path of ['/', '/insights/shape', '/insights/shape/pair_support']) {
+  await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });
+  await settle();
+  const bad2 = await page.evaluate(() => {
+    const out = [];
+    for (const card of document.querySelectorAll('#view .card')) {
+      const title = ((card.querySelector('.card-title') || {}).textContent || '?').trim();
+      const body = card.querySelector('.card-body');
+      if (!body || !body.querySelector('.cbars, .hbars')) continue;
+      const bottom = [...body.children]
+        .reduce((n, e) => Math.max(n, e.getBoundingClientRect().bottom), 0);
+      if (bottom > body.getBoundingClientRect().bottom + 1) out.push(`${title}: overflows`);
+      const cut = [...card.querySelectorAll('.cbar-value, .cbar-label, .hbar-value')]
+        .filter((e) => e.scrollWidth > e.clientWidth + 1).length;
+      if (cut) out.push(`${title}: ${cut} label(s) cut`);
+    }
+    return out;
+  });
+  if (bad2.length) bad(`${path} charts`, bad2.join('; '));
+  else ok(`${path} charts`, 'nothing clipped');
+}
+
+/* The splash is fixed and full-screen. If it ever fails to leave, the whole
+   application is behind it and every click lands on nothing -- so this checks
+   both halves: that it is there during the load, and gone after it. */
+console.log('\n=== the splash covers the load and then leaves ===');
+{
+  const probe = await browser.newPage();
+  await probe.setRequestInterception(true);
+  probe.on('request', (r) => {
+    if (r.url().includes('/api/overview')) setTimeout(() => r.continue(), 2500);
+    else r.continue();
+  });
+  probe.goto(BASE + '/', { waitUntil: 'domcontentloaded' }).catch(() => {});
+  await new Promise((r) => setTimeout(r, 900));
+  const during = await probe.evaluate(() => {
+    const s = document.getElementById('splash');
+    return s ? { shown: !s.classList.contains('gone'), covers: s.getBoundingClientRect().height > 200 } : null;
+  });
+  if (during && during.shown && during.covers) ok('splash during load', 'shown while the first query runs');
+  else bad('splash during load', JSON.stringify(during));
+
+  for (let i = 0; i < 40 && (await probe.evaluate(() => !!document.getElementById('splash'))); i++) {
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  const after = await probe.evaluate(() => ({
+    splash: !!document.getElementById('splash'),
+    rendered: (document.getElementById('view').textContent || '').trim().length > 40,
+  }));
+  if (!after.splash && after.rendered) ok('splash after load', 'removed once the view rendered');
+  else bad('splash after load', JSON.stringify(after));
+  await probe.close();
+}
+
 console.log('\n=== nothing overflows its container horizontally ===');
 for (const [path, label] of PAGES) {
   await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });

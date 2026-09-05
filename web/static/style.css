@@ -833,29 +833,74 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 
 /* Columns as elements: text is laid out by the browser at its natural size,
    rather than scaled with the drawing and coming out squashed. */
-.cbars { display: flex; align-items: flex-end; gap: 3px; }
+.cbars {
+  display: flex; align-items: flex-end; gap: 4px;
+  position: relative; padding-top: 2px;
+}
+.card-body:not(.chart-body) .cbars { gap: 8px; }
+.card-body:not(.chart-body) .cbar-value { font-size: 12.5px; color: var(--text); }
+.card-body:not(.chart-body) .cbar-label { font-size: 11.5px; }
+.cbars::before {
+  content: ''; position: absolute; left: 0; right: 0;
+  top: calc(var(--val-h, 14px)); height: var(--bar-h, 66px);
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--border) 0 1px,
+    transparent 1px calc(var(--bar-h, 66px) / 3));
+  opacity: .5; pointer-events: none; border-radius: 1px;
+}
 .cbar {
   flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
   align-items: center; gap: 3px; cursor: default;
 }
+/* Sized to the narrowest column that carries a value: eight buckets in a card
+   leave 35px, and "142.9k" at 10px needed 36 -- it lost its "k". */
 .cbar-value {
-  font-size: 9.5px; color: var(--text-faint); font-variant-numeric: tabular-nums;
+  font-size: 9.5px; color: var(--text-dim); font-variant-numeric: tabular-nums;
+  font-weight: 550; letter-spacing: -0.03em;
   white-space: nowrap; overflow: hidden; max-width: 100%;
+  transition: color .14s ease;
 }
 .cbar-track {
   width: 100%; height: var(--bar-h, 74px);
   display: flex; align-items: flex-end;
 }
-.cbar-fill { width: 100%; border-radius: 2px 2px 0 0; transition: opacity .12s ease; }
-.cbar:hover .cbar-fill { opacity: .72; }
+/* A bar is a solid of one hue, lit from the top: the gradient gives it a
+   surface instead of a flat block, and the ramp gives the chart a direction. */
+.cbar-fill {
+  width: 100%; border-radius: 3px 3px 1px 1px;
+  background: linear-gradient(
+    to bottom,
+    hsl(var(--hue) 72% 62%),
+    hsl(var(--hue) 66% 48%));
+  box-shadow: inset 0 1px 0 hsl(var(--hue) 85% 76% / .55);
+  transition: filter .14s ease, transform .14s ease;
+  transform-origin: bottom;
+  animation: grow .42s cubic-bezier(.22, .68, .36, 1) both;
+  animation-delay: calc(var(--i, 0) * 14ms);
+}
+.cbar-fill.alert {
+  background: linear-gradient(to bottom, #f87171, #dc2626);
+  box-shadow: inset 0 1px 0 #fca5a577;
+}
+.cbar:hover .cbar-fill { filter: brightness(1.18) saturate(1.1); }
+.cbar:hover .cbar-value { color: var(--text); }
+
+@keyframes grow { from { transform: scaleY(0); opacity: .4; } to { transform: scaleY(1); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .cbar-fill, .hbar-fill { animation: none; } }
 .cbar-label {
-  font-size: 9.5px; color: var(--text-faint); font-family: var(--mono);
-  white-space: nowrap; max-width: 100%;
+  font-size: 10px; color: var(--text-faint); font-family: var(--mono);
+  letter-spacing: -0.02em; white-space: nowrap; max-width: 100%;
 }
 /* The end labels of a dense chart sit outside their own column, so they are
    allowed to reach past it rather than being cut in half. */
-.cbars > .cbar:first-child .cbar-label { align-self: flex-start; max-width: none; }
-.cbars > .cbar:last-child  .cbar-label { align-self: flex-end;   max-width: none; }
+/* The axis of a dense chart: its ends, on their own line, where they have the
+   width to be read. */
+.cbars-axis {
+  display: flex; justify-content: space-between;
+  margin-top: 5px; font-size: 10px; letter-spacing: -0.02em;
+  color: var(--text-faint); font-family: var(--mono);
+}
 
 .stack {
   display: flex; height: 10px; border-radius: 5px; overflow: hidden;
@@ -890,7 +935,19 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .hbar-track { height: 9px; background: var(--bg-input); border-radius: 5px; overflow: hidden; }
-.hbar-fill { display: block; height: 100%; background: var(--accent); border-radius: 5px; }
+.hbar-fill {
+  display: block; height: 100%; border-radius: 5px;
+  background: linear-gradient(
+    to right,
+    hsl(var(--hue) 66% 46%),
+    hsl(var(--hue) 74% 60%));
+  transform-origin: left;
+  animation: extend .44s cubic-bezier(.22, .68, .36, 1) both;
+  animation-delay: calc(var(--i, 0) * 26ms);
+  transition: filter .14s ease;
+}
+.hbar:hover .hbar-fill { filter: brightness(1.15) saturate(1.1); }
+@keyframes extend { from { transform: scaleX(0); opacity: .4; } to { transform: scaleX(1); opacity: 1; } }
 .hbar-value {
   font-size: 11.5px; color: var(--text); font-variant-numeric: tabular-nums;
   min-width: 62px; text-align: right;
@@ -916,7 +973,7 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
    own padding. It was 116px against 109px of content inside a card that clips,
    so every chart was shaved off at the bottom. */
 .chart-body {
-  height: 124px;
+  height: 132px;
   display: flex; flex-direction: column; justify-content: center;
 }
 
@@ -949,3 +1006,70 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 /* A section heading that also offers the way in to everything under it. */
 .section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .section-more { font-size: 11.5px; font-weight: 500; letter-spacing: 0; text-transform: none; }
+
+/* ------------------------------------------------------- splash & motion -- */
+/* The first view needs a database round trip, and until now the page was blank
+   while it happened. The mark draws itself once, which is about as long as the
+   wait usually is; if the wait is shorter the splash leaves before it finishes,
+   which is the right way round. */
+#splash {
+  position: fixed; inset: 0; z-index: 999;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px; background: var(--bg);
+  transition: opacity .34s ease, visibility .34s;
+}
+#splash.gone { opacity: 0; visibility: hidden; pointer-events: none; }
+
+.splash-mark { width: 84px; height: 84px; overflow: visible; }
+.sm-arc path {
+  fill: none; stroke: var(--accent); stroke-width: 2.1; stroke-linecap: round;
+  /* In user units, not the normalised pathLength: CSS stroke-dasharray ignores
+     that attribute, and 1 drew the arc as a row of 1-unit dots. The arcs are
+     11.6 units long, so 13 is one dash with room to spare. */
+  stroke-dasharray: 13; stroke-dashoffset: 13;
+  animation: draw 1.5s cubic-bezier(.4, 0, .2, 1) infinite;
+}
+.sm-arc path:nth-child(2) { animation-delay: .18s; }
+.sm-node { fill: var(--accent); }
+.sm-spark {
+  fill: var(--accent); transform-origin: center;
+  animation: fire 1.5s ease-in-out infinite;
+}
+.sm-spark-2 { animation-delay: .2s; }
+
+/* The signal crosses the gap and fades, over and over: the mark is a synapse
+   firing, which is also what the product measures. */
+@keyframes draw {
+  0%   { stroke-dashoffset: 13; opacity: .25; }
+  40%  { stroke-dashoffset: 0;  opacity: 1; }
+  75%  { stroke-dashoffset: 0;  opacity: 1; }
+  100% { stroke-dashoffset: 0;  opacity: .25; }
+}
+@keyframes fire {
+  0%, 35% { opacity: .12; }
+  55%     { opacity: 1; }
+  100%    { opacity: .3; }
+}
+
+.splash-name {
+  font-size: 15px; font-weight: 600; letter-spacing: -0.01em; color: var(--text);
+}
+.splash-sub { font-size: 12px; color: var(--text-faint); }
+
+/* Views arrive rather than appearing: a short rise settles the eye on the new
+   page instead of leaving it to find what changed. */
+.view-enter { animation: rise .26s cubic-bezier(.22, .68, .36, 1) both; }
+@keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* A navigation slower than a blink gets a bar rather than a frozen page. */
+#progress {
+  position: fixed; top: 0; left: 0; height: 2px; width: 0;
+  background: linear-gradient(90deg, var(--accent), hsl(268 74% 62%));
+  z-index: 1000; opacity: 0; transition: width .18s ease, opacity .25s ease;
+}
+#progress.busy { opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .view-enter { animation: none; }
+  .sm-arc path, .sm-spark { animation: none; }
+}
