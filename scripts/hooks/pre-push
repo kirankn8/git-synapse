@@ -77,6 +77,10 @@ else
 fi
 
 # --- frontend ----------------------------------------------------------------
+# Reachability is probed against /api/health, not /api/overview: overview needs
+# a session now, and a 401 was being read as "no API here" -- so both UI suites
+# were quietly skipped on a healthy stack, which is the failure mode this hook
+# exists to prevent.
 # Needs a live API: the bundle is fetched from it rather than read off disk, so
 # the test exercises what is actually served.
 ui() {  # $1 = base url, then the runner
@@ -85,13 +89,13 @@ ui() {  # $1 = base url, then the runner
 }
 
 if command -v node >/dev/null 2>&1 \
-   && curl -fsS -o /dev/null --max-time 3 "${GIT_SYNAPSE_URL:-http://localhost:8080}/api/overview" 2>/dev/null; then
+   && curl -fsS -o /dev/null --max-time 3 "${GIT_SYNAPSE_URL:-http://localhost:8080}/api/health" 2>/dev/null; then
     say "UI smoke test (local node)"
     ui "${GIT_SYNAPSE_URL:-http://localhost:8080}" || fail=1
     ran=1
 elif command -v docker >/dev/null 2>&1 \
      && docker run --rm --network "$compose_net" curlimages/curl:latest \
-          -fsS -o /dev/null --max-time 3 http://api:8000/api/overview >/dev/null 2>&1; then
+          -fsS -o /dev/null --max-time 3 http://api:8000/api/health >/dev/null 2>&1; then
     say "UI smoke test (docker)"
     docker run --rm --network "$compose_net" -v "$root":/work -w /work/tests/ui \
         -e GIT_SYNAPSE_URL=http://api:8000 node:22-alpine \
@@ -109,7 +113,7 @@ fi
 if command -v docker >/dev/null 2>&1 \
    && docker image inspect zenika/alpine-chrome:with-puppeteer >/dev/null 2>&1 \
    && docker run --rm --network "$compose_net" curlimages/curl:latest \
-        -fsS -o /dev/null --max-time 3 http://api:8000/api/overview >/dev/null 2>&1; then
+        -fsS -o /dev/null --max-time 3 http://api:8000/api/health >/dev/null 2>&1; then
     say "layout checks (headless Chrome)"
     docker run --rm --network "$compose_net" -v "$root":/work \
         -e GIT_SYNAPSE_URL=http://api:8000 -w /usr/src/app \
