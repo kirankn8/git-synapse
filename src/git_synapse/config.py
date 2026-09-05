@@ -286,6 +286,16 @@ class ServerConfig:
     )
     web_root: Path = field(default_factory=lambda: Path(_env_str("WEB_ROOT", "/app/web")))
 
+    #: Presented once, to create the first administrator. Left empty for an
+    #: interactive deployment, where one is minted and written to the log:
+    #: putting a password in the environment puts it in the compose file, the
+    #: shell history and every process listing on the host. An automated
+    #: deployment that needs to claim the account without reading a log sets
+    #: this to a value it already holds in a secret store.
+    admin_setup_token: str = field(
+        default_factory=lambda: _env_str("ADMIN_SETUP_TOKEN", "")
+    )
+
 
 @dataclass(frozen=True)
 class Config:

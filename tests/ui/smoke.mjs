@@ -21,15 +21,21 @@ async function signIn() {
     body: JSON.stringify(body),
   });
 
-  let res = me.needs_setup
+  const res = me.needs_setup
     ? await post('/api/auth/setup',
-                 { email: TEST_EMAIL, name: 'UI tests', password: TEST_PASSWORD })
+                 { email: TEST_EMAIL, name: 'UI tests', password: TEST_PASSWORD,
+                   setup_token: process.env.GS_SETUP_TOKEN || '' })
     : await post('/api/auth/login', { email: TEST_EMAIL, password: TEST_PASSWORD });
 
   if (!res.ok) {
     throw new Error(
-      `could not sign in as ${TEST_EMAIL} (${res.status}). Set GS_TEST_EMAIL and `
-      + 'GS_TEST_PASSWORD to an account on this deployment.');
+      `could not sign in as ${TEST_EMAIL} (${res.status}). `
+      + (me.needs_setup
+        // Creating the first account is what needs authorising; signing in to
+        // an existing one only needs the right password.
+        ? 'This deployment has no accounts yet. Set GS_SETUP_TOKEN to the token '
+          + 'the API printed at startup, or start it with ADMIN_SETUP_TOKEN.'
+        : 'Set GS_TEST_EMAIL and GS_TEST_PASSWORD to an account on this deployment.'));
   }
   const cookie = (res.headers.getSetCookie?.() || [])
     .map((c) => c.split(';')[0]).join('; ');

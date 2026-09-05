@@ -196,6 +196,17 @@ class NewUser(BaseModel):
     role: str = "member"
 
 
+class FirstUser(NewUser):
+    """The first administrator, who has nobody to be authorised by.
+
+    The setup token stands in for the admin who does not exist yet. It proves
+    the caller can read the deployment's console or its secret store, which is
+    the same thing being an administrator will later mean.
+    """
+
+    setup_token: str = Field(min_length=1, max_length=200)
+
+
 class UserPatch(BaseModel):
     name: str | None = None
     role: str | None = None
@@ -223,10 +234,16 @@ def whoami(request: Request) -> dict:
     signed in already.
     """
     user = caller(request)
+    needs_setup = auth.count_users() == 0
     return {
         "user": user,
         "authenticated": user is not None,
-        "needs_setup": auth.count_users() == 0,
+        "needs_setup": needs_setup,
+        # Where to tell the reader to look for the setup token, which differs:
+        # a minted one is in the API log, a configured one is wherever the
+        # deployment keeps its secrets. Never the token itself -- the whole
+        # point is that reading it requires access this endpoint does not.
+        "setup_token_minted": needs_setup and auth.setup_token_is_minted(),
         # The UI needs this to know whether a signed-out visitor should see a
         # sign-in form or the dashboard.
         "auth_required": auth.access_mode("dashboard") == "required",
@@ -258,22 +275,36 @@ def logout(request: Request, response: Response) -> dict:
 
 
 @router.post("/auth/setup", tags=["auth"], status_code=201)
-def setup(body: NewUser, request: Request, response: Response) -> dict:
-    """Create the first administrator, once.
+def setup(body: FirstUser, request: Request, response: Response) -> dict:
+    """Create the first administrator, once, for whoever holds the setup token.
 
     A password in the environment would sit in a shell history, a compose file
     and every process listing; this asks for one at the console instead. The
     endpoint refuses as soon as a single user exists, so it cannot be used to
     add a second administrator later.
+
+    The window between a migrated database and a claimed account is the one
+    moment nothing is signed in, and the screen that ends it is by necessity
+    reachable without signing in. The token is what stops a stranger who
+    reaches the port first from becoming the administrator of the deployment.
     """
     if auth.count_users() > 0:
         raise HTTPException(409, "this deployment already has users")
+    try:
+        auth.check_setup_token(body.setup_token)
+    except auth.TooManyAttempts as exc:
+        raise HTTPException(429, str(exc)) from exc
+    except auth.AuthError as exc:
+        raise HTTPException(403, str(exc)) from exc
     try:
         user = auth.create_user(body.email, body.name, body.password, role="admin")
         token, _ = auth.sign_in(body.email, body.password,
                                 request.headers.get("user-agent"))
     except auth.AuthError as exc:
         raise HTTPException(400, str(exc)) from exc
+    # It authorised the one thing it exists for. Keeping it would leave a
+    # standing secret in the table that nothing will ever check again.
+    auth.clear_setup_token()
     _set_cookie(response, token, request.url.scheme == "https")
     return {"user": user}
 

@@ -35,6 +35,36 @@ def configure_logging() -> None:
     )
 
 
+def _announce_setup_token() -> None:
+    """Print the token that claims the first administrator account.
+
+    Only while there is no account to claim. Once one exists the token is gone
+    from the table and this says nothing, so a long-running deployment is not
+    repeating a dead secret into its log at every restart.
+
+    Deliberately loud. The alternative to a console handshake is an admin
+    password in the environment, which ends up in the compose file and in every
+    process listing; this way the secret is visible exactly to whoever can read
+    the logs of the thing they just started.
+    """
+    try:
+        if auth.count_users() > 0:
+            return
+        if not auth.setup_token_is_minted():
+            log.warning("No account exists yet. Create the first administrator "
+                        "in the web UI using the configured ADMIN_SETUP_TOKEN.")
+            return
+        token = auth.setup_token()
+    except Exception:  # noqa: BLE001 - never let the console note stop the API
+        log.warning("could not determine the first-run setup token")
+        return
+    log.warning(
+        "\n%s\n  No account exists yet. Open the dashboard and create the first\n"
+        "  administrator with this one-time setup token:\n\n      %s\n\n"
+        "  It stops being accepted the moment the account is created.\n%s",
+        "=" * 72, token, "=" * 72)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Wait for Postgres and apply the schema before serving traffic.
@@ -50,6 +80,7 @@ async def lifespan(app: FastAPI):
     from git_synapse.ingest.pipeline import reconcile_stale_runs
 
     reconcile_stale_runs()
+    _announce_setup_token()
     log.info("git-synapse api ready")
     yield
     close_pool()
