@@ -313,9 +313,11 @@ def test_expired_sessions_are_pruned_with_the_call_log(db, caplog, monkeypatch):
 
     monkeypatch.setattr(calls, "prune", lambda: 0)
     monkeypatch.setattr(auth, "prune_sessions", lambda: 4)
+    monkeypatch.setattr(auth, "prune_login_attempts", lambda: 7)
     with caplog.at_level(logging.INFO, logger="git_synapse.ingest.pipeline"):
         pipeline._prune_call_log()
     assert "pruned 4 expired" in caplog.text
+    assert "pruned 7 past the window" in caplog.text
 
     def boom():
         raise RuntimeError("gone")

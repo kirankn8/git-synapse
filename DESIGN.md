@@ -787,6 +787,15 @@ is nobody to sign in as, and requiring it would lock the first administrator out
 of the screen that creates them — and the setup endpoint refuses as soon as one
 account exists, so it cannot mint a second administrator later.
 
+**A password cannot be guessed at machine speed.** scrypt costs about 70ms an
+attempt, which throttles one attacker on one thread and does nothing about a
+thousand in parallel, so ten failures against an address make it wait fifteen
+minutes — answered 429, not 401, because the credentials were never examined.
+Counted per address rather than per client: an attacker cannot spread attempts
+across addresses to keep working on one, at the cost that they can lock a
+colleague out for fifteen minutes. On an internal dashboard that is an
+annoyance; a public one would want a per-client budget too.
+
 **Anyone may mint a token.** It carries its maker's identity and role, so it can
 do exactly what they can do and no more, and it stops working when their account
 is deactivated or removed. That is what makes them safe to hand out: an agent

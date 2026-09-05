@@ -46,8 +46,26 @@ _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 MIN_PASSWORD = 12
 
 
+#: Wrong passwords allowed before an address is made to wait, and how long the
+#: window is. scrypt already costs about 70ms an attempt, which throttles one
+#: attacker on one thread; it does nothing about a thousand in parallel.
+#:
+#: Counted per address rather than per client, which is the deliberate trade:
+#: an attacker cannot spread attempts across addresses to keep working on one,
+#: but can lock a colleague out for fifteen minutes by guessing at their
+#: address. On an internal dashboard that is an annoyance; on a public one it
+#: would want a per-client budget as well.
+MAX_FAILURES = 10
+LOCKOUT_MINUTES = 15
+
+
 class AuthError(Exception):
     """Something a caller did wrong: bad credentials, duplicate email, weak password."""
+
+
+class TooManyAttempts(AuthError):
+    """Refused for now, not refused outright. Distinguished so the API can
+    answer 429 rather than 401: the credentials were never examined."""
 
 
 # ----------------------------------------------------------------- passwords
@@ -205,6 +223,22 @@ def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def recent_failures(email: str) -> int:
+    return int(query_one(
+        "SELECT count(*) AS n FROM login_attempt"
+        " WHERE lower(email) = lower(%s) AND at > now() - make_interval(mins => %s)",
+        (email.strip(), LOCKOUT_MINUTES),
+    )["n"])
+
+
+def prune_login_attempts() -> int:
+    """Drop attempts past the window. Called with the other housekeeping."""
+    return int(execute(
+        "DELETE FROM login_attempt WHERE at < now() - make_interval(mins => %s)",
+        (LOCKOUT_MINUTES,),
+    ) or 0)
+
+
 def sign_in(email: str, password: str, user_agent: str | None = None) -> tuple[str, dict]:
     """Verify credentials and open a session. Returns (token, user).
 
@@ -212,10 +246,18 @@ def sign_in(email: str, password: str, user_agent: str | None = None) -> tuple[s
     is computed either way: a faster "no such user" tells an attacker which
     addresses are real.
     """
+    if recent_failures(email) >= MAX_FAILURES:
+        # Counted per address, not per connection: an attacker picks the
+        # address, and cannot pick a different one to keep attacking this one.
+        raise TooManyAttempts(
+            f"too many failed attempts; try again in {LOCKOUT_MINUTES} minutes")
+
     user = by_email(email)
     stored = user["password_hash"] if user else _DUMMY_HASH
     ok = verify_password(password, stored)
     if user is None or not ok:
+        execute("INSERT INTO login_attempt (email, client) VALUES (%s, %s)",
+                (email.strip()[:254], (user_agent or "")[:200]))
         raise AuthError("wrong email or password")
     if not user["is_active"]:
         raise AuthError("this account has been deactivated")
@@ -229,6 +271,9 @@ def sign_in(email: str, password: str, user_agent: str | None = None) -> tuple[s
          (user_agent or "")[:200]),
     )
     execute("UPDATE app_user SET last_login_at = now() WHERE id = %s", (user["id"],))
+    # A success clears the record: the person proved it was them, and a stale
+    # count would lock them out on their next typo.
+    execute("DELETE FROM login_attempt WHERE lower(email) = lower(%s)", (email.strip(),))
     return token, _row(user)
 
 

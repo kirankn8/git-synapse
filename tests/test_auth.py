@@ -266,3 +266,62 @@ def test_a_stored_mode_that_is_not_one_falls_closed(person):
         assert auth.access_mode("dashboard") == "required"
     finally:
         settings.clear("dashboard_auth")
+
+
+# ------------------------------------------------------- guessing a password
+
+def test_a_password_cannot_be_guessed_at_machine_speed(person):
+    """scrypt costs about 70ms an attempt, which throttles one attacker on one
+    thread and does nothing about a thousand in parallel."""
+    for _ in range(auth.MAX_FAILURES):
+        with pytest.raises(auth.AuthError):
+            auth.sign_in(person["email"], "not-the-password")
+
+    with pytest.raises(auth.TooManyAttempts, match="too many failed attempts"):
+        auth.sign_in(person["email"], "not-the-password")
+
+    # Refused even with the right password: the point is that credentials are
+    # no longer being examined at all.
+    with pytest.raises(auth.TooManyAttempts):
+        auth.sign_in(person["email"], "a-sufficiently-long-pass")
+
+
+def test_the_lockout_is_scoped_to_one_address(person, db):
+    """Otherwise a handful of guesses at one account closes the door on
+    everyone, which is a denial of service rather than a defence."""
+    other = auth.create_user(_email(), "Other", "a-sufficiently-long-pass")
+    try:
+        for _ in range(auth.MAX_FAILURES + 1):
+            with pytest.raises(auth.AuthError):
+                auth.sign_in(person["email"], "wrong")
+        # The other account still works.
+        token, _ = auth.sign_in(other["email"], "a-sufficiently-long-pass")
+        assert token
+    finally:
+        auth.delete_user(other["id"])
+
+
+def test_signing_in_clears_the_count(person):
+    """A stale count would lock someone out on their next typo, long after
+    they proved it was them."""
+    for _ in range(auth.MAX_FAILURES - 1):
+        with pytest.raises(auth.AuthError):
+            auth.sign_in(person["email"], "wrong")
+    assert auth.recent_failures(person["email"]) == auth.MAX_FAILURES - 1
+
+    auth.sign_in(person["email"], "a-sufficiently-long-pass")
+    assert auth.recent_failures(person["email"]) == 0
+
+
+def test_attempts_past_the_window_stop_counting(person):
+    from git_synapse.db.engine import execute
+
+    for _ in range(auth.MAX_FAILURES):
+        with pytest.raises(auth.AuthError):
+            auth.sign_in(person["email"], "wrong")
+    execute("UPDATE login_attempt SET at = now() - make_interval(mins => %s)",
+            (auth.LOCKOUT_MINUTES + 1,))
+    assert auth.recent_failures(person["email"]) == 0
+    assert auth.prune_login_attempts() >= auth.MAX_FAILURES
+    # And the door opens again.
+    assert auth.sign_in(person["email"], "a-sufficiently-long-pass")[0]

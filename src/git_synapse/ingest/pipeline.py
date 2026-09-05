@@ -202,6 +202,9 @@ def _prune_call_log() -> None:
         gone = auth.prune_sessions()
         if gone:
             log.info("sessions: pruned %d expired", gone)
+        stale = auth.prune_login_attempts()
+        if stale:
+            log.info("login attempts: pruned %d past the window", stale)
     except Exception:
         log.warning("could not prune expired sessions", exc_info=True)
 

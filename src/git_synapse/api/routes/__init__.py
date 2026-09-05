@@ -240,6 +240,10 @@ def login(body: Credentials, request: Request, response: Response) -> dict:
     try:
         token, user = auth.sign_in(body.email, body.password,
                                    request.headers.get("user-agent"))
+    except auth.TooManyAttempts as exc:
+        # 429, not 401: the credentials were never examined, and telling the
+        # caller to wait is different from telling them they are wrong.
+        raise HTTPException(429, str(exc)) from exc
     except auth.AuthError as exc:
         # 401 rather than 400: the credentials were the problem, and the client
         # distinguishes the two.

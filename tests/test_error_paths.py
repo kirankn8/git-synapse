@@ -146,3 +146,38 @@ def test_a_numeric_setting_that_is_not_a_number_names_itself(monkeypatch):
     monkeypatch.setenv("GS_RATIO", "half")
     with pytest.raises(ValueError, match="GS_RATIO"):
         _env_float("GS_RATIO", 0.25)
+
+
+def test_a_parse_failure_is_not_swallowed_by_an_empty_repository(tmp_path, monkeypatch):
+    """`return` inside a `finally` discards whatever exception is already
+    propagating. A parse error raised while reading commits therefore vanished
+    whenever git also exited non-zero with "no commits yet", and the run looked
+    like an empty repository rather than a bug."""
+    from git_synapse.ingest import parser
+
+    class FakeStream:
+        def __init__(self, chunks=b""):
+            self._chunks = chunks
+
+        def read(self, *_a):
+            return self._chunks
+
+        def close(self):
+            pass
+
+    class FakeProc:
+        stdout = FakeStream()
+        stderr = FakeStream(b"fatal: your current branch does not have any commits yet")
+
+        def wait(self):
+            return 128
+
+    monkeypatch.setattr("subprocess.Popen", lambda *a, **k: FakeProc())
+
+    def explode(_stream):
+        raise ValueError("the record stream is malformed")
+
+    monkeypatch.setattr(parser, "_iter_records", explode)
+
+    with pytest.raises(ValueError, match="malformed"):
+        list(parser.iter_commits(tmp_path, rev="main"))

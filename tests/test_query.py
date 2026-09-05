@@ -483,3 +483,30 @@ def test_repo_recency_buckets_every_repository_exactly_once(corpus, db):
     assert sum(r["n"] for r in rows) == total, "every repository lands in one bucket"
     assert {r["bucket"] for r in rows} <= {
         "never", "past month", "past 6 months", "past year", "over a year"}
+
+
+def test_a_search_term_is_matched_literally_not_as_a_pattern(corpus, db):
+    """`%` and `_` are wildcards to LIKE, so a term carrying either searched
+    for something else: `test_helper` matched `testXhelper`, and a lone `_`
+    matched every row in the table."""
+    every = q.search_files(limit=5)
+    if not every:
+        pytest.skip("no files")
+
+    # A lone underscore is a single-character wildcard unless it is escaped.
+    lone = q.search_files("_", limit=500)
+    assert all("_" in row["path"] for row in lone), \
+        "an underscore must match an underscore, not any character"
+
+    # Two literal characters with a wildcard between them must find nothing
+    # unless a path really contains the percent sign.
+    assert not [r for r in q.search_files("READ%ME", limit=50)
+                if "READ%ME" not in r["path"].upper()]
+
+    # And an ordinary term still works.
+    assert q.search_files(every[0]["basename"], limit=5)
+
+
+def test_a_repository_search_escapes_the_same_way(corpus, db):
+    assert all("_" in (r["full_name"] + (r["description"] or ""))
+               for r in q.list_repos(search="_", limit=200))
