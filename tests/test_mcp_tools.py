@@ -782,3 +782,116 @@ def test_coupled_directories_reports_only_partners_outside_the_subtree(monkeypat
     assert [d["path"] for d in out["partners"]] == ["web"]
     assert all(d["informative"] for d in out["partners"])
     assert "parents and children are excluded" in out["summary"]
+
+
+# ------------------------------------------------------- recording tool calls
+
+def test_a_tool_reply_is_read_from_the_text_blocks_when_there_is_no_schema():
+    """structured_content is populated only for tools that declare an output
+    schema. Everything else arrives as text, which is what the agent reads --
+    logging a null there would record that nothing came back."""
+    from git_synapse.mcp import server as srv
+
+    class Block:
+        def __init__(self, text):
+            self.text = text
+
+    class Result:
+        structured_content = None
+        content = [Block('{"repo": "acme/app", "upstream": [1, 2]}')]
+
+    assert srv._text_of(Result()) == {"repo": "acme/app", "upstream": [1, 2]}
+
+    class Plain(Result):
+        content = [Block("just words")]
+
+    assert srv._text_of(Plain()) == {"text": "just words"}
+
+    class Empty(Result):
+        content = []
+
+    assert srv._text_of(Empty()) is None
+
+
+def test_an_error_payload_is_summarised_for_the_log():
+    from git_synapse.mcp import server as srv
+
+    assert srv._error_text({"error": "no repository matching 'x'"}) \
+        == "no repository matching 'x'"
+    assert srv._error_text(["something else"]) == "['something else']"
+
+
+def test_calling_a_tool_records_what_was_asked_and_what_came_back(monkeypatch):
+    """One interception point covers every tool, including ones added later --
+    the only way this stays true without anyone remembering."""
+    import asyncio
+
+    from git_synapse.analysis import calls
+    from git_synapse.mcp import server as srv
+
+    recorded = []
+    monkeypatch.setattr(calls, "record", lambda *a, **k: recorded.append((a, k)))
+
+    class Block:
+        text = '{"ok": true}'
+
+    class Result:
+        structured_content = None
+        is_error = False
+        content = [Block()]
+
+    async def fake_super(self, name, arguments, context=None):
+        return Result()
+
+    monkeypatch.setattr(srv.MCPServer, "call_tool", fake_super)
+    out = asyncio.run(srv.server.call_tool("coupled_files", {"repo": "guava"}))
+    assert out is not None
+    (args, kwargs), = recorded
+    assert args == ("mcp", "coupled_files")
+    assert kwargs["arguments"] == {"repo": "guava"}
+    assert kwargs["result"] == {"ok": True}
+    assert kwargs["status"] == "ok"
+
+
+def test_a_tool_that_raises_is_recorded_before_the_error_is_re_raised(monkeypatch):
+    import asyncio
+
+    from git_synapse.analysis import calls
+    from git_synapse.mcp import server as srv
+
+    recorded = []
+    monkeypatch.setattr(calls, "record", lambda *a, **k: recorded.append(k))
+
+    async def explode(self, name, arguments, context=None):
+        raise RuntimeError("tool blew up")
+
+    monkeypatch.setattr(srv.MCPServer, "call_tool", explode)
+    with pytest.raises(RuntimeError, match="tool blew up"):
+        asyncio.run(srv.server.call_tool("coupled_files", {}))
+    assert recorded and recorded[0]["status"] == "error"
+    assert "tool blew up" in recorded[0]["error"]
+
+
+def test_a_tool_returning_an_error_object_is_counted_as_a_failure(monkeypatch):
+    """It succeeded at the protocol level and failed at the only level a reader
+    cares about; counting it as ok would make the error rate a fiction."""
+    import asyncio
+
+    from git_synapse.analysis import calls
+    from git_synapse.mcp import server as srv
+
+    recorded = []
+    monkeypatch.setattr(calls, "record", lambda *a, **k: recorded.append(k))
+
+    class Result:
+        structured_content = {"error": "no repository matching 'nope'"}
+        is_error = False
+        content = []
+
+    async def fake(self, name, arguments, context=None):
+        return Result()
+
+    monkeypatch.setattr(srv.MCPServer, "call_tool", fake)
+    asyncio.run(srv.server.call_tool("upstream_repos", {"repo": "nope"}))
+    assert recorded[0]["status"] == "error"
+    assert recorded[0]["error"] == "no repository matching 'nope'"

@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from git_synapse.analysis import mining, predict
+from git_synapse.analysis import calls, mining, predict
 from git_synapse.analysis import query as q
 from git_synapse.analysis import settings
 from git_synapse.config import get_config, live_cron
@@ -234,6 +234,38 @@ def delete_account(account_id: int) -> dict:
     if not accounts.remove_account(account_id):
         raise HTTPException(404, f"account {account_id} not found")
     return {"deleted": account_id}
+
+
+# ---------------------------------------------------------------------------
+# Callers: what asked for what, and what came back
+# ---------------------------------------------------------------------------
+
+
+@router.get("/calls/summary", tags=["calls"])
+def calls_summary(hours: int = Query(24, ge=1, le=8760)) -> dict:
+    """Volume, failures and latency over a window, for the operator view."""
+    return {"summary": calls.summary(hours), "by_name": calls.by_name(hours=hours)}
+
+
+@router.get("/calls", tags=["calls"])
+def list_calls(
+    surface: str | None = Query(None, pattern="^(mcp|http)$"),
+    name: str | None = None,
+    status: str | None = Query(None, pattern="^(ok|error)$"),
+    limit: int = Query(100, ge=1, le=1000),
+) -> dict:
+    """The call list, newest first, without payloads."""
+    rows = calls.recent(surface=surface, name=name, status=status, limit=limit)
+    return {"count": len(rows), "calls": rows}
+
+
+@router.get("/calls/{call_id}", tags=["calls"])
+def get_call(call_id: int) -> dict:
+    """One call in full: the arguments given, and the reply that went back."""
+    row = calls.detail(call_id)
+    if row is None:
+        raise HTTPException(404, f"call {call_id} not found")
+    return row
 
 
 # ---------------------------------------------------------------------------

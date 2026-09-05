@@ -21,13 +21,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+import time
 import os
 import sys
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
-from git_synapse.analysis import predict
+from git_synapse.analysis import calls, predict
 from git_synapse.analysis import query as q
 from git_synapse.db.engine import apply_schema, wait_for_database
 from git_synapse.stats.registry import (
@@ -88,7 +89,67 @@ to a defect log that feeds no measure or score, so this is not a way to suppress
 a suggestion or to disagree with a number -- it is for when the tool is broken.\
 """
 
-server = MCPServer(
+def _text_of(result: Any) -> Any:
+    """The reply as the agent receives it: parsed JSON when it is JSON, else text."""
+    import json as _json
+
+    parts = [getattr(block, "text", None) for block in getattr(result, "content", []) or []]
+    text = "\n".join(p for p in parts if p)
+    if not text:
+        return None
+    try:
+        return _json.loads(text)
+    except ValueError:
+        return {"text": text}
+
+
+def _error_text(payload: Any) -> str:
+    if isinstance(payload, dict) and "error" in payload:
+        return str(payload["error"])[:500]
+    return str(payload)[:500]
+
+
+class _RecordingServer(MCPServer):
+    """An MCP server that records what was called and what it returned.
+
+    Overriding the one dispatch point rather than decorating fourteen tools:
+    a tool added later is recorded without anyone remembering to, which is the
+    only way this stays true. Recording is best-effort and never changes what
+    the caller gets back -- a telemetry failure must not become a tool failure.
+    """
+
+    async def call_tool(self, name, arguments, context=None):
+        started = time.monotonic()
+        try:
+            result = await super().call_tool(name, arguments, context)
+        except Exception as exc:
+            calls.record("mcp", name, status="error", arguments=arguments,
+                         duration_ms=int((time.monotonic() - started) * 1000),
+                         error=f"{type(exc).__name__}: {exc}")
+            raise
+        # structured_content is populated only when a tool declares an output
+        # schema; every other reply arrives as text blocks, which is what the
+        # agent actually reads. Fall back to those so the log records what was
+        # returned rather than a null.
+        payload = getattr(result, "structured_content", None)
+        if payload is None:
+            payload = _text_of(result)
+        # A tool that returns {"error": ...} succeeded at the protocol level and
+        # failed at the only level a reader cares about. Count it as an error.
+        failed = bool(getattr(result, "is_error", False)) or (
+            isinstance(payload, dict) and "error" in payload)
+        calls.record(
+            "mcp", name,
+            status="error" if failed else "ok",
+            arguments=arguments,
+            result=payload,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            error=_error_text(payload) if failed else None,
+        )
+        return result
+
+
+server = _RecordingServer(
     name="git-synapse",
     title="Git Synapse change coupling",
     version="1.0.0",

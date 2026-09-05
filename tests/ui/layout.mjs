@@ -29,6 +29,8 @@ const PAGES = [
   ['/insights/drift', 'Drift'],
   ['/accounts', 'Accounts'],
   ['/jobs', 'Jobs'],
+  ['/jobs?tab=settings', 'Jobs settings'],
+  ['/callers', 'Callers'],
   ['/measures', 'Measures'],
 ];
 

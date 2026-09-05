@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -16,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from git_synapse.analysis import calls
 from git_synapse.api.routes import router
 from git_synapse.config import get_config
 from git_synapse.db.engine import apply_schema, close_pool, wait_for_database
@@ -79,6 +81,103 @@ app.add_middleware(
 app.include_router(router, prefix="/api")
 
 
+#: Reading the log through the log would make every visit to the activity page
+#: generate the traffic it is displaying.
+_UNLOGGED = ("/api/calls", "/api/health", "/api/openapi.json", "/api/docs")
+
+
+@app.middleware("http")
+async def _record_calls(request, call_next):
+    """Record every API call: what was asked, how it went, how long it took.
+
+    The route *template* is recorded rather than the concrete path, so a
+    thousand repositories collapse to one row in a ranking instead of a
+    thousand rows nobody can read. The body is captured too, bounded: this is a
+    log record, and "what came back" is unanswerable without it. FastAPI has
+    already built the whole reply in memory by this point, so reading it here
+    costs a copy, not a second render.
+    """
+    path = request.url.path
+    if not path.startswith("/api/") or path.startswith(_UNLOGGED):
+        return await call_next(request)
+
+    started = time.monotonic()
+    status = "ok"
+    error = None
+    try:
+        response = await call_next(request)
+    except Exception as exc:                      # pragma: no cover - re-raised
+        calls.record("http", path, method=request.method, status="error",
+                     duration_ms=int((time.monotonic() - started) * 1000),
+                     arguments=dict(request.query_params), error=str(exc),
+                     client=request.headers.get("user-agent"))
+        raise
+    if response.status_code >= 400:
+        status, error = "error", f"HTTP {response.status_code}"
+
+    # The template carries no mount prefix, so /api/repos/{repo_id} would be
+    # logged as /repos/{repo_id} and rank separately from the path it is.
+    route = request.scope.get("route")
+    name = request.scope.get("root_path", "") + getattr(route, "path", "") or path
+    if not name.startswith("/api"):
+        name = "/api" + name
+
+    body, response = await _replay_body(response)
+    parsed, rows = _decode(body)
+    calls.record(
+        "http", name, method=request.method, status=status,
+        duration_ms=int((time.monotonic() - started) * 1000),
+        arguments=dict(request.query_params) or None,
+        result=parsed,
+        result_bytes=len(body),
+        result_rows=rows,
+        error=error, client=request.headers.get("user-agent"),
+    )
+    return response
+
+
+async def _replay_body(response):
+    """Read a response's body and hand back one that can still be sent.
+
+    A streaming response's iterator is consumed once. Draining it to log the
+    reply and then returning the same object would send the client nothing at
+    all, so the drained bytes are wrapped in a fresh response carrying the
+    original status, headers and media type.
+    """
+    from starlette.responses import Response as _Response
+
+    chunks = [chunk async for chunk in response.body_iterator]
+    body = b"".join(chunks)
+    replayed = _Response(
+        content=body,
+        status_code=response.status_code,
+        headers=dict(response.headers),
+        media_type=response.media_type,
+    )
+    return body, replayed
+
+
+def _decode(body: bytes):
+    """The reply as data plus its row count, or as text when it is not JSON."""
+    import json as _json
+
+    if not body:
+        return None, None
+    try:
+        parsed = _json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return {"non_json": body[:200].decode("utf-8", "replace")}, None
+    rows = None
+    if isinstance(parsed, dict):
+        for value in parsed.values():
+            if isinstance(value, list):
+                rows = len(value)
+                break
+    elif isinstance(parsed, list):
+        rows = len(parsed)
+    return parsed, rows
+
+
 @app.exception_handler(KeyError)
 async def _key_error_handler(_request, exc: KeyError) -> JSONResponse:
     """Surface an unknown measure name as a 400 rather than a 500."""
@@ -138,7 +237,7 @@ if _web_root.is_dir():
     #: Every deeper view lives under the tab that owns it -- a file is
     #: /repos/{id}/files/{id}, not /file/{id} -- so this is exactly the nav.
     SPA_ROUTES = (
-        "accounts", "repos", "insights", "measures", "jobs", "feedback",
+        "accounts", "repos", "insights", "callers", "measures", "jobs", "feedback",
     )
 
     @app.get("/{segment}", include_in_schema=False)

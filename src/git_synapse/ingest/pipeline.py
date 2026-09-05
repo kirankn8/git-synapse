@@ -178,6 +178,23 @@ def _start_run(kind: str, trigger: str, repos_total: int) -> int:
         return int(row[0])
 
 
+def _prune_call_log() -> None:
+    """Trim the call log at the end of a run.
+
+    It is the one table that grows with traffic rather than with history, so it
+    needs a bound something actually applies. A refresh is the natural place:
+    it happens on a schedule, and a failure here must not fail the run.
+    """
+    from git_synapse.analysis import calls
+
+    try:
+        removed = calls.prune()
+        if removed:
+            log.info("call log: pruned %d row(s)", removed)
+    except Exception:
+        log.warning("could not prune the call log", exc_info=True)
+
+
 def _finish_run(run: RunResult) -> None:
     status = "success"
     if run.failed and run.ok:
@@ -843,6 +860,7 @@ def _run_ingest_locked(
             log.exception("mining rebuild failed")
 
     run.duration_s = time.monotonic() - started
+    _prune_call_log()
     _finish_run(run)
     log.info(
         "ingest run %s finished in %.1fs: %d ok, %d failed, %d commits added",
