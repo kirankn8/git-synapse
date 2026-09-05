@@ -354,28 +354,18 @@ def test_list_repositories_can_be_filtered(corpus):
 
 # ---------------------------------------------- the evidence prose, exhaustively
 
-@pytest.mark.parametrize(
-    ("validated", "withheld", "must_say"),
-    [
-        (0, 0, "No upstream edges recorded"),
-        (0, 5, "Nothing validated upstream"),
-        (2, 0, "declared"),
-        (2, 3, "withheld"),
-    ],
-)
-def test_upstream_guidance_covers_every_composition(validated, withheld, must_say):
-    """The guidance is read before the scores; it must be right in all four
-    shapes, including the one where nothing is validated at all."""
-    rows = [{"is_declared": True, "has_bump_history": False} for _ in range(validated)]
-    extra = [{"is_declared": False, "has_bump_history": False} for _ in range(withheld)]
-    out = server._upstream_guidance(rows, withheld, False, rows + extra)
-    assert must_say in out, out
-
-
-def test_upstream_guidance_when_discovery_is_requested_describes_everything():
-    rows = [{"is_declared": False, "has_bump_history": False} for _ in range(4)]
-    out = server._upstream_guidance([], 4, True, rows)
-    assert "NONE" in out and "not a probability" in out
+@pytest.mark.parametrize(("declared", "bumped"), [(0, 0), (3, 0), (0, 4), (2, 5)])
+def test_evidence_guidance_states_the_composition_it_is_describing(declared, bumped):
+    """The guidance is read before the scores, so it has to say what the list is
+    made of. The score mixes both tiers and cannot reveal that on its own."""
+    rows = ([{"is_declared": True, "has_bump_history": True}] * declared
+            + [{"is_declared": False, "has_bump_history": True}] * bumped)
+    out = server._evidence_guidance(rows, "upstream")
+    if not rows:
+        assert "No upstream edges recorded" in out
+    else:
+        assert f"{declared} declared" in out and f"{bumped} bump-backed" in out
+        assert "no statistical tier" in out
 
 
 def test_confidence_wording_matches_the_support_behind_it():
@@ -534,11 +524,22 @@ def test_an_empty_chain_explains_which_kind_of_empty_it_is(db, monkeypatch,
     assert must_contain.lower() in out["explanation"].lower()
 
 
-def test_an_entirely_unvalidated_shortlist_says_so_before_anything_else(db):
-    """An agent that reads a discovery-tier rank as a probability acts on it."""
-    rows = [{"is_declared": False, "has_bump_history": False} for _ in range(5)]
-    note = server._evidence_guidance(rows, "upstream")
-    assert note.startswith("NONE")
+def test_every_impact_edge_carries_evidence(corpus, db):
+    """The claim the product rests on, checked against the data rather than
+    asserted: an edge is written only from a dependency declared in a manifest
+    or from an observed version bump. There is no inferred tier to withhold,
+    warn about, or filter -- so no surface offers to."""
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        "SELECT count(*) AS total,"
+        " count(*) FILTER (WHERE NOT is_declared AND NOT has_bump_history) AS unprovable"
+        " FROM repo_impact"
+    )
+    assert row["unprovable"] == 0, (
+        f"{row['unprovable']} of {row['total']} impact edges rest on nothing; "
+        "predict.rebuild must only write declared or bump-backed rows"
+    )
 
 
 def test_an_empty_shortlist_is_described_not_left_blank():
@@ -721,17 +722,19 @@ def test_file_history_names_a_path_it_cannot_find(monkeypatch):
 @pytest.mark.parametrize(("row", "tier"), [
     ({"is_declared": True,  "has_bump_history": True},  "declared"),
     ({"is_declared": False, "has_bump_history": True},  "bump-backed"),
-    ({"is_declared": False, "has_bump_history": False}, "discovery"),
+    # Unreachable by construction; it must still be legible rather than blank,
+    # so a stale row from an older schema cannot pass as evidence.
+    ({"is_declared": False, "has_bump_history": False}, "none"),
 ])
 def test_an_impact_row_states_which_tier_it_came_from(row, tier):
-    """An agent acts differently on a manifest line than on a correlation, so
+    """An agent acts differently on a manifest line than on an observed bump, so
     the tier travels with every row rather than being inferred from the score."""
     row = {**row, "score": 0.5, "bump_count": 2, "median_adoption_days": None,
            "rank_in_source": 1}
     out = server._impact_row(row, "acme/app")
     assert out["evidence"] == tier
-    if tier == "discovery":
-        assert "unvalidated" in out["note"]
+    if tier == "none":
+        assert "no evidence" in out["note"]
 
 
 def test_coupled_directories_names_a_directory_it_cannot_find(monkeypatch):
@@ -761,23 +764,21 @@ def test_module_context_explains_both_directions_of_a_declaration(monkeypatch):
     assert "declared by" in out["guidance"] and "declares" in out["guidance"]
 
 
-def test_a_parent_directory_is_marked_as_not_informative(monkeypatch):
-    """Every change to `pkg/auth` is a change to `pkg` by construction, so it
-    scores high and means nothing. Saying so stops an agent reading arithmetic
-    as a discovery."""
+def test_coupled_directories_reports_only_partners_outside_the_subtree(monkeypatch):
+    """Every change to `pkg/auth` is a change to `pkg` by construction, so a
+    parent scores 1.000 and means nothing. The query now excludes ancestors and
+    descendants, so what reaches the agent is only what could have moved
+    independently and did not -- and the summary says so."""
     monkeypatch.setattr(server, "_resolve_repo",
                         lambda name: {"id": 1, "name": "app", "full_name": "acme/app"})
     monkeypatch.setattr(server.q, "query_one", lambda *a, **k: {
         "id": 9, "path": "pkg/auth", "file_count": 12, "change_count": 300})
     monkeypatch.setattr(server.q, "coupled_directories", lambda *a, **k: [
-        {"path": "pkg", "score": 0.99, "n_ab": 90, "confidence_ab": 0.9,
-         "confidence_ba": 0.9, "change_count": 100},
         {"path": "web", "score": 0.40, "n_ab": 20, "confidence_ab": 0.4,
          "confidence_ba": 0.4, "change_count": 60},
     ])
 
     out = server.coupled_directories("acme/app", "pkg/auth")
-    by_path = {d["path"]: d for d in out["partners"]}
-    assert by_path["pkg"]["relation"] == "ancestor-or-descendant"
-    assert by_path["pkg"]["informative"] is False
-    assert by_path["web"]["informative"] is True
+    assert [d["path"] for d in out["partners"]] == ["web"]
+    assert all(d["informative"] for d in out["partners"])
+    assert "parents and children are excluded" in out["summary"]

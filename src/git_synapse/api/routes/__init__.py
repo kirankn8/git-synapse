@@ -429,7 +429,7 @@ def repo_impact_chains(
     min_score: float = Query(0.3, ge=0.0, le=1.0),
     limit: int = Query(40, ge=1, le=200),
 ) -> dict:
-    """Transitive impact chains over validated edges only."""
+    """Transitive impact chains. Every hop carries evidence; see impact_graph."""
     if q.get_repo(repo_id) is None:
         raise HTTPException(404, f"repository {repo_id} not found")
     fn = predict.upstream_chains if direction == "upstream" else predict.impact_chains
@@ -454,22 +454,23 @@ def repo_impact_chains(
 @router.get("/impact/graph", tags=["impact"])
 def impact_graph(
     min_score: float = Query(0.4, ge=0.0, le=1.0),
-    validated_only: bool = True,
     limit: int = Query(400, ge=1, le=3000),
 ) -> dict:
-    """Repository-level impact graph, for the force-directed view."""
+    """Repository-level impact graph, for the force-directed view.
+
+    There is no evidence filter because there is nothing to filter: every row in
+    ``repo_impact`` comes from a declared dependency or an observed version
+    bump, by construction in :func:`git_synapse.analysis.predict.rebuild`.
+    """
     from git_synapse.db.engine import query as raw
 
-    clauses = ["i.score >= %(min_score)s"]
-    if validated_only:
-        clauses.append("(i.is_declared OR i.has_bump_history)")
     edges = raw(
         f"""
         SELECT i.source_repo_id AS source, i.target_repo_id AS target,
                i.score, i.is_declared, i.has_bump_history, i.bump_count,
                i.median_adoption_days
         FROM repo_impact i
-        WHERE {' AND '.join(clauses)}
+        WHERE i.score >= %(min_score)s
         ORDER BY i.score DESC
         LIMIT %(limit)s
         """,

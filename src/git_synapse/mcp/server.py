@@ -53,14 +53,12 @@ with bump history and a short propagation lag, the fix may belong there instead.
 `impact_of_change` is the opposite direction. `coupling_chain` follows multi-hop \
 paths such as signer -> packager -> runtime.
 
-TRUST THE EVIDENCE TIER, NOT THE SCORE. Cross-repo results carry an `evidence` \
-field, and the tiers are on DIFFERENT SCALES -- never sort them into one list:
-  * `declared` / `bump-backed` -- structural or ground-truth evidence, measured at \
-    AUC 0.88 in sample against real dependency propagation, 0.69 held
-    out in time. The strongest evidence available here; act on these, but the
-    number is an in-sample bound, not a guarantee.
-  * `discovery` -- statistical only, unvalidated, and prone to flagging merely \
-    busy repositories. A lead to verify, not a fact.
+EVERY CROSS-REPO EDGE CARRIES EVIDENCE. There is no statistical tier: an edge \
+exists only where a dependency is declared in a manifest, or where a version \
+bump was observed and resolved to the upstream commit it consumed. Both were \
+measured at AUC 0.88 in sample against real dependency propagation, 0.69 held \
+out in time. Act on them, but the number is an in-sample bound, not a \
+guarantee. The `evidence` field says which of the two a row rests on.
 
 WHEN NOT TO ACT. High coupling is a prompt to look, not a mandate to edit. Naive \
 use of this data makes an agent worse, not better:
@@ -455,36 +453,22 @@ def explain_pair(repo: str, path_a: str, path_b: str, commit_limit: int = 8) -> 
         "may belong upstream rather than in the repo you are looking at."
     ),
 )
-def upstream_repos(
-    repo: str, limit: int = 12, include_discovery: bool = False
-) -> dict:
+def upstream_repos(repo: str, limit: int = 12) -> dict:
     """List upstream repositories, strongest evidence first.
 
     Args:
         repo: repository name you are editing.
         limit: maximum results.
-        include_discovery: also return unvalidated statistical edges. Off by
-            default: they were never acted on across eight observed sessions and
-            cost the reader attention to dismiss.
     """
     target = _resolve_repo(repo)
     if target is None:
         return {"error": f"no repository matching {repo!r}"}
 
     rows = predict.upstream_of(target["id"], limit=limit)
-    validated = [r for r in rows if r["is_declared"] or r["has_bump_history"]]
-    withheld = len(rows) - len(validated)
-
-    # Discovery-tier rows are withheld unless asked for. Across eight observed
-    # sessions they were never once acted on, and the only reason they did no
-    # harm is that the reader kept distrusting a 0.999 that means "ranked first
-    # among guesses". That discipline should not be a requirement.
-    shown = rows if include_discovery else validated
-
     return {
         "repo": target["full_name"],
-        "guidance": _upstream_guidance(validated, withheld, include_discovery, rows),
-        "upstream": [_impact_row(r, r["name"]) for r in shown],
+        "guidance": _evidence_guidance(rows, "upstream"),
+        "upstream": [_impact_row(r, r["name"]) for r in rows],
     }
 
 
@@ -709,65 +693,30 @@ def _resolve_repo(name: str) -> dict | None:
 def _evidence_guidance(rows: list[dict], direction: str) -> str:
     """State the composition of the result before the reader reads the scores.
 
-    The discovery score is the mean of three rank-normalised columns, so 0.9998
-    means "top of the corpus ranking", not "99.98% likely". Presenting it beside
-    a tier field let a whole result set of unvalidated edges read as near
-    certainty. When nothing in the set is validated, that has to be the first
-    thing said, not a footnote.
+    The score mixes both tiers, so it cannot say which evidence a row rests on.
+    That has to be stated, not left to be inferred from a number.
     """
-    declared = sum(1 for r in rows if r["is_declared"])
-    bumped = sum(1 for r in rows if r["has_bump_history"] and not r["is_declared"])
-    discovery = len(rows) - declared - bumped
     if not rows:
         return f"No {direction} edges recorded for this repository."
-    if declared == 0 and bumped == 0:
-        return (
-            f"NONE of these {discovery} {direction} edges is validated -- every one "
-            "is discovery tier. `score` here is a rank position within the corpus, "
-            "not a probability, so 0.999 means 'ranked first', not 'almost "
-            "certain'. Treat the whole list as a hypothesis to check by reading "
-            "code, not as a finding."
-        )
+    declared = sum(1 for r in rows if r["is_declared"])
+    bumped = len(rows) - declared
     return (
-        f"{declared} declared, {bumped} bump-backed, {discovery} discovery. Act on "
-        "the declared and bump-backed entries; discovery entries are statistical "
-        "only and their `score` is a rank position, not a probability."
+        f"{declared} declared, {bumped} bump-backed. Every edge rests on a "
+        "dependency declared in a manifest or on an observed version bump; "
+        "there is no statistical tier. `score` ranks within that evidence, so "
+        "it orders the list rather than giving a probability."
     )
-
-
-def _upstream_guidance(
-    validated: list[dict], withheld: int, include_discovery: bool, rows: list[dict]
-) -> str:
-    """One coherent sentence about what is being shown and what is not."""
-    if include_discovery:
-        return _evidence_guidance(rows, "upstream")
-    if not validated and withheld:
-        return (
-            f"Nothing validated upstream. {withheld} discovery-tier edge(s) exist "
-            "but are withheld: they are statistical only, and their score is a "
-            "rank position rather than a probability, so a 0.999 means 'ranked "
-            "first among guesses'. This repository declares no internal "
-            "dependencies. Pass include_discovery=true to see them anyway."
-        )
-    if not validated:
-        return "No upstream edges recorded for this repository."
-    base = _evidence_guidance(validated, "upstream")
-    if withheld:
-        base += (
-            f" A further {withheld} discovery-tier edge(s) are withheld as "
-            "statistical only; pass include_discovery=true for them."
-        )
-    return base
 
 
 def _impact_row(row: dict, name: str) -> dict:
     """Serialise one impact row with an explicit evidence tier."""
     if row["is_declared"]:
-        tier, note = "declared", "declared dependency; validated tier (AUC 0.88 in sample)"
-    elif row["has_bump_history"]:
-        tier, note = "bump-backed", "observed manifest bumps; ground truth"
+        tier, note = "declared", "declared dependency; measured AUC 0.88 in sample"
     else:
-        tier, note = "discovery", "statistical only; unvalidated, verify before acting"
+        # Unreachable by construction -- an edge with neither is never written --
+        # but stated rather than assumed, so a stale row is legible.
+        tier, note = ("bump-backed", "observed manifest bumps; ground truth") \
+            if row["has_bump_history"] else ("none", "no evidence recorded")
     return {
         "repo": name,
         "score": round(float(row["score"]), 4),
@@ -835,39 +784,36 @@ def coupled_directories(
     except KeyError as exc:
         return {"error": str(exc)}
 
+    # Ancestors and descendants are excluded by the query: a parent changes
+    # whenever its child does, so it scores 1.000 by construction. What comes
+    # back is only directories that could have moved independently and did not.
     partners = q.coupled_directories(row["id"], spec.key, limit)
-    own = row["path"]
     shaped = []
     for pr in partners:
         other = pr["path"] or ""
-        # A parent or child scores high by construction: every change to the
-        # child is a change to the parent. Say so rather than let it read as a
-        # discovery.
-        nested = other.startswith(f"{own}/") or own.startswith(f"{other}/") or other == own
         shaped.append({
             "path": other,
-            "relation": "ancestor-or-descendant" if nested else "sibling-or-unrelated",
-            "informative": not nested,
+            "relation": "sibling-or-unrelated",
+            "informative": True,
             "score": _round(pr.get("score")),
             "co_changes": pr["n_ab"],
             "probability_also_changes": _round(pr.get("confidence_out"), 3),
             "its_total_changes": pr.get("n_other"),
             "files": pr.get("file_count"),
         })
-    useful = [x for x in shaped if x["informative"]]
     return {
         "directory": {
             "repo": target["full_name"],
-            "path": own,
+            "path": row["path"],
             "files": row["file_count"],
             "total_changes": row["change_count"],
         },
         "measure": {"key": spec.key, "label": spec.label},
         "summary": (
-            f"{len(useful)} of {len(shaped)} partners are outside this directory's "
-            "own subtree; the rest are its parents or children and move with it by "
-            "construction."
-        ) if shaped else "No directory coupling recorded.",
+            f"{len(shaped)} partners outside this directory's own subtree. Its "
+            "parents and children are excluded: a parent changes whenever its "
+            "child does, so it scores 1.000 by construction and says nothing."
+        ) if shaped else "No directory coupling recorded outside its own subtree.",
         "partners": shaped,
     }
 

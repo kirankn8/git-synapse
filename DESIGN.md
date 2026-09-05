@@ -823,6 +823,26 @@ pairs, so it belongs on the overview, a repository's pairs, a file's partners,
 a pair breakdown and a folder's coupled folders. On a risk table, an ingest log
 or a list of repositories it ranks nothing and reads as a stray control.
 
+**There is no unprovable tier.** Every row in `repo_impact` is written from a
+dependency declared in a manifest, or from a version bump observed and resolved
+to the upstream commit it consumed — the `edges` CTE in `predict.rebuild` has
+exactly those two branches, so `is_declared OR has_bump_history` is true by
+construction, not by coincidence. The statistical discovery path was removed
+after it measured AUC 0.63 on which way the arrow points, matching a baseline
+that ignored coupling entirely.
+
+Because the tier cannot occur, nothing offers to filter it: the graph's
+"validated only / include discovery" toggle, the API's `validated_only`
+parameter, `impact_chains`' hop filter and the MCP tool's `include_discovery`
+flag were all no-ops implying a doubt the data does not carry. A test asserts
+the invariant against the corpus rather than restating it in prose.
+
+The one place a *rule* stands in for an observation is version resolution, and
+it is labelled per row: 3.2% of bumps resolve to an exact `sha`, 79.7% to a
+`tag`, and 17.1% to a `floor` — a range like `^1.2` taken at its lowest
+satisfying version. That is deterministic and stated, not inferred, and the
+`resolution` column travels with every bump so a reader can tell which.
+
 **Directory coupling excludes containment.** A directory changes in a commit if
 any file beneath it changed, so an ancestor co-changes with its descendant by
 definition: `src/com` scored 1.000 against `src/com/google` on every measure,
