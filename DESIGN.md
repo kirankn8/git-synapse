@@ -786,8 +786,8 @@ can check rather than on taste:
 /repos/5                                    /insights/impact/graph nodes are repositories
 /repos/5/tree/src/main/java                 /insights/risk         ?repo=5
 /repos/5/files/src/main/java/Cache.java     /insights/drift        ?repo=5
-/repos/5/pairs/36/91                        /insights/graph        ?repo=5
-                                            /insights/graph        ?mode=repos
+/repos/5/pairs/36/91                        /insights/graph        the map, all repos
+                                            /insights/graph        ?repo=5  its files
                                             /insights/modules      ?repo=5
 ```
 
@@ -805,11 +805,23 @@ Insights opens `/repos/5/files/…`, because that is where the file lives. This
 only reads as a jump if clicking a *repository* went somewhere other than the
 repository — which is exactly the bug that prompted the restructure.
 
-**Both graphs are one Insights section.** Neither owns data — each draws
-couplings computed elsewhere — but drawing them is a question in its own right,
-so `/insights/graph` holds both modes: files within a repository, and
-repositories across the corpus. A repository, folder or file links into it
-already scoped.
+**Insights opens on a map.** `/insights/graph` is the first section and the
+landing: with nothing scoped it draws every repository, and choosing one in
+Scope zooms to that repository's files. A picture of the corpus is a better
+first answer than a table that must be configured before it says anything.
+Neither graph owns data — each draws couplings computed elsewhere — so they are
+one section with two zoom levels rather than two tabs.
+
+**Figures belong to the section that uses them.** The Insights frame used to
+render six corpus-wide tiles above whichever section was open, which then
+rendered five or six of its own: twelve numbers before any content, most of
+them irrelevant to the page. Each section now carries only its own, and long
+explanations sit in a collapsed `<details>` under the thing they explain.
+
+**The measure bar appears only where a measure orders something.** It ranks
+pairs, so it belongs on the overview, a repository's pairs, a file's partners,
+a pair breakdown and a folder's coupled folders. On a risk table, an ingest log
+or a list of repositories it ranks nothing and reads as a stray control.
 
 **Directory coupling excludes containment.** A directory changes in a commit if
 any file beneath it changed, so an ancestor co-changes with its descendant by

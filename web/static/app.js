@@ -260,6 +260,18 @@ function currentPath() {
   return (window.location.pathname || '/') + (window.location.search || '');
 }
 
+/** Whether the chosen measure orders anything on the page being rendered. */
+function measureRanksSomething(path, params) {
+  if (path === '/') return true;                                  // top pairs
+  if (/^\/repos\/\d+$/.test(path)) {
+    return ['overview', 'pairs'].includes(params.tab || 'files');
+  }
+  // A file's partners, a pair's breakdown, a folder's coupled folders.
+  if (/^\/repos\/\d+\/(files|pairs|tree)\//.test(path)) return true;
+  if (path === '/insights/graph') return params.mode !== 'repos' && !!params.repo;
+  return false;
+}
+
 /** Current view token, used to discard results from a superseded navigation. */
 let navToken = 0;
 
@@ -280,6 +292,12 @@ async function route() {
     window.history.replaceState({}, '', path + (qs ? `?${qs}` : ''));
   }
   const params = Object.fromEntries(new URLSearchParams(qs || ''));
+
+  // The measure bar ranks pairs. On a risk table, an ingest log or a list of
+  // repositories it ranks nothing, and reads as a stray control the reader has
+  // to wonder about -- so it appears only where changing it changes the page.
+  const bar = document.getElementById('measure-bar');
+  if (bar) bar.hidden = !measureRanksSomething(path, params);
 
   for (const link of document.querySelectorAll('#mainnav a')) {
     const target = (link.getAttribute('href') || '/').replace(/^#/, '');
@@ -899,9 +917,11 @@ async function repoImpactGraphView(params) {
   const wrap = await insightsShell('graph', null);
   wrap.append(
     h('div', { class: 'toolbar' },
-      h('a', { class: 'btn', href: '/insights/graph', 'data-nav': true },
-        'Files within a repository'),
-      h('button', { class: 'btn primary' }, 'Repositories across the corpus'),
+      h('button', { class: 'btn primary' }, 'All repositories'),
+      // Zooming to files needs a repository, and Scope is where one is chosen;
+      // a link here with nothing scoped would land back on this same view.
+      h('span', { class: 'card-sub' },
+        'Choose a repository in Scope to zoom to its files.'),
       h('span', { class: 'spacer' }),
       h('span', { class: 'card-sub' },
         'Nodes are repositories; edges are directional impact.')),
@@ -1521,16 +1541,24 @@ const folderTrail = (repoId, path) => {
    but drawing them is a question in its own right, so it is a section rather
    than a button hidden on a page. */
 on('/insights/graph', async (_args, params) => {
-  if (params.mode === 'repos') return repoImpactGraphView(params);
-  const repoId = Number(params.repo || 0)
-    || (await api('/api/repos', { limit: 1, order_by: 'pair_count' })).repos[0]?.id;
-  const wrap = await insightsShell('graph', Number(params.repo) || null);
+  // No repository chosen means the question is about the corpus, so that is
+  // what is drawn. Choosing one in Scope zooms to its files.
+  if (params.mode === 'repos' || (!params.repo && params.mode !== 'files')) {
+    return repoImpactGraphView(params);
+  }
+  const repoId = Number(params.repo);
+  const wrap = await insightsShell('graph', repoId || null);
   wrap.append(
     h('div', { class: 'toolbar' },
-      h('button', { class: 'btn primary' }, 'Files within a repository'),
       h('a', { class: 'btn', href: '/insights/graph?mode=repos', 'data-nav': true },
-        'Repositories across the corpus')),
+        'All repositories'),
+      h('button', { class: 'btn primary' }, 'Files in this repository')),
   );
+  if (!repoId) {
+    wrap.append(h('div', { class: 'empty' }, h('strong', {}, 'Pick a repository'),
+      'A file graph is drawn for one repository at a time. Choose one in Scope.'));
+    return wrap;
+  }
   if (!repoId) {
     wrap.append(h('div', { class: 'empty' }, h('strong', {}, 'No coupling data yet'),
       'Run an ingest to populate the graph.'));
@@ -1943,18 +1971,16 @@ on('/insights/impact', async (_args, params) => {
 
   wrap.append(
     h('div', { class: 'grid grid-stats' },
-      statTile('Impact edges', num(mining.impact_edges), 'ranked repo→repo relationships'),
-      statTile('Declared', num(mining.declared_edges), 'structural evidence'),
-      statTile('Bump-backed', num(mining.bump_edges), 'ground truth from manifests'),
+      statTile('Impact edges', num(mining.impact_edges),
+               `${num(mining.declared_edges)} declared · ${num(mining.bump_edges)} bump-backed`),
       statTile('Manifest bumps', num(mining.dep_bumps), 'observed propagation events'),
       statTile('Declared deps', num(mining.declared_deps), 'internal module edges'),
-      statTile('Repository graph', 'open', 'nodes are repositories', () => go('/insights/graph?mode=repos')),
+      statTile('Map', 'open', 'the same edges, drawn', () => go('/insights/graph?mode=repos')),
     ),
   );
 
   wrap.append(
-    h('div', { class: 'help' },
-      h('strong', {}, 'How to read this. '),
+    explainer('How to read this',
       'Within a repository, coupling means “same commit”. Two repositories never share one, ',
       'so nothing here is inferred from co-change: every edge is read from a ',
       h('strong', {}, 'declared dependency'),
@@ -1965,8 +1991,7 @@ on('/insights/impact', async (_args, params) => {
       'AUC 0.80 while managing 0.63 on which way the arrow points, and a baseline that ',
       'ignored coupling entirely matched it — the measure was ranking “both repositories ',
       'are busy”. Restricting to declared dependencies lifts the base rate from 0.23% to 82% ',
-      'before any measure is evaluated.',
-    ),
+      'before any measure is evaluated.'),
   );
 
   const dirBtn = (key, label, title) =>
@@ -2141,8 +2166,8 @@ on('/insights/impact/:a/:b', async ({ a, b }) => {
    because cross-repo impact drills further -- to one edge, and to the graph --
    and a query parameter cannot express where you are inside that. */
 const INSIGHT_SECTIONS = [
+  ['graph', 'Map'],
   ['impact', 'Cross-repo impact'],
-  ['graph', 'Coupling graph'],
   ['risk', 'Risk & bus factor'],
   ['drift', 'Coupling drift'],
   ['modules', 'De-facto modules'],
@@ -2158,6 +2183,7 @@ async function insightsShell(section, repoId, trail = []) {
     api('/api/mining/overview'),
     api('/api/repos', { limit: 1000, order_by: 'commit_count' }),
   ]);
+  const wrapOv = ov;
 
   const wrap = h('div');
   if (repoId) {
@@ -2166,17 +2192,7 @@ async function insightsShell(section, repoId, trail = []) {
   } else if (trail.length) {
     wrap.append(crumbs(['Insights', `/insights/${section}`], ...trail));
   }
-  wrap.append(pageHead('Insights',
-    'What history says about the code \u2014 impact, risk, drift and structure. '
-    + 'The repositories, folders and files themselves live under Repositories.'));
-
-  wrap.append(h('div', { class: 'grid grid-stats' },
-    statTile('De-facto modules', num(ov.modules), `${num(ov.clustered_files)} files clustered`),
-    statTile('Cross-directory', num(ov.cross_dir_modules), 'modules that cut across folders', () => go('/insights/modules')),
-    statTile('Emerging coupling', num(ov.emerging), 'strengthening lately', () => go('/insights/drift')),
-    statTile('Decaying coupling', num(ov.decaying), 'finished refactors', () => go('/insights/drift?trend=decaying')),
-    statTile('Stable', num(ov.stable), 'unchanged over time'),
-    statTile('Risk scored', num(ov.risk_scored), 'files profiled', () => go('/insights/risk'))));
+  wrap.append(pageHead('Insights', 'What history says about the code.'));
 
   const repoSel = h('select', { class: 'input', style: 'min-width:230px' },
     h('option', { value: '' }, 'All repositories'),
@@ -2190,13 +2206,21 @@ async function insightsShell(section, repoId, trail = []) {
   wrap.append(h('div', { class: 'toolbar' },
     h('div', { class: 'field' }, h('label', {}, 'Scope'), repoSel)));
   wrap.repos = repos.repos;
+  wrap.mining = wrapOv;
   return wrap;
 }
 
-// Impact leads, being the question the product exists to answer.
+/* Long explanations earn their place, but not above the thing they explain.
+   Collapsed by default: the reader who wants it opens it once. */
+const explainer = (summary, ...body) =>
+  h('details', { class: 'explainer' }, h('summary', {}, summary),
+    h('div', { class: 'help', style: 'margin:9px 0 0' }, ...body));
+
+// The map leads: a picture of the whole corpus is a better first answer than
+// a table that has to be configured before it says anything.
 on('/insights', (_args, params) => {
   const qs = params.repo ? `?repo=${params.repo}` : '';
-  go(`/insights/impact${qs}`);
+  go(`/insights/graph${qs}`);
   return h('div');
 });
 
@@ -2209,9 +2233,12 @@ on('/insights/:section', async ({ section }, params) => {
   }
   const repoId = params.repo ? Number(params.repo) : null;
   const wrap = await insightsShell(section, repoId);
+  const ov = wrap.mining;
   if (section === 'risk') {
     const data = await api('/api/risk', { repo_id: repoId || undefined, limit: 120 });
-    wrap.append(h('div', { class: 'help' },
+    wrap.append(h('div', { class: 'grid grid-stats' },
+      statTile('Files profiled', num(ov.risk_scored), 'scored for churn, coupling and ownership')));
+    wrap.append(explainer('How risk is computed',
       h('strong', {}, 'Effective authors'), ' is 1 / HHI, the Herfindahl concentration of each author’s share of a file’s commits. ',
       'Three authors splitting commits 98/1/1 has an effective count near 1, not 3 — only a concentration measure sees that. ',
       'Risk multiplies churn by coupling, lifts by concentration, then shrinks by n/(n+25) so a five-commit README cannot outrank a real hotspot.'));
@@ -2231,10 +2258,14 @@ on('/insights/:section', async ({ section }, params) => {
   } else if (section === 'drift') {
     const trend = params.trend === 'decaying' ? 'decaying' : 'emerging';
     const data = await api('/api/drift', { trend, repo_id: repoId || undefined, limit: 120 });
+    wrap.append(h('div', { class: 'grid grid-stats' },
+      statTile('Emerging', num(ov.emerging), 'coupling strengthening lately'),
+      statTile('Decaying', num(ov.decaying), 'finished refactors'),
+      statTile('Stable', num(ov.stable), 'unchanged over time')));
     wrap.append(h('div', { class: 'toolbar' },
       h('button', { class: `btn${trend === 'emerging' ? ' primary' : ''}`, onclick: () => go(`/insights/drift?trend=emerging&repo=${repoId || ''}`) }, 'Emerging'),
       h('button', { class: `btn${trend === 'decaying' ? ' primary' : ''}`, onclick: () => go(`/insights/drift?trend=decaying&repo=${repoId || ''}`) }, 'Decaying')));
-    wrap.append(h('div', { class: 'help' },
+    wrap.append(explainer('What drift means',
       trend === 'emerging'
         ? 'Coupling that has strengthened in the last year relative to the preceding history — relationships forming now.'
         : 'Coupling that has weakened. These are usually completed refactors. Reporting them as current coupling is one of the easier ways to mislead an agent, which is why they are separated out.',
@@ -2256,7 +2287,10 @@ on('/insights/:section', async ({ section }, params) => {
       return wrap;
     }
     const data = await api(`/api/repos/${repoId}/modules`, { limit: 40 });
-    wrap.append(h('div', { class: 'help' },
+    wrap.append(h('div', { class: 'grid grid-stats' },
+      statTile('De-facto modules', num(ov.modules), `${num(ov.clustered_files)} files clustered`),
+      statTile('Cross-directory', num(ov.cross_dir_modules), 'modules that cut across folders')));
+    wrap.append(explainer('How modules are found',
       'Clusters found by label propagation over the file-coupling graph, weighted by NPMI. ',
       h('strong', {}, 'The interesting output is the disagreement with the directory tree: '),
       'a cluster spanning several folders is a module the codebase grew without declaring. ',
