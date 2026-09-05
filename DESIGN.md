@@ -838,7 +838,15 @@ anything calling. The charts are inline SVG rather than a library — the UI has
 no build step, and a bar chart and a bar list are a few dozen lines each.
 
 Eight distributions sit under *Shape of the data*, each stating its own answer
-rather than leaving it to be read off a picture:
+rather than leaving it to be read off a picture. Every one is a thumbnail:
+clicking it opens `/insights/shape/{metric}`, where the same chart is drawn at
+full size with every bucket listed and its share, and buckets that map to
+something openable are links. All eight together are at `/insights/shape`.
+
+Each distribution is **defined once** — how to shape the rows, how to scale
+them, what the chart claims, and where a bucket leads. The card and the full
+view render the same definition, so the small one cannot drift into saying
+something the large one does not.
 
 Bars use a log axis where the distribution is a power law — half the coupling
 pairs sit in the first bucket, so on a linear axis one bar filled the card and
@@ -858,6 +866,11 @@ non-uniformly and drew every axis label horizontally squashed.
 | Authors per file | 47% have been touched by one author only |
 | How fast a bump is adopted | 62% landed within two months |
 | When repositories last changed | how much of the corpus has gone quiet |
+
+The distribution page carries no stat strip. Buckets, total, largest and scale
+were all already on the chart or in the table beneath it, and a figure that
+opens nothing is a dead end — restating them put decoration between the reader
+and the diagram they came for.
 
 They come from one endpoint, not eight: these are full-table aggregates and
 together they are the most expensive read the landing page makes (~550ms). The
