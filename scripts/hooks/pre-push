@@ -88,6 +88,16 @@ if command -v docker >/dev/null 2>&1 && docker image inspect git-synapse-test >/
     ran=1
 fi
 
+# The UI has no build step and therefore no node_modules; biome is a single
+# binary fetched on demand. Skipped without a network rather than failing,
+# since it is the one check here that needs one.
+if command -v docker >/dev/null 2>&1; then
+    say "lint the UI (biome)"
+    docker run --rm -v "$root":/work -w /work/web node:22-alpine \
+        npx --yes @biomejs/biome@1.9.4 lint static/ >/dev/null 2>&1 \
+        || warn "UI lint failed or could not be fetched; run it by hand to see why"
+fi
+
 # --- frontend ----------------------------------------------------------------
 # Reachability is probed against /api/health, not /api/overview: overview needs
 # a session now, and a 401 was being read as "no API here" -- so both UI suites

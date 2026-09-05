@@ -1,0 +1,28 @@
+{
+  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "files": { "include": ["static/*.js"] },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "correctness": {
+        "all": true,
+        "noUndeclaredVariables": "error",
+        "noUnusedVariables": "error",
+        "noUnusedFunctionParameters": "error",
+        "noUnusedImports": "error"
+      },
+            "complexity": { "useOptionalChain": "off", "noForEach": "off" },
+      "style": {
+        "useTemplate": "off",
+        "noUnusedTemplateLiteral": "off",
+        "useNamingConvention": "off",
+        "noDefaultExport": "off",
+        "useBlockStatements": "off"
+      },
+      "performance": { "noDelete": "off" },
+      "suspicious": { "all": true, "noConsole": "off" }
+    }
+  },
+  "javascript": { "globals": ["window", "document", "fetch", "localStorage", "navigator", "requestAnimationFrame", "setTimeout", "clearTimeout", "URL", "URLSearchParams", "console", "process"] }
+}

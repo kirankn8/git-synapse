@@ -318,6 +318,33 @@ console.log('\n=== the sign-in screen ===');
   await anon.close();
 }
 
+/* A browser told to block site data throws on touching localStorage, and the
+   remembered measure was read at module scope -- so the whole application
+   failed to evaluate and rendered nothing, with the reason only in a console
+   nobody had open. Neither remembered setting is worth the page. */
+console.log('\n=== the app survives a browser that blocks site data ===');
+{
+  const blocked = await browser.newPage();
+  if (AUTH_COOKIE) {
+    const { hostname } = new URL(BASE);
+    await blocked.setCookie({ ...AUTH_COOKIE, domain: hostname, path: '/' });
+  }
+  await blocked.evaluateOnNewDocument(() => {
+    Object.defineProperty(window, 'localStorage', {
+      get() { throw new DOMException('The operation is insecure.', 'SecurityError'); },
+    });
+  });
+  const thrown = [];
+  blocked.on('pageerror', (e) => thrown.push(String(e).slice(0, 80)));
+  await blocked.goto(BASE + '/', { waitUntil: 'domcontentloaded' });
+  await new Promise((r) => setTimeout(r, 2200));
+  const rendered = await blocked.evaluate(
+    () => (document.getElementById('view').textContent || '').trim().length > 40);
+  if (rendered && !thrown.length) ok('storage blocked', 'renders, no page errors');
+  else bad('storage blocked', `rendered=${rendered} errors=${thrown.join('; ')}`);
+  await blocked.close();
+}
+
 console.log('\n=== nothing overflows its container horizontally ===');
 for (const [path, label] of PAGES) {
   await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });
