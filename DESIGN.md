@@ -10,7 +10,7 @@ database table and the decisions that materially change the numbers.
 
 | | |
 |---|---|
-| [Every table at a glance](#every-table-at-a-glance) | all 28, one line each |
+| [Every table at a glance](#every-table-at-a-glance) | all 33, one line each |
 | [How it works](#how-it-works) | the pipeline, end to end |
 | [Store the atom, derive the rest](#store-the-atom-derive-the-rest) | the schema's one rule, and every core table |
 | [Cross-repository coupling](#cross-repository-coupling-what-repositories-declare) | why co-change cannot span repositories, and what does |
@@ -30,8 +30,9 @@ database table and the decisions that materially change the numbers.
 
 ## Every table at a glance
 
-Twenty-eight tables. The first group is the only one that cannot be recomputed;
-everything after it is a materialised cache.
+Thirty-three tables. The first group is the only one that cannot be recomputed;
+everything derived from it is a materialised cache, and the last two groups hold
+operational state that belongs to the deployment rather than to the corpus.
 
 **Identity and the atom** — the source of truth
 
@@ -51,11 +52,11 @@ everything after it is a materialised cache.
 | Table | What it holds |
 |---|---|
 | `file_pair` | The joint co-change count for a file pair. Only `n_ab`; the marginals and `N` live on `file` and `repo`. |
-| `file_pair_metric` | The 29 measures materialised, so the UI can sort millions of pairs by any of them without recomputing. |
+| `file_pair_metric` | The 31 measures materialised, so the UI can sort millions of pairs by any of them without recomputing. |
 | `directory` | Directory-level rollup. A directory "changed" in a commit if any file beneath it changed. |
 | `file_directory` | Which directories contain a file, one row per ancestor, so the rollup is a join rather than string work. |
 | `dir_pair` | Joint co-change counts between directories. |
-| `dir_pair_metric` | The same 29 measures, one level up the tree. |
+| `dir_pair_metric` | The same 31 measures, one level up the tree. |
 | `author_file` | Who has touched what, which answers "who should review this?" alongside "what else must change?" |
 
 **Across repositories** — what they declare about each other
@@ -84,7 +85,17 @@ everything after it is a materialised cache.
 | `ingest_run` | Job history: what ran, when, and whether it worked. |
 | `ingest_run_repo` | Per-repo detail for a run, so a failure is traceable to the repository that caused it. |
 | `feedback` | Defects in Git Synapse reported by the sessions using it. The only table an agent may write to, and deliberately read by no measure. |
-| `meta` | Key/value for the schema version and similar single values. |
+| `meta` | Key/value for the schema version, the settings a running deployment may change, and the first-run setup token until it is used. |
+
+**Access and audit** — who may read this, and what they asked for
+
+| Table | What it holds |
+|---|---|
+| `app_user` | One row per person: email, name, role, and the scrypt hash with its own cost parameters, so the cost can be raised without invalidating anyone's password. |
+| `user_session` | Live browser sessions, as the SHA-256 of the cookie. A dump yields no working credential, only the fact that a session existed. |
+| `api_token` | Tokens for agents and scripts, likewise hashed. The visible prefix is kept so a person can tell their own tokens apart without the list being a set of live keys. |
+| `login_attempt` | Failed sign-ins inside the lockout window, counted per address. Also carries setup-token guesses, against a sentinel no real address can match. |
+| `call_log` | Every call served on both surfaces — arguments, reply, duration, rows, client. The one table that grows with *traffic* rather than with history, so it is pruned by age and by count at the end of every ingest. |
 
 ---
 
@@ -101,7 +112,7 @@ flowchart TB
     ATOM["<b>commit + commit_file</b><br/>THE ATOMIC FACT<br/><i>one row per (commit, file)</i>"]
 
     subgraph within["WITHIN a repository — unit of co-occurrence: the commit"]
-        FP["file_pair"] --> FPM["file_pair_metric<br/><i>29 measures</i>"]
+        FP["file_pair"] --> FPM["file_pair_metric<br/><i>31 measures</i>"]
         DP["dir_pair"] --> DPM["dir_pair_metric"]
     end
 
@@ -163,7 +174,7 @@ authoritative**. The only thing that cannot be recomputed is `commit_file`: one
 row per (commit, file), with change type, line counts, rename source and
 similarity.
 
-Everything else — marginals, joint counts, all 29 measures, directory rollups,
+Everything else — marginals, joint counts, all 31 measures, directory rollups,
 directory rollups, the dependency graph, impact scores, clusters, drift, risk — is a
 materialised cache. Consequences:
 
@@ -236,7 +247,7 @@ erDiagram
         bigint n_a
         bigint n_b
         bigint n_total
-        float confidence_ab "29 measures + 2 directional"
+        float confidence_ab "31 measures + 2 directional"
     }
     DIRECTORY {
         text path
@@ -269,14 +280,15 @@ erDiagram
 ### Cross-repository coupling: what repositories declare
 
 Two repositories never share a commit, so co-change cannot express a
-relationship between them. This used to be solved by widening the unit: commits
-grouped into **change sets** by ticket key or by one author's work session, with
-the same 29 measures applied over that wider unit, plus a directed table built
+relationship between them. The obvious repair is to widen the unit: group
+commits into **change sets** by ticket key or by one author's work session,
+apply the same 31 measures over that wider unit, and add a directed table built
 by binning time and shifting one repository's activity against another's.
 
-**That construction was measured and found unsound.** Two public repositories in
-the test corpus — sharing no code whatsoever — scored `G² = 570` against each
-other, and the profile was flat across every lag from one day to two weeks:
+**Measured, that construction is unsound, so nothing here uses it.** Two public
+repositories in the test corpus — sharing no code whatsoever — score `G² = 570`
+against each other, and the profile is flat across every lag from one day to two
+weeks:
 
 ```
 scikit-learn -> django    lag 4   G² 393      lift over chance 1.19
@@ -286,16 +298,16 @@ scikit-learn -> django    lag 4   G² 393      lift over chance 1.19
 
 Real propagation has a characteristic delay, so a genuine signal peaks at some
 lag. A plateau is the signature of something else, and the marginals say what:
-django occupied 41% of all time bins and scikit-learn 33%. Two variables that
-are each "on" a third of the time co-occur constantly. The table was detecting a
-**shared release era**, not propagation. Direction was unstable for the same
-reason — `A → B` outscored `B → A` on one pair and the reverse on another,
+django occupies 41% of all time bins and scikit-learn 33%. Two variables that
+are each "on" a third of the time co-occur constantly. Such a table detects a
+**shared release era**, not propagation. Direction is unstable for the same
+reason — `A → B` outscores `B → A` on one pair and the reverse on another,
 tracking relative commit volume rather than causation.
 
-So it is gone, along with change sets, and nothing infers a cross-repository
-relationship from calendar time any more.
+So nothing here infers a cross-repository relationship from calendar time, and
+there are no change sets.
 
-#### What replaced it
+#### What it uses instead
 
 A manifest naming a dependency is **dated** (it lives in a commit),
 **directional** (the consumer names the dependency, never the reverse) and
@@ -371,8 +383,8 @@ github.com/acme/signing/v3 v3.0.0-20260626221153-5fc63d6f3055
 ```
 
 So a `go.mod` diff is a **dated, directional, provable** propagation edge.
-Recovering 6,388 of them gave a labelled set to test the statistical approach
-against — and the answer is why that approach is no longer here.
+Recovering 6,388 of them gives a labelled set to test the statistical approach
+against — and the answer is why coupling statistics do not decide this edge.
 
 | Approach | AUC | Directional accuracy |
 |---|---|---|
@@ -538,9 +550,9 @@ outside those ecosystems, a repository has to claim the name.
 published by laravel/framework; `events` is an unrelated npm one. Both the full
 coordinate and its last segment are indexed, because a consumer writes either --
 but without the ecosystem travelling alongside, every npm dependency on `events`
-became an edge into a PHP repository. Scoping removed some 290 such edges across
-the corpus and lifted Rust from 74% to 92%, having previously been credited with
-edges it never had.
+would become an edge into a PHP repository. Scoping is worth some 290 spurious
+edges across the corpus, and it is the difference between Rust resolving at 92%
+and at 74% while credited with edges it never had.
 
 **A range resolves to its declared floor**, which is parsed rather than guessed:
 `^4.17.21` states 4.17.21 as its own lower bound, and a wildcard segment states
@@ -845,12 +857,12 @@ is otherwise the database.
 
 ## What callers asked for
 
-Two surfaces consume this product — agents over MCP, and this UI over HTTP —
-and until recently neither left a trace, so *"is anything actually using this?"*
-had no answer, and *"what did it ask for, and what did it get back?"* had none
-either. `call_log` records every call on both surfaces: the arguments as given,
-the reply as returned, how long it took, how many rows came back, and which
-client asked.
+Two surfaces consume this product — agents over MCP, and this UI over HTTP.
+Neither leaves a trace on its own, which leaves *"is anything actually using
+this?"* and *"what did it ask for, and what did it get back?"* unanswerable.
+`call_log` records every call on both surfaces: the arguments as given, the
+reply as returned, how long it took, how many rows came back, and which client
+asked.
 
 One interception point per surface, not one per entry point. MCP overrides
 `call_tool`, the single dispatch every tool passes through, so a tool added
@@ -890,18 +902,15 @@ tool that has never run has never failed either and would read as passing.
 Reading it is the same drill-down as everywhere else: Overview ranks tools and
 routes, Activity lists the individual calls, and one call opens the arguments it
 was given and the reply that went back. Every filter — surface, status, window
-— reaches all three; the summary originally ignored them, so the list narrowed
-while every figure above it stayed put, which reads as broken rather than
-empty.
+— reaches all three, summary included: a filter that narrows the list while
+every figure above it stays put reads as broken rather than empty.
 
 ## How the UI is addressed
 
-The application had ten tabs, and five of them were views onto two things —
-files and pairs — at different scopes. The repository page alone reimplemented
-seven of the ten distinct things in the app, five of which were also a top-level
-tab. Every question had two homes, so no click could be predicted.
-
-One rule replaced them:
+The failure mode a UI like this falls into is a tab per noun: files, pairs,
+folders, impact, risk, drift, each also reachable from the repository page, so
+every question has two homes and no click can be predicted. What stops it is
+not restraint but a rule that decides the question without taste:
 
 > **Places nest in the path. Analyses scope with a query.**
 
@@ -980,10 +989,10 @@ hourly activity bars include the empty hours, because a chart drawn only from
 hours that had traffic closes the gaps and turns an outage into a smooth line.
 | Accounts · Measures · Jobs · Feedback | configuration, reference, operations |
 
-Overview used to carry a shortened copy of the repository list, the mining
-figures and the run history, plus three header buttons duplicating the nav one
-line above — half the page was a worse version of another tab. It now answers
-one question: corpus scale, ingest health, and who is calling.
+Overview answers one question — is this deployment healthy, and is anything
+using it — and carries nothing that another tab owns. A shortened copy of the
+repository list, or the run history, or header buttons duplicating the nav one
+line above, would each be a worse version of the page that owns it.
 
 ```
 /accounts                                   /insights            -> /insights/impact
@@ -997,7 +1006,7 @@ one question: corpus scale, ingest health, and who is calling.
                                             /insights/modules      ?repo=5
 ```
 
-Three consequences worth stating, because each was a defect before:
+Three consequences worth stating, because each is easy to get wrong:
 
 **Folders and files are addressed by path, not by id.** Ids renumber on a
 re-ingest, so a link keyed on one silently comes to mean a different file —
@@ -1007,9 +1016,9 @@ table, so a link to a path that has since moved still lands on the file it
 became, and the address is then corrected to the current path.
 
 **A lens result always lands back in the hierarchy.** Clicking a file in
-Insights opens `/repos/5/files/…`, because that is where the file lives. This
-only reads as a jump if clicking a *repository* went somewhere other than the
-repository — which is exactly the bug that prompted the restructure.
+Insights opens `/repos/5/files/…`, because that is where the file lives. It
+reads as a jump only if clicking a *repository* lands somewhere other than that
+repository, which is the trap the rule exists to close.
 
 **Insights opens on a map.** `/insights/graph` is the first section and the
 landing: with nothing scoped it draws every repository, and choosing one in
@@ -1018,30 +1027,31 @@ first answer than a table that must be configured before it says anything.
 Neither graph owns data — each draws couplings computed elsewhere — so they are
 one section with two zoom levels rather than two tabs.
 
-**Figures belong to the section that uses them.** The Insights frame used to
-render six corpus-wide tiles above whichever section was open, which then
-rendered five or six of its own: twelve numbers before any content, most of
-them irrelevant to the page. Each section now carries only its own, and long
+**Figures belong to the section that uses them.** A shared frame is the wrong
+place for tiles: six corpus-wide figures above whichever section is open, plus
+the five or six that section carries, is twelve numbers before any content and
+most of them irrelevant to the page. Each section carries only its own, and long
 explanations sit in a collapsed `<details>` under the thing they explain.
 
 **The measure bar appears only where a measure orders something.** It ranks
 pairs, so it belongs on a repository's pairs, a file's partners, a pair
 breakdown and a folder's coupled folders. On a risk table, an ingest log or a
-list of repositories it ranks nothing and reads as a stray control — as it did
-on Overview, which kept it after losing the ranked table that justified it.
+list of repositories it ranks nothing and reads as a stray control, so it is not
+drawn there. A UI test asserts its presence page by page, because the bar is
+global state and the page that stops ranking things is the one that forgets.
 
 **There is no unprovable tier.** Every row in `repo_impact` is written from a
 dependency declared in a manifest, or from a version bump observed and resolved
 to the upstream commit it consumed — the `edges` CTE in `predict.rebuild` has
 exactly those two branches, so `is_declared OR has_bump_history` is true by
-construction, not by coincidence. The statistical discovery path was removed
-after it measured AUC 0.63 on which way the arrow points, matching a baseline
-that ignored coupling entirely.
+construction, not by coincidence. There is no third, statistically-inferred
+branch, because inference measured AUC 0.63 on which way the arrow points —
+matching a baseline that ignores coupling entirely.
 
-Because the tier cannot occur, nothing offers to filter it: the graph's
-"validated only / include discovery" toggle, the API's `validated_only`
-parameter, `impact_chains`' hop filter and the MCP tool's `include_discovery`
-flag were all no-ops implying a doubt the data does not carry. A test asserts
+Because the tier cannot occur, nothing offers to filter it. A "validated only /
+include discovery" toggle on the graph, a `validated_only` parameter on the API,
+a hop filter on `impact_chains` or an `include_discovery` flag on the MCP tool
+would each be a no-op implying a doubt the data does not carry. A test asserts
 the invariant against the corpus rather than restating it in prose.
 
 The one place a *rule* stands in for an observation is version resolution, and
@@ -1058,11 +1068,11 @@ Those rows crowded out the real partners, which for `src/com/google/javascript`
 turn out to be the matching `test/…` subtrees.
 
 A third check runs in real Chrome. jsdom does no layout and loads no
-stylesheet, so `smoke.mjs` is structurally blind to two things that both
-shipped: a component sitting flush against the next one, and an element whose
-`hidden` attribute is beaten by an author `display` rule — `.measure-bar` is
-`display:flex`, so hiding it changed nothing on screen while every assertion on
-the property passed. `tests/ui/layout.mjs` measures real boxes: the gap between
+stylesheet, so `smoke.mjs` is structurally blind to two whole classes of defect:
+a component sitting flush against the next one, and an element whose `hidden`
+attribute is beaten by an author `display` rule — `.measure-bar` is
+`display:flex`, so setting the property hides nothing on screen while every
+assertion on it passes. `tests/ui/layout.mjs` measures real boxes: the gap between
 every pair of stacked blocks, the computed display of anything hidden from
 script, and horizontal overflow. The page rhythm is 16px, with two deliberate
 exceptions — a breadcrumb sits 12px above its title, and a section title sits
@@ -1070,22 +1080,48 @@ exceptions — a breadcrumb sits 12px above its title, and a section title sits
 belongs to what follows it.
 
 It also checks that **every card leads somewhere**. A summary always has a
-fuller view behind it, and a card giving no sign of one is a dead end the
-reader has to guess past. Cards carry an optional target, marked with a quiet
-arrow; a chart bar that maps to a filter is its own link — clicking *Go* under
-Languages opens the Go repositories; and a table row is only styled as a link
-when it actually navigates, which it was not before: every row carried a
-pointer cursor whether or not `onRow` was given, so a table that led nowhere
-looked exactly like one that did. Two cards are static by design — the GitHub
-token panel, which explains why it is not editable here, and the fixed-settings
-table — and the check names them, so the exception is on the record rather than
-a gap it tolerates.
+fuller view behind it, and a card giving no sign of one is a dead end the reader
+has to guess past. Cards carry an optional target, marked with a quiet arrow,
+and a table row is styled as a link only when it actually navigates — a pointer
+cursor on a row that goes nowhere makes a dead table look exactly like a live
+one. Two cards are static by design — the GitHub token panel, which explains why
+it is not editable here, and the fixed-settings table — and the check names
+them, so the exception is on the record rather than a gap it tolerates.
+
+**A card has one destination, not two.** Inside a card that opens a fuller view,
+a chart is a thumbnail of a whole, so clicking any part of it opens that whole
+rather than jumping sideways: bars in a preview carry no target of their own,
+and the card's own click wins. Only at `/insights/shape/{metric}`, where the
+whole is already drawn, does a bucket link to what it counts — *Go* under
+Languages opens the Go repositories. The two halves of that rule are one
+mechanism: `shapeChart` strips the per-bar target unless the caller asks for it,
+and a card yields its click only to an element that is genuinely a link and
+genuinely inside it — otherwise an inert bar or an unclickable table row
+swallows the click and the card appears broken. `layout.mjs` clicks the arrow,
+clicks a bar, and asserts the same URL.
+
+**A long list is searched, not scrolled.** Three controls outgrew a native
+`select`: the repository picker at 164 options, the measure catalogue at 31, the
+language filter at 22. `searchSelect` keeps a select's shape — a trigger showing
+the current value, a grouped list below — and adds the one thing a select cannot
+have: a filter field. It is a combobox in the ARIA sense, so a screen reader and
+the keyboard both work, and Escape and click-outside dismiss it.
+
+Repositories are grouped **by account**, because a repository name is unique
+only inside one: this corpus holds two `core` and two `framework`, and a flat
+list gives no way to tell them apart. The group label is the account for the
+same reason a breadcrumb exists — the name alone is not an address.
+
+A scope selector, where a section offers one, holds its choice. A section that
+reads corpus-wide aggregates offers none at all and says so, because a control
+that navigates to `?repo=N` and then snaps back to *All repositories* reads as
+the page refusing the choice rather than as the choice not applying.
 
 It also checks that **rows are full**. `auto-fit` picks as many columns as fit,
 which is right for content of unknown length and wrong for a fixed set: it
-chose five columns for seven charts and left a thousand pixels of gap in the
-second row, and seven for eight stat tiles, orphaning the eighth. Both grids
-now use explicit column counts that divide their contents — four charts across,
+would choose five columns for seven charts and leave a thousand pixels of gap
+in the second row, or seven for eight stat tiles, orphaning the eighth. Both
+grids use explicit column counts that divide their contents — four charts across,
 and stat strips at four, dropping to three when a strip holds exactly six,
 matched with `:has(> .stat:nth-child(6):last-child)` so the code building the
 strip needs no class. Every chart body is one fixed height, because a grid row
@@ -1094,9 +1130,9 @@ nothing.
 
 Two more tests hold the shape. `tests/test_ui_links.py` checks every `href` and
 `go()` target in `app.js` against the client's own route table and against the
-server's `SPA_ROUTES` — a commit that renamed the routes once left eleven dead
-links behind, and the suite stayed green because the smoke test renders routes
-without ever following a link. `tests/ui/smoke.mjs` then walks
+server's `SPA_ROUTES`: renaming a route otherwise leaves dead links behind that
+no suite notices, because rendering a route never follows a link out of it.
+`tests/ui/smoke.mjs` then walks
 account → repository → folder → file by *clicking*, asserting the breadcrumb
 grows a rung at each step.
 
@@ -1104,7 +1140,7 @@ grows a rung at each step.
 
 ```
 src/git_synapse/
-  stats/       contingency tables + the 29 measures + registry   (pure, no I/O)
+  stats/       contingency tables + the 31 measures + registry   (pure, no I/O)
   db/          schema.sql, connection pool, COPY helpers
   ingest/      github discovery, git mirroring, log parser, loader, pipeline
   analysis/    aggregation, scoring, read queries
@@ -1112,13 +1148,18 @@ src/git_synapse/
                predict.py    the declared dependency graph, ranked
                manifests.py  dependency references, 29 ecosystems
                mining.py     de-facto modules, drift, ownership risk
+               calls.py      the call log: one queue, one flusher
+               settings.py   settings a running deployment can change
   api/         FastAPI app and routes
   mcp/         MCP server
   scheduler/   daily refresh
+  auth.py      scrypt hashing, sessions, API tokens, access policy
   cli.py       Typer CLI
 web/           index.html + app.js + graph.js + style.css   (no build step)
 skills/
   git-synapse-mcp/    SKILL.md   -- standalone: how an agent should use the MCP server
 docker/        Dockerfile (one image, four services)
 tests/
+  ui/          smoke.mjs (jsdom, walks every route)
+               layout.mjs (headless Chrome, measures real boxes)
 ```
