@@ -799,3 +799,45 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
   border: 1px solid var(--border); border-radius: var(--radius-sm);
   padding: 11px 13px; white-space: pre-wrap; word-break: break-word;
 }
+
+/* ------------------------------------------------------------- charts -- */
+/* A categorical ramp, defined once. Distinguishable in both directions of the
+   theme, and reused by every chart so the same category keeps its colour. */
+:root {
+  --series-1: #2dd4bf;
+  --series-2: #60a5fa;
+  --series-3: #a78bfa;
+  --series-4: #fbbf24;
+  --series-5: #fb7185;
+  --series-6: #4ade80;
+}
+
+.chart-wrap { width: 100%; }
+.chart { width: 100%; display: block; overflow: visible; }
+.chart rect { transition: opacity .12s ease; }
+.chart rect:hover { opacity: .72; }
+.chart-tick { font-size: 4px; fill: var(--text-faint); font-family: var(--mono); }
+
+.stack {
+  display: flex; height: 10px; border-radius: 5px; overflow: hidden;
+  background: var(--bg-input);
+}
+.stack-seg { height: 100%; }
+.stack-seg:hover { filter: brightness(1.25); }
+
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 10px; }
+.legend-item {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11.5px; color: var(--text-dim);
+}
+.legend-item i { width: 8px; height: 8px; border-radius: 2px; flex: 0 0 auto; }
+.legend-item b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* A figure inside a card, where a full stat tile would be too heavy. */
+.ministat { padding: 2px 0; }
+.ministat-value {
+  font-size: 19px; font-weight: 650; letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums; color: var(--text);
+}
+.ministat-label { font-size: 12px; color: var(--text-dim); margin-top: 1px; }
+.ministat-note { font-size: 11px; color: var(--text-faint); margin-top: 2px; }

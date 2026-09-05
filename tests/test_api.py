@@ -866,17 +866,22 @@ def test_the_api_records_its_own_traffic(client, settled_calls):
     thousand repositories are one row in a ranking."""
     from git_synapse.analysis import calls
 
-    client.get("/api/repos", params={"limit": 1})
-    # Filtered in the query, not in a window afterwards: by the time this runs
-    # the suite has served hundreds of requests, and a slice of the most recent
-    # would not contain this one.
-    rows = settled_calls(
-        lambda: calls.recent(surface="http", name="/api/repos", limit=5))
-    match = rows[0]
-    assert match["status"] == "ok" and match["method"] == "GET"
+    # Marked with a value nothing else in the suite sends. Filtering by route
+    # alone is not enough: other tests call /api/repos too, so "the newest row
+    # for this route" is whichever request happened to land last.
+    probe = "zz-probe-not-a-real-repo"
+    client.get("/api/repos", params={"limit": 1, "search": probe})
 
-    full = calls.detail(match["id"])
-    assert full["arguments"] == {"limit": "1"}
+    def mine():
+        for row in calls.recent(surface="http", name="/api/repos", limit=50):
+            full = calls.detail(row["id"])
+            if (full["arguments"] or {}).get("search") == probe:
+                return full
+        return None
+
+    full = settled_calls(mine)
+    assert full["status"] == "ok" and full["method"] == "GET"
+    assert full["arguments"] == {"limit": "1", "search": probe}
     assert full["result_preview"] is not None, "the reply itself must be recorded"
     assert full["result_bytes"] and full["result_bytes"] > 0
 
@@ -920,3 +925,9 @@ def test_a_reply_is_decoded_for_the_log_whatever_shape_it_is(body, expected_rows
         assert parsed is None
     elif body == b"not json at all":
         assert parsed == {"non_json": "not json at all"}
+
+
+def test_the_timeline_endpoint_bounds_its_window(client):
+    assert client.get("/api/calls/timeline", params={"hours": 6}).json()["buckets"].__len__() == 6
+    assert client.get("/api/calls/timeline", params={"hours": 0}).status_code == 422
+    assert client.get("/api/calls/timeline", params={"hours": 999}).status_code == 422

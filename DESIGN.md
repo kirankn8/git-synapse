@@ -789,7 +789,7 @@ recorded either way, because "how much came back" is usually the question. It
 is the one table that grows with *traffic* rather than with history, so it is
 pruned by age and by count at the end of every ingest.
 
-**It does not read itself.** `/api/calls*` is excluded, or opening the Callers
+**It does not read itself.** `/api/calls*` is excluded, or opening the Activity
 page would generate the traffic it displays and could never show a quiet
 system.
 
@@ -803,7 +803,7 @@ tools are dead weight. The inventory is dropped under "errors only", where a
 tool that has never run has never failed either and would read as passing.
 
 Reading it is the same drill-down as everywhere else: Overview ranks tools and
-routes, Callers lists the individual calls, and one call opens the arguments it
+routes, Activity lists the individual calls, and one call opens the arguments it
 was given and the reply that went back. Every filter — surface, status, window
 — reaches all three; the summary originally ignored them, so the list narrowed
 while every figure above it stayed put, which reads as broken rather than
@@ -830,7 +830,14 @@ can check rather than on taste:
 | **Repositories** | the things — repositories, folders, files, pairs — and what is *in* them |
 | **Insights** | every analysis derived from history — impact, risk, drift, modules |
 | **Overview** | is this deployment healthy, and is anything using it |
-| **Callers** | every call served, and what it returned |
+| **Activity** | every call served, and what it returned |
+
+Overview reads top to bottom as an operator would ask it: what data is here,
+did the last ingest work, what has history produced, and is anything calling.
+The two charts are inline SVG rather than a library — the UI has no build step,
+and a bar chart and a stacked bar are a few dozen lines each. The hourly bars
+include the empty hours, because a chart drawn only from hours that had traffic
+closes the gaps and turns an outage into a smooth line.
 | Accounts · Measures · Jobs · Feedback | configuration, reference, operations |
 
 Overview used to carry a shortened copy of the repository list, the mining
@@ -878,9 +885,10 @@ them irrelevant to the page. Each section now carries only its own, and long
 explanations sit in a collapsed `<details>` under the thing they explain.
 
 **The measure bar appears only where a measure orders something.** It ranks
-pairs, so it belongs on the overview, a repository's pairs, a file's partners,
-a pair breakdown and a folder's coupled folders. On a risk table, an ingest log
-or a list of repositories it ranks nothing and reads as a stray control.
+pairs, so it belongs on a repository's pairs, a file's partners, a pair
+breakdown and a folder's coupled folders. On a risk table, an ingest log or a
+list of repositories it ranks nothing and reads as a stray control — as it did
+on Overview, which kept it after losing the ranked table that justified it.
 
 **There is no unprovable tier.** Every row in `repo_impact` is written from a
 dependency declared in a manifest, or from a version bump observed and resolved

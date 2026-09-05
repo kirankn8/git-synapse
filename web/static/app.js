@@ -262,7 +262,9 @@ function currentPath() {
 
 /** Whether the chosen measure orders anything on the page being rendered. */
 function measureRanksSomething(path, params) {
-  if (path === '/') return true;                                  // top pairs
+  // Overview lost its ranked pairs table when it became an operator page, and
+  // the bar stayed behind ordering nothing.
+  if (path === '/') return false;
   if (/^\/repos\/\d+$/.test(path)) {
     return ['overview', 'pairs'].includes(params.tab || 'files');
   }
@@ -562,15 +564,18 @@ export function scoreCell(value, spec) {
    using it? Everything that was a worse copy of another tab is gone -- the
    repository list belongs to Repositories, the mining figures to Insights, the
    run history to Jobs, and the shortcut buttons duplicated the nav one line
-   above. What is left is corpus scale, ingest health, and callers. */
+   above. What is left is corpus scale, ingest health, and activity. */
 on('/', async () => {
-  const [ov, runs, callers] = await Promise.all([
+  const [ov, runs, activity, timeline, langs, mining] = await Promise.all([
     api('/api/overview'),
     api('/api/runs', { limit: 12 }),
     api('/api/calls/summary', { hours: 24 }).catch(() => ({ summary: {}, by_name: [] })),
+    api('/api/calls/timeline', { hours: 24 }).catch(() => ({ buckets: [] })),
+    api('/api/repos/languages').catch(() => ({ languages: [] })),
+    api('/api/mining/overview').catch(() => ({})),
   ]);
   const wrap = h('div');
-  const c = callers.summary || {};
+  const c = activity.summary || {};
 
   wrap.append(pageHead('Overview',
     'The state of the corpus and of the deployment serving it.'));
@@ -610,15 +615,43 @@ on('/', async () => {
   }
 
   // ---- who is calling -----------------------------------------------------
-  wrap.append(h('div', { class: 'section-title' }, 'Callers, last 24 hours'));
-  wrap.append(h('div', { class: 'grid grid-stats' },
-    statTile('MCP calls', num(c.mcp_calls || 0), 'tools invoked by agents', () => go('/callers?surface=mcp')),
-    statTile('HTTP calls', num(c.http_calls || 0), 'API requests', () => go('/callers?surface=http')),
-    statTile('Errors', num(c.errors || 0), `of ${num(c.calls || 0)} calls`, () => go('/callers?status=error')),
-    statTile('Median', c.p50_ms == null ? '\u2014' : `${c.p50_ms}ms`,
-             c.p95_ms == null ? 'no calls recorded' : `p95 ${c.p95_ms}ms`, () => go('/callers'))));
+  // ---- what the corpus is made of ----------------------------------------
+  const top = (langs.languages || []).slice(0, 6);
+  const others = (langs.languages || []).slice(6).reduce((n, l) => n + l.n, 0);
+  wrap.append(h('div', { class: 'grid grid-2' },
+    card('Languages',
+      h('div', { class: 'card-body' },
+        stackedBar([...top.map((l) => ({ label: l.language || 'unknown', value: l.n })),
+                    ...(others ? [{ label: 'other', value: others }] : [])],
+                   { total: ov.repos })),
+      `${(langs.languages || []).length} languages across ${num(ov.repos)} repositories`),
+    card('What history has produced',
+      h('div', { class: 'card-body' },
+        h('div', { class: 'grid grid-2' },
+          miniStat('Coupled pairs', num(ov.file_pairs), 'file pairs that change together'),
+          miniStat('Impact edges', num(mining.impact_edges || 0), 'repository to repository'),
+          miniStat('De-facto modules', num(mining.modules || 0), `${num(mining.cross_dir_modules || 0)} cross-directory`),
+          miniStat('Manifest bumps', num(mining.dep_bumps || 0), 'observed version changes'))),
+      'The derived layers, in full under Insights')));
 
-  wrap.append(card('Most-called', dataTable(callers.by_name || [], [
+  wrap.append(h('div', { class: 'section-title' }, 'Activity, last 24 hours'));
+
+  const buckets = (timeline.buckets || []).map((b) => ({
+    label: new Date(b.hour).toISOString().slice(11, 16),
+    value: Number(b.calls) || 0,
+    alert: Number(b.errors) > 0,
+  }));
+  wrap.append(card('Calls per hour',
+    h('div', { class: 'card-body' }, barChart(buckets, { label: 'calls' })),
+    'Bars turn red in an hour that contained a failed call'));
+  wrap.append(h('div', { class: 'grid grid-stats' },
+    statTile('MCP calls', num(c.mcp_calls || 0), 'tools invoked by agents', () => go('/activity?surface=mcp')),
+    statTile('HTTP calls', num(c.http_calls || 0), 'API requests', () => go('/activity?surface=http')),
+    statTile('Errors', num(c.errors || 0), `of ${num(c.calls || 0)} calls`, () => go('/activity?status=error')),
+    statTile('Median', c.p50_ms == null ? '\u2014' : `${c.p50_ms}ms`,
+             c.p95_ms == null ? 'no calls recorded' : `p95 ${c.p95_ms}ms`, () => go('/activity'))));
+
+  wrap.append(card('Most-called', dataTable(activity.by_name || [], [
     { key: 'surface', label: 'Surface', render: (r) => h('span', { class: `badge ${r.surface === 'mcp' ? 'ok' : 'muted'}` }, r.surface) },
     { key: 'name', label: 'Tool or route', render: (r) => h('span', { class: 'mono' }, r.name) },
     { key: 'calls', label: 'Calls', num: true, render: (r) => num(r.calls) },
@@ -629,9 +662,9 @@ on('/', async () => {
         : h('span', { class: 'badge muted' }, 'never called')) },
   ], {
     initialSort: 'calls',
-    onRow: (r) => (r.calls ? go(`/callers?surface=${r.surface}&name=${encodeURIComponent(r.name)}`) : null),
+    onRow: (r) => (r.calls ? go(`/activity?surface=${r.surface}&name=${encodeURIComponent(r.name)}`) : null),
     empty: 'Nothing has called this deployment in the last 24 hours.',
-  }), `Every MCP tool is listed, called or not (${callers.mcp_tools || 0} registered)`));
+  }), `Every MCP tool is listed, called or not (${activity.mcp_tools || 0} registered)`));
 
   wrap.append(h('div', { class: 'help' },
     'The corpus itself is under ', h('a', { href: '/repos', 'data-nav': true }, 'Repositories'),
@@ -1597,12 +1630,12 @@ on('/insights/graph', async (_args, params) => {
 
 /* ------------------------------------------------------------- measures -- */
 
-/* Callers: every call this deployment served, and what it returned.
+/* Activity: every call this deployment served, and what it returned.
    The drill-down the rest of the app has -- a ranking, then a list, then the
    thing itself -- applied to traffic: Overview ranks tools, this lists their
    calls, and one call opens the arguments it was given and the reply that went
    back. */
-on('/callers', async (_args, params) => {
+on('/activity', async (_args, params) => {
   const surface = params.surface || '';
   const status = params.status || '';
   const name = params.name || '';
@@ -1623,8 +1656,8 @@ on('/callers', async (_args, params) => {
   const c = summary.summary || {};
 
   const wrap = h('div');
-  wrap.append(crumbs(['Overview', '/'], ['Callers'], ...(name ? [[name]] : [])));
-  wrap.append(pageHead('Callers',
+  wrap.append(crumbs(['Overview', '/'], ['Activity'], ...(name ? [[name]] : [])));
+  wrap.append(pageHead('Activity',
     'Every call served, what it was asked, and what went back. Kept for 30 days.'));
 
   wrap.append(h('div', { class: 'grid grid-stats' },
@@ -1652,7 +1685,7 @@ on('/callers', async (_args, params) => {
       // surface asks for MCP calls to an HTTP route and returns nothing --
       // which reads as the filter being broken rather than empty.
       if (key === 'surface') p.delete('name');
-      go(`/callers${p.toString() ? '?' + p : ''}`);
+      go(`/activity${p.toString() ? '?' + p : ''}`);
     },
   }, label);
 
@@ -1665,7 +1698,7 @@ on('/callers', async (_args, params) => {
       chip('1h', 'hours', '1'), chip('24h', 'hours', ''), chip('7d', 'hours', '168')),
     name ? h('button', { class: 'btn sm', onclick: () => {
       const p = new URLSearchParams(params); p.delete('name');
-      go(`/callers${p.toString() ? '?' + p : ''}`);
+      go(`/activity${p.toString() ? '?' + p : ''}`);
     } }, `clear "${name}"`) : null));
 
   wrap.append(card('By tool or route', dataTable(summary.by_name || [], [
@@ -1684,7 +1717,7 @@ on('/callers', async (_args, params) => {
       if (!r.calls) return;
       const p = new URLSearchParams(params);
       p.set('surface', r.surface); p.set('name', r.name);
-      go(`/callers?${p}`);
+      go(`/activity?${p}`);
     },
     empty: 'No calls in this window.',
   }),
@@ -1703,21 +1736,21 @@ on('/callers', async (_args, params) => {
     { key: 'client', label: 'Client', render: (r) => h('span', { class: 'card-sub' }, (r.client || '\u2014').slice(0, 42)) },
   ], {
     initialSort: 'at',
-    onRow: (r) => go(`/callers/${r.id}`),
+    onRow: (r) => go(`/activity/${r.id}`),
     empty: 'No calls match those filters.',
   }), 'Click a call to see exactly what it asked for and what it got back'));
   return wrap;
 });
 
-on('/callers/:id', async ({ id }) => {
+on('/activity/:id', async ({ id }) => {
   const call = await api(`/api/calls/${id}`);
   const wrap = h('div');
   wrap.append(crumbs(['Overview', '/'],
-                     ['Callers', `/callers?surface=${call.surface}`],
+                     ['Activity', `/activity?surface=${call.surface}`],
                      [call.name]));
   wrap.append(pageHead(h('span', { class: 'mono' }, call.name),
     `${call.surface.toUpperCase()}${call.method ? ' ' + call.method : ''} · ${when(call.at)}`,
-    [h('a', { class: 'btn', href: `/callers?surface=${call.surface}&name=${encodeURIComponent(call.name)}`, 'data-nav': true },
+    [h('a', { class: 'btn', href: `/activity?surface=${call.surface}&name=${encodeURIComponent(call.name)}`, 'data-nav': true },
        'Other calls to this')]));
 
   wrap.append(h('div', { class: 'grid grid-stats' },
@@ -2544,6 +2577,78 @@ on('/insights/:section', async ({ section }, params) => {
 });
 
 /* ------------------------------------------------------------ accounts -- */
+
+/** A small labelled figure for use inside a card. */
+const miniStat = (label, value, note) =>
+  h('div', { class: 'ministat' },
+    h('div', { class: 'ministat-value' }, value),
+    h('div', { class: 'ministat-label' }, label),
+    note ? h('div', { class: 'ministat-note' }, note) : null);
+
+/* Charts, drawn as inline SVG. No library: the UI has no build step, and a
+   bar chart and a stacked bar are a few dozen lines each. Both scale to their
+   container so they survive a narrow window without a resize observer. */
+
+/** Hourly bars. `rows` need `label`, `value`, and optionally `alert`. */
+function barChart(rows, { height = 84, label = 'calls' } = {}) {
+  const max = Math.max(1, ...rows.map((r) => r.value));
+  const w = 100 / Math.max(rows.length, 1);
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', `0 0 100 ${height}`);
+  svg.setAttribute('preserveAspectRatio', 'none');
+  svg.setAttribute('class', 'chart');
+  svg.style.height = `${height}px`;
+
+  rows.forEach((r, i) => {
+    const h1 = Math.max(r.value ? 1.5 : 0, (r.value / max) * (height - 14));
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', String(i * w + w * 0.15));
+    rect.setAttribute('y', String(height - 12 - h1));
+    rect.setAttribute('width', String(w * 0.7));
+    rect.setAttribute('height', String(h1));
+    rect.setAttribute('rx', '0.6');
+    rect.setAttribute('fill', r.alert ? 'var(--danger)' : 'var(--accent)');
+    rect.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'title'))
+        .textContent = `${r.label}: ${num(r.value)} ${label}`;
+    svg.appendChild(rect);
+  });
+
+  // Endpoints only: an axis label under every bar is unreadable at this size.
+  const tick = (x, text, anchorAt) => {
+    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    t.setAttribute('x', String(x));
+    t.setAttribute('y', String(height - 2));
+    t.setAttribute('class', 'chart-tick');
+    t.setAttribute('text-anchor', anchorAt);
+    t.textContent = text;
+    svg.appendChild(t);
+    return t;
+  };
+  if (rows.length) {
+    tick(0.5, rows[0].label, 'start');
+    tick(99.5, rows[rows.length - 1].label, 'end');
+  }
+  return h('div', { class: 'chart-wrap' }, svg);
+}
+
+/** One horizontal bar split by category, with a legend underneath. */
+function stackedBar(rows, { total } = {}) {
+  const sum = total || rows.reduce((n, r) => n + r.value, 0) || 1;
+  const bar = h('div', { class: 'stack' });
+  rows.forEach((r, i) => {
+    const seg = h('div', {
+      class: 'stack-seg',
+      title: `${r.label}: ${num(r.value)}`,
+      style: `width:${(r.value / sum) * 100}%;background:var(--series-${(i % 6) + 1})`,
+    });
+    bar.appendChild(seg);
+  });
+  return h('div', {},
+    bar,
+    h('div', { class: 'legend' }, ...rows.map((r, i) => h('span', { class: 'legend-item' },
+      h('i', { style: `background:var(--series-${(i % 6) + 1})` }),
+      `${r.label} `, h('b', {}, num(r.value))))));
+}
 
 /** A labelled form control with an optional hint underneath. */
 const field = (label, control, hint) =>

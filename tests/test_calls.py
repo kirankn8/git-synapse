@@ -282,3 +282,22 @@ def test_an_unpublished_inventory_is_empty_rather_than_an_error(db):
 
     execute("DELETE FROM meta WHERE key = 'watermark:mcp_tools'")
     assert calls.known_mcp_tools() == []
+
+
+def test_the_timeline_returns_every_hour_including_the_empty_ones(db):
+    """A chart drawn only from hours that had traffic closes the gaps silently
+    and turns an outage into a smooth line."""
+    buckets = calls.timeline(hours=6)
+    assert len(buckets) == 6
+    hours = [b["hour"] for b in buckets]
+    assert hours == sorted(hours), "buckets must be in time order"
+    for b in buckets:
+        assert b["calls"] == b["mcp"] + b["http"]
+        assert b["errors"] <= b["calls"]
+
+
+def test_the_timeline_window_is_clamped(db):
+    """A hand-typed hours=100000 would ask Postgres to generate a series with
+    four million rows in it."""
+    assert len(calls.timeline(hours=10_000)) == 168
+    assert len(calls.timeline(hours=0)) == 1

@@ -285,6 +285,34 @@ def by_name(surface: str | None = None, hours: int = 24, limit: int = 50,
     return rows + idle
 
 
+def timeline(hours: int = 24) -> list[dict]:
+    """Calls per hour, so the shape of the traffic is visible.
+
+    Every bucket in the window is returned, including the empty ones: a chart
+    drawn only from hours that had traffic silently closes the gaps and turns
+    an outage into a smooth line.
+    """
+    return query(
+        """
+        WITH buckets AS (
+            SELECT generate_series(
+                date_trunc('hour', now()) - make_interval(hours => %(hours)s - 1),
+                date_trunc('hour', now()),
+                interval '1 hour') AS hour
+        )
+        SELECT b.hour,
+               count(c.id)                                   AS calls,
+               count(c.id) FILTER (WHERE c.surface = 'mcp')  AS mcp,
+               count(c.id) FILTER (WHERE c.surface = 'http') AS http,
+               count(c.id) FILTER (WHERE c.status = 'error') AS errors
+        FROM buckets b
+        LEFT JOIN call_log c ON date_trunc('hour', c.at) = b.hour
+        GROUP BY b.hour ORDER BY b.hour
+        """,
+        {"hours": max(1, min(hours, 168))},
+    )
+
+
 def recent(
     surface: str | None = None,
     name: str | None = None,
