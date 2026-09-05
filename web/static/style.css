@@ -6,6 +6,13 @@
    monospace face so they align and diff visually.
    ========================================================================== */
 
+/* `hidden` is set from script to take an element out of the page. The browser's
+   own rule for it is display:none, which any author `display` on the same
+   element silently beats -- .measure-bar is display:flex, so hiding it did
+   nothing visible while every check on the property passed. Stated once, here,
+   so no component has to remember. */
+[hidden] { display: none !important; }
+
 :root {
   color-scheme: dark;
 

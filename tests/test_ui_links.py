@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 APP = Path(__file__).resolve().parents[1] / "web" / "static" / "app.js"
+CSS = Path(__file__).resolve().parents[1] / "web" / "static" / "style.css"
 SHELL = Path(__file__).resolve().parents[1] / "web" / "index.html"
 MAIN = Path(__file__).resolve().parents[1] / "src" / "git_synapse" / "api" / "main.py"
 
@@ -97,3 +98,15 @@ def test_the_server_serves_every_top_level_route_the_client_claims():
     else:
         raise AssertionError("SPA_ROUTES no longer exists in api/main.py")
     assert claimed <= served, f"the SPA routes {sorted(claimed - served)}, which 404 on reload"
+
+
+def test_script_hidden_elements_are_really_hidden():
+    """`el.hidden = true` only sets an attribute. The browser's [hidden] rule is
+    display:none, which any author `display` on the same element beats -- the
+    measure bar is display:flex, so hiding it changed nothing on screen while
+    every assertion on the property passed. One global rule settles it."""
+    assert re.search(r"\[hidden\]\s*\{[^}]*display:\s*none\s*!important", CSS.read_text()), \
+        "style.css must force [hidden] to display:none, or scripted hiding is a no-op"
+
+    hidden_from_script = re.findall(r"(\w+)\.hidden\s*=", APP.read_text())
+    assert hidden_from_script, "nothing hides itself any more; drop this test with the rule"
