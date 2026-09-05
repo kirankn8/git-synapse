@@ -1236,6 +1236,19 @@ def _publish_tool_inventory() -> None:
         log.warning("could not publish the tool inventory", exc_info=True)
 
 
+def _serve(app, host: str, port: int) -> None:
+    """Run the ASGI app. Separated so `main` can be tested without one starting.
+
+    The http path used to go through `server.run`, which every entrypoint test
+    patched. Calling uvicorn inline instead left those tests waiting on a real
+    server that never returns -- a hang, not a failure, which is far harder to
+    read: the suite simply stopped at 45%.
+    """
+    import uvicorn
+
+    uvicorn.run(app, host=host, port=port, log_level="info")
+
+
 def _guarded_app(host: str):
     """The MCP app, behind a token when this deployment asks for one.
 
@@ -1307,11 +1320,8 @@ def main(argv: list[str] | None = None) -> int:
         log.info("git-synapse mcp server (sse) on %s:%s", args.host, args.port)
         server.run(transport="sse", host=args.host, port=args.port)
     else:
-        import uvicorn
-
         log.info("git-synapse mcp server (streamable http) on %s:%s/mcp", args.host, args.port)
-        uvicorn.run(_guarded_app(args.host), host=args.host, port=args.port,
-                    log_level="info")
+        _serve(_guarded_app(args.host), args.host, args.port)
     return 0
 
 

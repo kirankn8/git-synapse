@@ -2879,15 +2879,37 @@ function gate({ setup = false } = {}) {
 
   setTimeout(() => email.input.focus(), 40);
 
+  // Two halves: what this is, and the way in. The left side is the only place
+  // in the app with room to say what the product does, and a person signing in
+  // to someone else's deployment has usually never been told.
   return h('div', { class: 'gate' },
-    h('div', { class: 'gate-card' },
-      h('div', { class: 'gate-brand' }, brandMark(44),
-        h('div', {},
-          h('div', { class: 'gate-title' }, 'Git Synapse'),
+    h('div', { class: 'gate-panel' },
+      h('div', { class: 'gate-aside' },
+        h('div', { class: 'gate-aside-inner' },
+          brandMark(40),
+          h('h1', { class: 'gate-h1' }, 'Git Synapse'),
+          h('p', { class: 'gate-lede' },
+            'If I change this file, what else has to change? Answered from the '
+            + 'history that is already in your repositories.'),
+          h('ul', { class: 'gate-points' },
+            h('li', {}, h('b', {}, 'Coupling'), ' — files that move together, ranked by 29 measures'),
+            h('li', {}, h('b', {}, 'Across repositories'), ' — every edge backed by a manifest or a bump'),
+            h('li', {}, h('b', {}, 'Measured'), ' — every prediction scored against the commits before it')),
+          // Facts about the product, not about this corpus: the figures for
+          // this deployment need a session to read, and a hard-coded "163
+          // repositories" would be a false claim on anyone else's.
+          h('div', { class: 'gate-figure' },
+            h('span', {}, '29'), ' association measures · ',
+            h('span', {}, 'prequential'), ' backtesting · ',
+            h('span', {}, 'no'), ' inference without evidence'))),
+
+      h('div', { class: 'gate-main' },
+        h('div', { class: 'gate-head' },
+          h('h2', { class: 'gate-title' }, setup ? 'Create the first account' : 'Sign in'),
           h('div', { class: 'gate-sub' }, setup
-            ? 'Nobody has an account yet. Create the first one.'
-            : 'Sign in to read this deployment.'))),
-      form));
+            ? 'Nobody has an account on this deployment yet. Yours will be the administrator.'
+            : 'This deployment is private to the people who have been added to it.')),
+        form)));
 }
 
 /** The signed-in user, or null. Read once at boot and after every change. */

@@ -196,27 +196,36 @@ def test_the_mcp_entrypoint_defaults_to_stdio(monkeypatch):
 
 
 def test_the_mcp_entrypoint_accepts_http_with_host_and_port(monkeypatch):
+    """http does not go through `server.run`: the app is wrapped in a token
+    check first, which means serving it ourselves. Patch what actually serves,
+    or the test starts a real server and the suite hangs rather than fails."""
     from git_synapse.mcp import server
 
-    started = {}
-    monkeypatch.setattr(server.server, "run", lambda **kw: started.update(kw) or 0)
+    served = {}
+    monkeypatch.setattr(server, "_serve",
+                        lambda app, host, port: served.update(app=app, host=host, port=port))
 
     assert server.main(["--transport", "http", "--host", "0.0.0.0", "--port", "9999"]) == 0
-    # The MCP SDK's name for it, not the flag's.
-    assert started.get("transport") == "streamable-http"
-    assert started.get("port") == 9999
+    assert served["host"] == "0.0.0.0" and served["port"] == 9999
+    assert served["app"] is not None, "the guarded app, not the bare one"
 
 
 def test_the_mcp_transport_can_come_from_the_environment(monkeypatch):
-    """The container sets MCP_TRANSPORT rather than passing flags."""
+    """The container sets MCP_TRANSPORT rather than passing flags.
+
+    http serves its own wrapped app, so `_serve` is what to patch here. With
+    only `server.run` patched this reached the real uvicorn and the suite hung
+    at 46% -- no failure, no output, just a process waiting to be killed.
+    """
     from git_synapse.mcp import server
 
-    started = {}
-    monkeypatch.setattr(server.server, "run", lambda **kw: started.update(kw) or 0)
+    served = {}
+    monkeypatch.setattr(server, "_serve",
+                        lambda app, host, port: served.update(app=app, host=host, port=port))
     monkeypatch.setenv("MCP_TRANSPORT", "http")
 
-    server.main([])
-    assert started.get("transport") == "streamable-http"
+    assert server.main([]) == 0
+    assert served["app"] is not None and served["port"] == 8081
 
 
 # ------------------------------------------------------------------ asymmetry
