@@ -840,6 +840,14 @@ no build step, and a bar chart and a bar list are a few dozen lines each.
 Eight distributions sit under *Shape of the data*, each stating its own answer
 rather than leaving it to be read off a picture:
 
+Bars use a log axis where the distribution is a power law — half the coupling
+pairs sit in the first bucket, so on a linear axis one bar filled the card and
+the rest were two pixels tall and indistinguishable. The axis says `log` on the
+chart: read as linear it makes the tail look far larger than it is. The columns
+are HTML rather than SVG, because the SVG version stretched a 100-unit viewBox
+to the card width with `preserveAspectRatio="none"`, which scales text
+non-uniformly and drew every axis label horizontally squashed.
+
 | Chart | What it says on this corpus |
 |---|---|
 | Commits per year | 21 years of history, still moving |
@@ -945,6 +953,18 @@ script, and horizontal overflow. The page rhythm is 16px, with two deliberate
 exceptions — a breadcrumb sits 12px above its title, and a section title sits
 24px below the previous block but 10px above its own card, because a heading
 belongs to what follows it.
+
+It also checks that **every card leads somewhere**. A summary always has a
+fuller view behind it, and a card giving no sign of one is a dead end the
+reader has to guess past. Cards carry an optional target, marked with a quiet
+arrow; a chart bar that maps to a filter is its own link — clicking *Go* under
+Languages opens the Go repositories; and a table row is only styled as a link
+when it actually navigates, which it was not before: every row carried a
+pointer cursor whether or not `onRow` was given, so a table that led nowhere
+looked exactly like one that did. Two cards are static by design — the GitHub
+token panel, which explains why it is not editable here, and the fixed-settings
+table — and the check names them, so the exception is on the record rather than
+a gap it tolerates.
 
 It also checks that **rows are full**. `auto-fit` picks as many columns as fit,
 which is right for content of unknown length and wrong for a fixed set: it

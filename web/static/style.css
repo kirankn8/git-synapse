@@ -421,7 +421,9 @@ table.data td {
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
 }
-table.data tbody tr { cursor: pointer; }
+/* Only rows that lead somewhere look like it. A pointer cursor on a row
+   that does nothing is a promise the table does not keep. */
+table.data tbody tr.is-link { cursor: pointer; }
 table.data tbody tr:hover { background: var(--bg-hover); }
 table.data tbody tr:last-child td { border-bottom: none; }
 table.data td.num, table.data th.num { text-align: right; font-family: var(--mono); }
@@ -828,10 +830,28 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 }
 
 .chart-wrap { width: 100%; }
-.chart { width: 100%; display: block; overflow: visible; }
-.chart rect { transition: opacity .12s ease; }
-.chart rect:hover { opacity: .72; }
-.chart-tick { font-size: 4px; fill: var(--text-faint); font-family: var(--mono); }
+
+/* Columns as elements: text is laid out by the browser at its natural size,
+   rather than scaled with the drawing and coming out squashed. */
+.cbars { display: flex; align-items: flex-end; gap: 3px; }
+.cbar {
+  flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
+  align-items: center; gap: 3px; cursor: default;
+}
+.cbar-value {
+  font-size: 9.5px; color: var(--text-faint); font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; max-width: 100%;
+}
+.cbar-track {
+  width: 100%; height: var(--bar-h, 74px);
+  display: flex; align-items: flex-end;
+}
+.cbar-fill { width: 100%; border-radius: 2px 2px 0 0; transition: opacity .12s ease; }
+.cbar:hover .cbar-fill { opacity: .72; }
+.cbar-label {
+  font-size: 9.5px; color: var(--text-faint); font-family: var(--mono);
+  white-space: nowrap; overflow: hidden; text-overflow: clip; max-width: 100%;
+}
 
 .stack {
   display: flex; height: 10px; border-radius: 5px; overflow: hidden;
@@ -892,3 +912,29 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
   height: 116px;
   display: flex; flex-direction: column; justify-content: center;
 }
+
+/* The peak and the axis type, on the chart. A log axis that does not say so
+   reads as linear, and the tail then looks far larger than it is. */
+.chart-scale {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 10.5px; color: var(--text-faint);
+  font-variant-numeric: tabular-nums; margin-bottom: 3px;
+}
+.chart-scale .badge { font-size: 9.5px; padding: 0 5px; }
+
+/* Anything that leads somewhere says so: the cursor, a lift on hover, and on a
+   card a quiet arrow in the corner. A summary with a fuller view behind it that
+   gives no sign of it is a dead end the reader has to guess past. */
+.is-link { cursor: pointer; }
+.card.is-link:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+.card.is-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.card-go { color: var(--text-faint); font-size: 15px; line-height: 1; padding: 0 2px; }
+.card.is-link:hover .card-go { color: var(--accent); }
+.stat.is-link:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+.cbar.is-link:hover .cbar-fill,
+.hbar.is-link:hover .hbar-fill { opacity: .7; }
+.hbar.is-link:hover .hbar-label { color: var(--text); }
+
+/* A chain hop opens the repository it names, so it has to look like it does. */
+.chain .node.is-link { cursor: pointer; }
+.chain .node.is-link:hover { color: var(--accent); border-color: var(--accent); }
