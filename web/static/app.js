@@ -365,7 +365,7 @@ async function route() {
     document.body.classList.add('gated');
     settled();
     progress(false);
-    view.replaceChildren(gate({ setup: state.needsSetup }));
+    view.replaceChildren(gate({ setup: state.needsSetup, minted: state.setupTokenMinted }));
     return;
   }
   document.body.classList.remove('gated');
@@ -553,7 +553,12 @@ export const card = (title, body, sub, headExtra, to) =>
       role: to ? 'link' : null,
       tabindex: to ? '0' : null,
       onclick: to
-        ? (e) => { if (!e.target.closest('a,button,tr,.cbar,.hbar')) go(to); }
+        ? (e) => {
+            // The card is itself `.is-link`, so the match has to be something
+            // strictly inside it.
+            const inner = e.target.closest('a,button,.is-link');
+            if (!inner || inner === e.currentTarget) go(to);
+          }
         : null,
       onkeydown: to ? (e) => { if (e.key === 'Enter') go(to); } : null,
     },
@@ -845,7 +850,20 @@ const SHAPE = {
  * column, a half-width panel 31 to 55, and the full view 66. Guessing it from
  * the row count alone drew 21 numbers into 31px and clipped every one.
  */
-function shapeChart(spec, rows, { small = true, values } = {}) {
+/**
+ * One distribution, drawn.
+ *
+ * `drill` decides who owns a click on a bar. Inside a card that opens the full
+ * distribution the answer is the card: a preview is a picture of a whole, and
+ * clicking part of it should show the whole rather than jump sideways to a
+ * filtered repository list. The languages card sat on Overview with its arrow
+ * going to the distribution and its bars going to `/repos?lang=…`, so the same
+ * card had two destinations depending on where in it you clicked.
+ *
+ * At `/insights/shape/:metric` the whole is already on screen, so there a bar
+ * drills into what it counts.
+ */
+function shapeChart(spec, rows, { small = true, values, drill = false } = {}) {
   // Five horizontal rows is what a card holds: each is about 21px and the body
   // is 124px less its padding. Six were drawn and the last was sliced in half
   // by the card's own clipping, which is worse than aggregating it away. The
@@ -858,9 +876,10 @@ function shapeChart(spec, rows, { small = true, values } = {}) {
         to: rows[0] && rows[0].to,
       }]
     : rows;
+  const bars = drill ? shown : shown.map(({ to, ...r }) => r);
   return spec.kind === 'hbar'
-    ? hbars(shown, { suffix: '' })
-    : barChart(shown, { label: spec.unit, scale: spec.scale || 'linear',
+    ? hbars(bars, { suffix: '' })
+    : barChart(bars, { label: spec.unit, scale: spec.scale || 'linear',
                         height: small ? 66 : 190,
                         values: values === undefined ? (small ? null : true) : values });
 }
@@ -1911,7 +1930,7 @@ on('/insights/shape/:metric', async ({ metric }) => {
   // and the diagram they came for.
 
   wrap.append(card(spec.title,
-    h('div', { class: 'card-body' }, shapeChart(spec, rows, { small: false })),
+    h('div', { class: 'card-body' }, shapeChart(spec, rows, { small: false, drill: true })),
     spec.means, null, spec.more || '/insights/shape'));
 
   // Every bucket, with its share -- the part a card has no room for.
@@ -2836,7 +2855,7 @@ function gateField(label, attrs, hint) {
  * One component for both because they differ by two fields and a verb, and two
  * near-identical forms drift.
  */
-function gate({ setup = false } = {}) {
+function gate({ setup = false, minted = true } = {}) {
   const email = gateField('Email', { type: 'email', autocomplete: 'username',
                                      placeholder: 'you@example.com', required: true });
   const name = gateField('Name', { autocomplete: 'name', placeholder: 'Your name' });
@@ -2844,13 +2863,21 @@ function gate({ setup = false } = {}) {
     { type: 'password', autocomplete: setup ? 'new-password' : 'current-password',
       placeholder: setup ? `at least ${12} characters` : '', required: true },
     setup ? 'You will be the administrator: only you can add other people.' : null);
+  // Nothing is signed in yet, so this screen is by necessity reachable by
+  // anyone who reaches the port. The token is what makes reaching it first
+  // insufficient.
+  const token = gateField('Setup token',
+    { autocomplete: 'off', spellcheck: 'false', class: 'input mono',
+      placeholder: 'paste it here', required: true },
+    minted ? 'Printed in the API log when it started: docker compose logs api'
+           : 'The ADMIN_SETUP_TOKEN this deployment was configured with.');
 
   const error = h('div', { class: 'gate-error', hidden: true });
   const submit = h('button', { class: 'btn primary gate-submit', type: 'submit' },
     setup ? 'Create administrator' : 'Sign in');
 
   const form = h('form', { class: 'gate-form' },
-    email, setup ? name : null, password, error, submit);
+    email, setup ? name : null, password, setup ? token : null, error, submit);
 
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -2859,7 +2886,8 @@ function gate({ setup = false } = {}) {
     submit.textContent = setup ? 'Creating…' : 'Signing in…';
     try {
       const body = setup
-        ? { email: email.input.value, name: name.input.value, password: password.input.value }
+        ? { email: email.input.value, name: name.input.value,
+            password: password.input.value, setup_token: token.input.value.trim() }
         : { email: email.input.value, password: password.input.value };
       await apiSend('POST', setup ? '/api/auth/setup' : '/api/auth/login', body);
       // Re-read rather than trusting the reply: this is the same call every
@@ -2920,6 +2948,7 @@ async function loadMe() {
       .then((r) => r.json());
     state.me = me.user;
     state.needsSetup = me.needs_setup;
+    state.setupTokenMinted = me.setup_token_minted !== false;
     state.authRequired = me.auth_required;
   } catch {
     // The API is unreachable. Let the view report that rather than showing a
