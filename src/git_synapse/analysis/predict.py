@@ -4,15 +4,15 @@ Built entirely from what repositories **declare** about each other. A manifest
 naming a dependency is dated, directional and provable; it needs no statistical
 argument and cannot produce an edge between codebases that share no code.
 
-This used to rank an ensemble of 29 measures over a time-binned, directed
-co-change table. That table was measured and found unsound: two of the public
-repositories in the test corpus, sharing no code at all, scored G2 = 570 against
-each other, because two busy repositories occupy the same time bins whatever
-they contain. Correlation over calendar time cannot tell propagation from a
-shared release era, so it is gone.
+No statistical ensemble ranks these edges, because the obvious one does not
+work: over a time-binned, directed co-change table, two of the public
+repositories in the test corpus -- sharing no code at all -- score G2 = 570
+against each other, since two busy repositories occupy the same time bins
+whatever they contain. Correlation over calendar time cannot tell propagation
+from a shared release era.
 
-What ranks an edge now
-----------------------
+What ranks an edge
+------------------
 Only facts, in order of weight:
 
 * **declared** -- the consumer's manifest names the dependency at HEAD.
