@@ -4,7 +4,7 @@
 --
 -- The atomic fact in this system is a single (commit, file) row in
 -- `commit_file`. Every number the product reports -- marginals, co-occurrence
--- counts, all 29 association measures, directory rollups, recency-weighted
+-- counts, all 31 association measures, directory rollups, recency-weighted
 -- variants -- is derivable from that table plus `commit`. The aggregate tables
 -- below are materialised caches: they exist for query latency and can be
 -- dropped and rebuilt at any time without data loss.
@@ -353,7 +353,7 @@ CREATE INDEX IF NOT EXISTS file_pair_b_idx      ON file_pair (file_b_id);
 CREATE INDEX IF NOT EXISTS file_pair_support_idx ON file_pair (repo_id, n_ab DESC);
 
 -- ===========================================================================
--- Derived aggregate: the 29 measures, materialised.
+-- Derived aggregate: the 31 measures, materialised.
 --
 -- Pure function of (n_ab, n_a, n_b, N). Rebuildable from file_pair at any time
 -- via `git-synapse score`. Materialised only so the UI can sort millions of pairs by

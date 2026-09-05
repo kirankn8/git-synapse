@@ -1,4 +1,4 @@
-"""The 29 association measures, each a pure function of a 2x2 contingency table.
+"""The 31 association measures, each a pure function of a 2x2 contingency table.
 
 Design notes
 ------------

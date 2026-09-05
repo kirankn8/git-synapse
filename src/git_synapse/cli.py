@@ -143,7 +143,7 @@ def aggregate(
 
 @app.command("score")
 def score(repo_id: int = typer.Option(0, "--repo-id", help="0 means every repo.")) -> None:
-    """Recompute the 29 measures from the existing pair counts.
+    """Recompute the 31 measures from the existing pair counts.
 
     Cheap, and the command to run after adding a new measure -- no re-clone or
     re-parse is needed because the contingency counts are already stored.

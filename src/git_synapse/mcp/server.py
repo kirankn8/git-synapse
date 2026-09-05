@@ -79,7 +79,7 @@ REPORT THE EVIDENCE, not just the conclusion: cite support counts alongside \
 percentages. If these tools are unavailable, say so -- a fabricated coupling \
 claim is worse than none.
 
-Scores come from 29 association measures over co-occurrence. NPMI is the default: \
+Scores come from 31 association measures over co-occurrence. NPMI is the default: \
 bounded to [-1, 1] and resistant to the rare-item bias that plagues raw PMI. Ask \
 for `log_likelihood_ratio` when you need statistical confidence, or \
 `confidence_ab` for "will I have to touch it". `list_measures` returns all of \
@@ -434,7 +434,7 @@ def coupled_files(
     title="Explain one coupling relationship",
     description=(
         "Return the full statistical case for a single file pair: the 2x2 "
-        "contingency table, all 29 association measures, and the actual commits "
+        "contingency table, all 31 association measures, and the actual commits "
         "in which both files changed."
     ),
 )
@@ -1177,7 +1177,7 @@ def report_gap(
     name="list_measures",
     title="List available association measures",
     description=(
-        "Describe the 29 association measures, including when each is appropriate "
+        "Describe the 31 association measures, including when each is appropriate "
         "and which ones are biased toward rarely-changed files."
     ),
 )
