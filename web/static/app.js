@@ -3082,11 +3082,11 @@ on('/insights/impact', async (_args, params) => {
       ' in a manifest, and is stronger still when an actual version ',
       h('strong', {}, 'bump'),
       ' was observed and resolved to the upstream commit it consumed. ',
-      'Grouping commits by ticket key or by author session was tried and removed: it scored ',
-      'AUC 0.80 while managing 0.63 on which way the arrow points, and a baseline that ',
-      'ignored coupling entirely matched it — the measure was ranking “both repositories ',
-      'are busy”. Restricting to declared dependencies lifts the base rate from 0.23% to 82% ',
-      'before any measure is evaluated.'),
+      'Inferring it from co-change instead — grouping commits by ticket key, or by ',
+      'author session — reaches AUC 0.80 overall but only 0.63 on which way the arrow ',
+      'points, and a baseline ignoring coupling entirely matches that: it ranks ',
+      '“both repositories are busy”. Restricting to declared dependencies lifts the ',
+      'base rate from 0.23% to 82% before any measure is evaluated.'),
   );
 
   const dirBtn = (key, label, title) =>
@@ -3102,13 +3102,15 @@ on('/insights/impact', async (_args, params) => {
   );
 
   if (!repoId) {
+    // There is no org-wide ranking here on purpose: an edge is a fact about
+    // one pair of repositories, read from a manifest or a bump, and averaging
+    // those into a league table says nothing a reader can act on.
     wrap.append(card('Pick a repository',
       h('div', { class: 'empty' },
-        'Cross-repository impact is per repository: choose one in Scope above to see what '
-        + 'it reaches and what reaches it. The org-wide table that used to sit here '
-        + 'ranked repositories by co-change across change sets, which is not how '
-        + 'this graph is built any more -- it is read from declared dependencies '
-        + 'and observed version bumps.')));
+        h('strong', {}, 'Choose a repository in Scope above.'),
+        'Impact is a fact about one repository: what its changes reach, and what '
+        + 'reaches it. Every edge is read from a dependency declared in a manifest '
+        + 'or from a version bump that was actually observed.')));
     return wrap;
   }
 
