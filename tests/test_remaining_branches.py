@@ -6,21 +6,21 @@ that anticipation is untested.
 """
 from __future__ import annotations
 
+from datetime import UTC
+
 import pytest
-
-
-
 
 # ------------------------------------------------------------- aggregate
 
 def test_directory_rollups_handle_a_repo_with_only_root_files(scratch_db):
     """Depth-zero files have no parent directory to roll into."""
+    from datetime import datetime
+
     from git_synapse.analysis.aggregate import rebuild_repo
     from git_synapse.db.engine import connection
+    from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.parser import FileChange, ParsedCommit
     from git_synapse.ingest.store import load_commits, upsert_repo
-    from git_synapse.ingest.github import RepoRecord
-    from datetime import datetime, timezone
 
     rec = RepoRecord(github_id=990101, owner="t", name="rootonly",
                      full_name="t/rootonly", clone_url="", default_branch="main")
@@ -29,9 +29,9 @@ def test_directory_rollups_handle_a_repo_with_only_root_files(scratch_db):
         load_commits(rid, [
             ParsedCommit(
                 sha="a" * 40, parents=[], author_name="A", author_email="a@e",
-                authored_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                authored_at=datetime(2026, 1, 1, tzinfo=UTC),
                 committer_name="A", committer_email="a@e",
-                committed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                committed_at=datetime(2026, 1, 1, tzinfo=UTC),
                 subject="root only", body="",
                 files=[FileChange(path="README.md", change_type="A"),
                        FileChange(path="LICENSE", change_type="A")],
@@ -48,17 +48,18 @@ def test_directory_rollups_handle_a_repo_with_only_root_files(scratch_db):
 def test_scoring_a_repo_with_a_single_file_produces_no_pairs(scratch_db):
     """A pair needs two files; one file must yield nothing rather than a
     degenerate self-pair."""
+    from datetime import datetime, timedelta
+
     from git_synapse.analysis.aggregate import rebuild_repo
     from git_synapse.analysis.score import score_repo
     from git_synapse.db.engine import connection, query_one
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.parser import FileChange, ParsedCommit
     from git_synapse.ingest.store import load_commits, upsert_repo
-    from datetime import datetime, timedelta, timezone
 
     rec = RepoRecord(github_id=990102, owner="t", name="onefile",
                      full_name="t/onefile", clone_url="", default_branch="main")
-    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    base = datetime(2026, 1, 1, tzinfo=UTC)
     with connection() as conn:
         rid = upsert_repo(rec, conn)
         load_commits(rid, [
@@ -142,7 +143,7 @@ def test_split_path_on_pathological_input():
     from git_synapse.ingest.parser import split_path
 
     for path in ("", "/", "//", "a//b", "   ", "."):
-        d, base, ext, depth = split_path(path)
+        d, base, _ext, depth = split_path(path)
         assert isinstance(d, str) and isinstance(base, str)
         assert depth >= 0
 

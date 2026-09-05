@@ -97,7 +97,7 @@ def test_an_http_error_raises_rather_than_returning_a_partial_list(monkeypatch):
             return httpx.Response(200, json=[_repo_payload(i) for i in range(100)])
         return httpx.Response(500, json={"message": "boom"})
 
-    with _client(handler) as c, pytest.raises(Exception):
+    with _client(handler) as c, pytest.raises(RuntimeError, match="failed after"):
         c.list_org_repos("acme")
 
 
@@ -147,11 +147,6 @@ def test_an_explicit_allowlist_overrides_every_other_filter():
     assert [r.name for r in select_repos(records, cfg)] == ["repo2"]
 
 
-def test_a_disabled_repository_is_never_selected():
-    records = [RepoRecord.from_api(_repo_payload(1, disabled=True))]
-    assert select_repos(records, GitHubConfig(include_archived=True, include_forks=True)) == []
-
-
 # ------------------------------------------------------- retry and limits
 
 def test_a_transient_5xx_is_retried_and_then_succeeds(monkeypatch):
@@ -199,7 +194,7 @@ def test_a_client_error_that_is_not_a_rate_limit_is_not_retried(monkeypatch):
         attempts["n"] += 1
         return httpx.Response(404, json={"message": "Not Found"})
 
-    with _client(handler) as c, pytest.raises(Exception):
+    with _client(handler) as c, pytest.raises(httpx.HTTPStatusError, match="404"):
         c.list_org_repos("acme")
     assert attempts["n"] == 1, f"a 404 was retried {attempts['n']} times"
 
@@ -212,7 +207,7 @@ def test_a_connection_error_is_retried_then_surfaced(monkeypatch):
         attempts["n"] += 1
         raise httpx.ConnectError("no route to host")
 
-    with _client(handler) as c, pytest.raises(Exception):
+    with _client(handler) as c, pytest.raises(RuntimeError, match="failed after"):
         c.list_org_repos("acme")
     assert attempts["n"] > 1, "a connection error must be retried before giving up"
 
@@ -276,8 +271,8 @@ def test_skip_repos_matches_a_bare_name_or_a_full_name():
 def test_a_disabled_repository_is_never_selected():
     """A disabled repository cannot be cloned at all, so selecting it turns one
     upstream state into a run-long sequence of failures."""
-    from git_synapse.ingest.github import RepoRecord, select_repos
     from git_synapse.config import GitHubConfig
+    from git_synapse.ingest.github import RepoRecord, select_repos
 
     cfg = GitHubConfig(org="acme")
     live = RepoRecord(github_id=1, owner="acme", name="live", full_name="acme/live")
@@ -290,8 +285,8 @@ def test_a_disabled_repository_is_never_selected():
 def test_a_private_repository_is_excluded_unless_asked_for():
     """Cloning it needs a credential, so selecting it when private access was
     not requested turns one setting into a clone failure."""
-    from git_synapse.ingest.github import RepoRecord, select_repos
     from git_synapse.config import GitHubConfig
+    from git_synapse.ingest.github import RepoRecord, select_repos
 
     public = RepoRecord(github_id=1, owner="acme", name="open", full_name="acme/open")
     secret = RepoRecord(github_id=2, owner="acme", name="shut", full_name="acme/shut",

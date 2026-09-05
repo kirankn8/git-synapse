@@ -11,7 +11,6 @@ import subprocess
 
 import pytest
 
-
 # ------------------------------------------------------------- aggregate
 
 def test_aggregating_an_unknown_repo_is_a_no_op(scratch_db):

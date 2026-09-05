@@ -10,9 +10,9 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip("typer")
-from typer.testing import CliRunner  # noqa: E402
+from typer.testing import CliRunner
 
-from git_synapse.cli import app  # noqa: E402
+from git_synapse.cli import app
 
 runner = CliRunner()
 
@@ -369,7 +369,7 @@ def test_ingest_discovers_when_nothing_is_known_yet(scratch_db, monkeypatch):
     from git_synapse.ingest import pipeline
 
     discovered = []
-    monkeypatch.setattr(pipeline, "load_repo_records", lambda: [])
+    monkeypatch.setattr(pipeline, "load_repo_records", list)
     monkeypatch.setattr(pipeline, "discover", lambda **kw: discovered.append(1) or [])
 
     class _R:
@@ -429,7 +429,7 @@ def _any_repo_name():
 
 
 def test_aggregate_says_so_when_nothing_is_stale(monkeypatch):
-    monkeypatch.setattr("git_synapse.cli.repos_needing_aggregation", lambda: [])
+    monkeypatch.setattr("git_synapse.cli.repos_needing_aggregation", list)
     r = runner.invoke(app, ["aggregate"])
     assert r.exit_code == 0
     assert "nothing to aggregate" in r.stdout
@@ -766,7 +766,7 @@ def test_status_renders_recent_runs(db, monkeypatch):
 
     rows = [
         {"id": 2, "kind": "full", "trigger": "manual", "status": "success",
-         "started_at": dt.datetime(2026, 1, 2, 3, 4), "duration_s": 12.0,
+         "started_at": dt.datetime(2026, 1, 2, 3, 4, tzinfo=dt.UTC), "duration_s": 12.0,
          "commits_added": 7},
         {"id": 1, "kind": "fast", "trigger": "schedule", "status": "running",
          "started_at": None, "duration_s": None, "commits_added": 0},

@@ -17,8 +17,8 @@ import logging
 from typing import Any
 
 from git_synapse.config import get_config
-from git_synapse.db.engine import query, query_one, scalar
-from git_synapse.stats.registry import BY_KEY, DEFAULT_MEASURE, MEASURES, resolve
+from git_synapse.db.engine import query, query_one
+from git_synapse.stats.registry import DEFAULT_MEASURE, MEASURES, resolve
 
 log = logging.getLogger(__name__)
 
@@ -405,7 +405,7 @@ def pair_detail(file_a_id: int, file_b_id: int) -> dict | None:
     """Everything known about one pair: contingency cells and all measures."""
     lo, hi = sorted((file_a_id, file_b_id))
     row = query_one(
-        f"""
+        """
         SELECT m.*, fa.path AS path_a, fb.path AS path_b, r.full_name AS repo,
                fp.first_co_change, fp.last_co_change, fp.distinct_authors, fp.w_ab
         FROM file_pair_metric m
@@ -918,15 +918,15 @@ def module_context(repo_id: int, path: str) -> dict:
     # file under gateway/internal/app belongs to `gateway` rather than the root.
     # lstrip("./") strips a *character set*, so ".github/x" became "github/x".
     normalised = path.strip()
-    while normalised.startswith("./") or normalised.startswith("/"):
+    while normalised.startswith(("./", "/")):
         normalised = normalised[2:] if normalised.startswith("./") else normalised[1:]
     owning = ""
     for module in modules:
         if not module:
             continue
-        if normalised == module or normalised.startswith(module + "/"):
-            if len(module) > len(owning):
-                owning = module
+        if ((normalised == module or normalised.startswith(module + "/"))
+                and len(module) > len(owning)):
+            owning = module
 
     return {
         "owning_module": owning or "",

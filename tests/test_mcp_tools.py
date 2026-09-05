@@ -9,7 +9,6 @@ import pytest
 
 from git_synapse.mcp import server
 
-
 # ------------------------------------------------------------- resolution
 
 @pytest.mark.parametrize("name", ["", "   ", "definitely-not-a-repo", "hubbl", "api"])
@@ -480,7 +479,7 @@ def _coupled_on_any_file(monkeypatch):
 
 def test_a_mock_file_is_labelled_generated_not_coupled_behaviour():
     """A mock changes with the interface it mocks by construction."""
-    labels, informative = server._classify_partner("pkg/mock_client.go",
+    labels, _informative = server._classify_partner("pkg/mock_client.go",
                                                    "pkg/client.go", 40)
     assert "generated" in labels
 
@@ -969,10 +968,10 @@ def test_the_mcp_gate_lets_a_token_through_and_turns_others_away(monkeypatch):
         }
         try:
             await app(scope, receive, send)
-        except Exception:
-            # Past the gate, the real MCP app wants a session manager this test
-            # has not started. Reaching that is itself the evidence that the
-            # request was let through.
+        except Exception:  # noqa: BLE001 - any failure here means "past the gate"
+            # The real MCP app wants a session manager this test has not
+            # started. Whatever it raises, reaching it is the evidence that the
+            # request was let through rather than refused.
             return None
         started = [m["status"] for m in sent if m["type"] == "http.response.start"]
         return started[0] if started else None

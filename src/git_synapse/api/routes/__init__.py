@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from git_synapse import auth
-from git_synapse.analysis import calls, mining, predict
+from git_synapse.analysis import calls, mining, predict, settings
 from git_synapse.analysis import query as q
-from git_synapse.analysis import settings
 from git_synapse.config import get_config, live_cron
 from git_synapse.db.engine import query_one, scalar
 from git_synapse.ingest import accounts, pipeline
@@ -360,7 +358,7 @@ def create_user(body: NewUser, request: Request) -> dict:
 
 @router.patch("/users/{user_id}", tags=["auth"])
 def patch_user(user_id: int, body: UserPatch, request: Request) -> dict:
-    me = _require(request, admin=True)
+    _require(request, admin=True)
     if auth.get_user(user_id) is None:
         raise HTTPException(404, f"user {user_id} not found")
     # Demoting or deactivating the last administrator leaves a deployment
@@ -731,7 +729,6 @@ def coupled_dirs(
     rank partners but cannot say whose directory this is, so a reader arriving
     from anywhere has no way back up to the repository or its account.
     """
-    from git_synapse.db.engine import query_one
 
     row = query_one(
         """
@@ -837,7 +834,7 @@ def impact_graph(
     from git_synapse.db.engine import query as raw
 
     edges = raw(
-        f"""
+        """
         SELECT i.source_repo_id AS source, i.target_repo_id AS target,
                i.score, i.is_declared, i.has_bump_history, i.bump_count,
                i.median_adoption_days

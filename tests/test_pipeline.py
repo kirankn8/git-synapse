@@ -19,7 +19,6 @@ from git_synapse.ingest.pipeline import (
     _is_contention,
 )
 
-
 # ------------------------------------------------------- contention detection
 
 @pytest.mark.parametrize(
@@ -176,7 +175,7 @@ def test_the_network_abort_threshold_exceeds_the_worker_count(db):
     """A single unlucky burst must not trip the circuit breaker."""
     from git_synapse.config import get_config
 
-    assert NETWORK_FAILURE_ABORT > get_config().ingest.concurrency
+    assert get_config().ingest.concurrency < NETWORK_FAILURE_ABORT
 
 
 def test_load_repo_records_returns_usable_records(db):
@@ -511,8 +510,12 @@ def test_the_derived_stages_are_skipped_when_nothing_changed(db, monkeypatch):
     no commits must not pay for them."""
     _stub_run(monkeypatch)
     for mod, fn in _STAGES:
-        monkeypatch.setattr(f"{mod}.{fn}",
-                            lambda *a, **k: pytest.fail(f"{mod}.{fn} ran with no new commits"))
+        # Bound at definition: without this every stub reports the last stage's
+        # name, so the failure names the wrong one.
+        monkeypatch.setattr(
+            f"{mod}.{fn}",
+            lambda *a, mod=mod, fn=fn, **k: pytest.fail(
+                f"{mod}.{fn} ran with no new commits"))
 
     result = pipeline.run_ingest(records=[], trigger="test", force_full=False)
     assert result.commits_added == 0

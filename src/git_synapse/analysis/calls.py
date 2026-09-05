@@ -92,7 +92,9 @@ def record(
     except queue.Full:
         with _lock:
             _dropped += 1
-    except Exception:  # pragma: no cover - recording must never break a caller
+    except Exception:  # pragma: no cover
+        # Deliberately blind: this runs on every request and every tool call,
+        # and there is no failure here worth turning into a caller's failure.
         log.debug("could not record a call", exc_info=True)
 
 
@@ -193,7 +195,9 @@ def _drain_at_exit() -> None:  # pragma: no cover - process teardown
     try:
         while _flush_once():
             pass
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - the process is exiting
+        # Whatever went wrong, there is nowhere left to report it and nothing
+        # left to protect: the alternative is a traceback on every shutdown.
         pass
 
 

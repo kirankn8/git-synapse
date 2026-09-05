@@ -17,8 +17,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from git_synapse.analysis import calls
 from git_synapse import auth
+from git_synapse.analysis import calls
 from git_synapse.api import routes
 from git_synapse.api.routes import router
 from git_synapse.config import get_config

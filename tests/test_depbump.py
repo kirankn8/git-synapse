@@ -11,7 +11,6 @@ import subprocess
 import pytest
 
 from git_synapse.analysis import depbump, manifests
-from git_synapse.analysis.manifests import _PSEUDO
 from git_synapse.analysis.depbump import (
     declared_at_head,
     declared_modules_at_head,
@@ -20,8 +19,7 @@ from git_synapse.analysis.depbump import (
     repo_ref,
     resolve_repo,
 )
-
-
+from git_synapse.analysis.manifests import _PSEUDO
 
 # --------------------------------------------------------- pseudo-versions
 
@@ -359,6 +357,7 @@ def test_documentation_is_not_scanned_for_dependencies(tmp_path, monkeypatch):
     """django ships `docs/ref/models/constraints.txt`, which is prose. Reading it
     as a pip constraints file invented dependencies called `name`."""
     import subprocess as sp
+
     from git_synapse.analysis import depbump
 
     class _Proc:
@@ -513,8 +512,8 @@ def test_a_commit_written_after_the_bump_is_rejected(bump_env):
     ("pyproject.toml", '[tool.poetry]\nname = "legacy"',            ["legacy"]),
     ("go.mod",         "module github.com/google/go-cmp\n",         ["github.com/google/go-cmp"]),
     ("lib.gemspec",    's.name = "rails"',                          ["rails"]),
-    ("pom.xml",        "<project><groupId>com.google.guava</groupId>"
-                       "<artifactId>guava</artifactId></project>",  ["com.google.guava:guava"]),
+    ("pom.xml",        ("<project><groupId>com.google.guava</groupId>"
+                       "<artifactId>guava</artifactId></project>"),  ["com.google.guava:guava"]),
 ])
 def test_a_repository_states_which_package_it_publishes(path, text, expected):
     """Turning "which repository is `com.google.guava:guava`?" from a guess

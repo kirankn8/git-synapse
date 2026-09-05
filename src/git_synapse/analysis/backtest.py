@@ -44,10 +44,10 @@ import random
 import re
 import subprocess
 from collections import defaultdict
-from functools import lru_cache
-from pathlib import Path
 from dataclasses import dataclass, field
+from functools import lru_cache
 from itertools import combinations
+from pathlib import Path
 
 import numpy as np
 
@@ -288,7 +288,7 @@ def _git(mirror: str, args: list[str], timeout: int) -> str:
     of prompts, which is a far worse outcome than one unanswered prompt.
     """
     try:
-        proc = subprocess.run(  # noqa: S603 - fixed executable
+        proc = subprocess.run(
             ["git", *args], cwd=mirror, env=_base_env(), capture_output=True,
             text=True, errors="replace", timeout=timeout)
     except (subprocess.TimeoutExpired, OSError) as exc:
@@ -561,7 +561,7 @@ def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE
     #: search solved, and how often each measure answered them anyway.
     unaided_hard, unaided_hits = 0, dict(zero)
     shas = _commit_shas(repo_id) if grep_sample else {}
-    rng = random.Random(20260830)
+    rng = random.Random(20260830)  # noqa: S311 - sampling, not secrets
     prompts, wanted, scored_commits = 0, 0, 0
 
     for repo, files, commit_id in commits:

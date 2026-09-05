@@ -9,7 +9,6 @@ import pytest
 
 from git_synapse.analysis import query as q
 
-
 # ------------------------------------------------------------- resolution
 
 def test_resolve_file_finds_a_real_file_and_rejects_a_missing_one(db):

@@ -30,10 +30,8 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any
+from collections.abc import Iterable
+from dataclasses import dataclass
 
 import psycopg
 
@@ -230,7 +228,7 @@ class AuthorCache:
     def close(self) -> None:
         try:
             self._own.close()
-        except Exception:  # noqa: BLE001 - closing must never mask a real error
+        except Exception:
             log.debug("author connection already closed", exc_info=True)
 
     def resolve(self, email: str, name: str) -> int | None:

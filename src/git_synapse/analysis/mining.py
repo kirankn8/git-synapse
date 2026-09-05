@@ -199,7 +199,7 @@ def _cluster_repo(conn: psycopg.Connection, repo_id: int, stats: MiningStats) ->
         labels = new_labels
 
     # Compact labels to dense cluster ids and compute per-cluster properties.
-    unique, compact = np.unique(labels, return_inverse=True)
+    _unique, compact = np.unique(labels, return_inverse=True)
     sizes = np.bincount(compact)
 
     dirs = {

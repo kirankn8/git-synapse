@@ -21,7 +21,7 @@ MAIN = Path(__file__).resolve().parents[1] / "src" / "git_synapse" / "api" / "ma
 
 def _routes() -> list[re.Pattern[str]]:
     """The client's own route table, compiled the way the router compiles it."""
-    patterns = re.findall(r"^on\('([^']+)'", APP.read_text(), re.M)
+    patterns = re.findall(r"^on\('([^']+)'", APP.read_text(), re.MULTILINE)
     assert patterns, "no routes found; the regex probably broke"
     return [
         re.compile("^" + re.sub(r"[:*]([a-zA-Z]+)",
@@ -80,7 +80,7 @@ def test_every_internal_link_matches_a_registered_route(link):
 
 
 def test_every_nav_link_matches_a_registered_route():
-    nav = re.search(r'<nav class="mainnav".*?</nav>', SHELL.read_text(), re.S)
+    nav = re.search(r'<nav class="mainnav".*?</nav>', SHELL.read_text(), re.DOTALL)
     assert nav, "the shell no longer has a main nav"
     for href in re.findall(r'href="(/[^"]*)"', nav.group(0)):
         assert any(rx.match(href) for rx in _routes()), f"nav links to {href}, which has no route"
@@ -89,7 +89,7 @@ def test_every_nav_link_matches_a_registered_route():
 def test_the_server_serves_every_top_level_route_the_client_claims():
     """A client route the server does not know 404s on reload and on a pasted
     link -- exactly when a shareable URL earns its keep."""
-    claimed = {p.split("/")[1] for p in re.findall(r"^on\('(/[^']+)'", APP.read_text(), re.M)}
+    claimed = {p.split("/")[1] for p in re.findall(r"^on\('(/[^']+)'", APP.read_text(), re.MULTILINE)}
     claimed.discard("")
     for node in ast.walk(ast.parse(MAIN.read_text())):
         if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "SPA_ROUTES":

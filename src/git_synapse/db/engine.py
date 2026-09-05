@@ -7,6 +7,7 @@ ORM would add a mapping layer that every hot path then has to bypass.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from collections.abc import Iterable, Iterator, Sequence
@@ -117,10 +118,10 @@ def _read(sql_text: str, params, mode: str, default=None):
                 log.warning("stale cached plan; discarding connection and retrying")
                 # Closing it makes the pool drop rather than reuse it, so the
                 # retry lands on a connection with no stale prepared statements.
-                try:
+                # The connection is being discarded because it is broken, so
+                # a failure to close it changes nothing.
+                with contextlib.suppress(Exception):
                     conn.close()
-                except Exception:  # noqa: BLE001 - already failing
-                    pass
                 conn_ctx.__exit__(None, None, None)
                 continue
             conn_ctx.__exit__(type(exc), exc, exc.__traceback__)

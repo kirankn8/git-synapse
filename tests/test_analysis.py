@@ -13,7 +13,7 @@ that is assumed correct.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pytest
@@ -28,7 +28,7 @@ from git_synapse.ingest.store import load_commits, upsert_repo
 from git_synapse.stats.contingency import Contingency
 from git_synapse.stats.registry import BY_KEY, CORE_KEYS
 
-BASE = datetime(2024, 1, 1, tzinfo=timezone.utc)
+BASE = datetime(2024, 1, 1, tzinfo=UTC)
 
 # A deliberately designed history.
 #

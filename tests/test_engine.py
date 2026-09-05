@@ -11,7 +11,6 @@ import pytest
 
 from git_synapse.db import engine
 
-
 # ------------------------------------------------------------- basic reads
 
 def test_query_query_one_and_scalar_agree(db):
@@ -71,10 +70,9 @@ def test_a_watermark_written_on_the_caller_connection_rolls_back_with_it(db):
 
     key = "probe-txn-watermark"
     try:
-        with pytest.raises(psycopg.errors.DivisionByZero):
-            with connection() as conn:
-                engine.set_watermark(key, "should-not-survive", conn=conn)
-                conn.execute("SELECT 1/0")
+        with pytest.raises(psycopg.errors.DivisionByZero), connection() as conn:
+            engine.set_watermark(key, "should-not-survive", conn=conn)
+            conn.execute("SELECT 1/0")
         assert engine.get_watermark(key) is None
     finally:
         with connection() as conn:
@@ -205,7 +203,7 @@ def test_wait_for_database_gives_up_rather_than_hanging(monkeypatch):
         raise psycopg.OperationalError("connection refused")
 
     monkeypatch.setattr(psycopg, "connect", refuse)
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError, match="unreachable after"):
         engine.wait_for_database(timeout_s=0.3, interval_s=0.1)
 
 
@@ -267,7 +265,7 @@ def test_a_stale_cached_plan_is_retried_on_a_fresh_connection(monkeypatch):
         def connection(self):
             return _Ctx()
 
-    monkeypatch.setattr(engine, "get_pool", lambda: _Pool())
+    monkeypatch.setattr(engine, "get_pool", _Pool)
     assert engine.query_one("SELECT 1 AS x") == {"x": 1}
     assert calls["n"] == 2, "the query was not retried"
     assert closed, "the poisoned connection was returned to the pool"
@@ -313,7 +311,7 @@ def test_a_stale_plan_on_the_retry_is_raised_rather_than_looping(monkeypatch):
         def connection(self):
             return _Ctx()
 
-    monkeypatch.setattr(engine, "get_pool", lambda: _Pool())
+    monkeypatch.setattr(engine, "get_pool", _Pool)
     with pytest.raises(psycopg.errors.FeatureNotSupported):
         engine.query_one("SELECT 1")
     assert calls["n"] == 2
@@ -347,8 +345,8 @@ def test_an_ordinary_query_error_is_not_retried(monkeypatch):
         def __exit__(self, *exc):
             return False
 
-    monkeypatch.setattr(engine, "get_pool", lambda: type("P", (), {
-        "connection": lambda self: _Ctx()})())
+    monkeypatch.setattr(engine, "get_pool", type("P", (), {
+        "connection": lambda self: _Ctx()}))
     with pytest.raises(psycopg.errors.UndefinedColumn):
         engine.query("SELECT nope")
     assert calls["n"] == 1
@@ -489,8 +487,8 @@ def test_a_connection_that_will_not_close_still_lets_the_retry_proceed(monkeypat
         def __exit__(self, *exc):
             return False
 
-    monkeypatch.setattr(engine, "get_pool", lambda: type("P", (), {
-        "connection": lambda self: _Ctx()})())
+    monkeypatch.setattr(engine, "get_pool", type("P", (), {
+        "connection": lambda self: _Ctx()}))
     assert engine.query_one("SELECT 1 AS x") == {"x": 1}
     assert calls["n"] == 2
 
@@ -498,7 +496,7 @@ def test_a_connection_that_will_not_close_still_lets_the_retry_proceed(monkeypat
 def test_copy_rows_opens_its_own_connection_when_given_none(db):
     """Callers inside a transaction pass theirs; the CLI and one-off scripts do
     not, and that branch had never run."""
-    from git_synapse.db.engine import connection, copy_rows, copy_into_temp
+    from git_synapse.db.engine import connection, copy_rows
 
     with connection() as conn:
         conn.execute("CREATE TEMP TABLE t_copy_own (a INT, b TEXT)")

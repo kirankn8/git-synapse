@@ -15,17 +15,14 @@ development, each of which produced plausible-looking but wrong numbers:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 
-import numpy as np
 import pytest
 
-from git_synapse.db.engine import connection, query, query_one
-from git_synapse.ingest.github import RepoRecord
+from git_synapse.db.engine import query, query_one
 from git_synapse.ingest.parser import FileChange, ParsedCommit
-from git_synapse.ingest.store import load_commits, upsert_repo
 
-BASE = datetime(2025, 1, 6, 9, 0, tzinfo=timezone.utc)
+BASE = datetime(2025, 1, 6, 9, 0, tzinfo=UTC)
 
 
 def _commit(sha_seed: int, subject: str, when: datetime, paths: list[str],
@@ -111,7 +108,9 @@ def test_clone_never_destroys_an_existing_mirror_on_failure(tmp_path):
     sentinel.write_text("ref: refs/heads/main\n")
 
     # A URL that cannot resolve, so the clone is guaranteed to fail.
-    with pytest.raises(Exception):
+    from git_synapse.ingest.gitops import GitError
+
+    with pytest.raises(GitError):
         # A bogus local path fails immediately; an unresolvable URL costs the
         # full network retry budget and made this the slowest test in the suite.
         gitops.clone_mirror(
@@ -149,7 +148,7 @@ def test_permanent_errors_are_distinguished_from_transient_ones():
 
 def test_credential_preflight_rejects_a_bad_token(monkeypatch):
     """A rejected token must abort the run, not fail 272 repositories one by one."""
-    from git_synapse.config import get_config, reset_config_cache
+    from git_synapse.config import reset_config_cache
     from git_synapse.ingest.pipeline import AuthError, verify_credentials
 
     monkeypatch.setenv("GITHUB_TOKEN", "")
@@ -285,7 +284,8 @@ def test_score_is_the_value_the_rows_were_ranked_by(db):
 
 def test_coupled_directories_reports_outward_confidence(db):
     """The fourth union site had no flip at all, so subdirectories read 100%."""
-    from git_synapse.analysis.query import coupled_directories, query_one as _q
+    from git_synapse.analysis.query import coupled_directories
+    from git_synapse.analysis.query import query_one as _q
 
     row = _q("SELECT id FROM directory ORDER BY change_count DESC LIMIT 1")
     if row is None:

@@ -13,8 +13,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from git_synapse.analysis import query as q
 from git_synapse.analysis import depbump, mining, predict
+from git_synapse.analysis import query as q
 from git_synapse.analysis.aggregate import rebuild_repo, repos_needing_aggregation
 from git_synapse.analysis.score import score_repo
 from git_synapse.config import get_config
@@ -206,7 +206,8 @@ def mine(
     _setup()
     stats = mining.rebuild(repo_id or None, force=force)
     t = Table(box=None, show_header=False)
-    t.add_column("metric", style="dim"); t.add_column("value", justify="right")
+    t.add_column("metric", style="dim")
+    t.add_column("value", justify="right")
     t.add_row("de-facto modules", f"{stats.clusters:,}")
     t.add_row("  cross-directory", f"{stats.cross_directory_clusters:,}")
     t.add_row("clustered files", f"{stats.clustered_files:,}")
@@ -266,7 +267,6 @@ def backtest_cmd(
     """Replay history and measure whether the suggestions would have helped."""
     _setup()
     from git_synapse.analysis import backtest as bt
-    from git_synapse.stats.registry import MEASURES
 
     repo_id = None
     if repo:
@@ -405,7 +405,8 @@ def feedback_cmd(
 
     summary = q.feedback_summary()
     st = Table(box=None, show_header=False)
-    st.add_column("metric", style="dim"); st.add_column("value", justify="right")
+    st.add_column("metric", style="dim")
+    st.add_column("value", justify="right")
     for key in ("total", "open", "open_high", "fixed", "total_hits", "seen_today"):
         st.add_row(key.replace("_", " "), str(summary.get(key, 0)))
     console.print(st)

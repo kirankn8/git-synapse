@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip("fastapi")
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
 
 @pytest.fixture(scope="module")
@@ -217,7 +217,7 @@ def test_every_navigable_route_serves_the_shell(client):
     from pathlib import Path
 
     shell = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text()
-    nav = re.search(r'<nav class="mainnav".*?</nav>', shell, re.S)
+    nav = re.search(r'<nav class="mainnav".*?</nav>', shell, re.DOTALL)
     assert nav, "the shell no longer has a main nav to derive routes from"
 
     hrefs = [h for h in re.findall(r'href="(/[^"]*)"', nav.group(0)) if h != "/"]
@@ -494,7 +494,7 @@ def test_a_refresh_is_refused_while_a_run_is_already_in_progress(client,
 
     monkeypatch.setattr(routes.pipeline, "active_run", lambda: {
         "id": 7, "trigger": "schedule",
-        "started_at": dt.datetime(2026, 8, 26, 10, 0, tzinfo=dt.timezone.utc),
+        "started_at": dt.datetime(2026, 8, 26, 10, 0, tzinfo=dt.UTC),
     })
     r = client.post("/api/ingest/refresh")
     assert r.status_code == 409
@@ -627,11 +627,9 @@ def test_deleting_a_missing_account_is_404(no_accounts):
 
 def test_a_deleted_account_keeps_its_repositories(no_accounts):
     """The mined statistics are the expensive part; they must survive."""
-    from git_synapse.db.engine import connection, query_one
+    from git_synapse.db.engine import connection, execute, query_one
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.store import upsert_repo
-
-    from git_synapse.db.engine import execute
 
     made = no_accounts.post("/api/accounts", json={"login": "keepme"}).json()
     record = RepoRecord.from_api({
@@ -674,7 +672,7 @@ def test_a_run_that_does_not_exist_is_a_404(client):
 
 
 def test_a_run_that_exists_is_returned(client):
-    from git_synapse.db.engine import connection, query_one
+    from git_synapse.db.engine import connection
 
     with connection() as conn:
         run_id = conn.execute(
@@ -775,7 +773,7 @@ def test_the_server_serves_the_shell_for_every_route_the_spa_claims():
     from git_synapse.api.main import app  # noqa: F401  (ensures the module loads)
 
     web = Path(__file__).resolve().parents[1] / "web" / "static" / "app.js"
-    claimed = {m.group(1) for m in re.finditer(r"^on\('/([a-z]+)", web.read_text(), re.M)}
+    claimed = {m.group(1) for m in re.finditer(r"^on\('/([a-z]+)", web.read_text(), re.MULTILINE)}
     assert claimed, "no client routes found; the regex probably broke"
 
     served = set(_spa_routes())

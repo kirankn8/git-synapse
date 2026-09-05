@@ -76,8 +76,8 @@ def effective(name: str, fallback: str) -> str:
     """
     try:
         stored = get(name)
-    except Exception:  # pragma: no cover - a settings read must never take the
+    except Exception:  # noqa: BLE001  # pragma: no cover - a read must not take the
         # scheduler down; the environment value is always a safe answer.
         log.warning("could not read setting %s; using the configured value", name)
         return fallback
-    return stored if stored else fallback
+    return stored or fallback

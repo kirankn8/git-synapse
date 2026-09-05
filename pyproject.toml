@@ -47,6 +47,77 @@ timeout_method = "thread"
 line-length = 100
 target-version = "py311"
 
+[tool.ruff.lint]
+# Stated rather than inherited. Twenty-five `# noqa: S603`, `BLE001`, `E731`
+# and `A001` comments were sitting in the source for rules nothing selected --
+# each one a deliberate decision that the linter had stopped checking, so
+# whether the code still deserved the exemption nobody could tell.
+#
+# S (bandit) and BLE (blind except) are the two that matter here: this tool
+# shells out to git constantly and swallows exceptions in a few places on
+# purpose, and both are worth having to justify in writing.
+select = [
+    "E", "W", "F",       # pycodestyle, pyflakes
+    "I",                 # import order
+    "B",                 # bugbear: the real-bug rules
+    "S",                 # bandit: subprocess, hashing, temp files
+    "BLE",               # blind except
+    "A",                 # shadowing a builtin
+    "UP",                # outdated idioms for the target version
+    "SIM", "RET", "PIE", # simplifications
+    "DTZ",               # naive datetimes
+    "RUF", "FURB", "PL", # ruff's own, refurb, pylint
+    "ISC", "C4", "T20",  # implicit concat, comprehensions, stray prints
+]
+ignore = [
+    # Long strings are usually SQL or a sentence; wrapping them hurts both.
+    "E501",
+    # This tool's job is to run git, several hundred times a run. It is called
+    # by name, from a pinned image, with an argument list and never a shell --
+    # which is the safe form S603 is asking about. Two hundred noqa comments
+    # saying so would bury the ones that mean something.
+    "S603", "S607",
+    # SQL assembled with an f-string. Every interpolation is an allowlisted
+    # column or a clause built from literals -- ids and search terms travel as
+    # bound parameters -- and a test asserts the allowlists hold.
+    "S608",
+    # Deliberate: imports inside functions break cycles between the analysis
+    # and db layers, and keep the CLI's startup off the API's critical path.
+    "PLC0415",
+    # A dataclass field is not a mutable class attribute in the sense meant.
+    "RUF012",
+    # Binding 0.0.0.0 is what a container does.
+    "S104",
+    # Assertions are the point of the test suite.
+    "S101",
+    # `raise ... from` inside `except` is not always clearer.
+    "B904",
+    # These fight the house style: named booleans in signatures read better
+    # than positional ones, and magic numbers in tests are the fixture data.
+    "PLR2004", "FBT001", "FBT002",
+    # Complexity thresholds; the long functions here are SQL builders whose
+    # branches are one clause each.
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917",
+    # subprocess.run without check=: every call site inspects returncode
+    # itself, because the message on stderr is the diagnosis.
+    "PLW1510",
+    # Module-level singletons -- the connection pool, the call-log thread --
+    # are initialised under a lock and are the point of those modules.
+    "PLW0603",
+    # `line = line.strip()` inside a loop is normalisation, not a mistake.
+    "PLW2901",
+    # typer declares its options as argument defaults; that is its API.
+    "B008",
+    # `done` counts completed results inside as_completed, where the loop may
+    # also cancel the remaining futures. enumerate would number iterations,
+    # which stops being the same thing the moment anything is cancelled.
+    "SIM113",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests reach into internals on purpose, and name fixtures after what they are.
+"tests/*" = ["S105", "S106", "S311", "SLF001", "PLC0415", "T201"]
+
 [tool.coverage.report]
 # Reaching 100% cost real bugs found -- a tag naming a blob indexed as a
 # release, a sweep deleting every commit the tag walk had just read, stubs that

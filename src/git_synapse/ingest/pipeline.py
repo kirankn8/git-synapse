@@ -22,7 +22,6 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 
 import psycopg
@@ -488,7 +487,7 @@ def _drop_unreachable_commits(repo_id: int, mirror: Path) -> int:
     if stored == 0:
         return 0
     try:
-        proc = subprocess.run(  # noqa: S603 - fixed executable
+        proc = subprocess.run(
             ["git", "rev-list", "HEAD", "--tags", "--no-merges", "--count"],
             cwd=str(mirror), capture_output=True, text=True, timeout=600, check=False,
         )
@@ -498,7 +497,7 @@ def _drop_unreachable_commits(repo_id: int, mirror: Path) -> int:
         return 0
 
     try:
-        walk = subprocess.run(  # noqa: S603 - fixed executable
+        walk = subprocess.run(
             ["git", "rev-list", "HEAD", "--tags", "--no-merges"],
             cwd=str(mirror), capture_output=True, text=True, timeout=900, check=False,
         )
@@ -670,7 +669,7 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
 
         result.status = "success"
 
-    except Exception as exc:  # noqa: BLE001 - one repo must not kill the run
+    except Exception as exc:
         result.status = "failed"
         result.error = f"{type(exc).__name__}: {exc}"
         log.exception("repository %s failed", record.full_name)
@@ -681,7 +680,7 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
                         "UPDATE repo SET ingest_status='failed', ingest_error=%s WHERE id=%s",
                         (result.error[:4000], result.repo_id),
                     )
-            except Exception:  # noqa: BLE001 - best effort status write
+            except Exception:
                 log.exception("could not record failure status for %s", record.full_name)
 
     result.duration_s = time.monotonic() - started
@@ -705,7 +704,6 @@ def run_ingest(
     Returns:
         A :class:`RunResult` summarising every repository.
     """
-    cfg = get_config()
     started = time.monotonic()
 
     # One ingest at a time, across processes. A scheduled tick and a human's
@@ -845,13 +843,13 @@ def _run_ingest_locked(
                 "manifest bumps: %d repos scanned, %d new edges in %.1fs",
                 db.repos_scanned, db.edges_written, db.duration_s,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("manifest bump scan failed")
 
         try:
             depbump.refresh_declared(force=force_full)
             depbump.refresh_modules()
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("declared dependency refresh failed")
 
         # Impact ranks the declared graph, so it runs after both stages above.
@@ -861,7 +859,7 @@ def _run_ingest_locked(
                 "impact: %d edges across %d repos in %.1fs",
                 pr.rows_written, pr.sources, pr.duration_s,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("impact prediction failed")
 
         try:
@@ -870,7 +868,7 @@ def _run_ingest_locked(
                 "mining: %d modules, %d drift rows, %d risk rows in %.1fs",
                 mn.clusters, mn.drift_rows, mn.risk_rows, mn.duration_s,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("mining rebuild failed")
 
     run.duration_s = time.monotonic() - started
