@@ -234,3 +234,71 @@ def test_refresh_on_start_runs_one_immediately_without_blocking_startup(monkeypa
         assert started[0][2] is True, "a non-daemon thread would block shutdown"
     finally:
         reset_config_cache()
+
+
+@pytest.mark.parametrize(("cron", "expected"), [
+    ("0 * * * *",   1800),   # hourly -> half an hour
+    ("*/30 * * * *", 900),
+    ("*/15 * * * *", 600),   # half is 450, but the floor holds
+    ("*/5 * * * *",  600),   # so does it here
+    ("0 3 * * *",  43200),   # daily -> twelve hours; nothing caps the top end
+])
+def test_the_misfire_grace_follows_the_configured_interval(cron, expected):
+    """A late tick is worth running if the next one is far off, and worth
+    dropping if it is imminent. That was a fixed 600s, which suited a
+    quarter-hourly cron and silently cost a whole hour once the default became
+    hourly. It is now half the interval, floored."""
+    from apscheduler.triggers.cron import CronTrigger
+
+    import git_synapse.scheduler.main as sched
+
+    trigger = CronTrigger.from_crontab(cron, timezone="UTC")
+    assert sched._grace_for(trigger, "UTC") == expected
+
+
+def test_a_trigger_that_never_fires_still_yields_a_usable_grace():
+    """`get_next_fire_time` returns None for an exhausted trigger. Returning
+    None from here would make APScheduler run every misfire, however stale."""
+    import git_synapse.scheduler.main as sched
+
+    class Never:
+        def get_next_fire_time(self, previous, now):
+            return None
+
+    assert sched._grace_for(Never(), "UTC") == 600
+
+    class Once:
+        def __init__(self):
+            self.calls = 0
+
+        def get_next_fire_time(self, previous, now):
+            self.calls += 1
+            return now if self.calls == 1 else None
+
+    assert sched._grace_for(Once(), "UTC") == 600
+
+
+def test_the_refresh_default_is_declared_once_and_matches_everywhere():
+    """The default lives in three files -- the config constant, the compose
+    environment and .env.example. They drifted apart before; a reader who
+    changes one and not the others gets a different cadence depending on how
+    the stack was started."""
+    import re
+    from pathlib import Path
+
+    from git_synapse.config import DEFAULT_REFRESH_CRON
+
+    root = Path(__file__).resolve().parents[1]
+    compose_text = (root / "docker-compose.yml").read_text()
+    declared = re.findall(r"REFRESH_CRON: \$\{REFRESH_CRON:-([^}]+)\}", compose_text)
+    assert declared == [DEFAULT_REFRESH_CRON], declared
+
+    # Declared once, in the shared anchor. On the scheduler alone, /api/config
+    # reported the built-in default and the Jobs page named a cadence nothing
+    # was running on.
+    anchor = compose_text[compose_text.index("x-app-env:"):compose_text.index("services:")]
+    assert "REFRESH_CRON:" in anchor, "the API must see the same schedule as the scheduler"
+
+    example = re.search(r"^REFRESH_CRON=(.+)$",
+                        (root / ".env.example").read_text(), re.M)
+    assert example and example.group(1).strip() == DEFAULT_REFRESH_CRON, example

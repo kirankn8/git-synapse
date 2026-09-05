@@ -224,6 +224,13 @@ class DependencyConfig:
     chain_max_depth: int = field(default_factory=lambda: _env_int("CHAIN_MAX_DEPTH", 3))
 
 
+#: Hourly. A refresh re-fetches every mirror and rewrites the pair tables; on a
+#: 163-repository corpus that measured 683-1662s, so a quarter-hourly tick spent
+#: most of its time overlapping itself to find a handful of commits. Set
+#: REFRESH_CRON to go faster; nothing here assumes the interval.
+DEFAULT_REFRESH_CRON = "0 * * * *"
+
+
 @dataclass(frozen=True)
 class ScheduleConfig:
     """When refreshes run.
@@ -241,7 +248,7 @@ class ScheduleConfig:
 
     enabled: bool = field(default_factory=lambda: _env_bool("SCHEDULER_ENABLED", True))
     #: Fast refresh of already-known repositories. Five-field cron, in ``timezone``.
-    cron: str = field(default_factory=lambda: _env_str("REFRESH_CRON", "*/15 * * * *"))
+    cron: str = field(default_factory=lambda: _env_str("REFRESH_CRON", DEFAULT_REFRESH_CRON))
     #: Slower pass that re-discovers the organisation from the GitHub API.
     discover_cron: str = field(default_factory=lambda: _env_str("DISCOVER_CRON", "0 3 * * *"))
     timezone: str = field(default_factory=lambda: _env_str("SCHEDULER_TZ", "UTC"))
