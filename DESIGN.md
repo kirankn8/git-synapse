@@ -833,11 +833,27 @@ can check rather than on taste:
 | **Activity** | every call served, and what it returned |
 
 Overview reads top to bottom as an operator would ask it: what data is here,
-did the last ingest work, what has history produced, and is anything calling.
-The two charts are inline SVG rather than a library — the UI has no build step,
-and a bar chart and a stacked bar are a few dozen lines each. The hourly bars
-include the empty hours, because a chart drawn only from hours that had traffic
-closes the gaps and turns an outage into a smooth line.
+did the last ingest work, what shape is it, what has history produced, and is
+anything calling. The charts are inline SVG rather than a library — the UI has
+no build step, and a bar chart and a bar list are a few dozen lines each.
+
+Seven distributions sit under *Shape of the data*, each stating its own answer
+rather than leaving it to be read off a picture:
+
+| Chart | What it says on this corpus |
+|---|---|
+| Commits per year | 21 years of history, still moving |
+| Evidence behind a coupling | **51% of pairs rest on two co-changes** — why min support exists |
+| Repositories by size | 6 repositories hold 30% of all commits |
+| Languages | 23 across 163 repositories |
+| Files per commit | 5% touch 12 files or more — why the fan-out is capped |
+| Authors per file | 47% have been touched by one author only |
+| How fast a bump is adopted | 62% landed within two months |
+
+They come from one endpoint, not seven: these are full-table aggregates and
+together they are the most expensive read the landing page makes (~550ms). The
+hourly activity bars include the empty hours, because a chart drawn only from
+hours that had traffic closes the gaps and turns an outage into a smooth line.
 | Accounts · Measures · Jobs · Feedback | configuration, reference, operations |
 
 Overview used to carry a shortened copy of the repository list, the mining
