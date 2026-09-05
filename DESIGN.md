@@ -21,6 +21,7 @@ database table and the decisions that materially change the numbers.
 | [**What the backtest is measured against**](#what-the-backtest-is-measured-against) | the baselines, and why a weak one is worse than none |
 | [What is incremental](#what-is-incremental-and-what-isnt) | what a refresh actually redoes |
 | [**How the UI is addressed**](#how-the-ui-is-addressed) | places nest in the path, analyses scope with a query |
+| [**Who may read this**](#who-may-read-this) | sign-in, roles, tokens, and the switch that turns it off |
 | [**What callers asked for**](#what-callers-asked-for) | the call log, and what it deliberately does not do |
 | [Bookkeeping](#bookkeeping) · [Portability](#portability) · [Layout](#layout) | operations and structure |
 | [Adding a measure](#adding-a-measure) | extending the registry |
@@ -757,6 +758,57 @@ The API, MCP server, CLI and UI all enumerate from the registry, so nothing else
 
 ---
 
+
+## Who may read this
+
+Everything here is derived from public repositories, but the deployment is not
+public: it says which repositories an organisation tracks, where its coupling
+is weakest, and which files one person alone understands. So there is a door.
+
+**Two roles, and no third.** A `member` reads everything, which is the whole
+application. An `admin` may also add and remove people and change the access
+policy. A third role nobody can describe is a role nobody applies consistently.
+
+**No new dependency.** Passwords are hashed with `hashlib.scrypt` — memory-hard
+and in the standard library — with the cost parameters stored alongside each
+hash, so they can be raised later without invalidating anyone's password. A
+password library would be the conventional choice and also a supply-chain edge
+on a tool whose whole argument is that dependencies propagate.
+
+**Neither secret is stored.** A session cookie is kept as its SHA-256, and so
+is an API token: a database dump yields no working credential, only the fact
+that one existed. A token's first characters are kept so a person can tell
+their tokens apart without the list being a set of live keys.
+
+**The first administrator is created at the console, not in the environment.**
+`ADMIN_PASSWORD` in a compose file sits in a shell history, a process listing
+and every copy of that file. Instead, a deployment with no users is open — there
+is nobody to sign in as, and requiring it would lock the first administrator out
+of the screen that creates them — and the setup endpoint refuses as soon as one
+account exists, so it cannot mint a second administrator later.
+
+**Anyone may mint a token.** It carries its maker's identity and role, so it can
+do exactly what they can do and no more, and it stops working when their account
+is deactivated or removed. That is what makes them safe to hand out: an agent
+calling the API *is* the person who set it up.
+
+**An administrator may switch the door off**, per surface, for the dashboard and
+for MCP. A laptop demo and a shared internal dashboard are different things, and
+only the person running it knows which this is. Two properties hold either way:
+administering the deployment always needs an account, because there is otherwise
+nobody to attribute the act to; and a stored mode that is not one of the two
+falls **closed**, so a typo cannot turn into a public dashboard.
+
+The MCP server is gated by wrapping its ASGI app rather than calling `run()`,
+because a switch that changes nothing is worse than no switch. stdio is
+deliberately exempt: it is a subprocess on the caller's own machine, which
+already has whatever access a token would grant.
+
+Changing a password or deactivating an account **ends that person's sessions**.
+Leaving them alive would make both changes advisory — whoever knew the old
+password is still signed in, which is the situation the change was meant to end.
+Demoting or deactivating the last administrator is refused, since the way back
+is otherwise the database.
 
 ## What callers asked for
 

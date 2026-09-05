@@ -23,7 +23,15 @@ log = logging.getLogger(__name__)
 #: Settings the API is allowed to write, and how to validate each. Anything not
 #: named here is rejected: an open key/value endpoint is an invitation to store
 #: configuration nothing reads.
-WRITABLE = ("refresh_cron", "discover_cron")
+#: Schedules, which are cron expressions.
+SCHEDULES = ("refresh_cron", "discover_cron")
+
+#: Access policy, which is one of auth.ACCESS_MODES. Kept apart from the
+#: schedules because the two are validated and reported differently, and a
+#: single list had /api/settings describing "dashboard_auth" as a cron.
+ACCESS = ("dashboard_auth", "mcp_auth")
+
+WRITABLE = SCHEDULES + ACCESS
 
 
 def _key(name: str) -> str:

@@ -1236,6 +1236,45 @@ def _publish_tool_inventory() -> None:
         log.warning("could not publish the tool inventory", exc_info=True)
 
 
+def _guarded_app(host: str):
+    """The MCP app, behind a token when this deployment asks for one.
+
+    Wrapping the ASGI app rather than calling `server.run` is what makes the
+    administrator's switch mean something here: without it the setting would be
+    a control that changes nothing, which is worse than not offering it.
+
+    The mode is read per request, so turning it on applies to the next call
+    rather than the next restart.
+    """
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.responses import JSONResponse
+
+    from git_synapse import auth
+
+    # `host` is not decoration: it configures the transport's allowed-Host
+    # check. Omitted, every request from anywhere but localhost came back 421,
+    # which reads as a protocol fault rather than a rejected Host header.
+    app = server.streamable_http_app(host=host)
+
+    async def gate(request, call_next):
+        if auth.access_mode("mcp") != "required":
+            return await call_next(request)
+        header = request.headers.get("authorization") or ""
+        user = (auth.token_user(header[7:].strip())
+                if header.lower().startswith("bearer ") else None)
+        if user is None:
+            return JSONResponse(
+                status_code=401,
+                content={"error": "this MCP server requires a token",
+                         "hint": "create one under API tokens in the dashboard, "
+                                 "then send it as: Authorization: Bearer gss_..."},
+            )
+        return await call_next(request)
+
+    app.add_middleware(BaseHTTPMiddleware, dispatch=gate)
+    return app
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Git Synapse MCP server")
     parser.add_argument(
@@ -1260,14 +1299,19 @@ def main(argv: list[str] | None = None) -> int:
     _publish_tool_inventory()
 
     if args.transport == "stdio":
+        # A subprocess on the caller's own machine: they already have whatever
+        # access the token would grant, so a token here protects nothing.
         log.info("git-synapse mcp server on stdio")
         server.run(transport="stdio")
     elif args.transport == "sse":
         log.info("git-synapse mcp server (sse) on %s:%s", args.host, args.port)
         server.run(transport="sse", host=args.host, port=args.port)
     else:
+        import uvicorn
+
         log.info("git-synapse mcp server (streamable http) on %s:%s/mcp", args.host, args.port)
-        server.run(transport="streamable-http", host=args.host, port=args.port)
+        uvicorn.run(_guarded_app(args.host), host=args.host, port=args.port,
+                    log_level="info")
     return 0
 
 

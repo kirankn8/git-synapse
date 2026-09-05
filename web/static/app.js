@@ -153,6 +153,7 @@ export async function api(path, params) {
     if (v !== null && v !== undefined && v !== '') url.searchParams.set(k, v);
   }
   const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  if (res.status === 401) throw signedOut();
   if (!res.ok) throw await failure(res);
   return res.json();
 }
@@ -164,13 +165,28 @@ export async function apiSend(method, path, body) {
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  if (res.status === 401) throw signedOut();
   if (!res.ok) throw await failure(res);
   return res.status === 204 ? null : res.json();
+}
+
+/* A session can end between two clicks -- it expired, an administrator
+   deactivated the account, someone signed out in another tab. Marking the
+   error lets the router put up the sign-in form instead of "could not load
+   this view", which is true but useless. */
+function signedOut() {
+  const err = new Error('Your session has ended. Sign in to continue.');
+  err.signedOut = true;
+  return err;
 }
 
 /* -------------------------------------------------------------- state -- */
 
 export const state = {
+  //: The signed-in user, and what this deployment asks of a visitor.
+  me: null,
+  needsSetup: false,
+  authRequired: false,
   measure: localStorage.getItem('git-synapse.measure') || 'npmi',
   measures: [],
   byKey: new Map(),
@@ -322,6 +338,17 @@ async function route() {
   const view = $('#view');
   const token = ++navToken;
 
+  // The door, if this deployment has one. Rendered in place of any view, so a
+  // deep link is remembered: signing in continues to where you were going.
+  if (state.needsSetup || (state.authRequired && !state.me)) {
+    document.body.classList.add('gated');
+    settled();
+    progress(false);
+    view.replaceChildren(gate({ setup: state.needsSetup }));
+    return;
+  }
+  document.body.classList.remove('gated');
+
   for (const { rx, keys, handler } of routes) {
     const match = path.match(rx);
     if (!match) continue;
@@ -345,6 +372,14 @@ async function route() {
       progress(false);
       settled();
       if (token !== navToken) return;
+      if (err.signedOut) {
+        // Expired, revoked, or signed out in another tab. Re-read the state and
+        // show the door rather than "could not load this view", which is true
+        // and useless.
+        await loadMe();
+        paintProfile();
+        return route();
+      }
       console.error(err);
       view.replaceChildren(
         h('div', { class: 'empty' }, h('strong', {}, 'Could not load this view'), String(err.message || err)),
@@ -2335,6 +2370,40 @@ async function settingsPanel(cfg) {
         'database, and would silently diverge from the value the host rotates.')),
     'Read from the environment or a host-managed file'));
 
+  // --- who may read this deployment --------------------------------------
+  const admin = state.me && state.me.role === 'admin';
+  const access = (await api('/api/settings').catch(() => ({}))).access || {};
+  const modeRow = (surface, title, note) => {
+    const on = access[surface] !== 'open';
+    const set = async (value) => {
+      try {
+        await apiSend('PUT', `/api/settings/${surface}_auth`, { value });
+        toast(value === 'open'
+          ? `${title}: sign-in no longer required`
+          : `${title}: sign-in required`);
+        route();
+      } catch (err) { toast(err.message || String(err), true); }
+    };
+    return h('div', { class: 'setting-row' },
+      h('div', {}, h('strong', {}, title), h('div', { class: 'card-sub' }, note)),
+      h('div', { class: 'toolbar', style: 'margin:0' },
+        h('button', { class: `btn${on ? ' primary' : ''}`, disabled: !admin,
+                      onclick: () => set('required') }, 'Sign-in required'),
+        h('button', { class: `btn${on ? '' : ' primary'}`, disabled: !admin,
+                      onclick: () => set('open') }, 'Open to anyone'),
+        h('span', { class: 'card-sub' }, admin ? '' : 'administrators only')));
+  };
+
+  box.append(card('Who may read this',
+    h('div', { class: 'card-body' },
+      modeRow('dashboard', 'Dashboard and API',
+              'With sign-in off, anyone who can reach this address can read everything. '
+              + 'Managing people always needs an account, whichever way this is set.'),
+      modeRow('mcp', 'MCP server',
+              'Whether an agent must present a token. Off suits a laptop; on suits anything shared.')),
+    'Applies to the next request — nothing restarts',
+    h('a', { class: 'btn', href: '/people', 'data-nav': true }, 'People')));
+
   // --- what is deliberately not editable ---------------------------------
   const fixed = [
     ['Max files per commit', cfg.max_files_per_commit, 'a commit touching more is not paired'],
@@ -2532,9 +2601,362 @@ document.addEventListener('click', (e) => {
   go(href);
 });
 
+/* Everyone may see who has access -- it is a shared dashboard, and knowing who
+   else reads it is part of using it. Only an administrator may change it. */
+on('/people', async () => {
+  const [data, cfg] = await Promise.all([
+    api('/api/users'),
+    api('/api/settings').catch(() => ({ access: {} })),
+  ]);
+  const admin = state.me && state.me.role === 'admin';
+  const wrap = h('div');
+
+  wrap.append(pageHead('People',
+    admin ? 'Everyone who can read this deployment. You may add and remove them.'
+          : 'Everyone who can read this deployment. Ask an administrator to change it.'));
+
+  const users = data.users || [];
+  const admins = users.filter((u) => u.role === 'admin' && u.is_active).length;
+  wrap.append(h('div', { class: 'grid grid-stats' },
+    statTile('People', num(users.length), `${num(users.filter((u) => u.is_active).length)} active`),
+    statTile('Administrators', num(admins), 'may add and remove people'),
+    statTile('Signed in now', num(users.reduce((n, u) => n + Number(u.active_sessions || 0), 0)),
+             'live sessions', () => go('/activity')),
+    statTile('Sign-in', (cfg.access || {}).dashboard === 'open' ? 'not required' : 'required',
+             admin ? 'change under Jobs → settings' : 'set by an administrator',
+             admin ? () => go('/jobs?tab=settings') : null)));
+
+  if (admin) wrap.append(addPersonCard());
+
+  wrap.append(card(`${users.length} with access`, dataTable(users, [
+    { key: 'name', label: 'Name', render: (u) => h('div', {},
+        h('div', {}, u.name),
+        h('div', { class: 'card-sub' }, u.email)) },
+    { key: 'role', label: 'Role', render: (u) => h('span',
+        { class: `badge ${u.role === 'admin' ? 'ok' : 'muted'}` }, u.role) },
+    { key: 'is_active', label: 'Status', render: (u) => h('span',
+        { class: `badge ${u.is_active ? 'info' : 'warn'}` }, u.is_active ? 'active' : 'deactivated') },
+    { key: 'active_sessions', label: 'Sessions', num: true },
+    { key: 'last_login_at', label: 'Last signed in', render: (u) => (u.last_login_at ? when(u.last_login_at) : 'never') },
+    { key: 'created_by_email', label: 'Added by', render: (u) => h('span', { class: 'card-sub' }, u.created_by_email || 'first account') },
+    ...(admin ? [{ key: 'act', label: '', sortable: false, render: (u) => peopleActions(u) }] : []),
+  ], { initialSort: 'created_at', empty: 'Nobody yet.' }),
+    admin ? 'A person may read everything; only an administrator may change who can.'
+          : 'Read-only: you are not an administrator.'));
+  return wrap;
+});
+
+/** The add-a-person form. Admin-only, and the API enforces that too. */
+function addPersonCard() {
+  const email = h('input', { class: 'input', type: 'email', placeholder: 'them@example.com' });
+  const name = h('input', { class: 'input', placeholder: 'Their name' });
+  const password = h('input', { class: 'input', type: 'password',
+                                placeholder: 'at least 12 characters' });
+  const role = h('select', { class: 'input' },
+    h('option', { value: 'member' }, 'Member — reads everything'),
+    h('option', { value: 'admin' }, 'Administrator — may also add people'));
+  const submit = h('button', { class: 'btn primary' }, 'Add person');
+
+  submit.addEventListener('click', async () => {
+    submit.disabled = true;
+    try {
+      await apiSend('POST', '/api/users', {
+        email: email.value.trim(), name: name.value.trim(),
+        password: password.value, role: role.value,
+      });
+      toast(`${email.value.trim()} can now sign in`);
+      route();
+    } catch (err) {
+      toast(err.message || String(err), true);
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  return card('Add a person',
+    h('div', { class: 'card-body' },
+      h('div', { class: 'grid grid-2' },
+        field('Email', email),
+        field('Name', name),
+        field('Temporary password', password,
+              'They keep it until they change it; there is no email from this deployment.'),
+        field('Role', role))),
+    'They will be able to read everything, immediately',
+    submit);
+}
+
+/** Per-person controls. Each refuses server-side too, not only here. */
+function peopleActions(u) {
+  const act = async (label, fn) => {
+    try { await fn(); toast(label); route(); }
+    catch (err) { toast(err.message || String(err), true); }
+  };
+  const me = state.me && state.me.id === u.id;
+  return h('div', { class: 'pillrow' },
+    h('button', { class: 'btn sm', title: u.role === 'admin'
+        ? 'Make a member: they keep read access but cannot add people'
+        : 'Make an administrator: they may add and remove people',
+      onclick: (e) => { e.stopPropagation(); act(`${u.email} is now a ${u.role === 'admin' ? 'member' : 'administrator'}`,
+        () => apiSend('PATCH', `/api/users/${u.id}`, { role: u.role === 'admin' ? 'member' : 'admin' })); },
+    }, u.role === 'admin' ? 'Make member' : 'Make admin'),
+    h('button', { class: 'btn sm', title: u.is_active
+        ? 'Deactivate: their sessions end immediately and they cannot sign in'
+        : 'Reactivate',
+      onclick: (e) => { e.stopPropagation(); act(`${u.email} ${u.is_active ? 'deactivated' : 'reactivated'}`,
+        () => apiSend('PATCH', `/api/users/${u.id}`, { is_active: !u.is_active })); },
+    }, u.is_active ? 'Deactivate' : 'Reactivate'),
+    me ? null : h('button', { class: 'btn sm danger',
+      onclick: (e) => {
+        e.stopPropagation();
+        if (!window.confirm(`Remove ${u.email}? Their sessions and tokens go with them.`)) return;
+        act(`${u.email} removed`, () => apiSend('DELETE', `/api/users/${u.id}`));
+      },
+    }, 'Remove'));
+}
+
+/* A token is a person's key: it carries their identity and role, does exactly
+   what they can do, and stops working when their account does. Anyone may make
+   one -- an agent calling the API is the person who set it up. */
+on('/tokens', async () => {
+  const data = await api('/api/auth/tokens');
+  const wrap = h('div');
+  wrap.append(pageHead('API tokens',
+    'For agents and scripts calling this deployment. A token acts as you.'));
+
+  const name = h('input', { class: 'input', placeholder: 'e.g. laptop agent' });
+  const days = h('select', { class: 'input' },
+    h('option', { value: '90' }, 'Expires in 90 days'),
+    h('option', { value: '365' }, 'Expires in a year'),
+    h('option', { value: '' }, 'Never expires'));
+  const secret = h('div', { class: 'token-reveal', hidden: true });
+  const mint = h('button', { class: 'btn primary' }, 'Create token');
+
+  mint.addEventListener('click', async () => {
+    mint.disabled = true;
+    try {
+      const out = await apiSend('POST', '/api/auth/tokens', {
+        name: name.value.trim(), days: days.value ? Number(days.value) : null,
+      });
+      secret.replaceChildren(
+        h('div', { class: 'token-note' }, out.note),
+        h('code', { class: 'token-value' }, out.token),
+        h('button', { class: 'btn sm', onclick: () => {
+          navigator.clipboard?.writeText(out.token);
+          toast('Token copied');
+        } }, 'Copy'));
+      secret.hidden = false;
+      name.value = '';
+      const table = document.getElementById('token-table');
+      if (table) table.replaceChildren(tokenTable((await api('/api/auth/tokens')).tokens));
+    } catch (err) {
+      toast(err.message || String(err), true);
+    } finally {
+      mint.disabled = false;
+    }
+  });
+
+  wrap.append(card('Create a token',
+    h('div', { class: 'card-body' },
+      h('div', { class: 'grid grid-2' }, field('Name', name), field('Lifetime', days)),
+      secret),
+    'Shown once. It is stored as a hash, so it cannot be shown again.', mint));
+
+  wrap.append(h('div', { class: 'help' },
+    'Send it as ', h('code', {}, 'Authorization: Bearer ' + (data.prefix || 'gss_') + '…'),
+    '. It carries your identity and your role, so it can do what you can do and no more.'));
+
+  const host = h('div', { id: 'token-table' }, tokenTable(data.tokens));
+  wrap.append(card(`${(data.tokens || []).length} tokens`, host,
+    'Revoking one takes effect immediately'));
+  return wrap;
+});
+
+const tokenTable = (tokens) => dataTable(tokens || [], [
+  { key: 'name', label: 'Name' },
+  { key: 'prefix', label: 'Starts with', render: (t) => h('code', { class: 'mono' }, `${t.prefix}…`) },
+  { key: 'created_at', label: 'Created', render: (t) => when(t.created_at) },
+  { key: 'last_used_at', label: 'Last used', render: (t) => (t.last_used_at ? when(t.last_used_at) : 'never') },
+  { key: 'expires_at', label: 'Expires', render: (t) => (t.expires_at ? when(t.expires_at)
+      : h('span', { class: 'badge warn', title: 'A token that never expires is a key left in a door' }, 'never')) },
+  { key: 'act', label: '', sortable: false, render: (t) => h('button', {
+      class: 'btn sm danger',
+      onclick: async (e) => {
+        e.stopPropagation();
+        if (!window.confirm(`Revoke "${t.name}"? Anything using it stops working.`)) return;
+        await apiSend('DELETE', `/api/auth/tokens/${t.id}`).catch((err) => toast(err.message, true));
+        route();
+      },
+    }, 'Revoke') },
+], { initialSort: 'created_at', empty: 'No tokens yet.' });
+
+/* ==========================================================================
+   Who is signed in
+
+   Everything here is derived from public repositories, but the deployment is
+   not: it says which repositories an organisation tracks, where its coupling
+   is weakest, and which files one person alone understands. So there is a door
+   -- and an administrator may leave it open, because a laptop demo and a
+   shared internal dashboard are different things.
+   ========================================================================== */
+
+/** The mark, at whatever size the caller wants. Shared by splash and sign-in. */
+const brandMark = (px) => {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 32 32');
+  svg.setAttribute('class', 'gate-mark');
+  svg.style.width = `${px}px`;
+  svg.style.height = `${px}px`;
+  svg.innerHTML =
+    '<g fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round">'
+    + '<path d="M8 24 C 8 18.5, 9.5 15.5, 12 13.6"/>'
+    + '<path d="M20 18.4 C 22.5 16.5, 24 13.5, 24 8"/></g>'
+    + '<circle cx="14.6" cy="15.1" r="1.15" fill="currentColor" opacity=".55"/>'
+    + '<circle cx="17.4" cy="16.9" r="1.15" fill="currentColor" opacity=".8"/>'
+    + '<circle cx="8" cy="24" r="2.6" fill="currentColor"/>'
+    + '<circle cx="24" cy="8" r="2.6" fill="currentColor"/>';
+  return svg;
+};
+
+/** A field with its label, returned with the input exposed. */
+function gateField(label, attrs, hint) {
+  const input = h('input', { class: 'input', ...attrs });
+  const node = h('label', { class: 'gate-field' },
+    h('span', {}, label), input,
+    hint ? h('span', { class: 'gate-hint' }, hint) : null);
+  node.input = input;
+  return node;
+}
+
+/**
+ * The sign-in screen, and the first-run screen that creates the first
+ * administrator.
+ *
+ * One component for both because they differ by two fields and a verb, and two
+ * near-identical forms drift.
+ */
+function gate({ setup = false } = {}) {
+  const email = gateField('Email', { type: 'email', autocomplete: 'username',
+                                     placeholder: 'you@example.com', required: true });
+  const name = gateField('Name', { autocomplete: 'name', placeholder: 'Your name' });
+  const password = gateField('Password',
+    { type: 'password', autocomplete: setup ? 'new-password' : 'current-password',
+      placeholder: setup ? `at least ${12} characters` : '', required: true },
+    setup ? 'You will be the administrator: only you can add other people.' : null);
+
+  const error = h('div', { class: 'gate-error', hidden: true });
+  const submit = h('button', { class: 'btn primary gate-submit', type: 'submit' },
+    setup ? 'Create administrator' : 'Sign in');
+
+  const form = h('form', { class: 'gate-form' },
+    email, setup ? name : null, password, error, submit);
+
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    error.hidden = true;
+    submit.disabled = true;
+    submit.textContent = setup ? 'Creating…' : 'Signing in…';
+    try {
+      const body = setup
+        ? { email: email.input.value, name: name.input.value, password: password.input.value }
+        : { email: email.input.value, password: password.input.value };
+      await apiSend('POST', setup ? '/api/auth/setup' : '/api/auth/login', body);
+      // Re-read rather than trusting the reply: this is the same call every
+      // later page makes, so if it disagrees the problem shows up here.
+      await loadMe();
+      paintProfile();
+      route();
+    } catch (err) {
+      error.textContent = err.message || String(err);
+      error.hidden = false;
+      password.input.value = '';
+      password.input.focus();
+    } finally {
+      submit.disabled = false;
+      submit.textContent = setup ? 'Create administrator' : 'Sign in';
+    }
+  });
+
+  setTimeout(() => email.input.focus(), 40);
+
+  return h('div', { class: 'gate' },
+    h('div', { class: 'gate-card' },
+      h('div', { class: 'gate-brand' }, brandMark(44),
+        h('div', {},
+          h('div', { class: 'gate-title' }, 'Git Synapse'),
+          h('div', { class: 'gate-sub' }, setup
+            ? 'Nobody has an account yet. Create the first one.'
+            : 'Sign in to read this deployment.'))),
+      form));
+}
+
+/** The signed-in user, or null. Read once at boot and after every change. */
+async function loadMe() {
+  try {
+    const me = await fetch('/api/auth/me', { headers: { Accept: 'application/json' } })
+      .then((r) => r.json());
+    state.me = me.user;
+    state.needsSetup = me.needs_setup;
+    state.authRequired = me.auth_required;
+  } catch {
+    // The API is unreachable. Let the view report that rather than showing a
+    // sign-in form for a server that cannot check one.
+    state.me = null;
+    state.needsSetup = false;
+    state.authRequired = false;
+  }
+  return state.me;
+}
+
+/** The avatar and menu, top right. Absent entirely when nobody is signed in. */
+function paintProfile() {
+  const host = document.getElementById('profile');
+  if (!host) return;
+  host.replaceChildren();
+  if (!state.me) { host.hidden = true; return; }
+  host.hidden = false;
+
+  const initials = (state.me.name || state.me.email).trim().split(/\s+/)
+    .slice(0, 2).map((w) => w[0]).join('').toUpperCase();
+
+  const menu = h('div', { class: 'profile-menu', hidden: true },
+    h('div', { class: 'profile-head' },
+      h('div', { class: 'profile-name' }, state.me.name),
+      h('div', { class: 'profile-email' }, state.me.email),
+      h('span', { class: `badge ${state.me.role === 'admin' ? 'ok' : 'muted'}` }, state.me.role)),
+    h('a', { class: 'profile-item', href: '/people', 'data-nav': true },
+      state.me.role === 'admin' ? 'People and access' : 'People'),
+    h('a', { class: 'profile-item', href: '/tokens', 'data-nav': true }, 'API tokens'),
+    h('button', { class: 'profile-item danger', onclick: async () => {
+      await apiSend('POST', '/api/auth/logout').catch(() => {});
+      await loadMe();
+      paintProfile();
+      go('/');
+      route();
+    } }, 'Sign out'));
+
+  const button = h('button', {
+    class: 'avatar', title: `${state.me.name} (${state.me.role})`,
+    'aria-haspopup': 'menu',
+    onclick: (ev) => { ev.stopPropagation(); menu.hidden = !menu.hidden; },
+  }, initials);
+
+  // Any click elsewhere closes it, including one that navigates.
+  document.addEventListener('click', () => { menu.hidden = true; });
+  host.append(button, menu);
+}
+
 async function boot() {
   wireTheme();
   wireOmnibox();
+  // Before the catalogue, before the footer: every other call needs to know
+  // whether there is a door, and a 401 storm at boot is not a diagnosis.
+  await loadMe();
+  paintProfile();
+  if (state.needsSetup || (state.authRequired && !state.me)) {
+    window.addEventListener('popstate', route);
+    return route();
+  }
   try {
     const cat = await api('/api/measures');
     state.measures = cat.measures;

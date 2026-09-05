@@ -3,9 +3,48 @@
 import { JSDOM } from 'jsdom';
 
 const BASE = process.env.GIT_SYNAPSE_URL || 'http://localhost:8080';
+
+/* The deployment may be behind a sign-in. Get a session before anything else,
+   creating the first administrator if nobody exists yet, so the suite works on
+   a fresh stack and on one that already has people. Credentials come from the
+   environment; the defaults suit a local dev stack and nothing else. */
+const TEST_EMAIL = process.env.GS_TEST_EMAIL || 'ui-tests@git-synapse.local';
+const TEST_PASSWORD = process.env.GS_TEST_PASSWORD || 'ui-tests-password-1234';
+
+async function signIn() {
+  const me = await (await fetch(BASE + '/api/auth/me')).json();
+  if (!me.auth_required && !me.needs_setup) return null;   // no door here
+
+  const post = (path, body) => fetch(BASE + path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  let res = me.needs_setup
+    ? await post('/api/auth/setup',
+                 { email: TEST_EMAIL, name: 'UI tests', password: TEST_PASSWORD })
+    : await post('/api/auth/login', { email: TEST_EMAIL, password: TEST_PASSWORD });
+
+  if (!res.ok) {
+    throw new Error(
+      `could not sign in as ${TEST_EMAIL} (${res.status}). Set GS_TEST_EMAIL and `
+      + 'GS_TEST_PASSWORD to an account on this deployment.');
+  }
+  const cookie = (res.headers.getSetCookie?.() || [])
+    .map((c) => c.split(';')[0]).join('; ');
+  if (!cookie) throw new Error('signed in but no session cookie came back');
+  return cookie;
+}
+
+const COOKIE = await signIn();
 const errors = [];
 
-const html = await (await fetch(BASE + '/')).text();
+const withCookie = (init = {}) => (COOKIE
+  ? { ...init, headers: { ...(init.headers || {}), cookie: COOKIE } }
+  : init);
+
+const html = await (await fetch(BASE + '/', withCookie())).text();
 
 const dom = new JSDOM(html, {
   url: BASE + '/',
@@ -19,7 +58,7 @@ const dom = new JSDOM(html, {
         typeof input === 'string' ? input
         : input instanceof URL ? input.href
         : (input && input.url) || String(input);
-      return fetch(url.startsWith('http') ? url : BASE + url, init);
+      return fetch(url.startsWith('http') ? url : BASE + url, withCookie(init));
     };
     window.URL = URL;
     // Canvas is not implemented in jsdom; stub just enough for graph.js.
@@ -69,23 +108,23 @@ report('measure select populated', $('#measure-select').options.length > 25,
        `${$('#measure-select').options.length} options`);
 
 // Resolve real ids from the live corpus to build deep-link routes.
-const repos = await (await fetch(BASE + '/api/repos?limit=1&order_by=pair_count')).json();
+const repos = await (await fetch(BASE + '/api/repos?limit=1&order_by=pair_count', withCookie())).json();
 const repoId = repos.repos[0].id;
-const files = await (await fetch(`${BASE}/api/repos/${repoId}/hotspots?limit=1`)).json();
+const files = await (await fetch(`${BASE}/api/repos/${repoId}/hotspots?limit=1`, withCookie())).json();
 const fileId = files.hotspots[0].id;
-const coupled = await (await fetch(`${BASE}/api/files/${fileId}/coupled?limit=1&min_support=2`)).json();
+const coupled = await (await fetch(`${BASE}/api/files/${fileId}/coupled?limit=1&min_support=2`, withCookie())).json();
 const otherId = coupled.partners[0]?.other_id;
 const filePath = files.hotspots[0].path;
-const tree = await (await fetch(`${BASE}/api/repos/${repoId}/tree`)).json();
+const tree = await (await fetch(`${BASE}/api/repos/${repoId}/tree`, withCookie())).json();
 const dirPath = (tree.directories[0] || {}).path || '';
-const runs = await (await fetch(BASE + '/api/runs?limit=1')).json();
+const runs = await (await fetch(BASE + '/api/runs?limit=1', withCookie())).json();
 const runId = runs.runs[0].id;
-const logged = await (await fetch(BASE + '/api/calls?limit=1')).json();
+const logged = await (await fetch(BASE + '/api/calls?limit=1', withCookie())).json();
 const callId = (logged.calls[0] || {}).id;
 
 // Edges are {source, target}; reading source_repo_id here quietly fell back to
 // a self-edge, so the impact routes rendered an empty page and asserted nothing.
-const repoWithImpact = await (await fetch(BASE + '/api/impact/graph?limit=5')).json();
+const repoWithImpact = await (await fetch(BASE + '/api/impact/graph?limit=5', withCookie())).json();
 const bumped = repoWithImpact.edges.find((e) => e.bump_count > 0) || repoWithImpact.edges[0] || {};
 const impactSrcId = bumped.source ?? repoId;
 const impactRepoId = bumped.target ?? repoId;
@@ -124,6 +163,8 @@ const routes = [
   ['#/activity',                            'Activity'],
   ['#/activity?surface=mcp',                'Activity (MCP only)'],
   ['#/activity?status=error',               'Activity (errors)'],
+  ['#/people',                             'People'],
+  ['#/tokens',                             'API tokens'],
   ['#/measures',                           'Measures catalogue'],
   ['#/jobs',                               'Jobs'],
   ['#/jobs?tab=settings',                  'Jobs settings'],
