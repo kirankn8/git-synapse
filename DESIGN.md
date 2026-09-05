@@ -830,7 +830,19 @@ and the root — which changes in every commit — scored 1.000 against everythi
 Those rows crowded out the real partners, which for `src/com/google/javascript`
 turn out to be the matching `test/…` subtrees.
 
-Two tests hold the shape. `tests/test_ui_links.py` checks every `href` and
+A third check runs in real Chrome. jsdom does no layout and loads no
+stylesheet, so `smoke.mjs` is structurally blind to two things that both
+shipped: a component sitting flush against the next one, and an element whose
+`hidden` attribute is beaten by an author `display` rule — `.measure-bar` is
+`display:flex`, so hiding it changed nothing on screen while every assertion on
+the property passed. `tests/ui/layout.mjs` measures real boxes: the gap between
+every pair of stacked blocks, the computed display of anything hidden from
+script, and horizontal overflow. The page rhythm is 16px, with two deliberate
+exceptions — a breadcrumb sits 12px above its title, and a section title sits
+24px below the previous block but 10px above its own card, because a heading
+belongs to what follows it.
+
+Two more tests hold the shape. `tests/test_ui_links.py` checks every `href` and
 `go()` target in `app.js` against the client's own route table and against the
 server's `SPA_ROUTES` — a commit that renamed the routes once left eleven dead
 links behind, and the suite stayed green because the smoke test renders routes

@@ -934,10 +934,26 @@ async function repoImpactGraphView(params) {
 
   wrap.append(h('div', { class: 'toolbar' },
     h('div', { class: 'field' }, h('label', {}, 'Min score'), scoreInput, scoreLabel),
-    h('button', { class: `btn${validated ? ' primary' : ''}`, onclick: () => go(`/insights/graph?mode=repos&min=${minScore}&all=0`) }, 'Validated only'),
-    h('button', { class: `btn${validated ? '' : ' primary'}`, onclick: () => go(`/insights/graph?mode=repos&min=${minScore}&all=1`) }, 'Include discovery'),
+    h('div', { class: 'field' }, h('label', {}, 'Edges'),
+      h('button', { class: `btn${validated ? ' primary' : ''}`,
+        title: 'Only edges backed by a dependency declared in a manifest, or by an observed version bump',
+        onclick: () => go(`/insights/graph?mode=repos&min=${minScore}&all=0`) }, 'With evidence'),
+      h('button', { class: `btn${validated ? '' : ' primary'}`,
+        title: 'Also edges inferred from co-change statistics alone, with nothing in any manifest to back them',
+        onclick: () => go(`/insights/graph?mode=repos&min=${minScore}&all=1`) }, 'Also inferred')),
     h('span', { class: 'spacer' }),
     h('span', { class: 'card-sub' }, `${data.stats.node_count} repos, ${data.stats.edge_count} edges`)));
+
+  wrap.append(explainer('What the two edge filters mean',
+    h('strong', {}, 'With evidence'),
+    ' draws only the edges something outside this tool can vouch for: a dependency ',
+    'declared in a manifest, or a version bump actually observed and resolved to the ',
+    'upstream commit it consumed. ',
+    h('strong', {}, 'Also inferred'),
+    ' adds edges guessed from co-change statistics alone. Those were measured and are ',
+    'kept only for exploration: they scored AUC 0.80 overall but 0.63 on which way the ',
+    'arrow points, and a baseline ignoring coupling entirely matched them — they rank ',
+    '“both repositories are busy”, not “one depends on the other”.'));
 
   if (!data.nodes.length) {
     wrap.append(h('div', { class: 'empty' }, h('strong', {}, 'Nothing to draw'), 'Lower the minimum score.'));
@@ -955,8 +971,8 @@ async function repoImpactGraphView(params) {
   wrap.append(h('div', { class: 'help', style: 'margin-top:13px' },
     'Click a repository to open its impact view; shift-click for its detail page. ',
     validated
-      ? 'Showing only edges with declared-dependency or manifest-bump evidence.'
-      : 'Discovery edges included — these are statistical only and skew toward busy repositories.'));
+      ? 'Every edge here is backed by a declared dependency or an observed version bump.'
+      : 'Inferred edges included: statistical only, and they favour busy repositories.'));
   return wrap;
 }
 
