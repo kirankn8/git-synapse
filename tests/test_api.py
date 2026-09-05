@@ -793,3 +793,47 @@ def _spa_routes():
         if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "SPA_ROUTES":
             return ast.literal_eval(node.value)
     raise AssertionError("SPA_ROUTES no longer exists in api/main.py")
+
+
+# ---------------------------------------------------------- runtime settings
+
+def test_settings_lists_only_what_may_be_changed(client):
+    body = client.get("/api/settings").json()["settings"]
+    names = {s["name"] for s in body}
+    assert names == {"refresh_cron", "discover_cron"}
+    for s in body:
+        assert s["value"] and "from_env" in s and "overridden" in s
+
+
+def test_a_setting_can_be_stored_and_cleared(client):
+    try:
+        put = client.put("/api/settings/refresh_cron", json={"value": "*/9 * * * *"})
+        assert put.status_code == 200
+        assert put.json() == {"name": "refresh_cron", "value": "*/9 * * * *",
+                              "overridden": True}
+        assert client.get("/api/config").json()["refresh_cron"] == "*/9 * * * *"
+    finally:
+        cleared = client.put("/api/settings/refresh_cron", json={"value": ""})
+    assert cleared.json()["overridden"] is False
+
+
+def test_a_cron_that_does_not_parse_is_refused_rather_than_stored(client):
+    """Accepted and stored, it would be read once a minute by a process nobody
+    is watching, and silently ignored."""
+    r = client.put("/api/settings/refresh_cron", json={"value": "every tuesday"})
+    assert r.status_code == 422 and "five-field cron" in r.json()["detail"]
+    assert client.get("/api/settings").json()["settings"][0]["overridden"] is False
+
+
+def test_an_unknown_setting_is_not_silently_accepted(client):
+    assert client.put("/api/settings/github_token",
+                      json={"value": "ghp_x"}).status_code == 404
+
+
+def test_the_token_is_reported_as_present_but_never_returned(client):
+    """The status says whether a credential exists and where it came from. The
+    value must not leave the process: this API is unauthenticated on localhost."""
+    status = client.get("/api/config").json()["github_token"]
+    assert set(status) == {"present", "source", "editable_here"}
+    assert status["source"] in {"file", "environment", "none"}
+    assert "token" not in str(status).lower().replace("github_token", "")

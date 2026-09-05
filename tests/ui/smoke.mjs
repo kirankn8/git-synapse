@@ -118,6 +118,7 @@ const routes = [
   [`#/insights/modules?repo=${repoId}`,    'Insights modules'],
   ['#/measures',                           'Measures catalogue'],
   ['#/jobs',                               'Jobs'],
+  ['#/jobs?tab=settings',                  'Jobs settings'],
   [`#/jobs/${runId}`,                      'Run detail'],
   ['#/feedback',                           'Feedback (open)'],
   ['#/feedback?status=all',                'Feedback (all)'],

@@ -1689,14 +1689,23 @@ on('/measures', async () => {
 
 /* ----------------------------------------------------------------- jobs -- */
 
-on('/jobs', async () => {
+on('/jobs', async (_args, params) => {
+  const tab = params.tab || 'runs';
   const [runs, cfg] = await Promise.all([api('/api/runs', { limit: 60 }), api('/api/config')]);
   const wrap = h('div');
   wrap.append(
-    pageHead('Ingest jobs', `Daily refresh at cron "${cfg.refresh_cron}" (${cfg.scheduler_timezone})`, [
+    pageHead('Ingest jobs', `Refreshing on cron "${cfg.refresh_cron}" (${cfg.scheduler_timezone})`, [
       h('button', { class: 'btn primary', onclick: triggerRefresh }, 'Run now'),
     ]),
   );
+  wrap.append(h('div', { class: 'tabs' },
+    ...[['runs', 'Run history'], ['settings', 'Schedule & settings']].map(([k, l]) =>
+      h('button', { class: `tab${tab === k ? ' active' : ''}`,
+                    onclick: () => go(`/jobs?tab=${k}`) }, l))));
+  if (tab === 'settings') {
+    wrap.append(await settingsPanel(cfg));
+    return wrap;
+  }
   wrap.append(
     h(
       'div',
@@ -1713,6 +1722,109 @@ on('/jobs', async () => {
   wrap.append(card('All runs', runsTable(runs.runs), 'Click a run for the per-repository breakdown'));
   return wrap;
 });
+
+/* Operational settings, editable here rather than only in .env, because a
+   deployment that has to be restarted to be slowed down will not be slowed
+   down. Anything that changes what the numbers *mean* -- pair support, rename
+   similarity, the measure set -- stays in the environment on purpose: it is
+   versioned with the deployment, and must not differ between two readings of
+   the same table. Those are shown, clearly, as read-only. */
+async function settingsPanel(cfg) {
+  const box = h('div');
+  const { settings } = await api('/api/settings');
+
+  const PRESETS = [
+    ['0 * * * *', 'Hourly'],
+    ['*/30 * * * *', 'Every 30 minutes'],
+    ['*/15 * * * *', 'Every 15 minutes'],
+    ['0 */6 * * *', 'Every 6 hours'],
+    ['0 3 * * *', 'Daily at 03:00'],
+  ];
+
+  const rows = settings.map((setting) => {
+    const input = h('input', { class: 'input', value: setting.value, spellcheck: 'false',
+                               autocomplete: 'off', style: 'width:170px;font-family:var(--mono)' });
+    const save = h('button', { class: 'btn primary' }, 'Save');
+    const reset = h('button', { class: 'btn', title: `Back to the deployment's value, ${setting.from_env}` }, 'Use .env');
+    const status = h('span', { class: 'card-sub' },
+      setting.overridden ? 'set here' : `from .env (${setting.from_env})`);
+
+    const put = async (value) => {
+      save.disabled = reset.disabled = true;
+      try {
+        const out = await apiSend('PUT', `/api/settings/${setting.name}`, { value });
+        input.value = out.value;
+        status.textContent = out.overridden ? 'set here' : `from .env (${setting.from_env})`;
+        toast(`${setting.name} is now "${out.value}" — applies within a minute`);
+      } catch (err) {
+        toast(String(err.message || err), true);
+      } finally {
+        save.disabled = reset.disabled = false;
+      }
+    };
+    save.addEventListener('click', () => put(input.value.trim()));
+    reset.addEventListener('click', () => put(''));
+
+    return h('div', { class: 'setting-row' },
+      h('div', {},
+        h('strong', {}, setting.name === 'refresh_cron' ? 'Refresh schedule' : 'Discovery schedule'),
+        h('div', { class: 'card-sub' }, setting.name === 'refresh_cron'
+          ? 'Re-fetch known repositories and rebuild whatever moved. No GitHub API calls.'
+          : 'Additionally re-list each account through the GitHub API to find new repositories.')),
+      h('div', { class: 'toolbar', style: 'margin:0' },
+        input, save, reset, status),
+      h('div', { class: 'pillrow' }, ...PRESETS.map(([expr, label]) =>
+        h('button', { class: `btn sm${setting.value === expr ? ' primary' : ''}`,
+                      onclick: () => put(expr) }, label))));
+  });
+
+  box.append(card('Schedules', h('div', { class: 'card-body' }, ...rows),
+    'Stored in the database and picked up within a minute — no restart, no redeploy.'));
+
+  // --- the token ---------------------------------------------------------
+  const tok = cfg.github_token || {};
+  box.append(card('GitHub token',
+    h('div', { class: 'card-body' },
+      h('div', { class: 'toolbar', style: 'margin:0' },
+        h('span', { class: `badge ${tok.present ? 'ok' : 'warn'}` },
+          tok.present ? 'configured' : 'not set'),
+        h('span', { class: 'card-sub' }, `source: ${tok.source}`)),
+      h('div', { class: 'help', style: 'margin:12px 0 0' },
+        tok.present
+          ? 'A token is in place. Its value is never returned by the API, so it cannot be read back here.'
+          : 'No token. Every account in this corpus is public, so ingest runs unauthenticated — '
+            + 'GitHub allows 60 API calls an hour that way, which only limits discovery, not fetching.',
+        ' To set or rotate one, put it in ',
+        h('code', {}, '.env'),
+        ' as ',
+        h('code', {}, 'GITHUB_TOKEN'),
+        ' (or the file at ',
+        h('code', {}, 'GITHUB_TOKEN_FILE'),
+        '), then ',
+        h('code', {}, 'docker compose up -d'),
+        '. It is deliberately not editable here: a credential posted through this ',
+        'unauthenticated local API would be readable by anything that can reach the ',
+        'database, and would silently diverge from the value the host rotates.')),
+    'Read from the environment or a host-managed file'));
+
+  // --- what is deliberately not editable ---------------------------------
+  const fixed = [
+    ['Max files per commit', cfg.max_files_per_commit, 'a commit touching more is not paired'],
+    ['Min pair support', cfg.min_pair_support, 'co-changes before a pair is stored'],
+    ['Rename similarity', `${cfg.rename_similarity}%`, 'threshold git uses to follow a rename'],
+    ['Recency half-life', `${cfg.recency_half_life_days}d`, 'weighting applied to older commits'],
+    ['Blobless above', bytes(cfg.blobless_threshold_kb), 'mirror metadata only past this size'],
+    ['Scheduler timezone', cfg.scheduler_timezone, 'the crons above are read in it'],
+  ];
+  box.append(card('Fixed for this deployment',
+    dataTable(fixed.map(([name, value, note]) => ({ name, value: String(value), note })), [
+      { key: 'name', label: 'Setting' },
+      { key: 'value', label: 'Value', render: (r) => h('span', { class: 'mono' }, r.value) },
+      { key: 'note', label: 'What it does' },
+    ], { sortable: false }),
+    'Changing these changes what every number means, so they are versioned with the deployment in .env rather than editable at runtime'));
+  return box;
+}
 
 on('/jobs/:id', async ({ id }) => {
   const run = await api(`/api/runs/${id}`);

@@ -10,7 +10,8 @@ from pydantic import BaseModel, Field
 
 from git_synapse.analysis import mining, predict
 from git_synapse.analysis import query as q
-from git_synapse.config import get_config
+from git_synapse.analysis import settings
+from git_synapse.config import get_config, live_cron
 from git_synapse.db.engine import query_one, scalar
 from git_synapse.ingest import accounts, pipeline
 from git_synapse.ingest.accounts import AccountError
@@ -70,10 +71,93 @@ def config() -> dict:
         "crossrepo_enabled": cfg.crossrepo.enabled,
         "chain_min_confidence": cfg.crossrepo.chain_min_confidence,
         "chain_max_depth": cfg.crossrepo.chain_max_depth,
-        "refresh_cron": cfg.schedule.cron,
+        # The value in force, not the seed: a schedule set from the UI is
+        # stored, and reporting the environment's here would tell the reader a
+        # cadence nothing runs on.
+        "refresh_cron": live_cron("refresh"),
+        "discover_cron": live_cron("discover"),
         "scheduler_timezone": cfg.schedule.timezone,
         "scheduler_enabled": cfg.schedule.enabled,
+        # Which of these the UI may change, and whether each is currently
+        # overridden or still coming from the environment.
+        "editable": {
+            name: {"value": live_cron(name.removesuffix("_cron")),
+                   "overridden": settings.get(name) is not None,
+                   "from_env": getattr(cfg.schedule, "cron" if name == "refresh_cron"
+                                       else "discover_cron")}
+            for name in settings.WRITABLE
+        },
+        # Never the token itself -- only whether one is present and how it got
+        # here, so the UI can say "set" without being able to read it back.
+        "github_token": _token_status(),
     }
+
+
+def _token_status() -> dict:
+    """Whether a token is configured, and from where. Never its value."""
+    gh = get_config().github
+    from pathlib import Path as _Path
+
+    path = _Path(gh.token_file) if gh.token_file else None
+    file_has = bool(path and path.is_file() and path.read_text(encoding="utf-8").strip())
+    return {
+        "present": bool(gh.current_token()),
+        "source": "file" if file_has else ("environment" if gh.token else "none"),
+        # A host-managed file is authoritative and rotates on its own; saying so
+        # stops a reader pasting a token that will be ignored.
+        "editable_here": not file_has,
+    }
+
+
+class SettingIn(BaseModel):
+    """One operational setting. Blank clears the override."""
+
+    value: str = Field(default="", max_length=200)
+
+
+@router.get("/settings", tags=["meta"])
+def list_settings() -> dict:
+    """The operational settings the UI may change, and what they are now."""
+    cfg = get_config().schedule
+    return {
+        "settings": [
+            {
+                "name": name,
+                "value": live_cron(name.removesuffix("_cron")),
+                "overridden": settings.get(name) is not None,
+                "from_env": cfg.cron if name == "refresh_cron" else cfg.discover_cron,
+            }
+            for name in settings.WRITABLE
+        ]
+    }
+
+
+@router.put("/settings/{name}", tags=["meta"])
+def put_setting(name: str, body: SettingIn) -> dict:
+    """Store an operational setting, or clear it back to the environment's.
+
+    Validated here rather than at the scheduler: a cron that does not parse
+    would otherwise be accepted, stored, and then silently ignored once a
+    minute by a process the reader is not watching.
+    """
+    if name not in settings.WRITABLE:
+        raise HTTPException(404, f"{name!r} is not a settable option")
+
+    value = body.value.strip()
+    if not value:
+        settings.clear(name)
+        return {"name": name, "value": live_cron(name.removesuffix("_cron")),
+                "overridden": False}
+
+    from apscheduler.triggers.cron import CronTrigger
+
+    try:
+        CronTrigger.from_crontab(value, timezone=get_config().schedule.timezone)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, f"not a five-field cron expression: {exc}") from exc
+
+    settings.set(name, value)
+    return {"name": name, "value": value, "overridden": True}
 
 
 # ---------------------------------------------------------------------------

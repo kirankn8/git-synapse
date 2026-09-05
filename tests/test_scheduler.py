@@ -302,3 +302,126 @@ def test_the_refresh_default_is_declared_once_and_matches_everywhere():
     example = re.search(r"^REFRESH_CRON=(.+)$",
                         (root / ".env.example").read_text(), re.M)
     assert example and example.group(1).strip() == DEFAULT_REFRESH_CRON, example
+
+
+# ------------------------------------------------- settings changed at runtime
+
+def test_a_stored_schedule_overrides_the_environment_and_clearing_restores_it(db):
+    """A deployment that must be restarted to be slowed down will not be slowed
+    down, so the schedule is stored and the environment is only the seed."""
+    from git_synapse.analysis import settings
+    from git_synapse.config import get_config, live_cron
+
+    from_env = get_config().schedule.cron
+    try:
+        assert live_cron("refresh") == from_env
+        settings.set("refresh_cron", "*/7 * * * *")
+        assert live_cron("refresh") == "*/7 * * * *"
+        assert settings.get("refresh_cron") == "*/7 * * * *"
+    finally:
+        settings.clear("refresh_cron")
+    assert live_cron("refresh") == from_env
+    assert settings.get("refresh_cron") is None
+
+
+def test_only_named_settings_can_be_stored(db):
+    """An open key/value endpoint invites storing configuration nothing reads."""
+    from git_synapse.analysis import settings
+
+    with pytest.raises(ValueError, match="not a writable setting"):
+        settings.set("github_token", "ghp_whatever")
+
+
+def test_a_settings_read_that_fails_falls_back_rather_than_stopping_the_loop(monkeypatch):
+    """The scheduler reads this every minute. A database blip must not take the
+    refresh down; the configured value is always a safe answer."""
+    from git_synapse.analysis import settings
+
+    def boom(_name):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(settings, "get", boom)
+    assert settings.effective("refresh_cron", "0 * * * *") == "0 * * * *"
+
+
+def test_the_scheduler_follows_a_schedule_changed_while_it_runs(monkeypatch):
+    """The whole point of storing it: a change made in the UI applies without a
+    restart, and within a minute."""
+    import git_synapse.scheduler.main as sched
+
+    calls = {"rescheduled": [], "modified": []}
+
+    class Job:
+        trigger = "cron[hour='*']"
+
+    class Sched:
+        def get_job(self, job_id):
+            return Job() if job_id == "fast-refresh" else None
+
+        def reschedule_job(self, job_id, trigger=None):
+            calls["rescheduled"].append((job_id, str(trigger)))
+
+        def modify_job(self, job_id, misfire_grace_time=None):
+            calls["modified"].append((job_id, misfire_grace_time))
+
+    monkeypatch.setattr(sched, "live_cron", lambda which: "*/5 * * * *")
+    sched._follow_stored_schedule(Sched(), "UTC")
+    assert calls["rescheduled"] and calls["rescheduled"][0][0] == "fast-refresh"
+    assert calls["modified"] == [("fast-refresh", 600)]
+
+
+def test_an_unchanged_schedule_is_left_alone(monkeypatch):
+    """Rescheduling every minute would reset the next fire time every minute,
+    so a job on a long cron could never reach it."""
+    import git_synapse.scheduler.main as sched
+    from apscheduler.triggers.cron import CronTrigger
+
+    same = CronTrigger.from_crontab("0 * * * *", timezone="UTC")
+    touched = []
+
+    class Sched:
+        def get_job(self, job_id):
+            return type("J", (), {"trigger": same})()
+
+        def reschedule_job(self, *a, **k):
+            touched.append(a)
+
+        def modify_job(self, *a, **k):
+            touched.append(a)
+
+    monkeypatch.setattr(sched, "live_cron", lambda which: "0 * * * *")
+    sched._follow_stored_schedule(Sched(), "UTC")
+    assert touched == []
+
+
+def test_a_stored_cron_that_does_not_parse_leaves_the_job_running(monkeypatch):
+    """Written by hand, or by a future version. Stopping the refresh over it
+    would be a worse outcome than ignoring it."""
+    import git_synapse.scheduler.main as sched
+
+    touched = []
+
+    class Sched:
+        def get_job(self, job_id):
+            return type("J", (), {"trigger": "cron[hour='*']"})()
+
+        def reschedule_job(self, *a, **k):
+            touched.append(a)
+
+        def modify_job(self, *a, **k):
+            touched.append(a)
+
+    monkeypatch.setattr(sched, "live_cron", lambda which: "nonsense")
+    sched._follow_stored_schedule(Sched(), "UTC")
+    assert touched == []
+
+
+def test_a_missing_job_is_skipped_rather_than_crashing_the_watcher(monkeypatch):
+    import git_synapse.scheduler.main as sched
+
+    class Sched:
+        def get_job(self, job_id):
+            return None
+
+    monkeypatch.setattr(sched, "live_cron", lambda which: "0 * * * *")
+    sched._follow_stored_schedule(Sched(), "UTC")   # must not raise
