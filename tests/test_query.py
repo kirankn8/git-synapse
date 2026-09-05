@@ -440,7 +440,7 @@ def test_the_corpus_shape_returns_every_distribution_the_landing_page_draws(corp
     shape = q.corpus_shape()
     assert set(shape) == {
         "commits_by_year", "pair_support", "repo_sizes", "languages",
-        "commit_width", "authors_per_file", "adoption_days",
+        "commit_width", "authors_per_file", "adoption_days", "repo_recency",
     }
     for name, rows in shape.items():
         assert isinstance(rows, list), name
@@ -473,3 +473,13 @@ def test_distribution_buckets_are_capped_so_the_tail_cannot_dominate(corpus, db)
     assert all(r["support"] <= 10 for r in shape["pair_support"])
     assert all(r["files"] <= 12 for r in shape["commit_width"])
     assert all(r["authors"] <= 8 for r in shape["authors_per_file"])
+
+
+def test_repo_recency_buckets_every_repository_exactly_once(corpus, db):
+    """A repository nobody has touched in a year still contributes history, but
+    that history no longer describes the code -- so the count has to be right."""
+    rows = q.corpus_shape()["repo_recency"]
+    total = q.query_one("SELECT count(*) AS n FROM repo")["n"]
+    assert sum(r["n"] for r in rows) == total, "every repository lands in one bucket"
+    assert {r["bucket"] for r in rows} <= {
+        "never", "past month", "past 6 months", "past year", "over a year"}

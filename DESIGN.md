@@ -837,7 +837,7 @@ did the last ingest work, what shape is it, what has history produced, and is
 anything calling. The charts are inline SVG rather than a library — the UI has
 no build step, and a bar chart and a bar list are a few dozen lines each.
 
-Seven distributions sit under *Shape of the data*, each stating its own answer
+Eight distributions sit under *Shape of the data*, each stating its own answer
 rather than leaving it to be read off a picture:
 
 | Chart | What it says on this corpus |
@@ -849,8 +849,9 @@ rather than leaving it to be read off a picture:
 | Files per commit | 5% touch 12 files or more — why the fan-out is capped |
 | Authors per file | 47% have been touched by one author only |
 | How fast a bump is adopted | 62% landed within two months |
+| When repositories last changed | how much of the corpus has gone quiet |
 
-They come from one endpoint, not seven: these are full-table aggregates and
+They come from one endpoint, not eight: these are full-table aggregates and
 together they are the most expensive read the landing page makes (~550ms). The
 hourly activity bars include the empty hours, because a chart drawn only from
 hours that had traffic closes the gaps and turns an outage into a smooth line.
@@ -944,6 +945,17 @@ script, and horizontal overflow. The page rhythm is 16px, with two deliberate
 exceptions — a breadcrumb sits 12px above its title, and a section title sits
 24px below the previous block but 10px above its own card, because a heading
 belongs to what follows it.
+
+It also checks that **rows are full**. `auto-fit` picks as many columns as fit,
+which is right for content of unknown length and wrong for a fixed set: it
+chose five columns for seven charts and left a thousand pixels of gap in the
+second row, and seven for eight stat tiles, orphaning the eighth. Both grids
+now use explicit column counts that divide their contents — four charts across,
+and stat strips at four, dropping to three when a strip holds exactly six,
+matched with `:has(> .stat:nth-child(6):last-child)` so the code building the
+strip needs no class. Every chart body is one fixed height, because a grid row
+stretches its cards to the tallest and a short one was carrying 104px of
+nothing.
 
 Two more tests hold the shape. `tests/test_ui_links.py` checks every `href` and
 `go()` target in `app.js` against the client's own route table and against the
