@@ -1201,3 +1201,24 @@ def test_promoting_and_removing_a_second_administrator_is_allowed(admin_client):
     finally:
         if auth.get_user(other["id"]):
             auth.delete_user(other["id"])
+
+
+def test_repeated_wrong_passwords_answer_429_not_401(client):
+    """429 says "wait", 401 says "wrong". Answering 401 while refusing to look
+    at the credentials would be a lie the client acts on."""
+    from git_synapse import auth
+
+    user = auth.create_user("pytest-rate@example.com", "R", "a-sufficiently-long-pass")
+    try:
+        for _ in range(auth.MAX_FAILURES):
+            assert client.post("/api/auth/login", json={
+                "email": "pytest-rate@example.com", "password": "wrong"}).status_code == 401
+        blocked = client.post("/api/auth/login", json={
+            "email": "pytest-rate@example.com", "password": "wrong"})
+        assert blocked.status_code == 429 and "try again" in blocked.json()["detail"]
+    finally:
+        from git_synapse.db.engine import execute
+
+        execute("DELETE FROM login_attempt")
+        auth.delete_user(user["id"])
+        client.cookies.clear()

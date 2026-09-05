@@ -32,6 +32,18 @@ def _clamp_limit(limit: int | None) -> int:
     return max(1, min(int(limit), cfg.max_limit))
 
 
+def _contains(term: str) -> str:
+    """A LIKE pattern matching `term` literally, anywhere in the value.
+
+    `%` and `_` are wildcards to LIKE, so a term carrying either searched for
+    something else: `test_helper` matched `testXhelper`, `100%` matched
+    anything starting with 100, and a lone `_` matched every row in the table.
+    They are escaped here with a backslash, which is LIKE's default escape.
+    """
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 def _safe_order(measure: str) -> str:
     """Validate an ordering key against the registry allowlist.
 
@@ -80,7 +92,7 @@ def list_repos(
     params: dict[str, Any] = {"limit": _clamp_limit(limit), "offset": max(offset, 0)}
     if search:
         clauses.append("(full_name ILIKE %(search)s OR description ILIKE %(search)s)")
-        params["search"] = f"%{search}%"
+        params["search"] = _contains(search)
     if language:
         clauses.append("primary_language = %(language)s")
         params["language"] = language
@@ -152,7 +164,7 @@ def search_files(
     }
     if term:
         clauses.append("f.path ILIKE %(term)s")
-        params["term"] = f"%{term}%"
+        params["term"] = _contains(term)
     if repo_id is not None:
         clauses.append("f.repo_id = %(repo_id)s")
         params["repo_id"] = repo_id
@@ -675,7 +687,9 @@ def directory_tree(repo_id: int, path: str = "", limit: int = 1000) -> dict:
         # recursive walk. At the root every top-level directory is depth 1 and
         # no prefix applies, so the clause degrades to the depth test alone.
         "depth": (0 if path == "" else len(path.split("/"))) + 1,
-        "prefix": f"{path}/%" if path else None,
+        # Escaped for the same reason as a search term: a directory named
+        # "100%" or "a_b" would otherwise match its siblings.
+        "prefix": (_contains(f"{path}/")[1:-1] + "%") if path else None,
         "limit": _clamp_limit(limit),
     }
     directory = None if path == "" else query_one(

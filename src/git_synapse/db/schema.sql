@@ -1092,6 +1092,20 @@ CREATE TABLE IF NOT EXISTS api_token (
 
 CREATE INDEX IF NOT EXISTS api_token_user_idx ON api_token (user_id);
 
+-- Failed sign-ins, so a password cannot be guessed at machine speed.
+--
+-- In the database rather than in a process, because the API may run several
+-- workers and an in-memory counter would give an attacker one budget per
+-- worker. Rows are for failures only; a success clears them.
+CREATE TABLE IF NOT EXISTS login_attempt (
+    id      BIGSERIAL PRIMARY KEY,
+    email   TEXT        NOT NULL,
+    at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    client  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS login_attempt_idx ON login_attempt (lower(email), at DESC);
+
 CREATE INDEX IF NOT EXISTS user_session_user_idx    ON user_session (user_id);
 CREATE INDEX IF NOT EXISTS user_session_expiry_idx  ON user_session (expires_at);
 
@@ -1107,5 +1121,5 @@ CREATE TABLE IF NOT EXISTS meta (
 -- was not, so schema_is_current() was permanently false and every service boot
 -- re-ran the whole DDL, taking exactly the locks the fast path exists to avoid.
 INSERT INTO meta (key, value)
-VALUES ('schema_version', '27'::jsonb)
+VALUES ('schema_version', '28'::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();

@@ -383,11 +383,17 @@ def iter_commits(
             # returned nothing and exited 0, so scoping the walk to the default
             # branch turned three empty repositories into hard failures. An
             # empty repository is a legitimate no-op, not an error.
+            #
+            # Falling off the end rather than returning: a `return` inside a
+            # `finally` discards whatever exception was already propagating, so
+            # a parse error in the loop above vanished whenever git also
+            # reported an empty repository -- the run then looked like a
+            # repository with no commits.
             lowered = stderr.lower()
             if "unknown revision" in lowered or "does not have any commits yet" in lowered:
                 log.info("no commits reachable in %s; nothing to read", mirror)
-                return
-            raise GitError(args, returncode, stderr)
+            else:
+                raise GitError(args, returncode, stderr)
 
 
 def split_path(path: str) -> tuple[str, str, str | None, int]:
