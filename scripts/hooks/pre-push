@@ -76,6 +76,18 @@ else
     warn "backend suite NOT RUN: no git-synapse-test image and no .venv"
 fi
 
+# --- lint --------------------------------------------------------------------
+# Cheap and first: a rule that catches an undefined name or a zip that silently
+# truncates should not wait behind a three-minute suite. The selection lives in
+# pyproject; twenty-five noqa comments had been sitting in the source for rules
+# nothing was checking any more.
+if command -v docker >/dev/null 2>&1 && docker image inspect git-synapse-test >/dev/null 2>&1; then
+    say "lint (ruff)"
+    docker run --rm -v "$root":/work -w /work git-synapse-test \
+        python -m ruff check src/ tests/ || fail=1
+    ran=1
+fi
+
 # --- frontend ----------------------------------------------------------------
 # Reachability is probed against /api/health, not /api/overview: overview needs
 # a session now, and a 401 was being read as "no API here" -- so both UI suites

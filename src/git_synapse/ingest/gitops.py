@@ -84,7 +84,9 @@ def _base_env() -> dict[str, str]:
             # On a blobless mirror an accidental blob read would otherwise
             # block on the promisor remote. Fail loudly instead of hanging.
             "GIT_NO_LAZY_FETCH": "1",
-            "HOME": env.get("HOME", "/tmp"),
+            # Only a fallback: git needs a writable HOME for its config, and
+            # the container sets one. Never used to hold anything.
+            "HOME": env.get("HOME", "/tmp"),  # noqa: S108
             "LC_ALL": "C",
         }
     )
@@ -111,7 +113,7 @@ def run_git(
     cfg = get_config().ingest
     timeout = timeout or cfg.git_timeout
     cmd = ["git", *args]
-    proc = subprocess.run(  # noqa: S603 - fixed executable, args built internally
+    proc = subprocess.run(
         cmd,
         cwd=str(cwd) if cwd else None,
         env=_base_env(),
@@ -528,8 +530,10 @@ def read_tags(path: Path, default_branch: str | None = None) -> list[Tag]:
     if not path.is_dir():
         return []
     proc = run_git(
-        ["for-each-ref", "--format=%(refname:short)\t%(objecttype)\t%(objectname)"
-         "\t%(*objectname)\t%(*objecttype)\t%(creatordate:iso-strict)", "refs/tags"],
+        ["for-each-ref",
+         ("--format=%(refname:short)\t%(objecttype)\t%(objectname)"
+          "\t%(*objectname)\t%(*objecttype)\t%(creatordate:iso-strict)"),
+         "refs/tags"],
         cwd=path, check=False, timeout=300,
     )
     if proc.returncode != 0:

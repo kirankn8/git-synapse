@@ -21,9 +21,9 @@ from __future__ import annotations
 
 import argparse
 import logging
-import time
 import os
 import sys
+import time
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -32,7 +32,11 @@ from git_synapse.analysis import calls, predict
 from git_synapse.analysis import query as q
 from git_synapse.db.engine import apply_schema, wait_for_database
 from git_synapse.stats.registry import (
-    BY_KEY, DEFAULT_MEASURE, FREE_LOOKUP_HIT_RATE, MEASURED_ON, MEASURES,
+    BY_KEY,
+    DEFAULT_MEASURE,
+    FREE_LOOKUP_HIT_RATE,
+    MEASURED_ON,
+    MEASURES,
 )
 
 log = logging.getLogger("git_synapse.mcp")
@@ -219,14 +223,14 @@ def _classify_partner(path: str, own_path: str, n_ab: int) -> tuple[list[str], b
         base in _LOCKFILES
         or any(seg.lower() in _GENERATED_DIRS for seg in segments[:-1])
         or any(part in lower_base for part in _GENERATED_FILE_PARTS)
-        or (lower_base.startswith("mock_") or lower_base.startswith("mocks_"))
+        or (lower_base.startswith(("mock_", "mocks_")))
     ):
         labels.append("generated")
 
     stem = own_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
     if stem and (
-        base.startswith(f"{stem}_test.") or base.startswith(f"test_{stem}.")
-        or base.startswith(f"{stem}.test.") or base.startswith(f"{stem}.spec.")
+        base.startswith((f"{stem}_test.", f"test_{stem}.",
+                         f"{stem}.test.", f"{stem}.spec."))
     ):
         labels.append("own_test")
 

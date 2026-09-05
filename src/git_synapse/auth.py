@@ -19,7 +19,7 @@ import hmac
 import logging
 import re
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from git_synapse.db.engine import execute, query, query_one
@@ -267,7 +267,7 @@ def sign_in(email: str, password: str, user_agent: str | None = None) -> tuple[s
         "INSERT INTO user_session (token_hash, user_id, expires_at, user_agent)"
         " VALUES (%s, %s, %s, %s)",
         (_token_hash(token), user["id"],
-         datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS),
+         datetime.now(UTC) + timedelta(days=SESSION_DAYS),
          (user_agent or "")[:200]),
     )
     execute("UPDATE app_user SET last_login_at = now() WHERE id = %s", (user["id"],))
@@ -301,7 +301,7 @@ def session_user(token: str | None) -> dict | None:
     execute(
         "UPDATE user_session SET last_seen_at = now(), expires_at = %s"
         " WHERE token_hash = %s",
-        (datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS), _token_hash(token)),
+        (datetime.now(UTC) + timedelta(days=SESSION_DAYS), _token_hash(token)),
     )
     return _row(row)
 
@@ -318,7 +318,7 @@ def revoke_all(user_id: int) -> int:
 # -------------------------------------------------------------- api tokens
 
 #: Recognisable in a log or a paste, and greppable in a leaked file.
-TOKEN_PREFIX = "gss_"
+TOKEN_PREFIX = "gss_"  # noqa: S105 - a prefix, not a secret
 
 
 def create_token(user_id: int, name: str, days: int | None = None) -> tuple[str, dict]:
@@ -332,7 +332,7 @@ def create_token(user_id: int, name: str, days: int | None = None) -> tuple[str,
     if not name:
         raise AuthError("give the token a name, so it can be told from the others")
     secret = TOKEN_PREFIX + secrets.token_urlsafe(32)
-    expires = (datetime.now(timezone.utc) + timedelta(days=days)) if days else None
+    expires = (datetime.now(UTC) + timedelta(days=days)) if days else None
     row = query_one(
         """
         INSERT INTO api_token (token_hash, prefix, user_id, name, expires_at)

@@ -53,7 +53,7 @@ def refresh(trigger: str = "schedule", discover: bool = False) -> None:
             result.status, len(result.ok), len(result.failed),
             result.commits_added, result.duration_s,
         )
-    except Exception:  # noqa: BLE001 - the scheduler must survive a bad run
+    except Exception:
         log.exception("refresh failed")
     finally:
         _run_lock.release()

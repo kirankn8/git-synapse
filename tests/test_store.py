@@ -7,7 +7,7 @@ is defined by the database, not by Python. Mocking it would test nothing.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -16,7 +16,7 @@ from git_synapse.ingest.github import RepoRecord
 from git_synapse.ingest.parser import FileChange, ParsedCommit
 from git_synapse.ingest.store import COMMIT_FLUSH_SIZE, load_commits, upsert_repo
 
-BASE = datetime(2024, 1, 1, tzinfo=timezone.utc)
+BASE = datetime(2024, 1, 1, tzinfo=UTC)
 
 
 def make_commit(i: int, paths: list[str], parents: list[str] | None = None, **kw) -> ParsedCommit:

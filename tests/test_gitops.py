@@ -8,7 +8,6 @@ Everything here exists to keep that shape impossible.
 from __future__ import annotations
 
 import dataclasses
-import os
 import subprocess
 
 import pytest
@@ -479,6 +478,7 @@ def test_tags_are_mirrored(tmp_path):
     """A manifest pinning `v1.2.3` names a release, and only a tag turns that
     into a commit. Excluding tags made the tag index build and stay empty."""
     import subprocess
+
     from git_synapse.ingest import gitops
 
     work = tmp_path / "w"
@@ -524,13 +524,15 @@ def worktree(tmp_path, name):
     work.mkdir()
     subprocess.run(["git", "init", "--quiet", "-b", "main", str(work)], check=True, env=ENV)
     (work / "a.txt").write_text("x")
-    g(work, "add", "-A"); g(work, "commit", "--quiet", "-m", "one")
+    g(work, "add", "-A")
+    g(work, "commit", "--quiet", "-m", "one")
     return work
 
 
 def add_commit(repo, name, body):
     (repo / name).write_text(body)
-    g(repo, "add", "-A"); g(repo, "commit", "--quiet", "-m", name)
+    g(repo, "add", "-A")
+    g(repo, "commit", "--quiet", "-m", name)
 
 
 def test_a_tag_on_the_shipping_branch_anchors_to_itself(tmp_path):
@@ -653,7 +655,8 @@ def test_a_backport_that_touched_extra_files_is_not_a_replay(tmp_path):
     g(work, "checkout", "-q", "-b", "release-1.0", "HEAD~1")
     (work / "auth.py").write_text("def check(): pass\n")
     (work / "compat.py").write_text("shim\n")          # the old branch needed this too
-    g(work, "add", "-A"); g(work, "commit", "--quiet", "-m", "backport auth fix")
+    g(work, "add", "-A")
+    g(work, "commit", "--quiet", "-m", "backport auth fix")
     adapted = g(work, "rev-parse", "HEAD").stdout.strip()
     g(work, "tag", "v1.0.0")
     g(work, "checkout", "-q", "main")
@@ -777,8 +780,7 @@ def test_tags_survive_a_branch_that_cannot_be_listed(tmp_path, monkeypatch):
 
     def _fail_rev_list(args, **kw):
         if args and args[0] == "rev-list":
-            proc = real(["rev-parse", "--verify", "definitely-not-a-ref"], **kw)
-            return proc
+            return real(["rev-parse", "--verify", "definitely-not-a-ref"], **kw)
         return real(args, **kw)
 
     monkeypatch.setattr(gitops, "run_git", _fail_rev_list)

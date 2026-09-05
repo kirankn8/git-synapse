@@ -65,7 +65,7 @@ class RepoRecord:
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_api(cls, payload: dict[str, Any]) -> "RepoRecord":
+    def from_api(cls, payload: dict[str, Any]) -> RepoRecord:
         """Build a record from a GitHub REST repository object."""
         owner = (payload.get("owner") or {}).get("login") or ""
         license_obj = payload.get("license") or {}
@@ -118,7 +118,7 @@ def _parse_ts(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except ValueError:
         log.warning("could not parse timestamp %r", value)
         return None
@@ -145,7 +145,7 @@ class GitHubClient:
             base_url=self.cfg.api_url, headers=headers, timeout=timeout, follow_redirects=True
         )
 
-    def __enter__(self) -> "GitHubClient":
+    def __enter__(self) -> GitHubClient:
         return self
 
     def __exit__(self, *exc: object) -> None:

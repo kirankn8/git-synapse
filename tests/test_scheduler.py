@@ -12,7 +12,7 @@ import pytest
 
 pytest.importorskip("apscheduler")
 
-from git_synapse.scheduler import main as sched  # noqa: E402
+from git_synapse.scheduler import main as sched
 
 
 def test_a_tick_is_skipped_while_the_previous_one_runs(monkeypatch):
@@ -28,7 +28,7 @@ def test_a_tick_is_skipped_while_the_previous_one_runs(monkeypatch):
         raise RuntimeError("stop here; the run itself is not under test")
 
     monkeypatch.setattr(sched.pipeline, "run_ingest", slow_ingest)
-    monkeypatch.setattr(sched.pipeline, "load_repo_records", lambda: [])
+    monkeypatch.setattr(sched.pipeline, "load_repo_records", list)
 
     first = threading.Thread(target=sched.refresh, kwargs={"trigger": "one"})
     first.start()
@@ -48,7 +48,7 @@ def test_the_lock_is_released_after_a_failing_run(monkeypatch):
         raise RuntimeError("ingest exploded")
 
     monkeypatch.setattr(sched.pipeline, "run_ingest", boom)
-    monkeypatch.setattr(sched.pipeline, "load_repo_records", lambda: [])
+    monkeypatch.setattr(sched.pipeline, "load_repo_records", list)
 
     sched.refresh(trigger="first")
     # If the lock leaked, this would be skipped rather than attempted.
@@ -76,7 +76,7 @@ def test_refresh_survives_an_exception_rather_than_killing_the_loop(monkeypatch)
         sched.pipeline, "run_ingest",
         lambda **kw: (_ for _ in ()).throw(ValueError("bad run")),
     )
-    monkeypatch.setattr(sched.pipeline, "load_repo_records", lambda: [])
+    monkeypatch.setattr(sched.pipeline, "load_repo_records", list)
     sched.refresh(trigger="schedule")  # must not raise
 
 
@@ -300,7 +300,7 @@ def test_the_refresh_default_is_declared_once_and_matches_everywhere():
     assert "REFRESH_CRON:" in anchor, "the API must see the same schedule as the scheduler"
 
     example = re.search(r"^REFRESH_CRON=(.+)$",
-                        (root / ".env.example").read_text(), re.M)
+                        (root / ".env.example").read_text(), re.MULTILINE)
     assert example and example.group(1).strip() == DEFAULT_REFRESH_CRON, example
 
 
@@ -373,8 +373,9 @@ def test_the_scheduler_follows_a_schedule_changed_while_it_runs(monkeypatch):
 def test_an_unchanged_schedule_is_left_alone(monkeypatch):
     """Rescheduling every minute would reset the next fire time every minute,
     so a job on a long cron could never reach it."""
-    import git_synapse.scheduler.main as sched
     from apscheduler.triggers.cron import CronTrigger
+
+    import git_synapse.scheduler.main as sched
 
     same = CronTrigger.from_crontab("0 * * * *", timezone="UTC")
     touched = []

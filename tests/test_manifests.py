@@ -73,15 +73,15 @@ CASES = [
      "nixpkgs", "commit"),
     ("Package.resolved", f'{{"pins":[{{"identity":"swift-log","state":{{"revision":"{SHA}"}}}}]}}',
      "swift-log", "commit"),
-    ("pom.xml", "<project><dependencies><dependency><artifactId>guava</artifactId>"
-                "<version>32.1.0</version></dependency></dependencies></project>", "guava", "tag"),
-    ("app.csproj", '<Project><ItemGroup><PackageReference Include="Serilog" Version="3.1.1"/>'
-                   "</ItemGroup></Project>", "Serilog", "tag"),
-    ("Gemfile.lock", "GIT\n  remote: https://github.com/acme/rack.git\n"
-                     f"  revision: {SHA}\n", "rack", "commit"),
+    ("pom.xml", ("<project><dependencies><dependency><artifactId>guava</artifactId>"
+                "<version>32.1.0</version></dependency></dependencies></project>"), "guava", "tag"),
+    ("app.csproj", ('<Project><ItemGroup><PackageReference Include="Serilog" Version="3.1.1"/>'
+                   "</ItemGroup></Project>"), "Serilog", "tag"),
+    ("Gemfile.lock", ("GIT\n  remote: https://github.com/acme/rack.git\n"
+                     f"  revision: {SHA}\n"), "rack", "commit"),
     ("pubspec.yaml", "dependencies:\n  http: 1.2.0\n", "http", "tag"),
-    (".gitmodules", '[submodule "vendor/zlib"]\n\tpath = vendor/zlib\n'
-                    "\turl = https://github.com/madler/zlib.git\n\tbranch = v1.3\n", "zlib", "tag"),
+    (".gitmodules", ('[submodule "vendor/zlib"]\n\tpath = vendor/zlib\n'
+                    "\turl = https://github.com/madler/zlib.git\n\tbranch = v1.3\n"), "zlib", "tag"),
     ("Dockerfile", f"FROM ghcr.io/acme/base@sha256:{SHA}\n", "base", "commit"),
 ]
 
@@ -337,7 +337,7 @@ def test_a_version_with_no_digits_is_not_a_version():
     import dataclasses
     eco = dataclasses.replace(M.ecosystem_for("package.json"),
                               parse=lambda _t: [("lodash", "name")])
-    import unittest.mock as mock
+    from unittest import mock
     with mock.patch.object(M, "ecosystem_for", lambda p: eco):
         assert M.references("package.json", "{}") == []
 
@@ -347,3 +347,28 @@ def test_yaml_manifests_are_skipped_when_the_parser_is_absent(monkeypatch):
     raise on every scan."""
     monkeypatch.setattr(M, "yaml", None)
     assert M.references("pnpm-lock.yaml", "packages:\n  /left-pad/1.0.0: {}\n") == []
+
+
+def test_a_manifest_declaring_a_dtd_is_refused_rather_than_expanded():
+    """These files come from repositories we mirror, which is to say from
+    anyone. ElementTree expands internal entities, so twenty lines of `pom.xml`
+    can define nested entities that expand to gigabytes and take the ingest
+    down with it. No real Maven or MSBuild manifest declares a DTD."""
+    bomb = (
+        '<?xml version="1.0"?>\n'
+        '<!DOCTYPE lolz [<!ENTITY lol "lol">\n'
+        ' <!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">\n'
+        ' <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">]>\n'
+        "<project><artifactId>&lol3;</artifactId></project>"
+    )
+    assert M.parse_xml(bomb) == []
+    assert M._maven_coordinates(bomb) == []
+
+    # And an ordinary manifest is still read.
+    real = (
+        '<project xmlns="http://maven.apache.org/POM/4.0.0"><dependencies>'
+        "<dependency><groupId>com.google.guava</groupId>"
+        "<artifactId>guava</artifactId><version>32.0</version></dependency>"
+        "</dependencies></project>"
+    )
+    assert M.parse_xml(real) == [("guava", "32.0")]

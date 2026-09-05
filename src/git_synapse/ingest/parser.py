@@ -342,7 +342,7 @@ def iter_commits(
     for sha in since_shas or []:
         args.append(f"^{sha}")
 
-    proc = subprocess.Popen(  # noqa: S603 - fixed executable
+    proc = subprocess.Popen(
         ["git", *args],
         cwd=str(mirror),
         env=_base_env(),

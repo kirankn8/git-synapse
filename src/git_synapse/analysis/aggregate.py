@@ -150,7 +150,7 @@ def _head_tree_paths(conn: psycopg.Connection, repo_id: int) -> set[str] | None:
     if not mirror.is_dir():
         return None
     try:
-        proc = subprocess.run(  # noqa: S603 - fixed executable
+        proc = subprocess.run(
             ["git", "ls-tree", "-r", "--name-only", "HEAD"],
             cwd=str(mirror), capture_output=True, text=True,
             errors="replace", timeout=300, check=False,
@@ -169,7 +169,7 @@ def _refresh_file_marginals(conn: psycopg.Connection, repo_id: int) -> int:
     with the joint counts in ``file_pair``; ``change_count`` keeps the honest
     total for display.
     """
-    row = conn.execute(
+    conn.execute(
         """
         WITH agg AS (
             SELECT cf.file_id,

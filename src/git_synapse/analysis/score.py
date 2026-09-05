@@ -79,7 +79,7 @@ def _level_sql(level: str) -> tuple[str, str, str, str, str]:
 
 def _score_level(conn: psycopg.Connection, repo_id: int, level: str) -> int:
     """Score every pair at one granularity level, batching through numpy."""
-    pair_table, metric_table, entity_table, col_a, col_b = _level_sql(level)
+    _pair_table, metric_table, _entity_table, col_a, col_b = _level_sql(level)
 
     population = conn.execute(
         "SELECT pair_population FROM repo WHERE id = %s", (repo_id,)
@@ -161,13 +161,18 @@ def _score_batch(repo_id: int, batch: _Batch) -> list[tuple]:
     # arrays is materially faster than indexing each array per row.
     return [
         (repo_id, int(a), int(b), int(ab), int(na), int(nb), batch.n_total, *values)
+        # strict: zip stops at the shortest input, so a measure returning
+        # fewer values than there are pairs would silently drop rows from the
+        # COPY -- pairs missing from the metric table, with nothing raised.
         for a, b, ab, na, nb, values in zip(
             batch.a_ids,
             batch.b_ids,
             batch.n_ab,
             batch.n_a,
             batch.n_b,
-            zip(*(np.asarray(s, dtype=np.float64).tolist() for s in scores)),
+            zip(*(np.asarray(s, dtype=np.float64).tolist() for s in scores),
+                strict=True),
+            strict=True,
         )
     ]
 

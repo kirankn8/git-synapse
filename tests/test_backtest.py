@@ -45,7 +45,8 @@ def worktree(tmp_path, name):
     work.mkdir()
     subprocess.run(["git", "init", "--quiet", "-b", "main", str(work)], check=True, env={**os.environ, **ENV})
     (work / "a.txt").write_text("x")
-    g(work, "add", "-A"); g(work, "commit", "--quiet", "-m", "one")
+    g(work, "add", "-A")
+    g(work, "commit", "--quiet", "-m", "one")
     return work
 
 
@@ -56,7 +57,8 @@ def g(repo, *args):
 
 def add_commit(repo, name, body):
     (repo / name).write_text(body)
-    g(repo, "add", "-A"); g(repo, "commit", "--quiet", "-m", name)
+    g(repo, "add", "-A")
+    g(repo, "commit", "--quiet", "-m", name)
 
 
 def git(repo, *args):
@@ -197,7 +199,7 @@ def test_a_commit_cannot_inform_its_own_prediction(monkeypatch):
     history.append((1, [90, 91]))                        # first and only sighting
     result = replay(monkeypatch, history, measures=("npmi",))
 
-    scored = [s for s in result.scores if s.measure == "npmi"][0]
+    scored = next(s for s in result.scores if s.measure == "npmi")
     # The 90/91 prompts contribute two predictions and must both miss.
     assert scored.found == 0 or scored.hit_prompts < scored.prompts
 
@@ -209,7 +211,7 @@ def test_a_pair_becomes_predictable_only_after_it_has_been_seen(monkeypatch):
     history.append((1, [90, 91]))                        # then ask
     result = replay(monkeypatch, history, measures=("npmi",))
 
-    scored = [s for s in result.scores if s.measure == "npmi"][0]
+    scored = next(s for s in result.scores if s.measure == "npmi")
     assert scored.hit_prompts > 0, "a pair seen five times must be predictable"
 
 
@@ -229,7 +231,7 @@ def test_sweeping_commits_are_not_used_as_prompts(monkeypatch):
 
 
 def test_single_file_commits_produce_no_prompt(monkeypatch):
-    history = flat([1, 2], bt.WARMUP_COMMITS) + [(1, [7])]
+    history = [*flat([1, 2], bt.WARMUP_COMMITS), (1, [7])]
     before = replay(monkeypatch, flat([1, 2], bt.WARMUP_COMMITS), measures=("npmi",)).prompts
     assert replay(monkeypatch, history, measures=("npmi",)).prompts == before
 
@@ -393,7 +395,7 @@ def test_the_verdict_names_the_baseline_that_actually_won(monkeypatch):
 
 def test_every_changed_file_takes_a_turn_by_default(monkeypatch):
     """A commit touching three files asks three questions, one per file."""
-    history = flat([1, 2], bt.WARMUP_COMMITS) + [(1, [1, 2, 3])]
+    history = [*flat([1, 2], bt.WARMUP_COMMITS), (1, [1, 2, 3])]
     before = replay(monkeypatch, flat([1, 2], bt.WARMUP_COMMITS), measures=("npmi",)).prompts
     after = replay(monkeypatch, history, measures=("npmi",)).prompts
     assert after - before == 3
@@ -402,7 +404,7 @@ def test_every_changed_file_takes_a_turn_by_default(monkeypatch):
 def test_obscure_seeding_asks_once_per_commit(monkeypatch):
     """One question per commit, so a commit touching many files cannot dominate
     the sample with its own easy cases."""
-    history = flat([1, 2], bt.WARMUP_COMMITS) + [(1, [1, 2, 3])]
+    history = [*flat([1, 2], bt.WARMUP_COMMITS), (1, [1, 2, 3])]
     before = replay(monkeypatch, flat([1, 2], bt.WARMUP_COMMITS),
                     measures=("npmi",), seeding="obscure").prompts
     after = replay(monkeypatch, history, measures=("npmi",), seeding="obscure").prompts
@@ -603,7 +605,7 @@ def test_the_replay_reads_commits_oldest_first(seeded, monkeypatch):
     """Prequential scoring depends on the order: a commit scored before its
     predecessors were learned from would be judged on a history that had not
     happened yet."""
-    conn, repo, files, (first, second) = seeded
+    conn, repo, _files, (first, second) = seeded
     monkeypatch.setattr(bt, "query", lambda sql, params: _rows(conn, sql, repo))
 
     history = bt._history(repo)
@@ -614,13 +616,13 @@ def _rows(conn, sql, repo):
     with conn.cursor() as cur:
         cur.execute(sql, {"repo": repo})
         cols = [c.name for c in cur.description]
-        return [dict(zip(cols, r)) for r in cur.fetchall()]
+        return [dict(zip(cols, r, strict=False)) for r in cur.fetchall()]
 
 
 def test_a_commit_excluded_from_pairs_never_becomes_a_prompt(seeded, monkeypatch):
     """`pair_eligible` is the one switch that keeps a sweep out of the
     statistics, so the replay has to honour it at the source."""
-    conn, repo, files, _ = seeded
+    conn, repo, _files, _ = seeded
     monkeypatch.setattr(bt, "query", lambda sql, params: _rows(conn, sql, repo))
     assert len(bt._history(repo)) == 2, "the ineligible commit must not appear"
 
@@ -665,7 +667,8 @@ def test_the_search_scores_a_filename_match_without_reading_the_file(tmp_path):
     # half a repository's files selects nothing.
     (work / "web" / "invoice_renderer.py").write_text("# unrelated contents\n")
     (work / "web" / "unrelated.py").write_text("x = 1\n")
-    g(work, "add", "-A"); g(work, "commit", "--quiet", "-m", "layout")
+    g(work, "add", "-A")
+    g(work, "commit", "--quiet", "-m", "layout")
     add_commit(work, "later.py", "y = 2\n")
     sha = g(work, "rev-parse", "HEAD").stdout.strip()
 
@@ -683,7 +686,8 @@ def test_the_search_widens_using_what_the_first_round_returned(tmp_path):
     (work / "treewalker.py").write_text("from parser import ParseTree\n")
     # Reachable only in round two, via `treewalker`'s own name.
     (work / "helpers.py").write_text("# see treewalker for details\n")
-    g(work, "add", "-A"); g(work, "commit", "--quiet", "-m", "layout")
+    g(work, "add", "-A")
+    g(work, "commit", "--quiet", "-m", "layout")
     add_commit(work, "later.py", "y = 2\n")
     sha = g(work, "rev-parse", "HEAD").stdout.strip()
 
@@ -711,7 +715,7 @@ def test_grep_output_that_is_not_for_this_commit_is_ignored(tmp_path, monkeypatc
 def test_a_commit_touching_one_file_yields_no_prompt(monkeypatch):
     """There is no "what else" when nothing else changed, and counting it as a
     miss would punish every measure for a question never asked."""
-    history = flat([1, 2], bt.WARMUP_COMMITS) + [(1, [1, 1])]   # one distinct file
+    history = [*flat([1, 2], bt.WARMUP_COMMITS), (1, [1, 1])]   # one distinct file
     before = replay(monkeypatch, flat([1, 2], bt.WARMUP_COMMITS), measures=("npmi",)).prompts
     assert replay(monkeypatch, history, measures=("npmi",)).prompts == before
 

@@ -243,7 +243,7 @@ def impact_chains(
     from git_synapse.db.engine import query
 
     return query(
-        f"""
+        """
         WITH RECURSIVE walk AS (
             SELECT i.source_repo_id AS src, i.target_repo_id AS dst, 1 AS depth,
                    i.score AS path_score,

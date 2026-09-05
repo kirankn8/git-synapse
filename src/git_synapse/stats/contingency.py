@@ -61,7 +61,7 @@ class Contingency:
         n_a: ArrayLike,
         n_b: ArrayLike,
         n_total: ArrayLike,
-    ) -> "Contingency":
+    ) -> Contingency:
         """Build a table from the counts the pair aggregation actually stores.
 
         Args:

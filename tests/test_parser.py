@@ -91,14 +91,18 @@ def test_a_rename_carries_its_old_path(tmp_path):
 
 
 def test_commits_arrive_oldest_first(tmp_path):
-    steps = [(f"c{i}", (lambda i: lambda w: (w / f"f{i}.txt").write_text(str(i)))(i))
+    # `i=i` binds the value at definition; the immediately-invoked wrapper this
+    # replaces did the same thing less legibly.
+    steps = [(f"c{i}", lambda w, i=i: (w / f"f{i}.txt").write_text(str(i)))
              for i in range(4)]
     subjects = [c.subject for c in iter_commits(_bare(tmp_path, steps))]
     assert subjects == ["c0", "c1", "c2", "c3"]
 
 
 def test_since_shas_excludes_already_read_history(tmp_path):
-    steps = [(f"c{i}", (lambda i: lambda w: (w / f"f{i}.txt").write_text(str(i)))(i))
+    # `i=i` binds the value at definition; the immediately-invoked wrapper this
+    # replaces did the same thing less legibly.
+    steps = [(f"c{i}", lambda w, i=i: (w / f"f{i}.txt").write_text(str(i)))
              for i in range(4)]
     mirror = _bare(tmp_path, steps)
     everything = list(iter_commits(mirror))
@@ -123,7 +127,7 @@ def test_unicode_paths_and_subjects_round_trip(tmp_path):
         (w / "日本").mkdir()
         (w / "日本" / "テスト.go").write_text("x")
 
-    c = list(iter_commits(_bare(tmp_path, [("añadir 日本 🎉", add)])))[0]
+    c = next(iter(iter_commits(_bare(tmp_path, [("añadir 日本 🎉", add)]))))
     assert c.subject == "añadir 日本 🎉"
     assert c.files[0].path == "日本/テスト.go"
 
@@ -133,7 +137,7 @@ def test_a_subject_containing_the_field_separator_does_not_corrupt_the_stream(tm
     desynchronise every commit after it."""
     def add(w): (w / "a.txt").write_text("x")
 
-    c = list(iter_commits(_bare(tmp_path, [("weird | subject -- with $chars", add)])))[0]
+    c = next(iter(iter_commits(_bare(tmp_path, [("weird | subject -- with $chars", add)]))))
     assert c.subject == "weird | subject -- with $chars"
     assert c.files[0].path == "a.txt"
 

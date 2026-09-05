@@ -43,10 +43,9 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
-from collections import defaultdict
 import time
+from collections import defaultdict
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 
 import psycopg
@@ -203,7 +202,7 @@ def manifest_paths(mirror: Path) -> list[tuple[str, str]]:
     and a repository with fourteen go.mod files below the root looked like one
     with no internal dependencies at all.
     """
-    proc = subprocess.run(  # noqa: S603 - fixed executable
+    proc = subprocess.run(
         ["git", "ls-tree", "-r", "--name-only", "HEAD"],
         cwd=str(mirror), env=_base_env(), capture_output=True,
         text=True, errors="replace", timeout=300,
@@ -231,7 +230,7 @@ def manifest_paths(mirror: Path) -> list[tuple[str, str]]:
 
 def _blob_at(mirror: Path, sha: str, path: str) -> str:
     """One file as it stood at one commit, or "" if it was not there."""
-    proc = subprocess.run(  # noqa: S603 - fixed executable
+    proc = subprocess.run(
         ["git", "show", f"{sha}:{path}"],
         cwd=str(mirror), env=_base_env(), capture_output=True,
         text=True, errors="replace", timeout=120,
@@ -277,7 +276,7 @@ def extract_from_mirror(mirror: Path, repo_name: str, manifest: str = "go.mod", 
     each commit that touched it costs one `git show` per revision and works for
     every format, structured ones included.
     """
-    proc = subprocess.run(  # noqa: S603 - fixed executable
+    proc = subprocess.run(
         ["git", "log", "--all", "--no-merges", "--format=%H", "--", manifest],
         cwd=str(mirror), env=_base_env(), capture_output=True,
         text=True, errors="replace", timeout=900,

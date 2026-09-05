@@ -52,11 +52,12 @@ import logging
 import re
 import tomllib
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 try:                                     # PyYAML is required, but a missing
-    import yaml                          # optional extra must not break ingest.
+    import yaml  # optional extra must not break ingest.
 except ImportError:                      # pragma: no cover - packaging guard
     yaml = None
 
@@ -200,14 +201,14 @@ def published_names(path: str, text: str) -> list[str]:
     """
     base = path.rsplit("/", 1)[-1]
     if base == "go.mod":
-        m = re.search(r"^\s*module\s+(\S+)", text, re.M)
+        m = re.search(r"^\s*module\s+(\S+)", text, re.MULTILINE)
         return [m.group(1)] if m else []
     if base == "pom.xml":
         return _maven_coordinates(text)
     if base.endswith(".gemspec"):
         m = re.search(r"""\.name\s*=\s*["']([^"']+)["']""", text)
         return [m.group(1)] if m else []
-    if base == "package.json" or base == "composer.json":
+    if base in {"package.json", "composer.json"}:
         doc = _load_json(text)
         return [doc["name"]] if isinstance(doc, dict) and isinstance(doc.get("name"), str) else []
     if base == "Cargo.toml":
@@ -225,9 +226,8 @@ def _maven_coordinates(text: str) -> list[str]:
     the top-level element finds nothing for exactly the modules a monorepo
     publishes.
     """
-    try:
-        root = ET.fromstring(text)
-    except ET.ParseError:
+    root = _parse_xml(text)
+    if root is None:
         return []
     ns = {"m": root.tag.split("}")[0].strip("{")} if "}" in root.tag else {}
 
@@ -356,11 +356,33 @@ def parse_json_deps(text: str) -> list[tuple[str, str]]:
     return out or _walk(doc)
 
 
+def _parse_xml(text: str):
+    """Parse a manifest as XML, refusing anything carrying a DTD.
+
+    These files come from repositories we mirror, which is to say from anyone.
+    ElementTree expands internal entities, so a twenty-line `pom.xml` can
+    define nested entities that expand to gigabytes -- the billion-laughs
+    attack -- and take the ingest down with it. Entity definitions live in a
+    DOCTYPE, and no real Maven or MSBuild manifest has one, so refusing them
+    closes the hole without taking on a parser dependency.
+
+    Returns None when the document cannot or should not be parsed; every caller
+    treats that as "no dependencies here", which is what a malformed manifest
+    means anyway.
+    """
+    if "<!DOCTYPE" in text[:4096].upper():
+        log.warning("manifest declares a DTD; refusing to expand it")
+        return None
+    try:
+        return ET.fromstring(text)  # noqa: S314 - DTDs refused above
+    except ET.ParseError:
+        return None
+
+
 def parse_xml(text: str) -> list[tuple[str, str]]:
     """Maven and MSBuild, which are XML and should be read as XML."""
-    try:
-        root = ET.fromstring(text)
-    except ET.ParseError:
+    root = _parse_xml(text)
+    if root is None:
         return []
     out = []
     strip = lambda t: t.rsplit("}", 1)[-1]  # noqa: E731 - drop the XML namespace

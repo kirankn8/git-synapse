@@ -8,7 +8,6 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-
 # ------------------------------------------------------------ contingency
 
 def test_contingency_reports_its_shape_and_repr():

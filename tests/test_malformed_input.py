@@ -13,7 +13,6 @@ import pytest
 
 from git_synapse.ingest.parser import split_path
 
-
 ENV = {
     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
     "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e",
@@ -34,7 +33,7 @@ ENV = {
     "-leading-dash.go",
 ])
 def test_split_path_never_raises_on_a_real_looking_path(path):
-    d, base, ext, depth = split_path(path)
+    d, base, _ext, depth = split_path(path)
     assert isinstance(d, str) and isinstance(base, str) and depth >= 0
 
 

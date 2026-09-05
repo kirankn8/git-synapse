@@ -6,11 +6,9 @@ crash; it reads as a finding.
 """
 from __future__ import annotations
 
-import numpy as np
 import pytest
 
 from git_synapse.analysis import mining, predict
-
 
 # ------------------------------------------------------- rank normalisation
 

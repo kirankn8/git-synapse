@@ -273,7 +273,7 @@ def mutual_information(t: Contingency) -> np.ndarray:
     col = (t.n_b, t.n - t.n_b, t.n_b, t.n - t.n_b)
 
     total = np.zeros_like(t.a)
-    for obs, r, c in zip(cells, row, col):
+    for obs, r, c in zip(cells, row, col, strict=True):
         p = safe_div(obs, n)
         expected_p = safe_div(r * c, n * n)
         total = total + xlog2y(p, safe_div(p, expected_p, fill=1.0))
@@ -320,7 +320,7 @@ def log_likelihood_ratio(t: Contingency) -> np.ndarray:
     col = (t.n_b, t.n - t.n_b, t.n_b, t.n - t.n_b)
 
     total = np.zeros_like(t.a)
-    for obs, r, c in zip(cells, row, col):
+    for obs, r, c in zip(cells, row, col, strict=True):
         expected = safe_div(r * c, n)
         total = total + xlogy(obs, safe_div(obs, expected, fill=1.0))
     return np.maximum(2.0 * total, 0.0)

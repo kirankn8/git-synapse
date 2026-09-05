@@ -114,7 +114,7 @@ def test_a_binary_file_is_marked_and_carries_no_line_counts(tmp_path):
     subprocess.run(["git", "clone", "--quiet", "--bare", str(work), str(bare)],
                    check=True, env=ENV)
 
-    f = list(iter_commits(bare))[0].files[0]
+    f = next(iter(iter_commits(bare))).files[0]
     assert f.is_binary is True
     assert f.insertions == 0 and f.deletions == 0
 
@@ -295,7 +295,7 @@ def test_run_ingest_discovers_when_given_no_records(db, monkeypatch):
 def test_health_never_throws_even_when_the_database_is_unreachable(monkeypatch):
     """The health endpoint is what a supervisor polls; it must report a problem
     rather than become one."""
-    import git_synapse.api.routes as routes
+    from git_synapse.api import routes
 
     def broken(*a, **kw):
         raise RuntimeError("database gone")

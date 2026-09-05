@@ -63,7 +63,7 @@ def test_explicit_size_and_rows_win_over_what_can_be_inferred():
 def test_something_unserialisable_is_described_rather_than_dropped():
     calls.record("mcp", "odd", arguments={"fn": object()})
     row = calls._queue.get_nowait()
-    assert "arguments" in row and row["arguments"]
+    assert row.get("arguments")
 
 
 def test_a_full_queue_drops_and_counts_rather_than_blocking(monkeypatch):
