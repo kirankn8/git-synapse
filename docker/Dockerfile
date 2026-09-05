@@ -29,6 +29,12 @@ COPY src /app/src
 COPY web /app/web
 RUN pip install --no-deps -e /app
 
+# The test tools, baked in rather than installed on every run. Fetching them
+# each time made the suite depend on PyPI being reachable and turned a busy
+# machine into an apparent deadlock: pip waiting on the network, with the whole
+# run buffered behind it and nothing on screen to say so.
+RUN pip install --no-cache-dir pytest pytest-cov pytest-timeout PyYAML
+
 # Mirrors live on a mounted volume; create the mount point with sane ownership.
 RUN mkdir -p /data/mirrors
 

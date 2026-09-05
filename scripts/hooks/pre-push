@@ -18,6 +18,16 @@ cd "$root" || exit 1
 fail=0
 ran=0
 
+# A hook that is interrupted -- Ctrl-C, a timeout, a closed terminal -- used to
+# leave its throwaway Postgres and test container running. Three of those
+# starve a laptop, which slows the next run, which is then also interrupted.
+cleanup() {
+    docker ps -aq --filter "name=prepush-db-" | xargs -r docker rm -f >/dev/null 2>&1
+    docker network ls --format '{{.Name}}' | grep -E '^prepush-[0-9]+$' \
+        | xargs -r docker network rm >/dev/null 2>&1
+}
+trap cleanup EXIT INT TERM
+
 say()  { printf '\033[1mpre-push:\033[0m %s\n' "$1"; }
 warn() { printf '\033[33mpre-push: %s\033[0m\n' "$1"; }
 
@@ -52,8 +62,7 @@ if command -v docker >/dev/null 2>&1 && docker image inspect git-synapse-test >/
         -e POSTGRES_USER=git_synapse -e POSTGRES_PASSWORD=git_synapse \
         -e POSTGRES_DB=git_synapse -e PYTHONPATH=/work/src \
         git-synapse-test \
-        sh -c 'pip install -q pytest pytest-cov PyYAML 2>/dev/null;
-               python -m pytest -q -p no:cacheprovider --cov=git_synapse' || fail=1
+        python -m pytest -q -p no:cacheprovider --cov=git_synapse || fail=1
     docker rm -f "$db" >/dev/null 2>&1
     docker network rm "$net" >/dev/null 2>&1
     ran=1

@@ -595,7 +595,6 @@ def test_search_files_scopes_to_a_repository_when_one_resolves(db):
 @pytest.mark.parametrize(("argv", "expected"), [
     ([], {"transport": "stdio"}),
     (["--transport", "sse", "--port", "9999"], {"transport": "sse", "port": 9999}),
-    (["--transport", "http", "--host", "0.0.0.0"], {"transport": "streamable-http"}),
 ])
 def test_each_transport_starts_the_server_the_way_it_is_meant_to(monkeypatch, argv,
                                                                 expected):
@@ -609,6 +608,22 @@ def test_each_transport_starts_the_server_the_way_it_is_meant_to(monkeypatch, ar
     assert server.main(argv) == 0
     for key, value in expected.items():
         assert started[key] == value
+
+
+def test_http_serves_the_guarded_app_rather_than_the_bare_one(monkeypatch):
+    """The token check lives in a wrapper around the ASGI app, so http cannot
+    go through `server.run` -- and a test that patches `run` would sit waiting
+    on a real server instead of failing."""
+    served = {}
+    monkeypatch.setattr(server, "wait_for_database", lambda *a, **k: None)
+    monkeypatch.setattr(server, "apply_schema", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_publish_tool_inventory", lambda: None)
+    monkeypatch.setattr(server, "_serve",
+                        lambda app, host, port: served.update(app=app, host=host, port=port))
+
+    assert server.main(["--transport", "http", "--host", "0.0.0.0", "--port", "8081"]) == 0
+    assert served["host"] == "0.0.0.0" and served["port"] == 8081
+    assert served["app"] is not None
 
 
 # ----------------------------------------------- explaining a repository pair
@@ -922,3 +937,67 @@ def test_publishing_the_inventory_never_stops_the_server(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="git_synapse.mcp.server"):
         srv._publish_tool_inventory()
     assert "could not publish the tool inventory" in caplog.text
+
+
+def test_the_mcp_gate_lets_a_token_through_and_turns_others_away(monkeypatch):
+    """The switch has to close a real door. Exercised through the ASGI app the
+    server actually serves, not a stand-in: a gate that is only tested in the
+    abstract is a gate nobody has opened."""
+    import asyncio
+
+    from git_synapse import auth
+
+    app = server._guarded_app("127.0.0.1")
+
+    # The middleware is the outermost layer; call it with a request it can read.
+    async def call(headers, mode, token_user):
+        monkeypatch.setattr(auth, "access_mode", lambda surface: mode)
+        monkeypatch.setattr(auth, "token_user", lambda secret: token_user)
+        sent = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+
+        scope = {
+            "type": "http", "http_version": "1.1", "method": "POST", "path": "/mcp",
+            "raw_path": b"/mcp", "query_string": b"", "root_path": "", "scheme": "http",
+            "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+            "client": ("127.0.0.1", 1234), "server": ("127.0.0.1", 8081), "app": app,
+        }
+        try:
+            await app(scope, receive, send)
+        except Exception:
+            # Past the gate, the real MCP app wants a session manager this test
+            # has not started. Reaching that is itself the evidence that the
+            # request was let through.
+            return None
+        started = [m["status"] for m in sent if m["type"] == "http.response.start"]
+        return started[0] if started else None
+
+    # Required, no token: turned away before the MCP app sees it.
+    assert asyncio.run(call({"host": "127.0.0.1"}, "required", None)) == 401
+    # Required, a token that resolves to nobody: same.
+    assert asyncio.run(call({"host": "127.0.0.1", "authorization": "Bearer gss_nope"},
+                            "required", None)) == 401
+    # Open: the gate delegates, so no 401 is produced by it. What the MCP app
+    # does next is the MCP app's business, not this gate's.
+    assert asyncio.run(call({"host": "127.0.0.1"}, "open", None)) != 401
+
+    # Required, with a token that resolves: delegated in the same way.
+    assert asyncio.run(call({"host": "127.0.0.1", "authorization": "Bearer gss_ok"},
+                            "required", {"id": 1, "role": "member"})) != 401
+
+
+def test_serving_is_a_thin_call_that_can_be_stood_in_for(monkeypatch):
+    """`_serve` exists so `main` can be tested without a server starting. It
+    must stay thin enough that patching it loses nothing."""
+    calls = {}
+    monkeypatch.setitem(__import__("sys").modules, "uvicorn",
+                        type("U", (), {"run": staticmethod(
+                            lambda app, **kw: calls.update(app=app, **kw))})())
+    server._serve("an-app", "0.0.0.0", 8081)
+    assert calls == {"app": "an-app", "host": "0.0.0.0", "port": 8081,
+                     "log_level": "info"}
