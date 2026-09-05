@@ -209,6 +209,13 @@ for (const [path, label, expect] of [
   ['/insights/impact?repo=5', 'scoped impact',  ['Accounts', 'google', 'guava', 'Insights']],
   ['/insights/graph?repo=5', 'scoped graph', ['Accounts', 'google', 'guava', 'Insights']],
 ]) {
+  // The previous page's breadcrumb is still in the DOM until the new view
+  // replaces it, and "the first non-empty trail" was therefore sometimes the
+  // old one -- a race that only showed under load.
+  const previous = (() => {
+    const el = window.document.querySelector('.crumbs');
+    return el ? el.textContent.replace(/\s+/g, ' ').trim() : '';
+  })();
   window.history.pushState({}, '', path);
   window.dispatchEvent(new window.PopStateEvent('popstate'));
   let trail = '';
@@ -216,7 +223,7 @@ for (const [path, label, expect] of [
     await sleep(120);
     const el = window.document.querySelector('.crumbs');
     trail = el ? el.textContent.replace(/\s+/g, ' ').trim() : '';
-    if (trail) break;
+    if (trail && trail !== previous) break;
   }
   const missing = expect.filter((w) => !trail.includes(w));
   report(`${label} trail`, !missing.length, trail || 'no breadcrumb');
