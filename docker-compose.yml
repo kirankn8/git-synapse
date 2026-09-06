@@ -84,6 +84,12 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    # Docker gives a container 64MB of /dev/shm, which Postgres uses to pass
+    # tuples between parallel workers. Aggregations over a million-row pair
+    # table exceed it and fail outright -- "could not resize shared memory
+    # segment ... No space left on device" -- which reads as a disk problem and
+    # is not one.
+    shm_size: 1gb
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-git_synapse}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-git_synapse}

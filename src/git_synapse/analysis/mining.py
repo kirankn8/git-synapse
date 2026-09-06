@@ -178,22 +178,47 @@ def _cluster_repo(conn: psycopg.Connection, repo_id: int, stats: MiningStats) ->
     dst = np.array([index[int(e[1])] for e in edges], dtype=np.int64)
     weight = np.array([float(e[2] or 0.0) for e in edges], dtype=np.float64)
 
-    labels = np.arange(len(nodes), dtype=np.int64)
+    n = len(nodes)
+    labels = np.arange(n, dtype=np.int64)
+    # Both directions of every edge, once. Only the labels change between
+    # rounds, so the endpoint and weight arrays are built here.
+    end = np.concatenate([dst, src])
+    other = np.concatenate([src, dst])
+    both = np.concatenate([weight, weight])
+
     for _ in range(LABEL_PROPAGATION_ROUNDS):
         # For each node, accumulate weight per neighbouring label and adopt the
-        # heaviest. Done with bincount over a (node, label) composite key so the
-        # whole sweep is vectorised.
-        n = len(nodes)
-        keys = np.concatenate([dst * n + labels[src], src * n + labels[dst]])
-        weights = np.concatenate([weight, weight])
-        # minlength is n*n and n >= 1 here (the edge list is non-empty), so the
-        # reshape below is always well-formed.
-        totals = np.bincount(keys, weights=weights, minlength=n * n)
-        reshaped = totals.reshape(n, n)
-        best = reshaped.argmax(axis=1)
-        # Only move a node that actually has an incident edge.
-        has_edge = reshaped.max(axis=1) > 0
-        new_labels = np.where(has_edge, best, labels)
+        # heaviest.
+        #
+        # Over the edges, not over an n-by-n grid. Keying a bincount on
+        # `node * n + label` needs `minlength=n*n`, which is a dense float64
+        # matrix: 7,007 coupled files in wireshark is 375MB, allocated afresh
+        # every round, and it grows with the square of the repository. Only the
+        # (node, label) pairs that actually occur can carry weight, and there
+        # are at most 2E of those.
+        lab = labels[other]
+        order = np.lexsort((lab, end))
+        end_s, lab_s, w_s = end[order], lab[order], both[order]
+
+        starts = np.empty(len(order), dtype=bool)
+        starts[0] = True
+        starts[1:] = (end_s[1:] != end_s[:-1]) | (lab_s[1:] != lab_s[:-1])
+        group = np.cumsum(starts) - 1
+        totals = np.bincount(group, weights=w_s)
+        g_node, g_label = end_s[starts], lab_s[starts]
+
+        # Heaviest label per node, ties to the lowest label -- which is what
+        # argmax over the dense row did.
+        pick = np.lexsort((g_label, -totals, g_node))
+        pn = g_node[pick]
+        first = np.empty(len(pn), dtype=bool)
+        first[0] = True
+        first[1:] = pn[1:] != pn[:-1]
+
+        new_labels = labels.copy()
+        # A node with no incident edge never appears in `end`, so it keeps its
+        # own label -- the `has_edge` guard, expressed by absence.
+        new_labels[pn[first]] = g_label[pick][first]
         if np.array_equal(new_labels, labels):
             break
         labels = new_labels
