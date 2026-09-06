@@ -187,3 +187,72 @@ def test_only_the_default_branch_is_walked(tmp_path):
 
     subjects = [c.subject for c in iter_commits(bare)]
     assert subjects == ["on main"], subjects
+
+
+# ------------------------------------------- paths git is allowed to produce
+
+def _repo_with(paths: list[str], tmp_path):
+    """A real repository containing exactly these files, and its bare mirror."""
+    import subprocess
+
+    work = tmp_path / "work"
+    work.mkdir()
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=work, capture_output=True,
+                              text=True, check=False)
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "T")
+    for name in paths:
+        f = work / name
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("hello\n")
+    git("add", "-A")
+    git("commit", "-qm", "fixture")
+
+    bare = tmp_path / "mirror.git"
+    subprocess.run(["git", "clone", "--bare", "-q", str(work), str(bare)],
+                   check=True, capture_output=True)
+    return bare
+
+
+def test_a_path_starting_with_a_colon_is_a_path_not_a_status_line(tmp_path):
+    """The raw block's status records start with ':', and so may a filename.
+
+    Sniffing the first byte before checking whether a path was expected ate
+    `:zz.txt` as a status line: the real file lost its status letter and its
+    line counts, and the numstat record behind it was consumed as a path --
+    putting a file literally called "1\\t0\\t1a.txt" into the corpus, where it
+    then co-occurred with every real file in that commit.
+    """
+    mirror = _repo_with(["1a.txt", ":zz.txt"], tmp_path)
+    commits = list(iter_commits(mirror))
+    assert len(commits) == 1
+    files = {f.path: f for f in commits[0].files}
+
+    assert set(files) == {"1a.txt", ":zz.txt"}, "no phantom, nothing missing"
+    assert files["1a.txt"].change_type == "A"
+    assert files[":zz.txt"].change_type == "A", "not misread as a modification"
+    assert files["1a.txt"].insertions == 1, "counts survive the colon path"
+    assert files[":zz.txt"].insertions == 1
+
+
+def test_a_path_starting_with_a_newline_survives(tmp_path):
+    """git emits one newline between the header and the diff block. Stripping
+    leading newlines from every record instead rewrote any path whose own first
+    character is one, and because the raw and numstat blocks were then keyed on
+    two different strings, one real file became two rows."""
+    mirror = _repo_with(["\nleading.txt", "z.txt"], tmp_path)
+    commits = list(iter_commits(mirror))
+    files = {f.path for f in commits[0].files}
+    assert files == {"\nleading.txt", "z.txt"}
+
+
+def test_the_ordinary_case_is_untouched(tmp_path):
+    """The separator newline must still be removed where git actually puts it."""
+    mirror = _repo_with(["a.txt", "b/c.txt"], tmp_path)
+    commits = list(iter_commits(mirror))
+    assert {f.path for f in commits[0].files} == {"a.txt", "b/c.txt"}
+    assert all(f.insertions == 1 for f in commits[0].files)

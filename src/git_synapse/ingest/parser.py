@@ -174,18 +174,15 @@ class _CommitAssembler:
         if not record:
             return
 
-        # --- raw block: a ":<modes> <shas> <STATUS>" line ---
-        if record.startswith(":"):
-            status_field = record.rsplit(" ", 1)[-1].strip()
-            letter = status_field[:1].upper() or "M"
-            similarity = None
-            if len(status_field) > 1 and status_field[1:].isdigit():
-                similarity = int(status_field[1:])
-            self._pending_raw = (letter, similarity)
-            self._pending_rename_old = None
-            return
-
         # --- a path record following a raw status line ---
+        #
+        # Tested before the ":" sniff, not after. A record that arrives where a
+        # path is due *is* a path, whatever its first byte -- and `:` is a legal
+        # first character for a filename. Sniffing first ate `:zz.txt` as a
+        # status line: the real file lost its status letter and its line counts,
+        # and the numstat record that followed was consumed as a path, putting a
+        # file called `1\t0\t1a.txt` into the corpus, co-occurring with every
+        # real file in that commit.
         if self._pending_raw is not None:
             letter, similarity = self._pending_raw
             if letter in ("R", "C"):
@@ -202,6 +199,17 @@ class _CommitAssembler:
             self.raw[record] = (letter, None, similarity)
             self._note(record)
             self._pending_raw = None
+            return
+
+        # --- raw block: a ":<modes> <shas> <STATUS>" line ---
+        if record.startswith(":"):
+            status_field = record.rsplit(" ", 1)[-1].strip()
+            letter = status_field[:1].upper() or "M"
+            similarity = None
+            if len(status_field) > 1 and status_field[1:].isdigit():
+                similarity = int(status_field[1:])
+            self._pending_raw = (letter, similarity)
+            self._pending_rename_old = None
             return
 
         # --- numstat block: "<adds>\t<dels>\t<path>" ---
@@ -353,20 +361,28 @@ def iter_commits(
 
     current: ParsedCommit | None = None
     assembler = _CommitAssembler()
+    # git emits one newline between a commit's --format output and its diff
+    # block, and it lands as a prefix on the record that follows the header.
+    # Exactly one, exactly there: `lstrip("\n")` on every record instead
+    # rewrote any path whose own first character is a newline, and since the raw
+    # and numstat blocks were then keyed on two different strings, one real file
+    # became two rows -- one of them a path that has never existed.
+    after_header = False
     try:
         for record in _iter_records(proc.stdout):
-            # git emits a newline between the format output and the diff block;
-            # it lands as a prefix on the following record.
-            stripped = record.lstrip("\n")
-            if stripped.startswith(COMMIT_SENTINEL):
+            if after_header and record.startswith("\n"):
+                record = record[1:]
+            after_header = False
+            if record.startswith(COMMIT_SENTINEL):
                 if current is not None:
                     current.files = assembler.build()
                     yield current
                 assembler = _CommitAssembler()
-                current = _parse_header(stripped[1:])
+                current = _parse_header(record[1:])
+                after_header = True
                 continue
             if current is not None:
-                assembler.feed(stripped)
+                assembler.feed(record)
 
         if current is not None:
             current.files = assembler.build()
