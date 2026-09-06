@@ -245,13 +245,20 @@ NPMI is the default and right most of the time. Override when:
 |---|---|
 | "Will I have to touch it?" | `confidence_ab` — the directional conditional |
 | Statistical confidence | `log_likelihood_ratio` — calibrated on rare events |
-| Safety over the long tail | `fager` — Ochiai with a small-sample penalty |
+| A penalised overlap | `fager` — Ochiai minus a small-sample correction |
 | A figure to state plainly | `association_strength` — a multiple of chance |
 | Signed coupling | `phi` — negative means the two systematically avoid each other |
 
 **Do not rank by** `sokal_michener`, `rogers_tanimoto`, `hamann` or `faith`. They
 count joint *absence*, and since almost no commit touches any given file they sit
 near 1.0 for nearly every pair.
+
+**`fager` is not a substitute for a support filter.** Its correction is driven by
+the *commoner* of the two files, as Fager and McGowan define it, so it shrinks as
+the busier partner accumulates changes and is flat in the rarer one. A single
+co-change between two files that each changed once scores 0.500 — ahead of five
+co-changes out of ten. For evidence-weighted ranking over the long tail ask for
+`log_likelihood_ratio`, and set `min_support`.
 
 ---
 
