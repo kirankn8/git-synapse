@@ -102,9 +102,9 @@ if (AUTH_COOKIE) {
   await page.setCookie({ ...AUTH_COOKIE, domain: hostname, path: '/' });
 }
 
-async function settle(target = page) {
+async function settle() {
   for (let i = 0; i < 50; i++) {
-    const done = await target.evaluate(() => {
+    const done = await page.evaluate(() => {
       const v = document.getElementById('view');
       return v && !(v.textContent || '').includes('Loading') && (v.textContent || '').trim().length > 40;
     });
@@ -387,10 +387,7 @@ console.log('\n=== the app survives a browser that blocks site data ===');
   const thrown = [];
   blocked.on('pageerror', (e) => thrown.push(String(e).slice(0, 80)));
   await blocked.goto(BASE + '/', { waitUntil: 'domcontentloaded' });
-  // The blocked-storage browser is intentionally a fresh context. Wait for
-  // the same render condition as the rest of the suite instead of assuming
-  // that its first API request completes within a fixed sleep.
-  await settle(blocked);
+  await new Promise((r) => setTimeout(r, 2200));
   const rendered = await blocked.evaluate(
     () => (document.getElementById('view').textContent || '').trim().length > 40);
   if (rendered && !thrown.length) ok('storage blocked', 'renders, no page errors');
