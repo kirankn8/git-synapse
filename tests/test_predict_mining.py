@@ -311,3 +311,65 @@ def test_a_coupling_query_still_reports_a_deleted_partner(db):
     partners = q.coupled_files(row["file_a_id"], limit=500)
     assert any(pt.get("is_deleted") for pt in partners), \
         "a deleted partner must still be offered, marked"
+
+
+def test_label_propagation_does_not_allocate_a_node_by_node_matrix():
+    """The sweep used to key a bincount on `node * n + label`, which needs
+    `minlength = n*n` -- a dense float64 matrix, reallocated every round, that
+    grows with the *square* of the repository. wireshark's 7,007 coupled files
+    made that 396MB a round; the sparse sweep does the same work in 25MB.
+
+    Only the (node, label) pairs that actually occur can carry weight, and
+    there are at most 2E of those.
+    """
+    import contextlib
+    import tracemalloc
+
+    import numpy as np
+    import psycopg
+
+    from git_synapse.analysis import mining
+
+    # Many nodes, few edges: the shape where the two costs diverge hardest.
+    n_nodes = 4000
+    rng = np.random.default_rng(7)
+    src = rng.integers(0, n_nodes, 3000)
+    dst = (src + 1) % n_nodes
+    edges = [(int(a) + 1, int(b) + 1, 0.9) for a, b in zip(src, dst, strict=True)
+             if a != b]
+
+    class _Conn:
+        """Just enough connection to drive the clustering sweep."""
+
+        def __init__(self):
+            self.rows = edges
+
+        def execute(self, sql, params=None):
+            class _R:
+                def __init__(self, rows):
+                    self._rows = rows
+
+                def fetchall(self):
+                    return self._rows
+
+                def fetchone(self):
+                    return self._rows[0] if self._rows else None
+
+            if "FROM file_pair" in sql:
+                return _R(self.rows)
+            if "FROM file" in sql:
+                return _R([(i, f"dir{i % 20}") for i in range(1, n_nodes + 1)])
+            return _R([])
+
+    stats = mining.MiningStats()
+    tracemalloc.start()
+    # The stub stops at the first write; the sweep has already run by then.
+    with contextlib.suppress(psycopg.Error, AttributeError, TypeError):
+        mining._cluster_repo(_Conn(), 1, stats)
+    _cur, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    dense_would_be = n_nodes * n_nodes * 8
+    assert peak < dense_would_be / 10, (
+        f"peak {peak / 1e6:.1f}MB is within an order of magnitude of the "
+        f"{dense_would_be / 1e6:.0f}MB dense matrix this replaced")
