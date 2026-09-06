@@ -116,7 +116,16 @@ app.include_router(router, prefix="/api")
 
 #: Reading the log through the log would make every visit to the activity page
 #: generate the traffic it is displaying.
-_UNLOGGED = ("/api/calls", "/api/health", "/api/openapi.json", "/api/docs")
+#: Never recorded. `/api/calls` because reading the log would generate the
+#: traffic it displays; the rest because they have nothing worth keeping.
+#:
+#: `/api/auth/` is here because its replies carry credentials. Minting a token
+#: returns the secret once -- that is the whole design, and `create_token`
+#: promises it is stored only as a hash -- but the reply was also being written
+#: verbatim into `call_log`, where `GET /api/calls/{id}` handed it back. Two
+#: requests turned any signed-in member into whoever had last minted a token.
+_UNLOGGED = ("/api/calls", "/api/health", "/api/openapi.json", "/api/docs",
+             "/api/auth/")
 
 #: Reachable without a caller, always. Everything else follows the access mode.
 #: `/api/auth/*` because you cannot sign in through a door that needs you to be

@@ -474,12 +474,14 @@ def test_looking_up_a_file_that_does_not_exist_is_a_404(client, db):
     assert r.status_code == 404
 
 
-def test_resolving_a_report_refuses_an_unknown_status(client):
+def test_resolving_a_report_refuses_an_unknown_status(signed_in):
+    client = signed_in
     r = client.post("/api/feedback/1/resolve", params={"status": "closed"})
     assert r.status_code == 400
 
 
-def test_resolving_a_report_that_does_not_exist_is_a_404(client):
+def test_resolving_a_report_that_does_not_exist_is_a_404(signed_in):
+    client = signed_in
     r = client.post("/api/feedback/999999999/resolve", params={"status": "fixed"})
     assert r.status_code == 404
 
@@ -548,8 +550,9 @@ def test_the_favicon_is_served(client):
     assert r.status_code == 200
 
 
-def test_a_report_can_be_resolved_and_says_so(client, db):
+def test_a_report_can_be_resolved_and_says_so(signed_in, db):
     """The one write an agent cannot make: closing its own report."""
+    client = signed_in
     from git_synapse.analysis import query as q
 
     created = q.record_feedback(
@@ -566,12 +569,58 @@ def test_a_report_can_be_resolved_and_says_so(client, db):
 
 @pytest.fixture()
 def no_accounts(client):
-    """An empty account table, restored to empty after the test."""
+    """An empty account table, and a signed-in administrator to manage it.
+
+    Adding, re-crediting and deleting a source decides what the deployment
+    scans and what credentials it uses, so those are administrative acts and
+    need somebody to attribute them to -- which means these tests need an admin
+    even on a deployment whose reads are open.
+    """
     from git_synapse.db.engine import execute
+    from git_synapse.ingest import accounts as _accounts
 
     execute("DELETE FROM account")
-    yield client
-    execute("DELETE FROM account")
+    admin = _sign_in_admin(client)
+    try:
+        yield client
+    finally:
+        client.cookies.clear()
+        execute("DELETE FROM account")
+        _cleanup_admin(admin)
+        del _accounts
+
+
+@pytest.fixture
+def signed_in(client):
+    """A client with an administrator's session, for acts that need an owner."""
+    email = _sign_in_admin(client)
+    try:
+        yield client
+    finally:
+        client.cookies.clear()
+        _cleanup_admin(email)
+
+
+def _sign_in_admin(client):
+    """Create an administrator and put their session on the client."""
+    from git_synapse import auth
+
+    email = "pytest-src-admin@example.com"
+    password = "a-sufficiently-long-pass"
+    existing = auth.by_email(email)
+    if existing is None:
+        auth.create_user(email, "Source Admin", password, role="admin")
+    resp = client.post("/api/auth/login", json={"email": email, "password": password})
+    assert resp.status_code == 200, resp.text
+    return email
+
+
+def _cleanup_admin(email: str) -> None:
+    from git_synapse import auth
+
+    row = auth.by_email(email)
+    if row is not None:
+        auth.delete_user(row["id"])
 
 
 def test_accounts_listing_is_empty_not_an_error_before_onboarding(no_accounts):
@@ -775,9 +824,11 @@ def test_a_deleted_account_keeps_its_repositories(no_accounts):
         execute("DELETE FROM repo WHERE id = %s", (repo_id,))
 
 
-def test_updating_an_account_to_a_taken_login_is_a_conflict(client):
+def test_updating_an_account_to_a_taken_login_is_a_conflict(signed_in):
     """409, not 500: the request was well-formed and the caller can fix it."""
     from git_synapse.ingest import accounts
+
+    client = signed_in
 
     first = accounts.add_account("apione")
     second = accounts.add_account("apitwo")
@@ -1464,3 +1515,80 @@ def test_repeated_wrong_passwords_answer_429_not_401(client):
         execute("DELETE FROM login_attempt")
         auth.delete_user(user["id"])
         client.cookies.clear()
+
+
+# ------------------------------------------------ what the call log may hold
+
+def test_a_minted_token_never_reaches_the_call_log(signed_in, db, settled_calls):
+    """`create_token` promises the secret is stored only as a hash. The call
+    log recorded every reply verbatim, and `/api/calls/{id}` handed it back --
+    so two requests turned any signed-in member into whoever last minted a
+    token. Four live secrets were sitting in the log when this was found."""
+    from git_synapse.db.engine import execute, query
+
+    client = signed_in
+    made = client.post("/api/auth/tokens", json={"name": "log-probe", "days": 1})
+    assert made.status_code == 201
+    secret = made.json()["token"]
+    assert secret.startswith("gss_") and len(secret) > 20
+
+    # Absence cannot be waited for, so a later request that IS logged acts as
+    # the barrier: once its row has landed, anything queued before it has too.
+    client.get("/api/overview")
+    settled_calls(lambda: query(
+        "SELECT id FROM call_log WHERE name = '/api/overview'"
+        " AND at > now() - interval '1 minute'"))
+
+    rows = query("SELECT result_preview::text AS body FROM call_log"
+                 " WHERE result_preview::text LIKE %s", (f"%{secret}%",))
+    assert rows == [], "the secret reached the call log"
+
+    # And no auth reply at all is recorded, so this cannot regress by another
+    # route -- a future endpoint under /api/auth is covered by construction.
+    auth_rows = query("SELECT count(*) AS n FROM call_log WHERE name LIKE '/api/auth/%%'"
+                      " AND at > now() - interval '1 minute'")
+    assert auth_rows[0]["n"] == 0
+
+    token_id = made.json()["detail"]["id"]
+    client.delete(f"/api/auth/tokens/{token_id}")
+    execute("DELETE FROM call_log WHERE at > now() - interval '5 minutes'")
+
+
+def test_managing_a_source_needs_an_administrator(client, db):
+    """Adding, re-crediting and deleting a source decides what the deployment
+    scans and with whose credentials. Eight handlers had no check at all, so a
+    member could delete an admin's source and get a 200."""
+    from git_synapse import auth
+    from git_synapse.ingest import accounts
+
+    admin_email = "pytest-authz-admin@example.com"
+    member_email = "pytest-authz-member@example.com"
+    password = "a-sufficiently-long-pass"
+    for email, role in ((admin_email, "admin"), (member_email, "member")):
+        if auth.by_email(email) is None:
+            auth.create_user(email, email.split("@")[0], password, role=role)
+    src = accounts.add_account("authz-probe", kind="org", provider="github",
+                               host="github.com")
+    try:
+        client.post("/api/auth/login", json={"email": member_email, "password": password})
+        for method, path, body in (
+            ("post", "/api/accounts", {"login": "member-made"}),
+            ("patch", f"/api/accounts/{src['id']}", {"login": "renamed"}),
+            ("put", f"/api/accounts/{src['id']}/credential", {"token": "ghp_x"}),
+            ("delete", f"/api/accounts/{src['id']}", None),
+        ):
+            resp = getattr(client, method)(path, **({"json": body} if body else {}))
+            assert resp.status_code == 403, f"{method} {path} allowed a member"
+        assert accounts.get_account(src["id"])["login"] == "authz-probe"
+
+        client.cookies.clear()
+        client.post("/api/auth/login", json={"email": admin_email, "password": password})
+        assert client.delete(f"/api/accounts/{src['id']}").status_code == 200
+    finally:
+        client.cookies.clear()
+        if accounts.get_account(src["id"]):
+            accounts.remove_account(src["id"])
+        for email in (admin_email, member_email):
+            row = auth.by_email(email)
+            if row:
+                auth.delete_user(row["id"])

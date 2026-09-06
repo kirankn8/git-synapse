@@ -951,6 +951,62 @@ DROP INDEX IF EXISTS account_login_idx;
 CREATE UNIQUE INDEX IF NOT EXISTS account_login_host_idx
     ON account (lower(login), lower(host));
 
+-- Constraints that make wrong rows impossible rather than merely absent.
+--
+-- Each of these held in the live corpus when it was added -- they are not
+-- repairs, they are the difference between an invariant the code happens to
+-- maintain and one the database will not let it break. Written as
+-- DROP-then-ADD because Postgres has no ADD CONSTRAINT IF NOT EXISTS, and this
+-- file is re-applied on every boot.
+
+-- A metric row describes a pair of files. Deleting a file cascades the pair
+-- away and left the metric behind, which is exactly what the repo_id half of
+-- this was added to prevent -- the other half was never added.
+ALTER TABLE file_pair_metric DROP CONSTRAINT IF EXISTS file_pair_metric_a_fk;
+ALTER TABLE file_pair_metric ADD  CONSTRAINT file_pair_metric_a_fk
+    FOREIGN KEY (file_a_id) REFERENCES file (id) ON DELETE CASCADE;
+ALTER TABLE file_pair_metric DROP CONSTRAINT IF EXISTS file_pair_metric_b_fk;
+ALTER TABLE file_pair_metric ADD  CONSTRAINT file_pair_metric_b_fk
+    FOREIGN KEY (file_b_id) REFERENCES file (id) ON DELETE CASCADE;
+ALTER TABLE dir_pair_metric DROP CONSTRAINT IF EXISTS dir_pair_metric_a_fk;
+ALTER TABLE dir_pair_metric ADD  CONSTRAINT dir_pair_metric_a_fk
+    FOREIGN KEY (dir_a_id) REFERENCES directory (id) ON DELETE CASCADE;
+ALTER TABLE dir_pair_metric DROP CONSTRAINT IF EXISTS dir_pair_metric_b_fk;
+ALTER TABLE dir_pair_metric ADD  CONSTRAINT dir_pair_metric_b_fk
+    FOREIGN KEY (dir_b_id) REFERENCES directory (id) ON DELETE CASCADE;
+
+-- The contingency cells. `a` cannot exceed either marginal and neither can
+-- exceed the population; every measure in the registry assumes it, and a row
+-- that breaks it produces finite, wrong numbers rather than an error.
+ALTER TABLE file_pair_metric DROP CONSTRAINT IF EXISTS file_pair_metric_cells_ck;
+ALTER TABLE file_pair_metric ADD  CONSTRAINT file_pair_metric_cells_ck
+    CHECK (n_ab >= 0 AND n_a >= n_ab AND n_b >= n_ab AND n_total >= n_a
+           AND n_total >= n_b);
+ALTER TABLE dir_pair_metric DROP CONSTRAINT IF EXISTS dir_pair_metric_cells_ck;
+ALTER TABLE dir_pair_metric ADD  CONSTRAINT dir_pair_metric_cells_ck
+    CHECK (n_ab >= 0 AND n_a >= n_ab AND n_b >= n_ab AND n_total >= n_a
+           AND n_total >= n_b);
+
+-- The recency weight is a decayed count: never negative, never more than the
+-- count it decays. A future-dated commit used to make it larger.
+ALTER TABLE file_pair DROP CONSTRAINT IF EXISTS file_pair_weight_ck;
+ALTER TABLE file_pair ADD  CONSTRAINT file_pair_weight_ck
+    CHECK (n_ab > 0 AND w_ab >= 0 AND w_ab <= n_ab + 1e-6);
+ALTER TABLE dir_pair DROP CONSTRAINT IF EXISTS dir_pair_weight_ck;
+ALTER TABLE dir_pair ADD  CONSTRAINT dir_pair_weight_ck
+    CHECK (n_ab > 0 AND w_ab >= 0 AND w_ab <= n_ab + 1e-6);
+
+-- Counts are counts.
+-- No CHECKs on the summary counters. They are the kind of invariant that is
+-- true of a repository at rest and false while it is being rebuilt: the
+-- population is refreshed in one statement and the summary counts in another,
+-- and a CHECK has to hold after *every* statement. Asserting it aborted the
+-- aggregation of every repository. The invariant is real and is asserted where
+-- it can be -- in the tests, against a finished repository.
+ALTER TABLE repo DROP CONSTRAINT IF EXISTS repo_counts_ck;
+ALTER TABLE file DROP CONSTRAINT IF EXISTS file_counts_ck;
+ALTER TABLE directory DROP CONSTRAINT IF EXISTS directory_counts_ck;
+
 -- The shipping-branch anchor for a tag. Added to existing databases, where
 -- CREATE TABLE IF NOT EXISTS above is a no-op.
 ALTER TABLE ref_tag ADD COLUMN IF NOT EXISTS main_sha TEXT;
@@ -1169,5 +1225,5 @@ CREATE TABLE IF NOT EXISTS meta (
 -- was not, so schema_is_current() was permanently false and every service boot
 -- re-ran the whole DDL, taking exactly the locks the fast path exists to avoid.
 INSERT INTO meta (key, value)
-VALUES ('schema_version', '30'::jsonb)
+VALUES ('schema_version', '31'::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();

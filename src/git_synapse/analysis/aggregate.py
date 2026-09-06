@@ -195,6 +195,30 @@ def _refresh_file_marginals(conn: psycopg.Connection, repo_id: int) -> int:
             last_change_at    = agg.last_change_at
         FROM agg
         WHERE f.id = agg.file_id
+          -- Scoped to the repository being rebuilt. Without it, a mislabelled
+          -- `commit_file.repo_id` would let this pass overwrite another
+          -- repository's marginals; nothing today produces such a row, but
+          -- nothing stops one either.
+          AND f.repo_id = %(repo)s
+        """,
+        {"repo": repo_id},
+    )
+    # A file whose `commit_file` rows have all gone -- the commits that touched
+    # it became unreachable from HEAD and every tag, and were deleted -- never
+    # appears in `agg`, so the UPDATE above cannot reach it and it keeps the
+    # counters it had when it still had commits. It is then a file with a
+    # marginal and no evidence: n_a in a contingency table nothing supports.
+    #
+    # The same shape as the stale-directory bug, and the same fix.
+    conn.execute(
+        """
+        UPDATE file f SET
+            change_count = 0, pair_change_count = 0,
+            insertions = 0, deletions = 0, author_count = 0,
+            first_change_at = NULL, last_change_at = NULL
+        WHERE f.repo_id = %(repo)s
+          AND (f.change_count <> 0 OR f.pair_change_count <> 0)
+          AND NOT EXISTS (SELECT 1 FROM commit_file cf WHERE cf.file_id = f.id)
         """,
         {"repo": repo_id},
     )
@@ -379,8 +403,19 @@ def _rebuild_file_pairs(conn: psycopg.Connection, repo_id: int) -> int:
             a.file_id,
             b.file_id,
             count(*),
-            sum(power(0.5, EXTRACT(EPOCH FROM (now() - c.committed_at)) / 86400.0
-                            / %(half_life)s)),
+            -- float8, and the age floored at zero. `EXTRACT(EPOCH ...)` is
+            -- `numeric` on PG14+, so this was arbitrary-precision arithmetic:
+            -- a commit dated in the future gives a negative age and a weight
+            -- above 1, and git accepts any date a committer cares to write.
+            -- Ten years ahead turned two co-changes into w_ab = 2057; the year
+            -- 3300 produced a 400-digit number that overflows the DOUBLE
+            -- PRECISION column and aborts the whole transaction -- so one bad
+            -- upstream date left the repository with no derived data at all.
+            -- Flooring treats a future commit as "now", weight 1, which is the
+            -- most it can honestly be worth. The float8 form is also 5x faster.
+            sum(power(0.5::float8,
+                       GREATEST(EXTRACT(EPOCH FROM (now() - c.committed_at))::float8, 0.0)
+                       / 86400.0 / %(half_life)s)),
             min(c.committed_at),
             max(c.committed_at),
             count(DISTINCT c.author_id)
@@ -424,8 +459,9 @@ def _rebuild_dir_pairs(conn: psycopg.Connection, repo_id: int) -> int:
         INSERT INTO dir_pair (repo_id, dir_a_id, dir_b_id, n_ab, w_ab,
                               first_co_change, last_co_change)
         SELECT %(repo)s, a.dir_id, b.dir_id, count(*),
-               sum(power(0.5, EXTRACT(EPOCH FROM (now() - a.committed_at)) / 86400.0
-                               / %(half_life)s)),
+               sum(power(0.5::float8,
+                       GREATEST(EXTRACT(EPOCH FROM (now() - a.committed_at))::float8, 0.0)
+                       / 86400.0 / %(half_life)s)),
                min(a.committed_at), max(a.committed_at)
         FROM dir_commits a
         JOIN dir_commits b ON b.commit_id = a.commit_id AND b.dir_id > a.dir_id
@@ -488,17 +524,35 @@ def _refresh_repo_summary(conn: psycopg.Connection, repo_id: int) -> None:
 
 
 def repos_needing_aggregation(conn: psycopg.Connection | None = None) -> list[int]:
-    """Repositories whose atomic data has changed since their last aggregation."""
+    """Repositories whose derived tables are not a complete answer to their facts.
+
+    Two ways that happens, and only the first is obvious.
+
+    New commits landed since the last pass -- the watermark comparison.
+
+    Or the last pass got halfway. `rebuild_repo` stamps `last_aggregate_at` and
+    commits; scoring is a *separate* transaction. If scoring then fails, the
+    watermark already says "done", the repository never appears on this list
+    again, and the API serves measures computed against a population that has
+    since moved. So the pair and metric row counts are compared too: they are
+    written by the two halves of one job, and any disagreement means the job did
+    not finish.
+    """
 
     def _run(c: psycopg.Connection) -> list[int]:
         rows = c.execute(
             """
-            SELECT id FROM repo
-            WHERE is_enabled
-              AND (last_aggregate_at IS NULL
-                   OR last_ingest_at IS NULL
-                   OR last_aggregate_at < last_ingest_at)
-            ORDER BY id
+            SELECT r.id FROM repo r
+            WHERE r.is_enabled
+              AND (r.last_aggregate_at IS NULL
+                   OR r.last_ingest_at IS NULL
+                   OR r.last_aggregate_at < r.last_ingest_at
+                   OR (SELECT count(*) FROM file_pair p WHERE p.repo_id = r.id)
+                      <> (SELECT count(*) FROM file_pair_metric m WHERE m.repo_id = r.id)
+                   OR EXISTS (SELECT 1 FROM file_pair_metric m
+                               WHERE m.repo_id = r.id
+                                 AND m.n_total <> r.pair_population))
+            ORDER BY r.id
             """
         ).fetchall()
         return [int(r[0]) for r in rows]
