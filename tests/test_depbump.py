@@ -514,6 +514,26 @@ def test_a_release_published_after_the_bump_is_not_a_candidate(bump_env):
     assert _resolved(conn, row) == (early, "ceiling")
 
 
+def test_tag_resolution_is_revalidated_when_the_tag_mapping_changes(bump_env):
+    """A cached tag match must not survive a later mirror correction."""
+    conn, repo, dep = bump_env
+    first = _commit(conn, dep, "12" * 20, "2024-01-01")
+    second = _commit(conn, dep, "34" * 20, "2024-01-02")
+    _tag(conn, dep, "v1.0.0", commit_id=first, main_commit_id=first, key="1")
+    row = _bump(conn, repo, dep, version="1.0.0", at="2024-02-01")
+
+    depbump.resolve_bumps(conn)
+    assert _resolved(conn, row) == (first, "tag")
+
+    conn.execute(
+        "UPDATE ref_tag SET commit_id = %s, main_commit_id = %s "
+        "WHERE repo_id = %s AND version_key = '1'",
+        (second, second, dep),
+    )
+    depbump.resolve_bumps(conn)
+    assert _resolved(conn, row) == (second, "tag")
+
+
 def test_a_prerelease_never_matches_the_release_it_precedes(bump_env):
     """Collapsing `-rc1` onto the final release resolves to the wrong commit
     while looking perfectly successful."""

@@ -581,6 +581,18 @@ def resolve_bumps(conn: psycopg.Connection | None = None) -> int:
         linked = _link_repositories(c)
         _fill_version_keys(c)
 
+        # Tag mappings can change when a mirror is refreshed. Clear only
+        # version-based resolutions so they are recomputed against the current
+        # tag set; SHA-pinned and ceiling resolutions have different semantics.
+        c.execute(
+            """
+            UPDATE dep_bump
+               SET dep_commit_id = NULL, resolution = NULL,
+                   adoption_seconds = NULL
+             WHERE resolution IN ('tag', 'floor')
+            """
+        )
+
         # Pins first: a reference naming a commit needs no interpretation.
         by_sha = c.execute(
             """
