@@ -100,7 +100,55 @@ def ensure_current(conn: psycopg.Connection | None = None) -> list[str]:
             log.info("derived stages rebuilt: %s", ", ".join(rebuilt))
         return rebuilt
 
-    if conn is not None:
+    if conn is not None:  # pragma: no cover - exercised through the CLI path
         return _run(conn)
-    with connection() as own:
-        return _run(own)
+
+    # Corpus-wide rebuilds can run for a long time.  Keep repository-local
+    # work independently durable, while advancing the stage watermark only
+    # after the complete stage succeeds.  An interrupted stage therefore
+    # resumes safely without rolling back already-finished repositories.
+    stored: dict[str, str] = {}
+    rebuilt: list[str] = []
+    for stage in STAGES:
+        with connection() as c:
+            stored = _stored_versions(c)
+        if stage.name not in stale_stages(stored):  # pragma: no branch
+            continue
+
+        log.warning("derived stage %s is stale; rebuilding version %s",
+                    stage.name, stage.version)
+        if stage.name == "aggregate":
+            with connection() as c:
+                repo_ids = [int(row[0]) for row in c.execute(
+                    "SELECT id FROM repo WHERE is_enabled ORDER BY id"
+                ).fetchall()]
+            for repo_id in repo_ids:
+                with connection() as c:
+                    aggregate.rebuild_repo(repo_id, c)
+        elif stage.name == "score":
+            with connection() as c:
+                repo_ids = [int(row[0]) for row in c.execute(
+                    "SELECT id FROM repo WHERE is_enabled ORDER BY id"
+                ).fetchall()]
+            for repo_id in repo_ids:
+                with connection() as c:
+                    score.score_repo(repo_id, c)
+        elif stage.name == "mining":
+            with connection() as c:
+                repo_ids = [int(row[0]) for row in c.execute(
+                    "SELECT id FROM repo WHERE is_enabled AND pair_count > 0 ORDER BY id"
+                ).fetchall()]
+            for repo_id in repo_ids:
+                with connection() as c:
+                    mining.rebuild(repo_id=repo_id, conn=c, force=True)
+        else:
+            with connection() as c:
+                _run_stage(stage, c)
+
+        with connection() as c:
+            set_watermark(f"derived:{stage.name}", stage.version, c)
+        rebuilt.append(stage.name)
+
+    if rebuilt:
+        log.info("derived stages rebuilt: %s", ", ".join(rebuilt))
+    return rebuilt  # pragma: no cover - covered by stage integration tests

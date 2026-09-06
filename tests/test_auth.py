@@ -231,6 +231,22 @@ def test_a_nameless_token_is_refused(person):
         auth.create_token(person["id"], "  ")
 
 
+def test_first_admin_claim_is_validated_and_single_use(db):
+    secret = auth.setup_token()
+    with pytest.raises(auth.AuthError, match="name"):
+        auth.claim_first_admin("first@example.com", " ",
+                               "a-sufficiently-long-pass", secret)
+    with pytest.raises(auth.AuthError, match="setup token"):
+        auth.claim_first_admin("first@example.com", "First",
+                               "a-sufficiently-long-pass", "wrong")
+    user = auth.create_user("already@example.com", "Already",
+                            "a-sufficiently-long-pass")
+    with pytest.raises(auth.SetupAlreadyClaimed):
+        auth.claim_first_admin("first@example.com", "First",
+                               "a-sufficiently-long-pass", secret)
+    auth.delete_user(user["id"])
+
+
 # ------------------------------------------------------------ access policy
 
 def test_with_nobody_registered_the_door_is_open(db):

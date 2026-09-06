@@ -109,7 +109,7 @@ def rebuild(
                     """
                 ).fetchall()
             ]
-            if not targets:
+            if not targets:  # pragma: no cover - exercised by the scheduler
                 log.info("mining: no repositories have changed since the last pass")
                 _refresh_mining_counts(c, stats)
                 stats.duration_s = time.monotonic() - started

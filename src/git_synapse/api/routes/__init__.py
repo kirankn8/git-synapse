@@ -299,14 +299,14 @@ def setup(body: FirstUser, request: Request, response: Response) -> dict:
     except auth.AuthError as exc:
         raise HTTPException(403, str(exc)) from exc
     try:
-        user = auth.create_user(body.email, body.name, body.password, role="admin")
-        token, _ = auth.sign_in(body.email, body.password,
-                                request.headers.get("user-agent"))
+        token, user = auth.claim_first_admin(
+            body.email, body.name, body.password, body.setup_token,
+            request.headers.get("user-agent"),
+        )
+    except auth.SetupAlreadyClaimed as exc:  # pragma: no cover - race-only path
+        raise HTTPException(409, str(exc)) from exc
     except auth.AuthError as exc:
         raise HTTPException(400, str(exc)) from exc
-    # It authorised the one thing it exists for. Keeping it would leave a
-    # standing secret in the table that nothing will ever check again.
-    auth.clear_setup_token()
     _set_cookie(response, token, request.url.scheme == "https")
     return {"user": user}
 

@@ -23,7 +23,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from git_synapse.db.engine import execute, query, query_one
+from git_synapse.db.engine import connection, execute, query, query_one
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +67,10 @@ class AuthError(Exception):
 class TooManyAttempts(AuthError):
     """Refused for now, not refused outright. Distinguished so the API can
     answer 429 rather than 401: the credentials were never examined."""
+
+
+class SetupAlreadyClaimed(AuthError):
+    """The first administrator was created while this request was waiting."""
 
 
 # ----------------------------------------------------------------- passwords
@@ -452,6 +456,61 @@ def clear_setup_token() -> None:
     thing has now happened; leaving the value in the table is a standing secret
     that nothing will ever check again."""
     execute("DELETE FROM meta WHERE key = %s", (_SETUP_KEY,))
+
+
+def claim_first_admin(
+    email: str, name: str, password: str, setup_secret: str,
+    user_agent: str | None = None,
+) -> tuple[str, dict]:
+    """Atomically claim the empty deployment for its first administrator."""
+    from git_synapse.config import get_config
+
+    email = email.strip()
+    name = name.strip()
+    configured = get_config().server.admin_setup_token
+    token = secrets.token_urlsafe(32)
+    with connection() as conn:
+        # A transaction-scoped lock closes the check-then-insert race between
+        # two first-run requests.  The lock is deliberately held through the
+        # account, session, and setup-secret writes.
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (0x47534649525354,))
+        if conn.execute("SELECT count(*) FROM app_user").fetchone()[0] > 0:
+            raise SetupAlreadyClaimed("this deployment already has users")
+        if not _EMAIL.match(email):
+            raise AuthError(f"{email!r} does not look like an email address")
+        if not name:
+            raise AuthError("a name is required")
+        stored = conn.execute(
+            "SELECT value #>> '{}' FROM meta WHERE key = %s", (_SETUP_KEY,)
+        ).fetchone()
+        expected = configured or (stored[0] if stored else "")
+        if not hmac.compare_digest(setup_secret.strip(), expected):
+            raise AuthError("that is not the setup token for this deployment")
+
+        row = conn.execute(
+            """
+            INSERT INTO app_user (email, name, role, password_hash)
+            VALUES (%s, %s, 'admin', %s)
+            RETURNING id, email, name, role, is_active, created_at, last_login_at
+            """,
+            (email, name, hash_password(password)),
+        ).fetchone()
+        user = dict(zip(
+            ("id", "email", "name", "role", "is_active", "created_at", "last_login_at"),
+            row,
+            strict=True,
+        ))
+        conn.execute(
+            "INSERT INTO user_session (token_hash, user_id, expires_at, user_agent)"
+            " VALUES (%s, %s, %s, %s)",
+            (_token_hash(token), user["id"],
+             datetime.now(UTC) + timedelta(days=SESSION_DAYS),
+             (user_agent or "")[:200]),
+        )
+        conn.execute("UPDATE app_user SET last_login_at = now() WHERE id = %s",
+                     (user["id"],))
+        conn.execute("DELETE FROM meta WHERE key = %s", (_SETUP_KEY,))
+        return token, user
 
 
 # ------------------------------------------------------------- access policy
