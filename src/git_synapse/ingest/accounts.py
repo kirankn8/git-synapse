@@ -237,10 +237,11 @@ def config_for(account: dict) -> GitHubConfig:
 
 
 def seed_from_env() -> dict | None:
-    """Adopt the legacy GITHUB_ORG setting the first time, if nothing is configured.
+    """Adopt GITHUB_ORG as an account, once, if nothing is configured.
 
-    Without this an existing deployment would discover nothing after upgrading,
-    because discovery stops reading the environment once accounts exist.
+    The environment is a seed for the account table, not a source discovery
+    reads: a deployment can be brought up with one organisation already listed,
+    and everything after that is a write to the table.
     """
     if list_accounts():
         return None
