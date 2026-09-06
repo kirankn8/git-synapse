@@ -400,7 +400,9 @@ def discover(trigger: str = "manual") -> list[RepoRecord]:
             raise
         except Exception as exc:  # noqa: BLE001 - one bad account must not stop the rest
             log.warning("discovery failed for %s: %s", account["login"], exc)
-            accounts.record_discovery(account["id"], 0, str(exc))
+            # No count: the listing failed, so nothing is known about how
+            # many repositories this source has -- and they did not vanish.
+            accounts.record_discovery(account["id"], error=str(exc))
             failures.append(f"{account['login']}: {exc}")
             continue
         listed += raw
@@ -433,6 +435,10 @@ def discover(trigger: str = "manual") -> list[RepoRecord]:
     with connection() as conn:
         for record in selected:
             upsert_repo(record, conn, account_id=owners.get(record.full_name))
+    # After the writes, never before: what was selected is an intention, and a
+    # run that aborts between the two leaves a source claiming repositories no
+    # row backs.
+    accounts.refresh_repo_counts()
     log.info("discovery upserted %d repositories from %d accounts", len(selected), len(configured))
     return selected
 
