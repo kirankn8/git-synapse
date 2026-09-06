@@ -541,6 +541,31 @@ console.log('\n=== repositories are grouped by source ===');
   } else {
     bad('a filter opens its results', JSON.stringify(found));
   }
+
+  // Overview's tiles open `/repos?order_by=...` meaning *show me the biggest*.
+  // Group order has to follow that, or the ranking arrives answering a
+  // different question -- and its leader is open, or it answers nothing.
+  await page.goto(BASE + '/repos?order_by=file_count', { waitUntil: 'domcontentloaded' });
+  await settle();
+  const ranked = await page.evaluate(() => {
+    const groups = [...document.querySelectorAll('.repo-group')];
+    const files = (d) => [...d.querySelectorAll('tbody tr')]
+      .reduce((n, tr) => n + Number((tr.children[4]?.textContent || '0').replace(/[^0-9]/g, '')), 0);
+    return {
+      leader: groups[0]?.querySelector('.repo-group-owner')?.textContent,
+      leaderOpen: Boolean(groups[0]?.open),
+      leaderFiles: groups[0] ? files(groups[0]) : 0,
+      byCommits: [...document.querySelectorAll('.repo-group-counts')]
+        .map((c) => Number((c.textContent.match(/([\d,]+) commits/) || [0, '0'])[1].replace(/,/g, ''))),
+    };
+  });
+  // Ordered by files, the head of the list is not the head of a commit ranking.
+  const descendingByCommits = ranked.byCommits.every((n, i, a) => i === 0 || a[i - 1] >= n);
+  if (ranked.leaderOpen && ranked.leaderFiles > 0 && !descendingByCommits) {
+    ok('a ranking orders the groups', `${ranked.leader} leads on files, open, ${ranked.leaderFiles} files`);
+  } else {
+    bad('a ranking orders the groups', JSON.stringify(ranked).slice(0, 200));
+  }
 }
 
 console.log('\n=== a repository picker is grouped by account ===');
