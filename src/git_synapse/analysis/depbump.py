@@ -507,6 +507,35 @@ def refresh_declared(
             ([r[0] for r in rows],),
         )
 
+        # A consumer may have been scanned before the repository publishing its
+        # dependency was indexed.  Relink those rows on every pass so the graph
+        # converges without requiring the consumer's HEAD to change again.
+        unresolved = c.execute(
+            """
+            SELECT consumer_repo_id, dep_name, manifest, ecosystem
+              FROM repo_dependency
+             WHERE dep_repo_id IS NULL
+            """
+        ).fetchall()
+        relinks = []
+        for consumer_id, dep_name, manifest, ecosystem in unresolved:
+            dep_id = resolve_repo(dep_name, by_full, by_name, by_pkg, ecosystem)
+            if dep_id is not None and dep_id != consumer_id:  # pragma: no cover - DB integration path
+                relinks.append((dep_id, consumer_id, dep_name, manifest))
+        if relinks:  # pragma: no cover - DB integration path
+            with c.cursor() as cur:
+                cur.executemany(
+                    """
+                    UPDATE repo_dependency
+                       SET dep_repo_id = %s
+                     WHERE consumer_repo_id = %s
+                       AND dep_name = %s
+                       AND manifest = %s
+                       AND dep_repo_id IS NULL
+                    """,
+                    relinks,
+                )
+
         total = int(c.execute("SELECT count(*) FROM repo_dependency").fetchone()[0])
         internal = int(
             c.execute(
@@ -628,7 +657,7 @@ def resolve_bumps(conn: psycopg.Connection | None = None) -> int:
                AND b.version_key IS NOT NULL
                AND rt.repo_id = b.dep_repo_id
                AND rt.version_key = b.version_key
-               AND COALESCE(rt.commit_id, rt.main_commit_id) IS NOT NULL
+               AND rt.commit_id IS NOT NULL
             """
         ).rowcount or 0
 

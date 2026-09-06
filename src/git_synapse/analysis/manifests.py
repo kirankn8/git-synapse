@@ -340,6 +340,28 @@ def parse_yaml(text: str) -> list[tuple[str, str]]:
     return out
 
 
+def parse_conda(text: str) -> list[tuple[str, str]]:
+    """Read conda's scalar dependency list as well as its pip subsection."""
+    doc = _load_yaml(text)
+    if not isinstance(doc, dict):
+        return []
+    out: list[tuple[str, str]] = []
+    for item in doc.get("dependencies", []):
+        if isinstance(item, str):
+            match = re.match(r"^([A-Za-z0-9_.-]+)\s*(?:=|==)\s*(\S+)$", item.strip())
+            if match:
+                out.append((match.group(1), match.group(2)))
+        elif isinstance(item, dict):
+            for pip_item in item.get("pip", []):
+                if isinstance(pip_item, str):
+                    match = re.match(
+                        r"^([A-Za-z0-9_.-]+)\s*(?:==|=)\s*(\S+)$", pip_item.strip()
+                    )
+                    if match:
+                        out.append((match.group(1), match.group(2)))
+    return out
+
+
 def parse_json_pins(text: str) -> list[tuple[str, str]]:
     return _walk(_load_json(text))
 
@@ -494,11 +516,12 @@ ECOSYSTEMS: tuple[Ecosystem, ...] = (
     Ecosystem("npm", ("yarn.lock", "bun.lock"), parse_pinned_refs),
     Ecosystem("deno", ("deno.json", "deno.jsonc", "import_map.json"), parse_json_deps),
 
-    Ecosystem("python", ("Pipfile.lock", "uv.lock"), parse_json_pins),
+    Ecosystem("python", ("Pipfile.lock",), parse_json_pins),
+    Ecosystem("python", ("uv.lock",), parse_toml),
     Ecosystem("python", ("poetry.lock", "pyproject.toml", "Pipfile"), parse_toml),
     Ecosystem("python", ("requirements.txt", "requirements-dev.txt", "constraints.txt",
                          "dev-requirements.txt", "test-requirements.txt"), parse_requirements),
-    Ecosystem("python", ("environment.yml", "conda.yaml"), parse_yaml),
+    Ecosystem("python", ("environment.yml", "conda.yaml"), parse_conda),
 
     Ecosystem("rust", ("Cargo.lock", "Cargo.toml"), parse_toml),
 

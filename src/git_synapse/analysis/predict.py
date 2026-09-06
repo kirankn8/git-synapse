@@ -51,15 +51,29 @@ class PredictStats:
 
 
 def _input_fingerprint(conn: psycopg.Connection) -> str:
-    """Cheap signature of the inputs, so an unchanged graph is not rebuilt."""
+    """Stable signature of every input value that affects the impact graph."""
     row = conn.execute(
         """
-        SELECT (SELECT count(*) FROM repo_dependency),
-               (SELECT count(*) FROM dep_bump),
-               (SELECT COALESCE(max(bumped_at)::text, '') FROM dep_bump)
+        SELECT md5(
+                 COALESCE((SELECT string_agg(
+                             format('%s|%s|%s|%s|%s|%s',
+                                    consumer_repo_id, COALESCE(dep_repo_id::text, ''),
+                                    dep_name, manifest, ecosystem,
+                                    COALESCE(dep_version, '')),
+                             E'\n' ORDER BY consumer_repo_id, dep_name, manifest)
+                           FROM repo_dependency), '')
+                 || '|' ||
+                 COALESCE((SELECT string_agg(
+                             format('%s|%s|%s|%s|%s|%s|%s',
+                                    consumer_repo_id, COALESCE(dep_repo_id::text, ''),
+                                    dep_name, dep_version, bumped_at,
+                                    adoption_seconds, COALESCE(version_key, '')),
+                             E'\n' ORDER BY id)
+                           FROM dep_bump), '')
+               )
         """
-    ).fetchone()
-    return "|".join(str(v) for v in row)
+    ).fetchone()[0]
+    return str(row)
 
 
 def rebuild(conn: psycopg.Connection | None = None, force: bool = False) -> PredictStats:

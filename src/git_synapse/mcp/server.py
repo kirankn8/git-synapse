@@ -1253,7 +1253,7 @@ def _serve(app, host: str, port: int) -> None:
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
-def _guarded_app(host: str):
+def _guarded_app(host: str, transport: str = "http"):
     """The MCP app, behind a token when this deployment asks for one.
 
     Wrapping the ASGI app rather than calling `server.run` is what makes the
@@ -1271,7 +1271,8 @@ def _guarded_app(host: str):
     # `host` is not decoration: it configures the transport's allowed-Host
     # check. Omitted, every request from anywhere but localhost came back 421,
     # which reads as a protocol fault rather than a rejected Host header.
-    app = server.streamable_http_app(host=host)
+    app = (server.sse_app(host=host) if transport == "sse"
+           else server.streamable_http_app(host=host))
 
     async def gate(request, call_next):
         if auth.access_mode("mcp") != "required":
@@ -1322,7 +1323,7 @@ def main(argv: list[str] | None = None) -> int:
         server.run(transport="stdio")
     elif args.transport == "sse":
         log.info("git-synapse mcp server (sse) on %s:%s", args.host, args.port)
-        server.run(transport="sse", host=args.host, port=args.port)
+        _serve(_guarded_app(args.host, transport="sse"), args.host, args.port)
     else:
         log.info("git-synapse mcp server (streamable http) on %s:%s/mcp", args.host, args.port)
         _serve(_guarded_app(args.host), args.host, args.port)

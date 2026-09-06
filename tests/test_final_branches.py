@@ -180,6 +180,25 @@ def test_the_input_fingerprint_changes_only_when_the_inputs_do(db):
     assert first == second
 
 
+def test_the_input_fingerprint_sees_in_place_dependency_changes(scratch_db):
+    from git_synapse.analysis.predict import _input_fingerprint
+    from git_synapse.db.engine import connection
+
+    with connection() as conn:
+        first = _input_fingerprint(conn)
+        repo_id = conn.execute(
+            "INSERT INTO repo (github_id, owner, name, full_name, clone_url,"
+            " default_branch) VALUES (900001, 'acme', 'fingerprint',"
+            " 'acme/fingerprint', '', 'main') RETURNING id"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO repo_dependency (consumer_repo_id, dep_name, manifest, ecosystem)"
+            " VALUES (%s, 'changed', 'go.mod', 'go')", (repo_id,)
+        )
+        second = _input_fingerprint(conn)
+    assert first != second
+
+
 # --------------------------------------------------------- the MCP entrypoint
 
 def test_the_mcp_entrypoint_defaults_to_stdio(monkeypatch):

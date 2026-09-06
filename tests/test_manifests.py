@@ -80,6 +80,8 @@ CASES = [
     ("Gemfile.lock", ("GIT\n  remote: https://github.com/acme/rack.git\n"
                      f"  revision: {SHA}\n"), "rack", "commit"),
     ("pubspec.yaml", "dependencies:\n  http: 1.2.0\n", "http", "tag"),
+    ("uv.lock", '[[package]]\nname = "httpx"\nversion = "0.27.0"\n', "httpx", "tag"),
+    ("environment.yml", "dependencies:\n  - python=3.12\n  - requests=2.31.0\n", "requests", "tag"),
     (".gitmodules", ('[submodule "vendor/zlib"]\n\tpath = vendor/zlib\n'
                     "\turl = https://github.com/madler/zlib.git\n\tbranch = v1.3\n"), "zlib", "tag"),
     ("Dockerfile", f"FROM ghcr.io/acme/base@sha256:{SHA}\n", "base", "commit"),
@@ -133,6 +135,12 @@ def test_duplicate_references_collapse():
 def test_a_dependency_block_name_is_never_itself_a_dependency():
     refs = M.references("Cargo.toml", '[dependencies]\nserde = "1.0"\n')
     assert all(r.name != "dependencies" for r in refs)
+
+
+def test_conda_reads_pip_subsection_and_rejects_non_mappings():
+    text = "dependencies:\n  - python=3.12\n  - pip:\n      - requests==2.31.0\n"
+    assert {r.name for r in M.references("environment.yml", text)} == {"python", "requests"}
+    assert M.parse_conda("- not a mapping") == []
 
 
 # ------------------------------------------------------------------- coverage

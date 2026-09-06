@@ -604,6 +604,9 @@ def test_each_transport_starts_the_server_the_way_it_is_meant_to(monkeypatch, ar
     monkeypatch.setattr(server, "apply_schema", lambda *a, **k: None)
     monkeypatch.setattr(server.server, "run",
                         lambda **kw: started.update(kw))
+    monkeypatch.setattr(server, "_serve",
+                        lambda app, host, port: started.update(
+                            transport="sse", host=host, port=port))
     assert server.main(argv) == 0
     for key, value in expected.items():
         assert started[key] == value
