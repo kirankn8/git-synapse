@@ -408,6 +408,14 @@ def discover(trigger: str = "manual") -> list[RepoRecord]:
     return selected
 
 
+#: Names above which listing the owner once and filtering beats fetching each
+#: one. A listing returns a hundred repositories per request, so this loses only
+#: for an owner with more than `NAME_FETCH_MAX * 100` repositories -- and wins
+#: enormously for the case it exists for, a handful of names pasted out of a
+#: very large organisation.
+NAME_FETCH_MAX = 25
+
+
 def _discover_account(account: dict) -> tuple[list[RepoRecord], int]:
     """List and filter one source, returning the kept records and the raw count.
 
@@ -415,11 +423,17 @@ def _discover_account(account: dict) -> tuple[list[RepoRecord], int]:
     allowlist legitimately collapses the *filtered* result, while a credential
     that has stopped working collapses the *listing*.
 
-    An allowlist is fetched, not filtered. Pasting one repository from an
-    organisation of 8,296 asks a question about one repository, and answering
-    it by paging through eighty-three listings -- on every nightly refresh --
-    is work nobody asked for. A source with an allowlist therefore costs one
-    request per named repository and never enumerates its owner at all.
+    A short allowlist is fetched by name rather than filtered out of a listing.
+    Pasting one repository from an organisation of 8,296 asks a question about
+    one repository, and answering it by paging through eighty-three listings --
+    on every nightly refresh -- is work nobody asked for.
+
+    Past `NAME_FETCH_MAX` the arithmetic flips, and the naive rule becomes the
+    expensive one: fetching by name costs one request per name, while a listing
+    costs one per hundred repositories the owner has. A source naming 122 of
+    google's repositories is 122 requests a night against a listing's two. So
+    the long case lists once and filters, which is what `select_repos` already
+    does with the allowlist.
     """
     cfg = accounts.config_for(account)
     source = sources.Source(
@@ -434,7 +448,8 @@ def _discover_account(account: dict) -> tuple[list[RepoRecord], int]:
     only = list(account.get("only_repos") or ())
     token = accounts.credential_for(accounts._with_credential(account))
     with providers.for_source(source, token=token) as client:
-        if only:
+        by_name = only and (len(only) <= NAME_FETCH_MAX or not client.supports_listing())
+        if by_name:
             records = []
             for name in only:
                 try:

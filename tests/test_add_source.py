@@ -438,3 +438,148 @@ def test_a_listing_error_that_is_not_a_rate_limit_is_raised_as_it_is(db, fake, c
     fake(_Fake(error=RuntimeError("dns exploded")))
     with pytest.raises(RuntimeError, match="dns exploded"):
         accounts.resolve_url("https://github.com/acme")
+
+
+# ----------------------------------------------------------------- budgeting
+
+@pytest.fixture(autouse=True)
+def _empty_listing_cache():
+    """Every test starts with a cold cache, or the second one to look up an
+    owner asserts against the first one's answer."""
+    accounts._LISTINGS.clear()
+    yield
+    accounts._LISTINGS.clear()
+
+
+def test_a_second_look_at_the_same_owner_spends_nothing(db, fake, clean):
+    """Paste, look, adjust, look again is one person's normal back-and-forth --
+    and on an anonymous GitHub it is three of the sixty requests in that hour."""
+    client = fake(_Fake(many=[_record("acme/one")]))
+    first = accounts.resolve_url("https://github.com/acme")
+    second = accounts.resolve_url("https://github.com/acme")
+    assert first["cached"] is False and second["cached"] is True
+    assert [c[0] for c in client.calls] == ["list_repos"], "asked the host once"
+    assert second["repos"] == first["repos"]
+
+
+def test_the_cache_expires(db, fake, clean, monkeypatch):
+    fake(_Fake(many=[_record("acme/one")]))
+    accounts.resolve_url("https://github.com/acme")
+    # Capture the real clock first: patching `time.time` and then calling it
+    # through the module is a call to the patch.
+    now = accounts.time.time()
+    monkeypatch.setattr(accounts.time, "time",
+                        lambda: now + accounts.LISTING_TTL_SECONDS + 1)
+    assert accounts.resolve_url("https://github.com/acme")["cached"] is False
+
+
+def test_a_lookup_carrying_a_token_never_reads_the_anonymous_answer(db, fake, clean):
+    """A token changes what is visible. Serving one caller's private listing to
+    the next, or an anonymous listing to someone who supplied a credential,
+    would both be wrong."""
+    client = fake(_Fake(many=[_record("acme/one")]))
+    accounts.resolve_url("https://github.com/acme")
+    found = accounts.resolve_url("https://github.com/acme", token="ghp_x")
+    assert found["cached"] is False
+    assert len([c for c in client.calls if c[0] == "list_repos"]) == 2
+
+
+def test_a_refused_listing_is_not_cached(db, fake, clean):
+    """Caching a failure would keep serving it after the budget refilled."""
+    limit = httpx.HTTPStatusError(
+        "429", request=httpx.Request("GET", "https://x"),
+        response=httpx.Response(429, request=httpx.Request("GET", "https://x")))
+    fake(_Fake(error=limit))
+    accounts.resolve_url("https://github.com/acme")
+    assert accounts._LISTINGS == {}
+
+
+def test_the_refusal_says_when_waiting_would_help(db, fake, clean, monkeypatch):
+    """"Rate limited" leaves someone guessing between a minute and an hour.
+    GitHub's own budget endpoint is exempt from the limit, so asking is free."""
+    from git_synapse.config import get_config
+    from git_synapse.ingest import github
+
+    monkeypatch.setenv("GITHUB_TOKEN", "")
+    monkeypatch.setenv("GITHUB_TOKEN_FILE", "")
+    get_config.cache_clear()
+
+    class _Budget:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def rate_limit(self):
+            import time as _t
+            return {"resources": {"core": {"remaining": 0, "limit": 60,
+                                           "reset": _t.time() + 12 * 60}}}
+
+    monkeypatch.setattr(github, "GitHubClient", lambda *a, **k: _Budget())
+    try:
+        limit = httpx.HTTPStatusError(
+            "403", request=httpx.Request("GET", "https://x"),
+            response=httpx.Response(403, request=httpx.Request("GET", "https://x")))
+        fake(_Fake(error=limit))
+        note = accounts.resolve_url("https://github.com/acme")["listing_error"]
+        assert "0 of 60" in note and "12 minutes" in note
+    finally:
+        get_config.cache_clear()
+
+
+def test_a_budget_that_cannot_be_read_is_simply_left_out(db, fake, clean, monkeypatch):
+    """It is a nicety. Failing the whole lookup over it would be absurd."""
+    from git_synapse.ingest import github
+
+    monkeypatch.setattr(github, "GitHubClient",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no")))
+    limit = httpx.HTTPStatusError(
+        "429", request=httpx.Request("GET", "https://x"),
+        response=httpx.Response(429, request=httpx.Request("GET", "https://x")))
+    fake(_Fake(error=limit))
+    assert accounts.resolve_url("https://github.com/acme")["listing_error"]
+
+
+def test_a_non_github_host_is_not_asked_for_a_github_budget(db, fake, clean):
+    limit = httpx.HTTPStatusError(
+        "429", request=httpx.Request("GET", "https://x"),
+        response=httpx.Response(429, request=httpx.Request("GET", "https://x")))
+    fake(_Fake(error=limit))
+    note = accounts.resolve_url("https://bitbucket.org/team")["listing_error"]
+    assert "requests left" not in note
+
+
+def test_a_long_allowlist_lists_once_instead_of_fetching_each_name(db, fake, clean):
+    """The naive rule is only cheap while the list is short. `google` names 122
+    repositories: fetched one by one that is 122 requests every night, against
+    two for a listing."""
+    from git_synapse.ingest import pipeline
+
+    names = [f"r{i}" for i in range(pipeline.NAME_FETCH_MAX + 1)]
+    client = fake(_Fake(many=[_record(f"acme/{n}") for n in names]
+                             + [_record("acme/unwanted")]))
+    row = accounts.add_from_url("https://github.com/acme", repos=names)
+    records, _ = pipeline._discover_account(accounts.get_account(row["id"]))
+    assert [c[0] for c in client.calls] == ["list_repos"], "one request, not 26"
+    # And the allowlist still decides what is kept.
+    assert "acme/unwanted" not in {r.full_name for r in records}
+    assert len(records) == len(names)
+
+
+def test_a_short_allowlist_still_fetches_by_name(db, fake, clean):
+    from git_synapse.ingest import pipeline
+
+    client = fake(_Fake())
+    row = accounts.add_from_url("https://github.com/acme", repos=["one", "two"])
+    pipeline._discover_account(accounts.get_account(row["id"]))
+    assert [c[0] for c in client.calls] == ["get_repo", "get_repo"]
+
+
+def test_a_long_allowlist_on_a_host_that_cannot_list_falls_back_to_names(db, fake, clean):
+    """There is no listing to be cheaper than."""
+    from git_synapse.ingest import pipeline
+
+    names = [f"r{i}" for i in range(pipeline.NAME_FETCH_MAX + 1)]
+    client = fake(_Fake(listing=False))
+    row = accounts.add_account("selfhosted", kind="repo", provider="git",
+                               host="git.corp", only_repos=names)
+    records, _ = pipeline._discover_account(accounts.get_account(row["id"]))
+    assert {c[0] for c in client.calls} == {"get_repo"}
+    assert len(records) == len(names)
