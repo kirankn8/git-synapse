@@ -799,10 +799,16 @@ inside, and a bare `owner/repo` because that is how people write it in prose.
 **A repository URL costs one request.** This is the property the whole design
 turns on. `microsoft` holds 8,296 repositories; enumerating it takes 83 pages,
 which is enough to trip GitHub's secondary rate limit, and it would happen
-again on every nightly refresh. So a source with an allowlist is *fetched by
-name*, never listed — and the filters are not applied to it either, since
-naming a repository is already an explicit answer that a fork toggle could only
-contradict.
+again on every nightly refresh. So a short allowlist is *fetched by name* — and
+the filters are not applied to it either, since naming a repository is already
+an explicit answer that a fork toggle could only contradict.
+
+Past `NAME_FETCH_MAX` names that rule inverts, and following it blindly is how
+the cheap case becomes the expensive one: fetching by name costs one request
+per name, a listing one per hundred repositories the owner has. A source naming
+122 of google's repositories is 122 requests a night against a listing's two.
+So a long allowlist lists once and filters, which loses only for an owner with
+more than 2,500 repositories.
 
 **An owner URL is a question, not an instruction.** It comes back as a list to
 tick rather than being added whole, because "add microsoft" almost never means
@@ -824,6 +830,23 @@ full_name)`, `account` on `(login, host)`, and the mirror path carries the host
 for anything that is not github.com. An internal GitLab group commonly mirrors
 the company's public organisation name, and merging two repositories' histories
 into one row is the worst failure this system has: nothing would look wrong.
+
+**Nothing is asked of a host twice in five minutes.** Paste, look, adjust,
+look again is one person's normal back-and-forth, and on an anonymous GitHub
+that is three of the sixty requests available that hour. Owner listings are
+cached for `LISTING_TTL_SECONDS`; single repositories are not, because one
+request is cheap enough that a stale answer is the worse trade. A lookup
+carrying a token never reads the anonymous answer, since a credential changes
+what is visible. A refusal is never cached — it would outlive the budget that
+caused it.
+
+There is no way around the budget itself. GitHub's unauthenticated limit is per
+IP, not per tool, so reaching for `curl` buys nothing; the only levers are
+asking less often, which is the cache, and asking as somebody, which is a
+token. What the refusal can do is stop being unactionable: GitHub's
+`rate_limit` endpoint is
+itself exempt from the limit, so the message says how much is left and when it
+refills, which is the difference between waiting a minute and waiting an hour.
 
 **A lookup a person is watching is impatient.** An ingest run has all night and
 should wait a rate limit out; a request someone is watching has seconds, and

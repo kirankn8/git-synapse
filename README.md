@@ -11,7 +11,7 @@
 ![Docker](https://img.shields.io/badge/Docker-compose-2496ED?style=flat-square&logo=docker&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-14%20tools-5eead4?style=flat-square)
 ![Measures](https://img.shields.io/badge/measures-31-a78bfa?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-1%2C453-3fb950?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-1%2C463-3fb950?style=flat-square)
 ![Coverage](https://img.shields.io/badge/backend%20coverage-100%25-3fb950?style=flat-square)
 ![Backtested](https://img.shields.io/badge/backtested-769k%20predictions-14b8a6?style=flat-square)
 
@@ -384,6 +384,13 @@ being refreshed.
 | **GitLab** (and self-hosted) | Everything, including nested groups — `gitlab-org/security/gitlab` is one project, addressed by its full path. |
 | **Bitbucket** | Everything; an owner is a workspace. |
 | **Anything else** | Cloned, parsed, aggregated, scored and mined identically. No listing and no stars or fork flags, because there is no API to ask — which is the point: coupling is derived from `git log`, so a self-hosted server nobody has written a client for is still fully usable. Paste each repository's URL. |
+
+Listing a *public* owner still costs API requests, and GitHub's
+unauthenticated budget is 60 an hour per IP — which is per IP, not per tool, so
+reaching for `curl` buys nothing. Two things soften it: listings are cached for
+five minutes, so looking twice costs once, and a refusal reports how much
+budget is left and when it refills rather than just saying no. A token is the
+only way to actually raise it.
 
 Credentials are all optional; a public repository on any host clones without
 one. `GITHUB_TOKEN`, `GITLAB_TOKEN`, `BITBUCKET_USER` + `BITBUCKET_TOKEN` are

@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import re
+import time
 from typing import Any
 
 from git_synapse.config import GitHubConfig, get_config
@@ -347,12 +348,36 @@ def _not_found_message(source: Any) -> str:
     )
 
 
+def _budget_note(source: Any) -> str:
+    """How much budget is left and when it comes back, where the host says.
+
+    GitHub's `/rate_limit` is itself exempt from the rate limit, so asking is
+    free -- and "resets in 12 minutes" is something a reader can act on, while
+    "rate limited" leaves them guessing whether to wait a minute or an hour.
+    """
+    if source.provider != "github":
+        return ""
+    try:
+        from git_synapse.ingest.github import GitHubClient
+
+        with GitHubClient(patient=False) as client:
+            core = client.rate_limit()["resources"]["core"]
+        remaining, limit, reset = core["remaining"], core["limit"], core["reset"]
+    except Exception:  # noqa: BLE001 - a nicety; never worth failing over
+        return ""
+
+    minutes = max(0, round((reset - time.time()) / 60))
+    when = "in under a minute" if minutes < 1 else f"in about {minutes} minutes"
+    return f" {remaining} of {limit} requests left; the budget refills {when}."
+
+
 def _rate_limit_message(source: Any) -> str:
     """Why the host refused, in terms of the thing the reader can change.
 
     "Rate limited" alone sends someone to wait it out. Anonymous GitHub allows
-    sixty requests an hour, which one listing can exhaust, and the fix is a
-    token rather than patience -- so say which of the two situations this is.
+    sixty requests an hour, which one listing of a large organisation can
+    exhaust, and the fix there is a token rather than patience -- so say which
+    of the two situations this is, and when waiting would actually work.
     """
     from git_synapse.config import get_config
 
@@ -361,6 +386,7 @@ def _rate_limit_message(source: Any) -> str:
             "GitHub allows 60 requests an hour without a token, and this "
             "deployment has none — one listing of a large organisation spends "
             "that. Set GITHUB_TOKEN to raise it to 5,000."
+            + _budget_note(source)
         )
     if source.provider == "gitlab" and not get_config().providers.gitlab_token:
         return (f"{source.host} is rate-limiting us. Set GITLAB_TOKEN to raise "
@@ -368,6 +394,7 @@ def _rate_limit_message(source: Any) -> str:
     return (
         f"{source.host} is rate-limiting us, which a very large owner will do — "
         "listing thousands of repositories takes hundreds of requests."
+        + _budget_note(source)
     )
 
 
@@ -402,6 +429,29 @@ def credential_for(account: dict | None) -> str:
     if not account:
         return ""
     return vault.open_(account.get("credential"))
+
+
+#: Owner listings, kept briefly so that looking the same one up twice does not
+#: spend the budget twice. The window is short because it exists to cover one
+#: person's back-and-forth -- paste, look, adjust, look again -- not to serve
+#: stale data: on an anonymous GitHub, three glances at an organisation is
+#: three of the sixty requests available that hour.
+#:
+#: Only listings are cached. A single repository costs one request, which is
+#: cheap enough that a stale answer would be the worse trade.
+_LISTINGS: dict[tuple[str, str], tuple[float, dict]] = {}
+LISTING_TTL_SECONDS = 300
+
+
+def _cached_listing(key: tuple[str, str]) -> dict | None:
+    hit = _LISTINGS.get(key)
+    if hit is None:
+        return None
+    at, payload = hit
+    if time.time() - at > LISTING_TTL_SECONDS:
+        del _LISTINGS[key]
+        return None
+    return payload
 
 
 def resolve_url(url: str, limit: int = 300, token: str = "") -> dict:
@@ -492,6 +542,14 @@ def resolve_url(url: str, limit: int = 300, token: str = "") -> dict:
         return {**base, "kind": "repo", "repos": [_repo(record)], "total": 1,
                 "truncated": False}
 
+    # A token changes what is visible, so it must not read another caller's
+    # anonymous answer.
+    cache_key = (source.host, source.owner.lower()) if not secret else None
+    if cache_key is not None:
+        cached = _cached_listing(cache_key)
+        if cached is not None:
+            return {**cached, **base, "cached": True}
+
     with providers.for_source(source, patient=False, token=secret) as client:
         if not client.supports_listing():
             raise AccountError(
@@ -519,7 +577,7 @@ def resolve_url(url: str, limit: int = 300, token: str = "") -> dict:
     # that was cut: the true total is unknown and larger. Reporting `len` as
     # the total would state the cap as a fact about the owner.
     capped = len(records) >= providers.LIST_CAP
-    return {
+    payload = {
         **base,
         "kind": "owner",
         "repos": [_repo(r) for r in records[:limit]],
@@ -528,7 +586,11 @@ def resolve_url(url: str, limit: int = 300, token: str = "") -> dict:
         # Nobody reads past a few hundred rows, and "track everything" is one
         # flag rather than 8,296 names.
         "truncated": capped or len(records) > limit,
+        "cached": False,
     }
+    if cache_key is not None:
+        _LISTINGS[cache_key] = (time.time(), payload)
+    return payload
 
 
 def _with_credential(account: dict | None) -> dict | None:
