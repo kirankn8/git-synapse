@@ -1128,18 +1128,39 @@ const reposView = async (args, params) => {
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(r);
   }
+  /* Groups are ordered by whatever the reader is sorting on, not always by
+     commits: Overview's "Files tracked" tile opens `?order_by=file_count`
+     meaning *show me the biggest*, and a group order fixed to commits answers
+     a question nobody asked. Counts sum across the group; dates take the most
+     recent, since a group is as fresh as its freshest repository. */
+  const SUMMED = new Set(['commit_count', 'file_count', 'pair_count', 'author_count',
+                          'stargazers', 'disk_usage_kb', 'total_insertions']);
+  const LATEST = new Set(['last_commit_at', 'github_pushed_at', 'last_ingest_at']);
+  const sortKey = tableOpts.initialSort;
+  const groupRank = (rows) => {
+    if (LATEST.has(sortKey)) {
+      return Math.max(...rows.map((r) => (r[sortKey] ? Date.parse(r[sortKey]) : 0)));
+    }
+    return rows.reduce((n, r) => n + Number(r[SUMMED.has(sortKey) ? sortKey : 'commit_count'] || 0), 0);
+  };
   const ordered = [...groups.entries()]
     .map(([key, rows]) => {
       const [owner, host] = key.split('\u0000');
       return { owner, host, rows,
                commits: rows.reduce((n, r) => n + Number(r.commit_count || 0), 0),
+               rank: groupRank(rows),
                accountId: rows[0].account_id };
     })
-    .sort((a, b) => b.commits - a.commits || b.rows.length - a.rows.length);
+    .sort((a, b) => (sortKey === 'name'
+      ? a.owner.localeCompare(b.owner)
+      : b.rank - a.rank || b.rows.length - a.rows.length));
 
   // A filter is a search: what it finds should be open, not hidden one click
   // further in.
   const filtering = Boolean(params.q || params.lang || params.status);
+  // Arriving on an explicit ranking -- from a tile that counted something --
+  // the leader is the answer, so it is open on arrival.
+  const ranking = Boolean(params.order_by);
 
   wrap.append(h('div', { class: 'section-title' },
     `${num(repos.count)} repositories across ${num(ordered.length)} sources`));
@@ -1154,7 +1175,9 @@ const reposView = async (args, params) => {
   for (const g of ordered) {
     const body = h('div', { class: 'card-body flush' });
     let built = false;
-    const panel = h('details', { class: 'repo-group', open: filtering || ordered.length <= 3 },
+    const panel = h('details',
+      { class: 'repo-group',
+        open: filtering || ordered.length <= 3 || (ranking && g === ordered[0]) },
       h('summary', { class: 'repo-group-head' },
         h('span', { class: 'repo-group-owner mono' }, g.owner),
         h('span', { class: 'repo-group-host' }, g.host),

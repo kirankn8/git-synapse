@@ -1168,14 +1168,17 @@ repository, which is the trap the rule exists to close.
 **A list of repositories is grouped by the source that owns them.** A
 repository is *in* an account, so `/repos` draws one collapsed line per
 `(owner, host)` — the pair, not the owner alone, because two hosts can carry
-the same owner name — ordered by commits, and opens the table only when a group
-is expanded. 240 undifferentiated rows read as a bag of names and lose the one
-relation the hierarchy is built on. The groups stay shut on arrival and each
-builds its table on first open, so the page is an index rather than sixty-six
-stacked tables; the filter searches `owner/name`, so typing a source name finds
-everything under it, and anything matching is opened — a search must never hide
-its own results behind a disclosure triangle. Inside one source, `/sources/7`
-is already the group, so it lists its repositories flat.
+the same owner name — and opens a table only when a group is expanded. 240
+undifferentiated rows read as a bag of names and lose the one relation the
+hierarchy is built on. Each group builds its table on first open, so the page
+is an index rather than sixty-six stacked tables. Group order follows what the
+reader is sorting on: counts sum across the group, dates take the freshest
+repository in it, and an explicit `?order_by=` — which is what Overview's tiles
+link to, meaning *show me the biggest* — opens its leader. The filter searches
+`owner/name`, so typing a source name finds everything under it, and every
+group it matches is opened: a search must never hide its own results behind a
+disclosure triangle. Inside one source, `/sources/7` is already the group, so it
+lists its repositories flat.
 
 **Insights opens on a map.** `/insights/graph` is the first section and the
 landing: with nothing scoped it draws every repository, and choosing one in
