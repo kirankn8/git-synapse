@@ -189,12 +189,43 @@ def test_the_network_abort_threshold_exceeds_the_worker_count(db):
 
 
 def test_load_repo_records_returns_usable_records(db):
-    records = pipeline.load_repo_records()
-    if not records:
-        pytest.skip("no repositories stored")
-    r = records[0]
-    assert r.full_name and "/" in r.full_name
-    assert r.clone_url.startswith("http")
+    """Reads back a repository it wrote itself.
+
+    Taking `records[0]` -- whichever repository happened to be first -- made
+    this assert things about another test's fixture, and it failed the moment a
+    fixture row without a clone URL sorted ahead of a real one. The point is
+    that every column survives the round trip, which needs a row whose columns
+    are known.
+    """
+    from git_synapse.db.engine import execute, query_one
+
+    row = query_one(
+        """
+        INSERT INTO repo (github_id, owner, name, full_name, host, provider,
+                          clone_url, default_branch, primary_language, topics,
+                          visibility, is_private, is_fork, is_archived,
+                          stargazers, disk_usage_kb, is_enabled)
+        VALUES (4242, 'roundtrip', 'thing', 'roundtrip/thing', 'github.com',
+                'github', 'https://github.com/roundtrip/thing.git', 'main',
+                'Rust', ARRAY['cli','tool'], 'public', FALSE, TRUE, FALSE,
+                77, 512, TRUE)
+        RETURNING id
+        """)
+    try:
+        records = {r.full_name: r for r in pipeline.load_repo_records()}
+        r = records["roundtrip/thing"]
+        assert r.clone_url == "https://github.com/roundtrip/thing.git"
+        assert (r.provider, r.host) == ("github", "github.com")
+        assert (r.primary_language, r.default_branch) == ("Rust", "main")
+        assert r.topics == ["cli", "tool"]
+        # Booleans and counts specifically: they are read back by name, and a
+        # column added in the middle of the SELECT list used to shift every
+        # field after it into a neighbour of compatible type.
+        assert r.is_fork is True and r.is_archived is False
+        assert r.stargazers == 77 and r.disk_usage_kb == 512
+        assert r.github_id == 4242
+    finally:
+        execute("DELETE FROM repo WHERE id = %s", (row["id"],))
 
 
 # ------------------------------------------------------ credential preflight
