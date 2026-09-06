@@ -9,9 +9,9 @@
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-compose-2496ED?style=flat-square&logo=docker&logoColor=white)
-![MCP](https://img.shields.io/badge/MCP-12%20tools-5eead4?style=flat-square)
-![Measures](https://img.shields.io/badge/measures-29-a78bfa?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-1%2C150-3fb950?style=flat-square)
+![MCP](https://img.shields.io/badge/MCP-14%20tools-5eead4?style=flat-square)
+![Measures](https://img.shields.io/badge/measures-31-a78bfa?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-1%2C347-3fb950?style=flat-square)
 ![Coverage](https://img.shields.io/badge/backend%20coverage-100%25-3fb950?style=flat-square)
 ![Backtested](https://img.shields.io/badge/backtested-769k%20predictions-14b8a6?style=flat-square)
 
@@ -40,10 +40,10 @@ only the commits that preceded it — <a href="#does-it-actually-help">how this 
 
 | | |
 |---|---|
-| [What it does](#what-it-does) · [The 29 measures](#the-29-measures) | the idea, and the statistics behind it |
+| [What it does](#what-it-does) · [The 31 measures](#the-31-measures) | the idea, and the statistics behind it |
 | [**Does it actually help?**](#does-it-actually-help) | the backtest that judges the product, not the corpus |
 | [Quick start](#quick-start) · [Which repositories get scanned](#which-repositories-get-scanned) | running it |
-| [Using it from a coding agent](#using-it-from-a-coding-agent-mcp) · [The web UI](#the-web-ui) | the interfaces |
+| [Using it from a coding agent](#using-it-from-a-coding-agent-mcp) · [The web UI](#the-web-ui) · [Who may read it](#who-may-read-it) | the interfaces, and the door in front of them |
 | [CLI](#cli) · [Configuration](#configuration) · [Development](#development) | operating it |
 | [**DESIGN.md**](DESIGN.md) | how it works inside: the schema, every table, the trade-offs |
 
@@ -90,7 +90,7 @@ Go and PHP bracket the range for a structural reason: a Go pseudo-version *is* a
 commit id, while Composer and Maven name a registry artifact that records no
 commit at all, so the link has to be reconstructed from a tag.
 
-### The 29 measures
+### The 31 measures
 
 Every measure is a pure function of the same 2×2 contingency table. For two items
 A and B over N observations: **a** = both changed, **b** = only A, **c** = only B,
@@ -182,11 +182,12 @@ from, so no pair can vouch for itself.
 
 ### What it is measured against
 
-A benchmark is only as honest as its opponent. This one shipped a bad one: it
-compared against *the repository's busiest files*, which nobody has ever used to
-decide what to open, and every lift it reported was inflated by a weak rival.
+A benchmark is only as honest as its opponent, and the easy opponent here is
+*the repository's busiest files* — which nobody has ever used to decide what to
+open. Beating it inflates every lift reported, so it is the floor rather than
+the rival.
 
-The baselines are now a ladder of people who could answer the question with **no
+The baselines are a ladder of people who could answer the question with **no
 history at all**. Every rung is free, so whatever Git Synapse adds on top of the
 highest one has to have come from the commit log and nowhere else.
 
@@ -257,8 +258,9 @@ exists for: prompts where reading the code, however well, surfaces nothing.
 
 Counts are kept per repository, never pooled. Two files in different repositories
 cannot co-occur, so a shared population hands a baseline candidates it can never
-hit — which does not weaken it honestly, it breaks it. Pooling the same 38
-repositories drove the old baseline to 9% and reported 6.84x.
+hit — which does not weaken it honestly, it breaks it. Pool the same 38
+repositories and the baseline collapses to 9%, reporting a 6.84x lift that is an
+artefact of the pooling.
 
 Two things the backtest settled that opinion had not:
 
@@ -306,8 +308,19 @@ cp .env.example .env      # add a GITHUB_TOKEN with `repo` scope
 docker compose up -d      # postgres + api + scheduler + mcp
 ```
 
-Then open **http://localhost** (or `:8080`) and add the organisations or user
-accounts to scan on the **Accounts** page — or from the CLI:
+Then open **http://localhost** (or `:8080`). A deployment with no accounts
+shows a first-run screen instead of the dashboard, which asks for a one-time
+**setup token** the API printed when it started:
+
+```bash
+docker compose logs api | grep -A3 'setup token'
+```
+
+Paste it in with your email, name and a password, and you are the
+administrator. The token stops being accepted the moment the account exists.
+
+Now add the organisations or user accounts to scan on the **Accounts** page —
+or from the CLI:
 
 ```bash
 docker compose run --rm cli account add my-org
@@ -334,9 +347,10 @@ the statistics are the expensive part, and they stay valid whether or not the
 account that discovered them is still listed. Those repositories simply stop
 being refreshed.
 
-`GITHUB_ORG` still exists, but only as a seed: if it is set and no accounts are
-configured yet, it is adopted once on first discovery so an existing deployment
-keeps working after upgrading. It is ignored thereafter.
+`GITHUB_ORG` is a seed, not a setting: if it is set and no accounts are
+configured, it is adopted once as an account on the first discovery run, and
+ignored from then on. Configure accounts in the UI or the CLI; the environment
+variable exists so a deployment can be brought up with one already listed.
 
 ### Nicer URL, and keeping it running (macOS)
 
@@ -407,7 +421,7 @@ interval, and the misfire grace is derived from it rather than fixed.
 ## How it works
 
 The atomic fact is one row per `(commit, file)`; everything else — marginals,
-joint counts, all 29 measures, cross-repo pairs, the dependency graph — is
+joint counts, all 31 measures, cross-repo pairs, the dependency graph — is
 derived from it and can be dropped and rebuilt.
 
 **→ [DESIGN.md](DESIGN.md)** covers the pipeline, all 34 tables with entity
@@ -447,6 +461,18 @@ The MCP server runs on port 8081. Register it with Claude Code:
 claude mcp add --transport http git-synapse http://localhost:8081/mcp
 ```
 
+If the MCP surface requires sign-in — the default — the agent needs a token.
+Mint one under the avatar menu → **API tokens** and register the server with it:
+
+```bash
+claude mcp add --transport http git-synapse http://localhost:8081/mcp \
+  --header "Authorization: Bearer gss_..."
+```
+
+An administrator can set the MCP surface to open under **Jobs → Schedule &
+settings**, in which case no header is needed. The dashboard and MCP are set independently, so
+an agent on the same host can be let in without opening the UI to the network.
+
 Or run it as a subprocess over stdio:
 
 ```json
@@ -462,17 +488,19 @@ Or run it as a subprocess over stdio:
 }
 ```
 
-### Twelve tools
+### Fourteen tools
 
 **Within a repository**
 
 | Tool | Purpose |
 |---|---|
 | `coupled_files` | What changes with this file, ranked, with confidence. |
-| `explain_pair` | Full 2×2 table, all 29 measures, and the commits as evidence. |
+| `explain_pair` | Full 2×2 table, all 31 measures, and the commits as evidence. |
 | `file_history` | Recent commits and top authors for a file. |
 | `search_files` | Find a file by path substring. |
 | `repo_hotspots` | Churn leaders — how to orient in an unfamiliar repo. |
+| `coupled_directories` | The same question one level up: which packages or subsystems change with this one. |
+| `module_context` | In a monorepo, the file's own module and both directions of the manifest graph around it. |
 
 **Across repositories**
 
@@ -484,6 +512,12 @@ Or run it as a subprocess over stdio:
 | `explain_repo_pair` | Declared status, every observed bump with exact upstream commits, adoption delay. |
 | `list_repositories` | What is in the corpus. |
 | `list_measures` | The catalogue, with caveats on each measure. |
+
+**Reporting back**
+
+| Tool | Purpose |
+|---|---|
+| `report_gap` | Tell Git Synapse its own data or tooling is wrong. The only tool that writes, and nothing derived reads what it writes — see the **Feedback** tab. |
 
 ### The workflow it exists for
 
@@ -515,26 +549,85 @@ than on a bare float, and needs to be told which tier it can trust.
 
 ## The web UI
 
-Real paths (History API), not hash fragments — `/insights` is bookmarkable and
-survives a refresh. Everything is clickable; every table sorts on every column.
+Real paths (History API), not hash fragments — `/insights/risk?repo=5` is
+bookmarkable and survives a refresh.
 
-| View | What it shows |
+One rule decides where anything lives:
+
+> **Places nest in the path. Analyses scope with a query.**
+
+A file is *in* a repository, which is *in* an account, so that nests and is a
+path. "Risk" is a question you can ask at any scope, so it is a filter. Two
+tabs carry the application and nothing appears under both.
+
+| Tab | Owns |
 |---|---|
-| **Overview** | Corpus stats across all layers, strongest couplings, recent jobs. |
-| **Repositories** | Filter by language, visibility, status; drill into any repo. |
-| **Repository** | Hotspots, coupled pairs, files, directories, **cross-repo impact**, **de-facto modules**, **risk**, full metadata. |
-| **File** | Ranked partners with directional probabilities, history, authors. |
-| **Pair** | The 2×2 table as a grid, all 29 measures with bars, and the commits behind them. |
-| **Impact** | Upstream/downstream per repo with evidence tiers, transitive chains, declared deps and observed bumps. |
-| **Cross-repo** | The declared dependency graph: who depends on whom, with bump history. |
-| **Insights** | Risk & bus factor, coupling drift (emerging vs decaying), de-facto modules. |
-| **Graph** | Force-directed coupling network, at file level or repository level. |
-| **Measures** | The catalogue with formula, guidance and caveats. |
+| **Overview** | Is this deployment healthy, and is anything using it: corpus scale, ingest health, eight distributions, who is calling. |
+| **Accounts** | The organisations and users being scanned, and their filters. |
+| **Repositories** | The *things* — repositories, folders, files, pairs — and what is in them. Filter by language, visibility, status, then drill all the way down. |
+| **Insights** | Every analysis derived from history: **Map**, **Distributions**, **Cross-repo impact**, **Risk & bus factor**, **Coupling drift**, **De-facto modules**. Each takes an optional `?repo=`. |
+| **Activity** | Every call served on both surfaces, what it was given and what came back. |
+| **Measures** | The catalogue: formula, guidance, caveats. |
+| **Jobs** | Run history, the refresh schedule, and the access policy. |
+| **Feedback** | What agents reported back about the answers they were given. |
+
+Inside **Repositories**, the path keeps descending and the breadcrumb keeps up:
+
+```
+/repos/5                                     one repository
+/repos/5/tree/src/main/java                  a folder in it
+/repos/5/files/src/main/java/Cache.java      a file in that folder
+/repos/5/pairs/36/91                         the 2×2 table, 31 measures, and the commits behind them
+```
+
+**Everything clickable drills down.** A row opens what it names, a figure opens
+what it counts, a card opens the fuller view behind it, and a chart opens the
+whole distribution it is a thumbnail of — a preview is a picture of a whole, so
+clicking part of it shows the whole. Nothing is a dead end: a number with no way
+in is treated as a bug, and the layout suite fails the build over one.
 
 The measure selector in the header is global: pick Log-likelihood and every
-ranking re-sorts. Press `/` to focus search.
+ranking re-sorts. It appears only on pages that actually rank something. Long
+dropdowns — 164 repositories, 31 measures, 22 languages — are searchable
+comboboxes; repositories are grouped by account, because a repository name is
+only unique inside one. Press `/` to focus search.
 
 No build step, no framework, no CDN — three static files served by FastAPI.
+
+### Who may read it
+
+Everything here is derived from public repositories, but a deployment is not
+public: it says which repositories an organisation tracks, where its coupling is
+weakest, and which files one person alone understands. So it is behind a
+sign-in.
+
+The avatar in the top right opens **People** (`/people`) and **API tokens**
+(`/tokens`).
+
+- **Everyone who is signed in reads everything.** There are no per-repository
+  permissions; the split is between reading and administering. Two roles, and
+  no third: a `member` reads, an `admin` also adds people and sets policy.
+- **Only an administrator adds or removes people**, on **People**. Everyone can
+  see who has an account; only an admin can change the list. Demoting or
+  deactivating the last administrator is refused, since the way back is
+  otherwise the database.
+- **Anyone may mint an API token** for agents and scripts, on **API tokens**. A
+  token carries its maker's identity and role, so it can do exactly what they
+  can and no more, and it dies with their account.
+
+  ```bash
+  curl -H 'Authorization: Bearer gss_...' http://localhost:8080/api/repos
+  ```
+
+- **An administrator may switch sign-in off per surface** — dashboard and MCP
+  independently — under **Jobs → Schedule & settings**. A laptop demo and a
+  shared internal dashboard are different things, and only the person running it
+  knows which this is. Administering always needs an account either way, because
+  there is otherwise nobody to attribute the act to.
+
+Passwords are hashed with `scrypt`; session cookies and API tokens are stored as
+their SHA-256, so a database dump yields no working credential. Ten failed
+attempts against an address make it wait fifteen minutes.
 
 ## CLI
 
@@ -549,7 +642,7 @@ docker compose run --rm cli <command>
 | `discover` | List every configured account's repos and the mirror mode each would use. Clones nothing. |
 | `ingest --all` | Full pipeline. `--repo NAME` to limit, `-j N` for concurrency, `--force-full` to ignore watermarks. |
 | `aggregate` | Rebuild pair tables from the atomic facts. |
-| `score` | Recompute the 29 measures. Run this after adding a measure. |
+| `score` | Recompute the 31 measures. Run this after adding a measure. |
 | `coupled REPO PATH` | The core query, from the shell. `-m` to pick a measure. |
 | `measures` | Print the catalogue. |
 | `status` | Corpus summary and recent runs. |
@@ -651,6 +744,19 @@ The ones that change the numbers:
 After changing an ingest knob: `docker compose run --rm cli aggregate`.
 After changing a dependency knob: `depbump`, then `impact`.
 
+Access is deliberately **not** configured here. There is no `ADMIN_PASSWORD`: it
+would sit in a shell history, in the compose file, and in every process listing
+on the host. The first administrator is created at the console instead, and who
+may read the deployment is changed from the UI, where it takes effect without a
+restart.
+
+The one exception is for claiming an account from a script rather than a
+terminal:
+
+| Variable | Effect |
+|---|---|
+| `ADMIN_SETUP_TOKEN` | Use this value as the first-run setup token instead of minting one and printing it to the log. Ignored once anyone has an account, and never echoed back — whoever set it already has it. |
+
 ---
 
 ## Development
@@ -665,11 +771,13 @@ Integration tests skip cleanly when no database is reachable.
 
 | Test file | Covers |
 |---|---|
-| `test_measures.py` | All 29 measures against hand-computed values, plus bounds, symmetry, degenerate tables, and independence limits. |
+| `test_measures.py` | All 31 measures against hand-computed values, plus bounds, symmetry, degenerate tables, and independence limits. |
 | `test_store.py` | Loader: flush boundaries, idempotent re-ingest, rename identity, fan-out cap. |
 | `test_analysis.py` | The whole pipeline: a synthetic history with a known answer, aggregated and scored through real SQL, compared against the measures computed directly. |
 | `test_backtest.py` | The backtest itself, most of it pinning down leakage: a pair first seen in the commit being scored must be unpredictable, and predictable once taught. |
 | `test_manifests.py` | Dependency references across 29 ecosystems, each classified at its true strength, and prose never read as a dependency. |
-| `tests/ui/` | Optional headless UI smoke test — boots the real front-end in jsdom against a running API and drives all 18 routes. Needs Node; see its README. |
+| `test_api.py` | Every endpoint, including the door: who may read what, the first-run setup token, rate limiting, and tokens. |
+| `tests/ui/smoke.mjs` | Boots the real front-end in jsdom against a running API and walks 39 routes, following every link it finds. Needs Node; see its README. |
+| `tests/ui/layout.mjs` | The same UI in headless Chrome, where boxes have positions: spacing, ragged rows, clipped charts, dead-end cards, and that a chart lands where its card's arrow does. jsdom does no layout and loads no stylesheet, so it cannot see any of this. |
 
 Adding a measure, and the reasoning behind the schema, are in **[DESIGN.md](DESIGN.md)**.

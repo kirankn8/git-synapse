@@ -10,9 +10,16 @@ is covered by tests/ui/layout.mjs, which reads what the pages actually render
 rather than what the source contains -- most of that prose is assembled at
 runtime.
 
-Code comments and DESIGN.md are deliberately *not* covered. Explaining what was
-tried and why it was rejected is their entire job, and the difference is who is
-reading: a maintainer wants the reasoning, a user wants the tool.
+It also covers the prose docs. The distinction there is not "no history" but
+*whose* history: a rejected alternative stated as one -- "the obvious repair is
+to widen the unit; measured, that construction is unsound" -- is rationale a
+maintainer needs, and reads as true whenever it is read. "The table that used to
+sit here" is a diff against a version the reader never saw, and rots the moment
+it is written. The first survives this check by construction; the second is what
+it looks for.
+
+Code comments are not covered. They are read beside the code they annotate, by
+someone who can see the current state next to them.
 """
 from __future__ import annotations
 
@@ -99,13 +106,23 @@ def test_no_error_message_explains_what_the_code_used_to_do():
     assert not leaked, leaked
 
 
-@pytest.mark.parametrize("doc", ["README.md", ".env.example",
-                                 "skills/git-synapse-mcp/SKILL.md"])
-def test_the_documents_a_newcomer_reads_first_are_about_the_tool(doc):
-    """DESIGN.md is exempt and says so: a design document exists to record what
-    was tried and why it was rejected. These three are read by someone deciding
-    whether to use the thing at all."""
+@pytest.mark.parametrize("doc", [
+    "README.md", "DESIGN.md", ".env.example",
+    "tests/ui/README.md", "skills/git-synapse-mcp/SKILL.md",
+])
+def test_no_document_narrates_its_own_past(doc):
+    """A reader of the docs has never seen the previous version either.
+
+    DESIGN.md is included, which is not a claim that it may not discuss what
+    was rejected -- that is most of its job. The distinction is tense. "The
+    obvious repair is to widen the unit; measured, that construction is
+    unsound" is a fact about the problem and reads as true whenever it is read.
+    "The table that used to sit here" is a diff against a build nobody can see,
+    and rots the moment it is written. Only the second shape is matched.
+    """
     from pathlib import Path
 
-    text = (Path(__file__).resolve().parents[1] / doc).read_text(encoding="utf-8")
-    assert not _offending(text)
+    path = Path(__file__).resolve().parents[1] / doc
+    if not path.exists():  # pragma: no cover - every one of these is committed
+        pytest.skip(f"{doc} is not present")
+    assert not _offending(path.read_text(encoding="utf-8"))
