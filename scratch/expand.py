@@ -71,11 +71,16 @@ def main() -> None:
             break
 
         remaining, reset_in = budget()
-        gh = [a for a in pend if a["host"] == "github.com"]
-        if gh and remaining < 5:
+        others = [a for a in pend if a["host"] != "github.com"]
+        # Only wait when GitHub is the *only* thing left. Discovery is impatient
+        # now, so a spent budget costs a fast failure per GitHub source and does
+        # not stop GitLab or Bitbucket resolving in the same pass.
+        if remaining < 5 and not others:
             log(f"budget spent ({remaining}); waiting {reset_in + 30}s for a refill")
             time.sleep(reset_in + 30)
             continue
+        if remaining < 5:
+            log(f"budget spent; resolving {len(others)} non-GitHub sources meanwhile")
 
         try:
             found = pipeline.discover(trigger="corpus-expansion")
