@@ -502,13 +502,14 @@ def list_accounts(enabled_only: bool = False) -> dict:
 
 
 @router.post("/accounts/resolve", tags=["accounts"])
-def resolve_source(body: ResolveIn) -> dict:
+def resolve_source(body: ResolveIn, request: Request) -> dict:
     """What is at this URL, and what could be tracked from it.
 
     Reads only. A repository URL comes back as one already-fetched repository
     to confirm; an owner URL comes back with the repositories under it, for a
     person to tick. Nothing is written until :func:`create_source`.
     """
+    _require(request, admin=True)
     try:
         return {**accounts.resolve_url(body.url, token=body.token, page=body.page),
                 # Whether a token *could* be kept, so the form knows to offer.
@@ -523,8 +524,9 @@ def resolve_source(body: ResolveIn) -> dict:
 
 
 @router.post("/accounts/from-url", tags=["accounts"], status_code=201)
-def create_source(body: SourceIn) -> dict:
+def create_source(body: SourceIn, request: Request) -> dict:
     """Track what a person pasted and chose. Discovery picks it up next run."""
+    _require(request, admin=True)
     try:
         return accounts.add_from_url(body.url, repos=body.repos, token=body.token)
     except SourceError as exc:
@@ -539,8 +541,9 @@ def create_source(body: SourceIn) -> dict:
 
 
 @router.post("/accounts", tags=["accounts"], status_code=201)
-def create_account(body: AccountIn) -> dict:
+def create_account(body: AccountIn, request: Request) -> dict:
     """Add a source field by field. Discovery picks it up on the next run."""
+    _require(request, admin=True)
     try:
         return accounts.add_account(**body.model_dump())
     except AccountError as exc:
@@ -553,8 +556,9 @@ class CredentialIn(BaseModel):
 
 
 @router.put("/accounts/{account_id}/credential", tags=["accounts"])
-def set_credential(account_id: int, body: CredentialIn) -> dict:
+def set_credential(account_id: int, body: CredentialIn, request: Request) -> dict:
     """Replace or clear one source's access token. Never returns it."""
+    _require(request, admin=True)
     if accounts.get_account(account_id) is None:
         raise HTTPException(404, f"account {account_id} not found")
     try:
@@ -572,8 +576,9 @@ def get_account(account_id: int) -> dict:
 
 
 @router.patch("/accounts/{account_id}", tags=["accounts"])
-def patch_account(account_id: int, body: AccountPatch) -> dict:
+def patch_account(account_id: int, body: AccountPatch, request: Request) -> dict:
     """Update an account's login or filters."""
+    _require(request, admin=True)
     if accounts.get_account(account_id) is None:
         raise HTTPException(404, f"account {account_id} not found")
     try:
@@ -583,8 +588,9 @@ def patch_account(account_id: int, body: AccountPatch) -> dict:
 
 
 @router.delete("/accounts/{account_id}", tags=["accounts"])
-def delete_account(account_id: int) -> dict:
+def delete_account(account_id: int, request: Request) -> dict:
     """Stop scanning an account. Its repositories and statistics are kept."""
+    _require(request, admin=True)
     if not accounts.remove_account(account_id):
         raise HTTPException(404, f"account {account_id} not found")
     return {"deleted": account_id}
@@ -1141,8 +1147,10 @@ def feedback(
 
 
 @router.post("/feedback/{feedback_id}/resolve", tags=["feedback"])
-def resolve_feedback(feedback_id: int, status: str, resolution: str = "") -> dict:
+def resolve_feedback(feedback_id: int, request: Request, status: str,
+                     resolution: str = "") -> dict:
     """Close or reclassify a report. A human action, not an agent's."""
+    _require(request)
     try:
         ok = q.resolve_feedback(feedback_id, status, resolution)
     except ValueError as exc:
