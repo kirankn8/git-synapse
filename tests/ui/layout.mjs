@@ -58,6 +58,9 @@ const bad = (label, detail) => { console.log(`  FAIL ${label.padEnd(36)} ${detai
    it to the browser, so these pages render rather than showing the door. */
 const TEST_EMAIL = process.env.GS_TEST_EMAIL || 'ui-tests@git-synapse.local';
 const TEST_PASSWORD = process.env.GS_TEST_PASSWORD || 'ui-tests-password-1234';
+// Only needed against a deployment nobody has claimed yet, where creating the
+// account is the only way in and the token is what authorises that.
+const SETUP_TOKEN = process.env.GS_SETUP_TOKEN || '';
 
 async function sessionCookie() {
   const me = await (await fetch(BASE + '/api/auth/me')).json();
@@ -66,12 +69,17 @@ async function sessionCookie() {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(me.needs_setup
-      ? { email: TEST_EMAIL, name: 'UI tests', password: TEST_PASSWORD }
+      ? { email: TEST_EMAIL, name: 'UI tests', password: TEST_PASSWORD,
+          setup_token: SETUP_TOKEN }
       : { email: TEST_EMAIL, password: TEST_PASSWORD }),
   });
   if (!res.ok) {
     throw new Error(`could not sign in as ${TEST_EMAIL} (${res.status}). `
-      + 'Set GS_TEST_EMAIL and GS_TEST_PASSWORD to an account on this deployment.');
+      + (me.needs_setup
+        ? 'This deployment has no accounts yet, so one must be created, which '
+          + 'needs the setup token. Set GS_SETUP_TOKEN to the value the API '
+          + 'printed at startup, or start it with ADMIN_SETUP_TOKEN.'
+        : 'Set GS_TEST_EMAIL and GS_TEST_PASSWORD to an account on this deployment.'));
   }
   const raw = (res.headers.getSetCookie?.() || [])[0] || '';
   const [pair] = raw.split(';');
@@ -241,6 +249,45 @@ for (const path of ['/', '/repos/4', '/activity', '/insights/shape/pair_support'
 /* A chart drawn into a card that clips is worse than no chart: the reader sees
    a number cut in half and cannot tell it is cut. Both were shipped -- bars
    overflowing the body, and values drawn into columns too narrow for them. */
+/* A card that opens a fuller view has one destination, not two. The languages
+   card on Overview had its arrow going to the distribution and its bars going
+   to a filtered repository list, so where you landed depended on which pixel
+   you hit. A preview is a picture of a whole; clicking part of it shows the
+   whole. */
+console.log('\n=== a chart goes where its card goes ===');
+for (const path of ['/', '/insights/shape']) {
+  const count = await (async () => {
+    await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });
+    await settle();
+    return page.evaluate(() => [...document.querySelectorAll('.card.is-link')]
+      .filter((c) => c.querySelector('.cbar, .hbar')).length);
+  })();
+
+  for (let i = 0; i < count; i++) {
+    const land = async (what) => {
+      await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });
+      await settle();
+      const title = await page.evaluate((n, pick) => {
+        const card = [...document.querySelectorAll('.card.is-link')]
+          .filter((c) => c.querySelector('.cbar, .hbar'))[n];
+        const name = card.querySelector('.card-title').textContent;
+        (pick === 'arrow' ? card.querySelector('.card-go')
+                          : card.querySelector('.cbar, .hbar')).click();
+        return name;
+      }, i, what);
+      await settle();
+      return { title, url: await page.evaluate(() => location.pathname + location.search) };
+    };
+    const arrow = await land('arrow');
+    const chart = await land('chart');
+    if (arrow.url === chart.url) {
+      ok(`${path} "${arrow.title}"`, `arrow and chart both open ${arrow.url}`);
+    } else {
+      bad(`${path} "${arrow.title}"`, `arrow opens ${arrow.url}, chart opens ${chart.url}`);
+    }
+  }
+}
+
 console.log('\n=== charts fit inside their cards ===');
 for (const path of ['/', '/insights/shape', '/insights/shape/pair_support']) {
   await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });
