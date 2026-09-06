@@ -231,6 +231,29 @@ def test_extract_from_mirror_finds_every_bump_in_history(tmp_path):
     assert all(b.dep_sha for b in bumps)
 
 
+def test_manifest_history_limit_keeps_the_newest_revisions(monkeypatch, tmp_path):
+    """The cap must discard old history, not the dependency changes nearest HEAD."""
+    class _Proc:
+        returncode = 0
+        stderr = ""
+        stdout = "newest\nnewer\nold\noldest\n"
+
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: _Proc())
+    monkeypatch.setattr(
+        depbump,
+        "_snapshot",
+        lambda mirror, sha, manifest: {
+            "github.com/acme/lib": manifests.Reference(
+                "github.com/acme/lib", {"newer": "v2.0.0", "newest": "v3.0.0"}.get(sha, "v1.0.0"),
+                "tag", "go"
+            )
+        },
+    )
+
+    bumps = extract_from_mirror(tmp_path, "consumer", max_commits=2)
+    assert [b.dep_version for b in bumps] == ["v2.0.0", "v3.0.0"]
+
+
 # ------------------------------------------------- the parser's darker corners
 
 
@@ -445,6 +468,19 @@ def test_a_range_resolves_to_its_declared_floor(bump_env):
 
     depbump.resolve_bumps(conn)
     assert _resolved(conn, row) == (c, "floor")
+
+
+def test_ambiguous_release_tags_are_not_resolved_arbitrarily(bump_env):
+    """Equal version keys with different commits are unsafe ground truth."""
+    conn, repo, dep = bump_env
+    first = _commit(conn, dep, "ab" * 20, "2024-01-01")
+    second = _commit(conn, dep, "cd" * 20, "2024-01-02")
+    _tag(conn, dep, "v1.0.0", commit_id=first, main_commit_id=first, key="1")
+    _tag(conn, dep, "release-1", commit_id=second, main_commit_id=second, key="1")
+    row = _bump(conn, repo, dep, version="1.0.0", at="2024-02-01")
+
+    depbump.resolve_bumps(conn)
+    assert _resolved(conn, row) == (None, None)
 
 
 def test_an_upper_bound_resolves_to_the_newest_release_beneath_it(bump_env):
