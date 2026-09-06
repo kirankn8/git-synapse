@@ -28,7 +28,7 @@ from pathlib import Path
 
 import psycopg
 
-from git_synapse.analysis import depbump, mining, predict
+from git_synapse.analysis import depbump, derived, mining, predict
 from git_synapse.analysis.aggregate import rebuild_repo
 from git_synapse.analysis.score import score_repo
 from git_synapse.config import get_config
@@ -931,6 +931,10 @@ def _run_ingest_locked(
 
     try:
         verify_credentials(required=private_repos_in_scope() > 0)
+        # Materialised analytics are versioned separately from source data.
+        # This catches calculation changes even when no repository has new
+        # commits, and runs the affected dependency closure exactly once.
+        derived.ensure_current()
     except AuthError as exc:
         log.error("aborting run: %s", exc)
         run = RunResult(kind="full" if force_full else "sync")
