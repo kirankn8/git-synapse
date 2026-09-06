@@ -25,6 +25,9 @@ const PAGES = [
   ['/repos/4/tree/src', 'Folder'],
   ['/insights/graph', 'Insights map'],
   ['/insights/impact?repo=5&dir=upstream', 'Impact'],
+  // Unscoped as well as scoped: the empty state is a different page, and it
+  // carried prose no other page did.
+  ['/insights/impact', 'Impact (unscoped)'],
   ['/insights/shape', 'Distributions'],
   ['/insights/shape/commit_width', 'One distribution'],
   ['/insights/risk', 'Risk'],
@@ -343,6 +346,49 @@ console.log('\n=== the app survives a browser that blocks site data ===');
   if (rendered && !thrown.length) ok('storage blocked', 'renders, no page errors');
   else bad('storage blocked', `rendered=${rendered} errors=${thrown.join('; ')}`);
   await blocked.close();
+}
+
+/* No page may describe its own history.
+
+   A reader has never seen the version being compared to, so "the table that
+   used to sit here ranked repositories by co-change" tells them nothing and
+   costs them a paragraph. Code comments are where that belongs, and this
+   repository uses them heavily; the difference is who is reading.
+
+   The pattern is deliberately narrow. "Best used to confirm candidates" means
+   employed-to, and "where the reduction no longer holds" is a statement about
+   the maths -- both are on /measures and both are correct. It matches only
+   phrasing that can be about nothing except a previous version. */
+const CHANGELOG = new RegExp([
+  'used to (sit|be|show|live|say|appear|rank)',
+  '(was|were) (tried|removed|replaced|dropped)',
+  'we (tried|removed|used to|no longer)',
+  'previously (shown|ranked|listed|here)',
+  'in an earlier (version|release)',
+  'has been replaced',
+  'is not how .* (any ?more|is built now)',
+].join('|'), 'i');
+
+console.log('\n=== no page talks about its own past ===');
+{
+  const leaked = [];
+  for (const [path, label] of PAGES) {
+    await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });
+    await settle();
+    // Collapsed explainers hold the longest prose in the app; unopened, none
+    // of it is scanned.
+    await page.evaluate(() => {
+      for (const d of document.querySelectorAll('details')) d.open = true;
+    });
+    const text = await page.evaluate(() => document.getElementById('view').innerText || '');
+    for (const sentence of text.split(/(?<=[.!?])\s+|\n/)) {
+      if (sentence.trim().length > 25 && CHANGELOG.test(sentence)) {
+        leaked.push(`${label}: ${sentence.trim().slice(0, 90)}`);
+      }
+    }
+  }
+  if (leaked.length) bad('changelog in the UI', leaked.join(' | '));
+  else ok('no changelog in the UI', `${PAGES.length} pages, explainers opened`);
 }
 
 console.log('\n=== nothing overflows its container horizontally ===');
