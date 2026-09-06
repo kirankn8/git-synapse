@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import re
 import secrets
@@ -376,6 +377,81 @@ def token_user(secret: str | None) -> dict | None:
     execute("UPDATE api_token SET last_used_at = now() WHERE token_hash = %s",
             (_token_hash(secret),))
     return _row(row)
+
+
+# --------------------------------------------------------------- first admin
+
+#: Where the minted token lives. Not routed through `analysis.settings`, whose
+#: WRITABLE list is the set of things an administrator may change from the UI;
+#: this is neither settable nor readable there.
+_SETUP_KEY = "setup:token"
+
+#: The sentinel the failed-token attempts are counted against. `_EMAIL` demands
+#: an `@` and a dot, so no real address can ever collide with this one and no
+#: person can be locked out by someone hammering setup.
+_SETUP_PRINCIPAL = "setup"
+
+
+def setup_token() -> str:
+    """The token that must be presented to create the first administrator.
+
+    `ADMIN_SETUP_TOKEN` wins when set, so an automated deployment can put a
+    known value in place and claim the account without reading a log. Otherwise
+    one is minted here and stored, because the alternatives are worse: deriving
+    it from anything already in the deployment makes it guessable from that
+    thing, and generating it per process gives every worker a different answer.
+
+    The INSERT is the arbitration. Four workers racing on a cold database all
+    attempt it, exactly one row survives, and the SELECT that follows returns
+    that row to all four.
+    """
+    from git_synapse.config import get_config
+
+    configured = get_config().server.admin_setup_token
+    if configured:
+        return configured
+
+    execute(
+        """
+        INSERT INTO meta (key, value) VALUES (%s, %s::jsonb)
+        ON CONFLICT (key) DO NOTHING
+        """,
+        (_SETUP_KEY, json.dumps(secrets.token_urlsafe(32))),
+    )
+    row = query_one("SELECT value FROM meta WHERE key = %s", (_SETUP_KEY,))
+    return str(row["value"])
+
+
+def setup_token_is_minted() -> bool:
+    """Whether the token was generated here, rather than supplied. The console
+    needs to say where to find it, and the two answers differ."""
+    from git_synapse.config import get_config
+
+    return not get_config().server.admin_setup_token
+
+
+def check_setup_token(supplied: str) -> None:
+    """Raise unless `supplied` is the setup token.
+
+    Rate-limited like a password. A 32-byte token is not going to fall to
+    guessing, but the endpoint is reachable during the one window in the
+    deployment's life when nothing is signed in, and an unbounded loop against
+    it is free noise in the log at best.
+    """
+    if recent_failures(_SETUP_PRINCIPAL) >= MAX_FAILURES:
+        raise TooManyAttempts(
+            f"too many failed attempts; try again in {LOCKOUT_MINUTES} minutes")
+    if not hmac.compare_digest(supplied.strip(), setup_token()):
+        execute("INSERT INTO login_attempt (email, client) VALUES (%s, %s)",
+                (_SETUP_PRINCIPAL, "setup"))
+        raise AuthError("that is not the setup token for this deployment")
+
+
+def clear_setup_token() -> None:
+    """Drop it once it has been used. It authorises exactly one thing, and that
+    thing has now happened; leaving the value in the table is a standing secret
+    that nothing will ever check again."""
+    execute("DELETE FROM meta WHERE key = %s", (_SETUP_KEY,))
 
 
 # ------------------------------------------------------------- access policy

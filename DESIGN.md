@@ -787,6 +787,30 @@ is nobody to sign in as, and requiring it would lock the first administrator out
 of the screen that creates them — and the setup endpoint refuses as soon as one
 account exists, so it cannot mint a second administrator later.
 
+**That open window is closed by a setup token.** Being open means the screen
+that creates the administrator is reachable by whoever reaches the port, so
+without a second factor the first stranger to load the page owns the
+deployment. On a cold database the API mints a 32-byte token, stores it, and
+prints it once to its own log; `/auth/setup` will not create the account
+without it. The token proves the caller can read the console of the thing they
+just started, which is the same access being an administrator will later imply.
+
+Three details are load-bearing. It is *stored*, not generated per process, so
+four workers racing on a cold database converge on one value rather than
+printing three that will not work — the `INSERT … ON CONFLICT DO NOTHING` is
+the arbitration. It is *deleted* the moment the account is created, so a
+claimed deployment holds no standing secret that nothing will ever check again,
+and a restart announces nothing. And `ADMIN_SETUP_TOKEN` overrides it for a
+deployment that claims the account from a script rather than a terminal — that
+one is never echoed to the log, since whoever set it already has it.
+
+Guessing it is rate-limited on the same budget as a password. A 32-byte token
+will not fall to a brute-force run, but the endpoint is reachable during the
+one window in a deployment's life when nothing is signed in, and an unbounded
+loop against it is free noise in the log at best. The attempts are counted
+against the sentinel `setup`, which the email pattern can never match, so
+hammering the setup screen cannot lock a real person out.
+
 **A password cannot be guessed at machine speed.** scrypt costs about 70ms an
 attempt, which throttles one attacker on one thread and does nothing about a
 thousand in parallel, so ten failures against an address make it wait fifteen
