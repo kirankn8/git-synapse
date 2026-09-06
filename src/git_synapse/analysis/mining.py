@@ -313,21 +313,32 @@ def _rebuild_drift(conn: psycopg.Connection, repo_id: int) -> None:
         CROSS JOIN pop p
         JOIN marg ma ON ma.file_id = j.a_id
         JOIN marg mb ON mb.file_id = j.b_id
+        -- NPMI, computed here rather than read from file_pair_metric because
+        -- these are windowed counts. It must agree with `measures.npmi` at the
+        -- boundaries or the drift page contradicts the pair page:
+        --   * j = N (the pair spans every commit in the window) is NPMI +1, not
+        --     the NULL the strict `j < N` guard produced. That case is common
+        --     in the short recent window, and COALESCE turned it into 0 --
+        --     "independent" -- with the delta measured against that.
+        --   * j = 0 cannot occur here: the joint CTE only yields observed
+        --     co-changes.
         CROSS JOIN LATERAL (
             SELECT
               CASE WHEN j.j_recent > 0 AND p.n_recent > 0
                         AND ma.m_recent > 0 AND mb.m_recent > 0
-                        AND j.j_recent < p.n_recent
-                   THEN (ln((j.j_recent::numeric * p.n_recent)
-                            / (ma.m_recent::numeric * mb.m_recent)) / ln(2))
-                        / (-ln(j.j_recent::numeric / p.n_recent) / ln(2))
+                   THEN CASE WHEN j.j_recent >= p.n_recent THEN 1.0
+                        ELSE (ln((j.j_recent::numeric * p.n_recent)
+                                 / (ma.m_recent::numeric * mb.m_recent)) / ln(2))
+                             / (-ln(j.j_recent::numeric / p.n_recent) / ln(2))
+                        END
               END AS npmi_recent,
               CASE WHEN j.j_historic > 0 AND p.n_historic > 0
                         AND ma.m_historic > 0 AND mb.m_historic > 0
-                        AND j.j_historic < p.n_historic
-                   THEN (ln((j.j_historic::numeric * p.n_historic)
-                            / (ma.m_historic::numeric * mb.m_historic)) / ln(2))
-                        / (-ln(j.j_historic::numeric / p.n_historic) / ln(2))
+                   THEN CASE WHEN j.j_historic >= p.n_historic THEN 1.0
+                        ELSE (ln((j.j_historic::numeric * p.n_historic)
+                                 / (ma.m_historic::numeric * mb.m_historic)) / ln(2))
+                             / (-ln(j.j_historic::numeric / p.n_historic) / ln(2))
+                        END
               END AS npmi_historic
         ) r
         ON CONFLICT (repo_id, file_a_id, file_b_id) DO NOTHING
@@ -441,10 +452,18 @@ def cross_directory_modules(repo_id: int, limit: int = 20) -> list[dict]:
 
 
 def drifting_pairs(
-    repo_id: int | None = None, trend: str = "emerging", limit: int = 25
+    repo_id: int | None = None, trend: str = "emerging", limit: int = 25,
+    include_deleted: bool = False,
 ) -> list[dict]:
-    """Pairs whose coupling is strengthening or decaying."""
+    """Pairs whose coupling is strengthening or decaying.
+
+    A pair with a deleted endpoint is left out: "decaying" is then explained by
+    the deletion rather than by anything about the codebase, and "emerging" is
+    incoherent. Either way it is not a coupling anybody can act on.
+    """
     clause = "WHERE d.trend = %(trend)s"
+    if not include_deleted:
+        clause += " AND NOT fa.is_deleted AND NOT fb.is_deleted"
     params: dict = {"trend": trend, "limit": limit}
     if repo_id is not None:
         clause += " AND d.repo_id = %(repo)s"
@@ -465,9 +484,22 @@ def drifting_pairs(
     )
 
 
-def risky_files(repo_id: int | None = None, limit: int = 25) -> list[dict]:
-    """Files where churn, coupling and concentrated ownership coincide."""
+def risky_files(repo_id: int | None = None, limit: int = 25,
+                include_deleted: bool = False) -> list[dict]:
+    """Files where churn, coupling and concentrated ownership coincide.
+
+    Files deleted at HEAD are left out. Risk answers "what happens if I change
+    this, and who understands it" -- a question that cannot be asked of a file
+    that is gone, so each one displaces a real answer. Ten of the top fifty
+    were deleted files.
+
+    The rows are still stored: the risk was real while the file existed, and a
+    file can come back. The exclusion belongs at the read, exactly like the
+    containment exclusion in `coupled_directories`.
+    """
     clause = "WHERE fr.change_count >= 5"
+    if not include_deleted:
+        clause += " AND NOT f.is_deleted"
     params: dict = {"limit": limit}
     if repo_id is not None:
         clause += " AND fr.repo_id = %(repo)s"

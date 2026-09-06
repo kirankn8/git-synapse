@@ -612,9 +612,23 @@ def overview() -> dict:
     return row or {}
 
 
-def hotspots(repo_id: int | None = None, limit: int = 25) -> list[dict]:
-    """Most-changed files -- the churn leaders."""
+def hotspots(repo_id: int | None = None, limit: int = 25,
+             include_deleted: bool = False) -> list[dict]:
+    """Most-changed files -- the churn leaders.
+
+    Files deleted at HEAD are left out. This is a ranking that answers "where
+    should I look", and a file that no longer exists is not somewhere anyone
+    can look -- each one spends a slot the reader came for. Eleven of the top
+    fifty were exactly that.
+
+    Not the same judgement as `coupled_files`, which keeps deleted partners and
+    labels them: there the reader asked about one specific file, the coupling
+    is a historical fact, and the label makes it actionable. Here nobody asked
+    about the deleted file at all.
+    """
     clause = "WHERE f.change_count > 0"
+    if not include_deleted:
+        clause += " AND NOT f.is_deleted"
     params: dict[str, Any] = {"limit": _clamp_limit(limit)}
     if repo_id is not None:
         clause += " AND f.repo_id = %(repo_id)s"

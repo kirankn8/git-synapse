@@ -382,3 +382,69 @@ def test_repositories_can_be_listed_by_the_account_that_owns_them(db):
             conn.execute("DELETE FROM repo WHERE owner IN ('owner-test','someone')")
             conn.execute("DELETE FROM account WHERE id = %s", (acct,))
             conn.commit()
+
+
+def test_the_cells_stored_are_the_cells_the_scores_came_from(caplog):
+    """`Contingency.from_counts` clamps infeasible input to the feasible
+    region, and inclusion-exclusion can force `a` *up* from a reported zero.
+    Storing the raw counts beside scores derived from the clamped ones breaks
+    the property everything here rests on: that four counts reproduce the
+    number shown beside them."""
+    import logging
+
+    import numpy as np
+
+    from git_synapse.analysis import score
+
+    class _Batch:
+        a_ids = np.array([11])
+        b_ids = np.array([22])
+        # n_a + n_b > N, so at least 20 co-changes are forced however many were
+        # reported. The reported figure here is zero.
+        n_ab = np.array([0])
+        n_a = np.array([60])
+        n_b = np.array([60])
+        n_total = 100
+
+    with caplog.at_level(logging.WARNING, logger="git_synapse.analysis.score"):
+        rows = score._score_batch(7, _Batch())
+
+    stored_ab, stored_a, stored_b, stored_n = rows[0][3:7]
+    assert (stored_ab, stored_a, stored_b, stored_n) == (20, 60, 60, 100)
+
+    # And the scores agree with those cells rather than with the raw ones.
+    from git_synapse.stats.contingency import Contingency
+    from git_synapse.stats.registry import ALL_KEYS, BY_KEY
+
+    table = Contingency.from_counts(n_ab=stored_ab, n_a=stored_a,
+                                    n_b=stored_b, n_total=stored_n)
+    for key, stored in zip(ALL_KEYS, rows[0][7:], strict=True):
+        expected = float(np.asarray(BY_KEY[key].compute(table)).ravel()[0])
+        assert stored == pytest.approx(expected, abs=1e-9, nan_ok=True), key
+
+    # Clamping means an aggregate is stale, so it is reported, not swallowed.
+    assert "clamped" in caplog.text and "stale" in caplog.text
+
+
+def test_feasible_counts_are_stored_unchanged_and_say_nothing(caplog):
+    """The warning must not cry wolf on ordinary data -- which is all data this
+    pipeline produces, since the marginals come from the same commits as the
+    joint count."""
+    import logging
+
+    import numpy as np
+
+    from git_synapse.analysis import score
+
+    class _Batch:
+        a_ids = np.array([1, 2])
+        b_ids = np.array([3, 4])
+        n_ab = np.array([5, 2])
+        n_a = np.array([20, 9])
+        n_b = np.array([30, 4])
+        n_total = 400
+
+    with caplog.at_level(logging.WARNING, logger="git_synapse.analysis.score"):
+        rows = score._score_batch(1, _Batch())
+    assert [r[3:7] for r in rows] == [(5, 20, 30, 400), (2, 9, 4, 400)]
+    assert "clamped" not in caplog.text
