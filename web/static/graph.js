@@ -149,7 +149,10 @@ export function renderGraph(container, data, opts = {}) {
       const n = nodes[i];
       const key = `${Math.floor(n.x / CELL)},${Math.floor(n.y / CELL)}`;
       let bucket = grid.get(key);
-      if (!bucket) grid.set(key, (bucket = []));
+      if (!bucket) {
+        bucket = [];
+        grid.set(key, bucket);
+      }
       bucket.push(i);
     }
 
@@ -311,7 +314,7 @@ export function renderGraph(container, data, opts = {}) {
   function pick(px, py) {
     const w = toWorld(px, py);
     let best = null;
-    let bestDist = Infinity;
+    let bestDist = Number.POSITIVE_INFINITY;
     for (let i = 0; i < nodes.length; i++) {
       const n = nodes[i];
       const d = Math.hypot(n.x - w.x, n.y - w.y);
@@ -431,8 +434,8 @@ export function renderGraph(container, data, opts = {}) {
     return b;
   };
 
-  button('−', 'Zoom out', () => (scale = Math.max(0.15, scale / 1.3)));
-  button('+', 'Zoom in', () => (scale = Math.min(6, scale * 1.3)));
+  button('−', 'Zoom out', () => { scale = Math.max(0.15, scale / 1.3); });
+  button('+', 'Zoom in', () => { scale = Math.min(6, scale * 1.3); });
   button('Fit', 'Fit the graph to the viewport', fit);
   button('Reheat', 'Restart the layout simulation', () => {
     alpha = 1;

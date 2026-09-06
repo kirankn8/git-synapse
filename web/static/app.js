@@ -14,17 +14,19 @@ import { renderGraph } from './graph.js';
 
 /* -------------------------------------------------------------- utils -- */
 
+/** A deliberate do-nothing, so an empty arrow never reads as an oversight. */
+const noop = () => undefined;
+
 export const h = (tag, attrs = {}, ...children) => {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v === null || v === undefined || v === false) continue;
     if (k === 'class') node.className = v;
-    else if (k === 'html') node.innerHTML = v;
     else if (k === 'dataset') Object.assign(node.dataset, v);
     else if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2), v);
     else node.setAttribute(k, v === true ? '' : v);
   }
-  for (const c of children.flat(Infinity)) {
+  for (const c of children.flat(Number.POSITIVE_INFINITY)) {
     if (c === null || c === undefined || c === false) continue;
     node.appendChild(c instanceof Node ? c : document.createTextNode(String(c)));
   }
@@ -182,12 +184,34 @@ function signedOut() {
 
 /* -------------------------------------------------------------- state -- */
 
+/* Reading localStorage throws outright in a browser told to block site data,
+   and this is read at module scope -- so the whole application failed to load,
+   blank, with the reason only in the console. A remembered measure and a
+   remembered theme are conveniences; neither is worth the page. */
+const store = {
+  get(key) {
+    try {
+      return window.localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  },
+  set(key, value) {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch {
+      /* Nothing to do and nothing to report: the setting simply will not
+         survive the tab, which is what the browser was asked to enforce. */
+    }
+  },
+};
+
 export const state = {
   //: The signed-in user, and what this deployment asks of a visitor.
   me: null,
   needsSetup: false,
   authRequired: false,
-  measure: localStorage.getItem('git-synapse.measure') || 'npmi',
+  measure: store.get('git-synapse.measure') || 'npmi',
   measures: [],
   byKey: new Map(),
   overview: null,
@@ -201,7 +225,7 @@ const QUICK_MEASURES = [
 export function setMeasure(key, { rerender = true } = {}) {
   if (!state.byKey.has(key)) return;
   state.measure = key;
-  localStorage.setItem('git-synapse.measure', key);
+  store.set('git-synapse.measure', key);
   paintMeasureBar();
   if (rerender) route();
 }
@@ -460,13 +484,13 @@ const repoById = (id) => {
   return _repoOnce.get(id);
 };
 
-async function repoTrail(repo) {
+async function repoTrail(input) {
   const trail = [];
   // A caller with only an id gets the rest looked up, so every page can build
   // the same trail without carrying repository fields it does not otherwise need.
-  if (repo && repo.id && !repo.name) {
-    repo = { ...(await repoById(repo.id)) || {}, ...repo };
-  }
+  const repo = input && input.id && !input.name
+    ? { ...((await repoById(input.id)) || {}), ...input }
+    : input;
   let accountId = repo && (repo.account_id ?? repo.accountId);
   // Most endpoints return the repository id but not its account. Rather than
   // widen every one of them, resolve it here -- cached, so a breadcrumb costs
@@ -509,7 +533,7 @@ export const pageHead = (title, sub, actions = []) =>
 export const statTile = (label, value, meta, onclick) =>
   h(
     'div',
-    { class: `stat${onclick ? ' is-link' : ''}`, onclick: onclick || (() => {}),
+    { class: `stat${onclick ? ' is-link' : ''}`, onclick: onclick || noop,
       role: onclick ? 'button' : null, tabindex: onclick ? '0' : null },
     h('div', { class: 'stat-label' }, label),
     h('div', { class: 'stat-value' }, value),
@@ -1206,25 +1230,6 @@ on('/repos/:id', async ({ id }, params) => {
 on('/repos', reposView);
 on('/accounts/:id', reposView);
 
-/** Impact rows, with the evidence tier always visible. */
-const impactTable = (rows, otherKey, selfId) =>
-  dataTable(rows, [
-    { key: 'name', label: 'Repository', render: (r) => h('span', { class: 'mono', style: 'font-weight:550' }, r.name) },
-    { key: 'evidence', label: 'Evidence', sortable: false, render: (r) => tierBadge(r) },
-    { key: 'bump_count', label: 'Bumps', num: true },
-    { key: 'median_adoption_days', label: 'Adopted after', num: true, render: (r) => adoptedAfter(r.median_adoption_days) },
-    { key: 'score', label: 'Score', num: true, render: (r) => h('div', { class: 'confbar', style: 'justify-content:flex-end' }, h('span', {}, fx(r.score, 3)), bar(r.score)) },
-  ], {
-    initialSort: 'score',
-    onRow: (r) => {
-      const other = r[otherKey];
-      const a = otherKey === 'source_repo_id' ? other : selfId;
-      const b = otherKey === 'source_repo_id' ? selfId : other;
-      go(`/insights/impact/${a}/${b}`);
-    },
-    empty: 'No cross-repository edges recorded.',
-  });
-
 /** Repository-level impact graph: nodes are repos, edges are validated impact. */
 async function repoImpactGraphView(params) {
   const minScore = Number(params.min || 0.4);
@@ -1247,7 +1252,7 @@ async function repoImpactGraphView(params) {
 
   const scoreInput = h('input', { class: 'input', type: 'range', min: '0', max: '0.95', step: '0.05', value: String(minScore), style: 'width:150px' });
   const scoreLabel = h('span', { class: 'card-sub', style: 'min-width:76px' }, `min ${minScore.toFixed(2)}`);
-  scoreInput.addEventListener('input', () => (scoreLabel.textContent = `min ${Number(scoreInput.value).toFixed(2)}`));
+  scoreInput.addEventListener('input', () => { scoreLabel.textContent = `min ${Number(scoreInput.value).toFixed(2)}`; });
   scoreInput.addEventListener('change', () => go(`/insights/graph?mode=repos&min=${scoreInput.value}`));
 
   wrap.append(h('div', { class: 'toolbar' },
@@ -1967,7 +1972,7 @@ on('/insights/graph', async (_args, params) => {
     go(`/insights/graph?${p}`);
   };
   minSupport.addEventListener('change', navigate);
-  edgeCount.addEventListener('input', () => (edgeLabel.textContent = `${edgeCount.value} edges`));
+  edgeCount.addEventListener('input', () => { edgeLabel.textContent = `${edgeCount.value} edges`; });
   edgeCount.addEventListener('change', navigate);
 
   wrap.append(
@@ -2552,7 +2557,7 @@ function wireOmnibox() {
   input.addEventListener('input', search);
   input.addEventListener('focus', () => input.value.trim().length >= 2 && paint());
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') return (input.blur(), close());
+    if (e.key === 'Escape') { input.blur(); close(); return; }
     if (!items.length || panel.hidden) return;
     if (e.key === 'ArrowDown') { e.preventDefault(); sel = Math.min(sel + 1, items.length - 1); paint(); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); sel = Math.max(sel - 1, 0); paint(); }
@@ -2579,12 +2584,12 @@ function paintFooter(ov) {
 }
 
 function wireTheme() {
-  const saved = localStorage.getItem('git-synapse.theme');
+  const saved = store.get('git-synapse.theme');
   if (saved) document.documentElement.dataset.theme = saved;
   $('#theme-toggle').addEventListener('click', () => {
     const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
     document.documentElement.dataset.theme = next;
-    localStorage.setItem('git-synapse.theme', next);
+    store.set('git-synapse.theme', next);
   });
 }
 
@@ -2930,6 +2935,15 @@ async function loadMe() {
   return state.me;
 }
 
+/* Registered once, at module scope. Doing it inside paintProfile added a
+   listener per call -- and that runs on boot, on sign-in, on sign-out and on
+   every 401 -- each closure holding a menu element that had already been
+   replaced. */
+document.addEventListener('click', () => {
+  const menu = document.querySelector('.profile-menu');
+  if (menu) menu.hidden = true;
+});
+
 /** The avatar and menu, top right. Absent entirely when nobody is signed in. */
 function paintProfile() {
   const host = document.getElementById('profile');
@@ -2950,7 +2964,7 @@ function paintProfile() {
       state.me.role === 'admin' ? 'People and access' : 'People'),
     h('a', { class: 'profile-item', href: '/tokens', 'data-nav': true }, 'API tokens'),
     h('button', { class: 'profile-item danger', onclick: async () => {
-      await apiSend('POST', '/api/auth/logout').catch(() => {});
+      await apiSend('POST', '/api/auth/logout').catch(noop);
       await loadMe();
       paintProfile();
       go('/');
@@ -2963,8 +2977,6 @@ function paintProfile() {
     onclick: (ev) => { ev.stopPropagation(); menu.hidden = !menu.hidden; },
   }, initials);
 
-  // Any click elsewhere closes it, including one that navigates.
-  document.addEventListener('click', () => { menu.hidden = true; });
   host.append(button, menu);
 }
 
@@ -2988,7 +3000,7 @@ async function boot() {
   } catch (err) {
     toast(`Could not load measure catalogue: ${err.message}`, true);
   }
-  api('/api/overview').then(paintFooter).catch(() => {});
+  api('/api/overview').then(paintFooter).catch(noop);
   window.addEventListener('popstate', route);
   route();
 }
@@ -3499,25 +3511,6 @@ function barChart(rows, { label = 'calls', scale = 'linear', height = 66,
     dense ? h('div', { class: 'cbars-axis' },
       h('span', {}, rows[0].label),
       h('span', {}, rows[rows.length - 1].label)) : null);
-}
-
-/** One horizontal bar split by category, with a legend underneath. */
-function stackedBar(rows, { total } = {}) {
-  const sum = total || rows.reduce((n, r) => n + r.value, 0) || 1;
-  const bar = h('div', { class: 'stack' });
-  rows.forEach((r, i) => {
-    const seg = h('div', {
-      class: 'stack-seg',
-      title: `${r.label}: ${num(r.value)}`,
-      style: `width:${(r.value / sum) * 100}%;background:var(--series-${(i % 6) + 1})`,
-    });
-    bar.appendChild(seg);
-  });
-  return h('div', {},
-    bar,
-    h('div', { class: 'legend' }, ...rows.map((r, i) => h('span', { class: 'legend-item' },
-      h('i', { style: `background:var(--series-${(i % 6) + 1})` }),
-      `${r.label} `, h('b', {}, num(r.value))))));
 }
 
 /** A labelled form control with an optional hint underneath. */
