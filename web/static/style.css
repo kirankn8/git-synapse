@@ -1325,3 +1325,44 @@ body.gated .topbar { border-bottom-color: transparent; }
 }
 .linkish:hover { color: var(--text); }
 .token-box { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+
+/* --- Repositories, grouped by source --------------------------------------
+   One disclosure per owner rather than one flat list: a repository is *in* an
+   account, and 240 undifferentiated rows make the corpus look like a bag of
+   names. Collapsed by default because most owners hold one or two, so the shut
+   state is a readable index rather than a wall. */
+.repo-groups { display: flex; flex-direction: column; gap: 8px; }
+.repo-group {
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: 10px; overflow: hidden;
+}
+.repo-group[open] { border-color: var(--border-strong); }
+.repo-group-head {
+  display: flex; align-items: baseline; gap: 12px; padding: 11px 14px;
+  cursor: pointer; list-style: none; user-select: none;
+}
+.repo-group-head::-webkit-details-marker { display: none; }
+/* The triangle, drawn rather than inherited, so it turns with the disclosure
+   and lines up with the text baseline in both states. */
+.repo-group-head::before {
+  content: ''; flex: 0 0 auto; width: 0; height: 0; margin-right: 2px;
+  border-left: 5px solid var(--text-faint);
+  border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+  transform: translateY(-1px); transition: transform 120ms ease;
+}
+.repo-group[open] > .repo-group-head::before {
+  transform: translateY(-1px) rotate(90deg);
+}
+.repo-group-head:hover { background: var(--bg-hover); }
+.repo-group-owner { font-size: 13.5px; font-weight: 600; color: var(--text); }
+.repo-group-host { font-size: 11px; color: var(--text-faint); }
+.repo-group-counts {
+  margin-left: auto; font-size: 11.5px; color: var(--text-dim);
+  display: flex; align-items: center; gap: 6px; white-space: nowrap;
+}
+.repo-group-dot { color: var(--text-faint); }
+.repo-group-open {
+  font-size: 11.5px; color: var(--accent); text-decoration: none;
+  white-space: nowrap;
+}
+.repo-group-open:hover { text-decoration: underline; }

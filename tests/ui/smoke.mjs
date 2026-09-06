@@ -262,10 +262,34 @@ window.dispatchEvent(new window.PopStateEvent('popstate'));
 }
 
 console.log('\n=== interaction ===');
+
+// /repos groups repositories by source, and a shut group holds no table. Both
+// of the checks below want a row, so open the first group the way a reader
+// would -- jsdom does not fire `toggle` off an `open` assignment, so say it.
+const openFirstGroup = async () => {
+  for (let i = 0; i < 60; i++) {
+    const panel = view().querySelector('details.repo-group');
+    if (panel) {
+      if (!panel.open) {
+        panel.open = true;
+        panel.dispatchEvent(new window.Event('toggle'));
+      }
+      await sleep(120);
+      if (panel.querySelector('table.data tbody tr')) return panel;
+    }
+    await sleep(120);
+  }
+  return null;
+};
+
 window.history.pushState({}, '', '/repos');
 window.dispatchEvent(new window.PopStateEvent('popstate'));
 await sleep(1400);
-const firstRow = view().querySelector('table.data tbody tr');
+const openedGroup = await openFirstGroup();
+report('repository group expands', Boolean(openedGroup),
+       openedGroup ? `${openedGroup.querySelectorAll('tbody tr').length} rows under the first source`
+                   : 'no repository group rendered');
+const firstRow = openedGroup && openedGroup.querySelector('table.data tbody tr');
 const before = window.location.pathname;
 if (!firstRow) {
   report('row click navigates', false, 'no table row rendered to click');
@@ -280,6 +304,7 @@ if (!firstRow) {
 window.history.pushState({}, '', '/repos');
 window.dispatchEvent(new window.PopStateEvent('popstate'));
 await sleep(1400);
+await openFirstGroup();
 const th = [...view().querySelectorAll('th.sortable')].find((t) => t.textContent.includes('Commits'));
 const firstBefore = view().querySelector('tbody tr').textContent.slice(0, 30);
 th.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
@@ -296,6 +321,8 @@ const headerBefore = view().querySelector('table.data thead').textContent;
 chip.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 await sleep(1800);
 const nowActive = [...$('#measure-chips').children].find((c) => c.classList.contains('active'));
+// The repaint rebuilds the group list shut, so open one again to read a header.
+await openFirstGroup();
 const headerAfter = view().querySelector('table.data thead').textContent;
 report('measure switch applies',
        nowActive && nowActive.textContent === chipName && headerBefore !== headerAfter,
@@ -398,11 +425,35 @@ console.log('\n=== click walk: account -> repo -> folder -> file ===');
     const el = window.document.querySelector('.crumbs');
     return el ? el.textContent.split('/').filter((x) => x.trim()).length : 0;
   };
+  // The trail repaints with the view, a beat behind the URL.
+  const crumbsDeeperThan = async (depth) => {
+    for (let i = 0; i < 30; i++) {
+      if (crumbCount() > depth) return true;
+      await sleep(120);
+    }
+    return false;
+  };
+  // A row click is a navigation, so wait for the *path* to change rather than
+  // for the view to look settled: under load the old page still reads as
+  // rendered content, and the walk then clicks a row of the page it just left.
   const clickRow = async (match) => {
     const rows = [...view().querySelectorAll('table.data tbody tr')];
     const row = match ? rows.find((r) => match(r)) : rows[0];
     if (!row) return false;
+    const before = window.location.pathname;
+    const tableBefore = view().querySelector('table.data tbody')?.textContent || '';
     row.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    for (let i = 0; i < 60; i++) {
+      await sleep(120);
+      if (window.location.pathname !== before) break;
+    }
+    if (window.location.pathname === before) return false;
+    // The URL changes first and the table a beat later. Read the old table and
+    // the walk clicks the folder it just came from, which navigates nowhere.
+    for (let i = 0; i < 60; i++) {
+      if ((view().querySelector('table.data tbody')?.textContent || '') !== tableBefore) break;
+      await sleep(120);
+    }
     await settle();
     return true;
   };
@@ -433,21 +484,30 @@ console.log('\n=== click walk: account -> repo -> folder -> file ===');
   ok = await clickRow((r) => r.textContent.includes('\u{1F4C1}'));
   step('folder row descends into the folder',
        ok && /^\/repos\/\d+\/tree\//.test(window.location.pathname)
-          && crumbCount() > depthAtRepo);
+          && await crumbsDeeperThan(depthAtRepo));
 
   const depthAtFolder = crumbCount();
   // Descend until a level with files in it, so the walk works on any corpus.
+  // An empty table means the listing has not painted yet, not that the folder
+  // holds nothing -- read it only once it has rows, or the walk gives up one
+  // level short of a file.
+  const rowsHere = async () => {
+    for (let i = 0; i < 30; i++) {
+      const rows = [...view().querySelectorAll('table.data tbody tr')];
+      if (rows.length) return rows;
+      await sleep(120);
+    }
+    return [];
+  };
   for (let i = 0; i < 6; i++) {
-    if (view().querySelector('table.data tbody tr td')?.textContent.includes('\u{1F4C4}')) break;
-    if (![...view().querySelectorAll('table.data tbody tr')]
-          .some((r) => r.textContent.includes('\u{1F4C4}'))) {
-      if (!(await clickRow((r) => r.textContent.includes('\u{1F4C1}')))) break;
-    } else break;
+    const rows = await rowsHere();
+    if (rows.some((r) => r.textContent.includes('\u{1F4C4}'))) break;
+    if (!(await clickRow((r) => r.textContent.includes('\u{1F4C1}')))) break;
   }
   ok = await clickRow((r) => r.textContent.includes('\u{1F4C4}'));
   step('file row opens the file, still under its repository',
        ok && /^\/repos\/\d+\/files\//.test(window.location.pathname)
-          && crumbCount() >= depthAtFolder);
+          && await crumbsDeeperThan(depthAtFolder - 1));
 
   // The file page's own tab bar rebuilt its URL from the numeric id, so every
   // tab on every file 404'd. Clicking a tab is the only way to see that.
@@ -456,9 +516,16 @@ console.log('\n=== click walk: account -> repo -> folder -> file ===');
   if (history) {
     history.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
     await settle();
-    step('a file tab keeps the file',
-         !(view().textContent || '').includes('Not found')
-         && /^\/repos\/\d+\/files\//.test(window.location.pathname));
+    // The tab swaps the panel under the same URL, so there is no path change to
+    // wait on -- poll the panel instead of trusting one settle.
+    let kept = false;
+    for (let i = 0; i < 30; i++) {
+      kept = !(view().textContent || '').includes('Not found')
+             && /^\/repos\/\d+\/files\//.test(window.location.pathname);
+      if (kept) break;
+      await sleep(120);
+    }
+    step('a file tab keeps the file', kept);
   } else {
     step('a file tab keeps the file', false);
   }

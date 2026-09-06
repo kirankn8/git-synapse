@@ -491,6 +491,58 @@ console.log('\n=== adding a source is one line and one field ===');
   }
 }
 
+/* A repository is *in* an account, so the corpus-wide list is grouped by one.
+   240 undifferentiated rows make it look like a bag of names, and the grouping
+   is the same rule the rest of the IA runs on. */
+console.log('\n=== repositories are grouped by source ===');
+{
+  await page.goto(BASE + '/repos', { waitUntil: 'domcontentloaded' });
+  await settle();
+  const shut = await page.evaluate(() => ({
+    groups: document.querySelectorAll('.repo-group').length,
+    open: document.querySelectorAll('.repo-group[open]').length,
+    rows: document.querySelectorAll('table.data tbody tr').length,
+    hosts: [...new Set([...document.querySelectorAll('.repo-group-host')]
+      .map((h) => h.textContent))].length,
+    flatTable: !!document.querySelector('.card > .card-body > .table-wrap'),
+  }));
+  if (shut.groups > 1 && !shut.flatTable) {
+    ok('repositories grouped', `${shut.groups} sources, ${shut.hosts} host(s)`);
+  } else {
+    bad('repositories grouped', JSON.stringify(shut));
+  }
+  // Sixty-six tables built up front is a lot of DOM for a page where most stay
+  // shut, so nothing is rendered until a group is opened.
+  if (shut.rows === 0) {
+    ok('groups build lazily', 'no rows rendered while every group is shut');
+  } else {
+    bad('groups build lazily', `${shut.rows} rows rendered with nothing open`);
+  }
+
+  await page.click('.repo-group .repo-group-head');
+  await new Promise((r) => setTimeout(r, 350));
+  const opened = await page.evaluate(() =>
+    document.querySelectorAll('.repo-group[open] table.data tbody tr').length);
+  if (opened > 0) {
+    ok('a group opens', `${opened} repositories`);
+  } else {
+    bad('a group opens', 'no rows after expanding');
+  }
+
+  // A filter is a search: what it finds must not sit behind a shut triangle.
+  await page.goto(BASE + '/repos?q=inkscape', { waitUntil: 'domcontentloaded' });
+  await settle();
+  const found = await page.evaluate(() => ({
+    groups: document.querySelectorAll('.repo-group').length,
+    open: document.querySelectorAll('.repo-group[open]').length,
+  }));
+  if (found.groups > 0 && found.groups === found.open) {
+    ok('a filter opens its results', `${found.groups} matching source(s), all open`);
+  } else {
+    bad('a filter opens its results', JSON.stringify(found));
+  }
+}
+
 console.log('\n=== a repository picker is grouped by account ===');
 {
   await page.goto(BASE + '/insights/risk', { waitUntil: 'domcontentloaded' });
