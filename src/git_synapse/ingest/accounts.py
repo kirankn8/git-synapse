@@ -237,8 +237,27 @@ def remove_account(account_id: int) -> bool:
     return row is not None
 
 
-def record_discovery(account_id: int, repo_count: int, error: str | None = None) -> None:
-    """Stamp the outcome of a discovery pass so the UI can show what happened."""
+def record_discovery(account_id: int, repo_count: int | None = None,
+                     error: str | None = None) -> None:
+    """Stamp the outcome of a discovery pass so the UI can show what happened.
+
+    ``repo_count`` of None leaves the count alone, which is what a *failure*
+    means: the listing did not come back, so nothing is known about how many
+    repositories the source has -- and they certainly did not disappear.
+    Writing 0 there had `google` reporting no repositories while owning 122.
+    """
+    if repo_count is None:
+        query_one(
+            """
+            UPDATE account
+               SET last_discovered_at = now(), last_discover_error = %s,
+                   updated_at = now()
+             WHERE id = %s
+         RETURNING id
+            """,
+            (error, account_id),
+        )
+        return
     query_one(
         """
         UPDATE account
@@ -248,6 +267,28 @@ def record_discovery(account_id: int, repo_count: int, error: str | None = None)
      RETURNING id
         """,
         (repo_count, error, account_id),
+    )
+
+
+def refresh_repo_counts() -> None:
+    """Set every source's count from the repositories that actually exist.
+
+    Discovery records what it *selected*, which is written before the upsert
+    and therefore before anything is durable: a run that aborts between the two
+    -- the shrink guard does exactly that -- leaves a source claiming
+    repositories no row backs. Counting the rows afterwards is the only figure
+    that cannot drift from what a reader can click on.
+    """
+    execute(
+        """
+        UPDATE account a
+           SET repo_count = c.n, updated_at = now()
+          FROM (SELECT a2.id, count(r.id) AS n
+                  FROM account a2
+                  LEFT JOIN repo r ON r.account_id = a2.id AND r.is_enabled
+                 GROUP BY a2.id) c
+         WHERE c.id = a.id AND a.repo_count <> c.n
+        """
     )
 
 

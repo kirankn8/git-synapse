@@ -282,3 +282,61 @@ def test_updating_nothing_still_reports_an_unknown_account(db):
     """A no-op update on an id that does not exist must not look like success."""
     with pytest.raises(accounts.AccountError, match="not found"):
         accounts.update_account(-1)
+
+
+def test_a_failed_discovery_does_not_zero_the_repository_count(db):
+    """The listing did not come back. That says nothing about how many
+    repositories the source has, and they certainly did not disappear --
+    `google` reported none while owning 122 of them."""
+    from git_synapse.ingest import accounts
+
+    src = accounts.add_account("countkeep", kind="org", provider="github",
+                               host="github.com")
+    try:
+        accounts.record_discovery(src["id"], 122)
+        assert accounts.get_account(src["id"])["repo_count"] == 122
+
+        accounts.record_discovery(src["id"], error="403 rate limit exceeded")
+        row = accounts.get_account(src["id"])
+        assert row["repo_count"] == 122, "a failure must not rewrite the count"
+        assert "rate limit" in row["last_discover_error"]
+
+        # A successful pass does set it, including down.
+        accounts.record_discovery(src["id"], 3)
+        row = accounts.get_account(src["id"])
+        assert row["repo_count"] == 3 and row["last_discover_error"] is None
+    finally:
+        accounts.remove_account(src["id"])
+
+
+def test_the_count_is_reconciled_against_the_repositories_that_exist(db):
+    """Discovery records what it *selected*, which is written before the upsert
+    and therefore before anything is durable. A run that aborts between the two
+    leaves a source claiming repositories no row backs."""
+    from git_synapse.db.engine import execute, query_one
+    from git_synapse.ingest import accounts
+
+    src = accounts.add_account("countreal", kind="org", provider="github",
+                               host="github.com")
+    try:
+        # What discovery intended.
+        accounts.record_discovery(src["id"], 7)
+        # What actually landed.
+        execute(
+            "INSERT INTO repo (github_id, owner, name, full_name, host, provider,"
+            " account_id, is_enabled) VALUES (NULL,'countreal','a','countreal/a',"
+            "'github.com','github',%s,TRUE)", (src["id"],))
+        assert accounts.get_account(src["id"])["repo_count"] == 7
+
+        accounts.refresh_repo_counts()
+        assert accounts.get_account(src["id"])["repo_count"] == 1
+
+        # A paused repository is not one a reader can click on.
+        execute("UPDATE repo SET is_enabled = FALSE WHERE full_name='countreal/a'")
+        accounts.refresh_repo_counts()
+        assert accounts.get_account(src["id"])["repo_count"] == 0
+        row = query_one("SELECT count(*) AS n FROM repo WHERE full_name='countreal/a'")
+        assert row["n"] == 1, "reconciling a count must not delete anything"
+    finally:
+        execute("DELETE FROM repo WHERE full_name='countreal/a'")
+        accounts.remove_account(src["id"])
