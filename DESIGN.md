@@ -878,6 +878,21 @@ the username that host expects — `x-access-token`, `oauth2`, `x-token-auth`,
 which are not interchangeable. Without that check, the deployment-wide GitHub
 token is handed to whatever server a self-hosted repository happens to live on.
 
+**A credential on the host reaches the containers through a file, not the
+environment.** They cannot read a keychain or a `gh` login, and an environment
+variable is captured once at start-up — which is wrong for anything short-lived,
+because the process keeps presenting a credential that expired hours ago and
+every fetch 401s until somebody restarts it. `current_token()` re-reads the file
+on every use instead, so rotating it needs no restart. It is written in place
+rather than renamed: a rename is atomic but swaps the inode, and the containers
+see the path vanish for a couple of seconds across the mount, so readers guard
+against a torn read by checking the token's shape instead.
+
+An SSH key is not a candidate. It authenticates `git`, and listing repositories
+is the REST API, which does not accept one — which is why a machine that clones
+private repositories perfectly well can still be unable to list an
+organisation.
+
 ### The one secret that must be readable again
 
 Everything else here is stored as a hash: a session cookie, an API token, a

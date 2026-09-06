@@ -39,6 +39,9 @@ score:  ## Recompute the 29 measures from stored pair counts
 	$(CLI) score
 
 .PHONY: status
+token:  ## Hand this machine's GitHub credential to the containers
+	@./scripts/refresh-token.sh
+
 status:  ## Corpus summary and recent ingest runs
 	$(CLI) status
 

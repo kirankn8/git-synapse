@@ -402,6 +402,30 @@ one. `GITHUB_TOKEN`, `GITLAB_TOKEN`, `BITBUCKET_USER` + `BITBUCKET_TOKEN` are
 the deployment-wide ones. A token is only ever embedded in a clone URL on the
 host that issued it.
 
+### Using the credential this machine already has
+
+The containers cannot read your keychain or your `gh` login — they are
+containers. The credential is handed over through a file instead, which the
+compose file mounts and which is re-read on **every** request, so refreshing it
+needs no restart and a short-lived token can rotate under a running stack.
+
+```bash
+make token          # finds a credential and writes it where the stack reads it
+```
+
+It tries, in order: `$GIT_SYNAPSE_TOKEN_CMD` (any command that prints a token),
+`gh auth token`, `git credential fill` (the platform keychain), then
+`$GITHUB_TOKEN`. If none answers it says so and leaves any existing file alone,
+rather than truncating a working token because a helper was briefly
+unavailable. Whatever it finds is shape-checked first, so a helper's error
+message never reaches GitHub as a credential and come back as a mystifying 401.
+
+**An SSH key does not help here.** It authenticates `git`, and listing
+repositories is the REST API, which does not accept one — which is why a
+machine that clones private repositories perfectly well can still be unable to
+list an organisation. `gh auth login` once is the usual fix; `make token` then
+finds it.
+
 ### Private repositories
 
 A host answers "does not exist" and "exists but you cannot see it" identically,
