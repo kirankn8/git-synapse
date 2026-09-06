@@ -542,3 +542,60 @@ def test_a_paused_source_drops_out_of_the_corpus_wide_list(db):
     finally:
         execute("DELETE FROM repo WHERE full_name='paused-src/r'")
         accounts.remove_account(src["id"])
+
+
+def test_the_same_history_stored_twice_is_detected(db):
+    """Two addresses are not two repositories. A project moved to a subgroup, a
+    mirror kept in sync, a fork the API declines to declare -- GitLab lists
+    `veloren/veloren` and `veloren/dev/veloren` as separate projects with
+    separate ids and a byte-identical history. Nothing about either row is
+    wrong on its own; every corpus-wide total is."""
+    from git_synapse.analysis import query as q
+    from git_synapse.db.engine import execute, query_one
+
+    sha = "f" * 40
+    ids = []
+    for path in ("dup/one", "dup/two"):
+        owner, name = path.split("/")
+        row = query_one(
+            "INSERT INTO repo (github_id, owner, name, full_name, host, provider,"
+            " is_enabled, head_sha, commit_count, pair_population)"
+            " VALUES (NULL,%s,%s,%s,'gitlab.com','gitlab',TRUE,%s,4242,4242)"
+            " RETURNING id", (owner, name, path, sha))
+        ids.append(row["id"])
+    try:
+        found = [d for d in q.duplicate_histories() if d["head_sha"] == sha]
+        assert len(found) == 1
+        assert found[0]["copies"] == 2
+        assert set(found[0]["names"]) == {"dup/one", "dup/two"}
+        assert found[0]["commits"] == 4242
+
+        # A paused copy is not a duplicate: pausing is the fix.
+        execute("UPDATE repo SET is_enabled = FALSE WHERE id = %s", (ids[1],))
+        assert not [d for d in q.duplicate_histories() if d["head_sha"] == sha]
+    finally:
+        for rid in ids:
+            execute("DELETE FROM repo WHERE id = %s", (rid,))
+
+
+def test_repositories_with_no_history_are_not_called_duplicates(db):
+    """Every never-ingested repository has a NULL head and a zero count. They
+    would otherwise all collide with each other."""
+    from git_synapse.analysis import query as q
+    from git_synapse.db.engine import execute, query_one
+
+    ids = []
+    for path in ("empty/a", "empty/b"):
+        owner, name = path.split("/")
+        row = query_one(
+            "INSERT INTO repo (github_id, owner, name, full_name, host, provider,"
+            " is_enabled, head_sha, commit_count) VALUES"
+            " (NULL,%s,%s,%s,'github.com','github',TRUE,NULL,0) RETURNING id",
+            (owner, name, path))
+        ids.append(row["id"])
+    try:
+        assert not [d for d in q.duplicate_histories()
+                    if set(d["names"]) & {"empty/a", "empty/b"}]
+    finally:
+        for rid in ids:
+            execute("DELETE FROM repo WHERE id = %s", (rid,))

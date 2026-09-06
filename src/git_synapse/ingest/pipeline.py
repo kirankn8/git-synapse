@@ -521,10 +521,17 @@ def _discover_account(account: dict) -> tuple[list[RepoRecord], int]:
         # An allowlist is an explicit answer, so it decides on its own; running
         # the include filters over it as well would let `include_forks` drop a
         # repository somebody named.
-        wanted = {n.lower() for n in only}
+        #
+        # Matched on the path *under the owner*, never on the bare last segment.
+        # On GitHub the two are the same. On GitLab they are not: `veloren`
+        # also matches `veloren/dev/veloren`, a different project that happens
+        # to share a name -- and in that case a byte-identical history, which
+        # was then counted twice in every corpus-wide total.
+        wanted = {n.lower().strip("/") for n in only}
+        prefix = f"{login.lower()}/"
         kept = [r for r in records
-                if r.name.lower() in wanted or r.full_name.lower() in wanted
-                or r.full_name.lower().removeprefix(f"{login.lower()}/") in wanted]
+                if r.full_name.lower() in wanted
+                or r.full_name.lower().removeprefix(prefix) in wanted]
         return kept, len(records)
     return select_repos(records, cfg), len(records)
 
@@ -1034,6 +1041,22 @@ def _run_ingest_locked(
 
     run.duration_s = time.monotonic() - started
     _prune_call_log()
+    # Loud, and at the end, where a reader is already looking at the run: a
+    # duplicated history makes every corpus-wide total wrong, and nothing about
+    # either row on its own looks it.
+    try:
+        from git_synapse.analysis.query import duplicate_histories
+
+        for dup in duplicate_histories():
+            log.warning(
+                "the same history is stored %d times on %s (%s commits): %s -- "
+                "corpus-wide totals count it once per copy; pause all but one",
+                dup["copies"], dup["host"], dup["commits"], ", ".join(dup["names"]))
+    except Exception:
+        # The work is already done and recorded. A report that cannot run is
+        # not a reason to lose it.
+        log.debug("could not check for duplicated histories", exc_info=True)
+
     _finish_run(run)
     log.info(
         "ingest run %s finished in %.1fs: %d ok, %d failed, %d commits added",

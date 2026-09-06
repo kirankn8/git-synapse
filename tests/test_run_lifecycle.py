@@ -207,3 +207,39 @@ def test_a_clean_run_has_nothing_to_explain(db):
     run = pipeline.RunResult(kind="sync")
     run.repos = [pipeline.RepoResult(full_name="a/r", status="success")]
     assert pipeline._failure_summary(run) is None
+
+
+def test_a_finished_run_reports_a_duplicated_history(db, monkeypatch, caplog):
+    """It is reported at the end of the run, where a reader is already looking.
+    Nothing about either row looks wrong on its own; every corpus-wide total
+    is, because it counts that history once per copy."""
+    import logging
+
+    from git_synapse.analysis import query as q
+    from git_synapse.ingest import pipeline
+
+    monkeypatch.setattr(q, "duplicate_histories", lambda: [
+        {"copies": 2, "host": "gitlab.com", "commits": 13981,
+         "names": ["veloren/veloren", "veloren/dev/veloren"],
+         "head_sha": "a" * 40, "ids": [1, 2]}])
+    monkeypatch.setattr(pipeline, "discover", lambda trigger="manual": [])
+    with caplog.at_level(logging.WARNING, logger="git_synapse.ingest.pipeline"):
+        pipeline.run_ingest(trigger="test")
+    assert "same history is stored 2 times" in caplog.text
+    assert "veloren/dev/veloren" in caplog.text
+    assert "pause all but one" in caplog.text
+
+
+def test_a_failing_duplicate_check_does_not_fail_a_finished_run(db, monkeypatch):
+    """The work is already done and recorded. A report that cannot run is not a
+    reason to lose it."""
+    from git_synapse.analysis import query as q
+    from git_synapse.ingest import pipeline
+
+    def _boom():
+        raise RuntimeError("the report query broke")
+
+    monkeypatch.setattr(q, "duplicate_histories", _boom)
+    monkeypatch.setattr(pipeline, "discover", lambda trigger="manual": [])
+    run = pipeline.run_ingest(trigger="test")
+    assert run.run_id is not None and run.status in {"success", "partial", "failed"}

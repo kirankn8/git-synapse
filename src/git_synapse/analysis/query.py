@@ -1142,3 +1142,37 @@ def feedback_summary() -> dict:
         FROM feedback
         """
     ) or {}
+
+
+def duplicate_histories() -> list[dict]:
+    """Repositories that are the same history stored twice.
+
+    Identity is the address -- host plus owner/name -- because that is what a
+    host guarantees is unique. It does not follow that two addresses are two
+    repositories: a project moved to a subgroup, a mirror kept in sync, a fork
+    the API declines to declare as one. GitLab lists `veloren/veloren` and
+    `veloren/dev/veloren` as separate projects with separate ids, and their
+    HEAD sha and commit count are identical.
+
+    Nothing downstream is wrong about either row on its own. What is wrong is
+    every corpus-wide total, which counts that history twice -- and the
+    backtest population with it.
+
+    Matched on HEAD sha rather than on anything a provider says, because no
+    provider field survives all three cases: GitLab's project listing omits the
+    fork relationship entirely, so `is_fork` is false for everything it returns.
+    """
+    return query(
+        """
+        SELECT r.head_sha, count(*) AS copies,
+               min(r.commit_count) AS commits,
+               array_agg(r.full_name ORDER BY r.id) AS names,
+               array_agg(r.id ORDER BY r.id) AS ids,
+               max(r.host) AS host
+        FROM repo r
+        WHERE r.is_enabled AND r.head_sha IS NOT NULL AND r.commit_count > 0
+        GROUP BY r.head_sha
+        HAVING count(*) > 1
+        ORDER BY min(r.commit_count) DESC
+        """
+    )
