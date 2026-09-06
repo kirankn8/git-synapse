@@ -509,3 +509,36 @@ def test_a_search_term_is_matched_literally_not_as_a_pattern(corpus, db):
 def test_a_repository_search_escapes_the_same_way(corpus, db):
     assert all("_" in (r["full_name"] + (r["description"] or ""))
                for r in q.list_repos(search="_", limit=200))
+
+
+def test_a_paused_source_drops_out_of_the_corpus_wide_list(db):
+    """Pausing means these are not being refreshed and their numbers are not
+    moving. Left in, a source that had enumerated 8,105 repositories ranks
+    ahead of the whole corpus by count, every row opening a page with no
+    history behind it."""
+    from git_synapse.analysis import query as q
+    from git_synapse.db.engine import execute
+    from git_synapse.ingest import accounts
+
+    src = accounts.add_account("paused-src", kind="org", provider="github",
+                               host="github.com")
+    try:
+        execute(
+            "INSERT INTO repo (github_id, owner, name, full_name, host, provider,"
+            " account_id, is_enabled) VALUES (%s,'paused-src','r','paused-src/r',"
+            "'github.com','github',%s,false)", (987654321, src["id"]))
+
+        names = {r["full_name"] for r in q.list_repos(limit=1000)}
+        assert "paused-src/r" not in names
+
+        # Asked for by name it is still there: having opened that source, its
+        # repositories are exactly what the reader came for.
+        scoped = {r["full_name"] for r in q.list_repos(account_id=src["id"], limit=1000)}
+        assert "paused-src/r" in scoped
+
+        # And explicitly, for anything that wants the whole picture.
+        everything = {r["full_name"] for r in q.list_repos(limit=1000, include_paused=True)}
+        assert "paused-src/r" in everything
+    finally:
+        execute("DELETE FROM repo WHERE full_name='paused-src/r'")
+        accounts.remove_account(src["id"])

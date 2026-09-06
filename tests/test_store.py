@@ -309,3 +309,65 @@ def test_tags_are_indexed_and_resolved_to_their_commit(db):
     assert {r["name"] for r in query(
         "SELECT name FROM ref_tag WHERE repo_id = %s", (repo_id,))} == {"v2.0.0"}
     execute("DELETE FROM repo WHERE id = %s", (repo_id,))
+
+
+def test_a_record_from_a_host_with_no_api_cannot_blank_what_one_collected(db):
+    """GitProvider knows nothing about stars, forks or visibility and says so
+    by leaving the defaults. Writing those over what an API run collected is
+    destruction dressed as an update -- it zeroed the stars on all 164
+    repositories once, and language only survived because it is COALESCEd."""
+    from git_synapse.ingest.github import RepoRecord
+    from git_synapse.ingest.store import upsert_repo
+
+    rich = RepoRecord(
+        github_id=99001, owner="acme", name="sparse-test",
+        full_name="acme/sparse-test", provider="github", host="github.com",
+        clone_url="https://github.com/acme/sparse-test.git",
+        primary_language="Rust", visibility="public", stargazers=4200,
+        is_fork=True, is_archived=True, disk_usage_kb=512, forks_count=7,
+    )
+    repo_id = upsert_repo(rich)
+
+    # The same repository seen again through the no-API fallback.
+    bare = RepoRecord(
+        github_id=None, owner="acme", name="sparse-test",
+        full_name="acme/sparse-test", provider="git", host="github.com",
+        clone_url="https://github.com/acme/sparse-test.git",
+        visibility="unknown",
+    )
+    assert upsert_repo(bare) == repo_id, "same repository, not a second row"
+
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        "SELECT stargazers, is_fork, is_archived, visibility, forks_count,"
+        " disk_usage_kb, primary_language FROM repo WHERE id = %s", (repo_id,))
+    assert row["stargazers"] == 4200
+    assert row["is_fork"] is True and row["is_archived"] is True
+    assert row["visibility"] == "public", "not overwritten with 'unknown'"
+    assert row["forks_count"] == 7 and row["disk_usage_kb"] == 512
+    assert row["primary_language"] == "Rust"
+
+    from git_synapse.db.engine import execute
+    execute("DELETE FROM repo WHERE id = %s", (repo_id,))
+
+
+def test_a_real_api_record_still_updates_those_fields(db):
+    """The guard must not freeze them: a repository really does get archived."""
+    from git_synapse.db.engine import execute, query_one
+    from git_synapse.ingest.github import RepoRecord
+    from git_synapse.ingest.store import upsert_repo
+
+    def record(**over):
+        base = {"github_id": 99002, "owner": "acme", "name": "live-test",
+                "full_name": "acme/live-test", "provider": "github",
+                "host": "github.com", "visibility": "public", "stargazers": 1}
+        base.update(over)
+        return RepoRecord(**base)
+
+    repo_id = upsert_repo(record())
+    upsert_repo(record(stargazers=9, is_archived=True, visibility="private"))
+    row = query_one("SELECT stargazers, is_archived, visibility FROM repo WHERE id = %s",
+                    (repo_id,))
+    assert (row["stargazers"], row["is_archived"], row["visibility"]) == (9, True, "private")
+    execute("DELETE FROM repo WHERE id = %s", (repo_id,))

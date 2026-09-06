@@ -137,6 +137,9 @@ def test_discovery_refuses_a_collapsed_listing(db, monkeypatch):
         def __exit__(self, *a): return False
         def supports_listing(self): return True
         def list_repos(self, login): return []
+        def list_page(self, login, page=1):
+            from git_synapse.ingest.providers import Page
+            return Page([], has_more=False, total=0)
 
     monkeypatch.setattr(pipeline.providers, "for_source",
                         lambda src, patient=True, token="": _Client())
@@ -162,6 +165,9 @@ def test_discovery_accepts_a_listing_that_is_merely_smaller(db, monkeypatch):
         def __exit__(self, *a): return False
         def supports_listing(self): return True
         def list_repos(self, login): return fake
+        def list_page(self, login, page=1):
+            from git_synapse.ingest.providers import Page
+            return Page(fake, has_more=False, total=len(fake))
 
     monkeypatch.setattr(pipeline.providers, "for_source",
                         lambda src, patient=True, token="": _Client())
@@ -675,6 +681,11 @@ def _client_returning(mapping):
             if isinstance(outcome, Exception):
                 raise outcome
             return outcome
+
+        def list_page(self, login, page=1):
+            from git_synapse.ingest.providers import Page
+            rows = self.list_repos(login)
+            return Page(rows, has_more=False, total=len(rows))
     return lambda src, patient=True, token="": _Client()
 
 
@@ -809,6 +820,8 @@ def test_a_bad_credential_stops_discovery_rather_than_repeating_itself(two_accou
             def __exit__(self, *a): return False
             def supports_listing(self): return True
             def list_repos(self, login):
+                raise AuthError("bad credential")
+            def list_page(self, login, page=1):
                 raise AuthError("bad credential")
         return _C()
 

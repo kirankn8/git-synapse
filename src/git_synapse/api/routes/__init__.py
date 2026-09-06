@@ -658,10 +658,15 @@ def list_repos(
     limit: int = Query(500, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     account_id: int | None = None,
+    include_paused: bool = False,
 ) -> dict:
-    """List repositories with ingest state and history summary."""
+    """List repositories with ingest state and history summary.
+
+    A paused source's repositories are excluded unless asked for, or unless a
+    single source is being listed by `account_id` -- see `q.list_repos`.
+    """
     rows = q.list_repos(search, language, status, order_by, descending, limit,
-                        offset, account_id)
+                        offset, account_id, include_paused)
     return {"count": len(rows), "repos": rows}
 
 

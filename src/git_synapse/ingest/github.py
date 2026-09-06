@@ -217,6 +217,12 @@ class GitHubClient:
             if response.status_code in (403, 429):
                 if not self.patient:
                     response.raise_for_status()
+                # Remembered, because giving up after five retries used to
+                # report "failed after 5 attempts: None" -- last_error is only
+                # set by transport errors, so the one thing a reader needed
+                # (the status, and what the host said) was the one thing
+                # dropped.
+                last_error = self._http_reason(response)
                 wait = self._rate_limit_wait(response)
                 log.warning(
                     "GET %s rate limited (%s); sleeping %ds",
@@ -228,6 +234,7 @@ class GitHubClient:
                 continue
 
             if response.status_code >= 500:
+                last_error = self._http_reason(response)
                 wait = min(2**attempt, 30)
                 log.warning("GET %s returned %s; retry in %ds", path, response.status_code, wait)
                 time.sleep(wait)
@@ -235,7 +242,26 @@ class GitHubClient:
 
             response.raise_for_status()
 
-        raise RuntimeError(f"GET {path} failed after {MAX_RETRIES} attempts: {last_error}")
+        raise RuntimeError(
+            f"GET {path} failed after {MAX_RETRIES} attempts: "
+            f"{last_error or 'no further detail'}")
+
+    @staticmethod
+    def _http_reason(response: httpx.Response) -> str:
+        """The status and whatever the host said about it, in one line.
+
+        GitHub puts a usable sentence in `message` -- "API rate limit exceeded
+        for 1.2.3.4" -- which is far more use to a reader than the number
+        alone, and costs nothing to carry.
+        """
+        detail = ""
+        try:
+            body = response.json()
+            if isinstance(body, dict):
+                detail = str(body.get("message") or "")
+        except Exception:  # noqa: BLE001 - a non-JSON body is not a failure here
+            detail = ""
+        return f"HTTP {response.status_code}" + (f": {detail}" if detail else "")
 
     @staticmethod
     def _rate_limit_wait(response: httpx.Response) -> int:

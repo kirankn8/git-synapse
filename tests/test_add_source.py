@@ -306,49 +306,6 @@ def test_credential_for_falls_back_to_nothing(db):
 
 # ------------------------------------------------- the allowlist fetch path
 
-def test_an_allowlisted_source_fetches_by_name_and_never_lists(db, fake, clean):
-    """The whole reason a repository URL is cheap: a source with an allowlist
-    costs one request per named repository, every night, forever -- rather than
-    the eighty-three pages it takes to enumerate an organisation of 8,296."""
-    from git_synapse.ingest import pipeline
-
-    client = fake(_Fake())
-    row = accounts.add_from_url("https://github.com/acme/one")
-    accounts.add_from_url("https://github.com/acme/two")
-    records, raw = pipeline._discover_account(accounts.get_account(row["id"]))
-    assert [c for c in client.calls if c[0] == "list_repos"] == []
-    assert sorted(r.full_name for r in records) == ["acme/one", "acme/two"]
-    assert raw == 2
-
-
-def test_one_unfetchable_name_does_not_cost_the_others(db, fake, clean):
-    """A repository that was renamed or deleted must not take its siblings
-    down with it."""
-    from git_synapse.ingest import pipeline
-
-    class _Picky(_Fake):
-        def get_repo(self, owner, name):
-            if name == "gone":
-                raise RuntimeError("404")
-            return _record(f"{owner}/{name}")
-
-    fake(_Picky())
-    row = accounts.add_from_url("https://github.com/acme", repos=["one", "gone", "two"])
-    records, _ = pipeline._discover_account(accounts.get_account(row["id"]))
-    assert sorted(r.full_name for r in records) == ["acme/one", "acme/two"]
-
-
-def test_an_allowlist_is_not_run_through_the_filters(db, fake, clean):
-    """Somebody who named a fork wants that fork. A filter applied on top could
-    only contradict them."""
-    from git_synapse.ingest import pipeline
-
-    fake(_Fake(one=_record("acme/a-fork", is_fork=True)))
-    row = accounts.add_from_url("https://github.com/acme/a-fork")
-    records, _ = pipeline._discover_account(accounts.get_account(row["id"]))
-    assert [r.full_name for r in records] == ["acme/a-fork"]
-
-
 def test_a_whole_owner_on_a_host_with_no_api_yields_nothing_rather_than_raising(
         db, fake, clean, caplog):
     """It cannot be enumerated, and a nightly discovery must not fail over it."""
@@ -578,40 +535,133 @@ def test_a_non_github_host_is_not_asked_for_a_github_budget(db, fake, clean):
     assert "requests left" not in note
 
 
-def test_a_long_allowlist_lists_once_instead_of_fetching_each_name(db, fake, clean):
-    """The naive rule is only cheap while the list is short. `google` names 122
-    repositories: fetched one by one that is 122 requests every night, against
-    two for a listing."""
+def test_a_small_owner_is_listed_once_however_many_names_are_given(db, fake, clean):
+    """Seven names in an org of thirty is seven requests by name and one by
+    listing. A threshold on the number of names gets this exactly backwards."""
     from git_synapse.ingest import pipeline
 
-    names = [f"r{i}" for i in range(pipeline.NAME_FETCH_MAX + 1)]
-    client = fake(_Fake(many=[_record(f"acme/{n}") for n in names]
-                             + [_record("acme/unwanted")]))
+    client = fake(_Fake(many=[_record(f"acme/r{i}") for i in range(30)]))
+    names = [f"r{i}" for i in range(7)]
     row = accounts.add_from_url("https://github.com/acme", repos=names)
     records, _ = pipeline._discover_account(accounts.get_account(row["id"]))
-    assert [c[0] for c in client.calls] == ["list_repos"], "one request, not 26"
-    # And the allowlist still decides what is kept.
-    assert "acme/unwanted" not in {r.full_name for r in records}
-    assert len(records) == len(names)
+    assert [c[0] for c in client.calls] == ["list_page"], "one request, not seven"
+    assert sorted(r.name for r in records) == sorted(names)
 
 
-def test_a_short_allowlist_still_fetches_by_name(db, fake, clean):
+def test_a_few_names_out_of_a_huge_owner_are_fetched_by_name(db, fake, clean):
+    """One repository out of microsoft's 8,296 is one request by name and
+    eighty-three by listing -- on every nightly refresh."""
     from git_synapse.ingest import pipeline
 
-    client = fake(_Fake())
-    row = accounts.add_from_url("https://github.com/acme", repos=["one", "two"])
-    pipeline._discover_account(accounts.get_account(row["id"]))
-    assert [c[0] for c in client.calls] == ["get_repo", "get_repo"]
+    client = fake(_Fake(many=[_record(f"big/r{i}") for i in range(1000)]))
+    row = accounts.add_from_url("https://github.com/big", repos=["r5", "r7"])
+    records, _ = pipeline._discover_account(accounts.get_account(row["id"]))
+    kinds = [c[0] for c in client.calls]
+    # One page to learn the size, then exactly the names asked for.
+    assert kinds == ["list_page", "get_repo", "get_repo"]
+    assert sorted(r.name for r in records) == ["r5", "r7"]
+
+
+def test_many_names_out_of_a_large_owner_still_prefer_the_listing(db, fake, clean):
+    """The comparison is pages against names, not a fixed number of either."""
+    from git_synapse.ingest import pipeline
+
+    client = fake(_Fake(many=[_record(f"big/r{i}") for i in range(300)]))
+    names = [f"r{i}" for i in range(50)]
+    row = accounts.add_from_url("https://github.com/big", repos=names)
+    records, _ = pipeline._discover_account(accounts.get_account(row["id"]))
+    # 2 pages left versus 50 names: page.
+    assert {c[0] for c in client.calls} == {"list_page"}
+    assert len(records) == 50
+
+
+def test_one_unfetchable_name_does_not_cost_the_others_by_name(db, fake, clean):
+    """A repository renamed or deleted upstream is a fact about that
+    repository, not about the source it was named in."""
+    from git_synapse.ingest import pipeline
+
+    class _Picky(_Fake):
+        def get_repo(self, owner, name):
+            self.calls.append(("get_repo", f"{owner}/{name}"))
+            if name == "gone":
+                raise RuntimeError("404")
+            return _record(f"{owner}/{name}")
+
+    fake(_Picky(many=[_record(f"big/r{i}") for i in range(1000)]))
+    row = accounts.add_from_url("https://github.com/big",
+                                repos=["one", "gone", "two"])
+    records, _ = pipeline._discover_account(accounts.get_account(row["id"]))
+    assert sorted(r.name for r in records) == ["one", "two"]
 
 
 def test_a_long_allowlist_on_a_host_that_cannot_list_falls_back_to_names(db, fake, clean):
     """There is no listing to be cheaper than."""
     from git_synapse.ingest import pipeline
 
-    names = [f"r{i}" for i in range(pipeline.NAME_FETCH_MAX + 1)]
+    names = [f"r{i}" for i in range(30)]
     client = fake(_Fake(listing=False))
     row = accounts.add_account("selfhosted", kind="repo", provider="git",
                                host="git.corp", only_repos=names)
     records, _ = pipeline._discover_account(accounts.get_account(row["id"]))
     assert {c[0] for c in client.calls} == {"get_repo"}
     assert len(records) == len(names)
+
+
+def test_an_ordinary_source_reaches_its_provider_not_the_no_api_fallback(db, clean, monkeypatch):
+    """A NULL api_url on an account means "the provider's public API", but
+    `has_api` reads None as "no API at all" -- so building the Source by hand
+    here sent every ordinary GitHub source down the fallback and re-imported
+    164 repositories as bare git URLs with no stars, no fork flags and no
+    visibility."""
+    from git_synapse.ingest import pipeline, providers
+
+    seen = {}
+
+    def _spy(source, patient=True, token=""):
+        seen["provider"] = source.provider
+        seen["has_api"] = source.has_api
+        raise RuntimeError("stop here; the Source is what is under test")
+
+    monkeypatch.setattr(providers, "for_source", _spy)
+    row = accounts.add_account("spy-org", kind="org", provider="github",
+                               host="github.com")
+    with pytest.raises(RuntimeError):
+        pipeline._discover_account(accounts.get_account(row["id"]))
+    assert seen == {"provider": "github", "has_api": True}
+
+
+def test_a_self_hosted_source_keeps_its_own_endpoint(db, clean, monkeypatch):
+    """The account knows the endpoint; the hostname cannot imply it."""
+    from git_synapse.ingest import pipeline, providers
+
+    seen = {}
+
+    def _spy(source, patient=True, token=""):
+        seen.update(provider=source.provider, api_url=source.api_url,
+                    host=source.host, owner=source.owner)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(providers, "for_source", _spy)
+    row = accounts.add_account("platform", kind="group", provider="gitlab",
+                               host="git.corp", api_url="https://git.corp/api/v4")
+    with pytest.raises(RuntimeError):
+        pipeline._discover_account(accounts.get_account(row["id"]))
+    assert seen == {"provider": "gitlab", "api_url": "https://git.corp/api/v4",
+                    "host": "git.corp", "owner": "platform"}
+
+
+def test_a_host_with_no_client_still_gets_the_fallback(db, clean, monkeypatch):
+    """The fallback must remain reachable -- it is the whole point of it."""
+    from git_synapse.ingest import pipeline, providers
+
+    seen = {}
+
+    def _spy(source, patient=True, token=""):
+        seen.update(provider=source.provider, has_api=source.has_api)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(providers, "for_source", _spy)
+    row = accounts.add_account("team", kind="org", provider="git", host="git.corp")
+    with pytest.raises(RuntimeError):
+        pipeline._discover_account(accounts.get_account(row["id"]))
+    assert seen == {"provider": "git", "has_api": False}
