@@ -235,6 +235,39 @@ def _failure_summary(run: RunResult) -> str | None:
             f" \u2014 and {others} other kind{'s' if others > 1 else ''} of error")
 
 
+def _crossrepo_rebuild_needed() -> bool:
+    """Return whether a previous cross-repository stage is incomplete."""
+    with connection() as conn:
+        stale = conn.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM repo r
+                 WHERE r.is_enabled AND (
+                    (EXISTS (SELECT 1 FROM file f
+                               WHERE f.repo_id = r.id
+                                 AND f.basename = ANY(%(manifests)s))
+                     AND (r.last_depbump_sha IS NULL
+                          OR r.last_depbump_sha IS DISTINCT FROM r.head_sha
+                          OR r.last_declared_sha IS NULL
+                          OR r.last_declared_sha IS DISTINCT FROM r.head_sha))
+                    OR (r.pair_count > 0 AND (r.last_mining_at IS NULL
+                                               OR r.last_aggregate_at IS NULL
+                                               OR r.last_mining_at < r.last_aggregate_at))
+                 )
+            )
+            """,
+            {"manifests": list(depbump.manifests.MANIFEST_FILES)},
+        ).fetchone()[0]
+        if stale:
+            return True
+
+        fingerprint = predict._input_fingerprint(conn)
+        stored = conn.execute(
+            "SELECT value #>> '{}' FROM meta WHERE key = 'watermark:predict_inputs'"
+        ).fetchone()[0]
+        return stored != fingerprint
+
+
 def _finish_run(run: RunResult) -> None:
     status = "success"
     if run.failed and run.ok:
@@ -1012,7 +1045,9 @@ def _run_ingest_locked(
     # The dependency graph is global -- an edge spans repositories -- so it runs
     # once after all per-repo work completes. A failure here must not fail the
     # whole run: the per-repo results are already committed and useful alone.
-    if cfg.crossrepo.enabled and (run.commits_added > 0 or force_full):
+    if cfg.crossrepo.enabled and (
+        run.commits_added > 0 or force_full or _crossrepo_rebuild_needed()
+    ):
         # Manifest bumps first: they are incremental per repository, and they
         # are what dates every edge the graph below carries.
         try:
@@ -1025,8 +1060,12 @@ def _run_ingest_locked(
             log.exception("manifest bump scan failed")
 
         try:
-            depbump.refresh_declared(force=force_full)
-            depbump.refresh_modules()
+            # Keep both structural graphs in one transaction. If the module
+            # refresh fails, the declared graph remains stale too and the next
+            # ordinary refresh retries both stages.
+            with connection() as conn:
+                depbump.refresh_declared(conn=conn, force=force_full)
+                depbump.refresh_modules(conn=conn)
         except Exception:
             log.exception("declared dependency refresh failed")
 

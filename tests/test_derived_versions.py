@@ -14,10 +14,17 @@ def test_derived_stages_rebuild_once_in_dependency_order(scratch_db, monkeypatch
     from git_synapse.db.engine import connection
 
     calls: list[str] = []
+    with connection() as conn:
+        conn.execute(
+            "INSERT INTO repo (owner, name, full_name, pair_count) "
+            "VALUES ('test', 'derived', 'test/derived', 1)"
+        )
     monkeypatch.setattr(derived.aggregate, "rebuild_repo",
                         lambda repo_id, conn: calls.append("aggregate"))
     monkeypatch.setattr(derived.score, "score_all",
                         lambda conn: calls.append("score"))
+    monkeypatch.setattr(derived.score, "score_repo",
+                        lambda repo_id, conn: calls.append("score"))
     monkeypatch.setattr(derived.depbump, "rebuild",
                         lambda **kwargs: calls.append("depbump"))
     monkeypatch.setattr(derived.depbump, "refresh_declared",
@@ -32,11 +39,18 @@ def test_derived_stages_rebuild_once_in_dependency_order(scratch_db, monkeypatch
     with connection() as conn:
         conn.execute("DELETE FROM meta WHERE key LIKE 'watermark:derived:%'")
         first = derived.ensure_current(conn)
-        second = derived.ensure_current(conn)
+    ordered = [name for name in calls if name != "aggregate"]
+    expected = ["score", "depbump", "declared", "modules", "predict", "mining"]
+    positions = [ordered.index(name) for name in expected]
+    assert positions == sorted(positions)
+    calls.clear()
+    with connection() as conn:
+        conn.execute("DELETE FROM meta WHERE key LIKE 'watermark:derived:%'")
+    isolated = derived.ensure_current()
+    calls.clear()
+    second = derived.ensure_current()
 
     assert first == [stage.name for stage in derived.STAGES]
+    assert isolated == first
     assert second == []
-    ordered = [name for name in calls if name != "aggregate"]
-    assert ordered == ["score", "depbump", "declared", "modules", "predict", "mining"]
-    if "aggregate" in calls:
-        assert calls.index("aggregate") < calls.index("score")
+    assert calls == []
