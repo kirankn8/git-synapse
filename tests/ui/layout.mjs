@@ -391,6 +391,75 @@ console.log('\n=== no page talks about its own past ===');
   else ok('no changelog in the UI', `${PAGES.length} pages, explainers opened`);
 }
 
+/* A scope selector that does not stick is worse than none: Distributions read
+   corpus-wide aggregates, so choosing a repository navigated to ?repo=N, the
+   section ignored it, and the control snapped back to "All repositories" --
+   which reads as the page refusing the choice. Either a section scopes, or it
+   does not offer to. */
+/* A repository name is unique only inside its account: two organisations can
+   each have a `guava`, and a flat list renders both as "guava" with no way to
+   tell them apart. The account is the group label. */
+console.log('\n=== a repository picker is grouped by account ===');
+{
+  await page.goto(BASE + '/insights/risk', { waitUntil: 'domcontentloaded' });
+  await settle();
+  await page.click('.toolbar .picker-trigger');
+  await new Promise((r) => setTimeout(r, 250));
+  const shape = await page.evaluate(() => ({
+    groups: [...document.querySelectorAll('.picker-group')].map((g) => g.textContent),
+    options: document.querySelectorAll('.picker-option').length,
+    searchable: !!document.querySelector('.picker-search'),
+  }));
+  if (shape.groups.length > 1 && shape.options > shape.groups.length && shape.searchable) {
+    ok('repository picker', `${shape.groups.length} accounts, ${shape.options} options, searchable`);
+  } else {
+    bad('repository picker', JSON.stringify(shape));
+  }
+
+  // Typing narrows it, which is the whole reason it is not a native select.
+  await page.type('.picker-search', 'guav');
+  await new Promise((r) => setTimeout(r, 250));
+  const filtered = await page.evaluate(
+    () => [...document.querySelectorAll('.picker-option')].map((o) => o.textContent));
+  if (filtered.length && filtered.length < shape.options) {
+    ok('picker search', `"guav" narrows ${shape.options} to ${filtered.length}`);
+  } else {
+    bad('picker search', `got ${filtered.length} of ${shape.options}`);
+  }
+}
+
+console.log('\n=== a scope selector, where offered, holds its choice ===');
+for (const path of ['/insights/shape', '/insights/shape/pair_support',
+                    '/insights/risk', '/insights/drift', '/insights/impact']) {
+  await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });
+  await settle();
+  const trigger = await page.$('.toolbar .picker-trigger');
+  if (!trigger) { ok(`${path} scope`, 'none offered, none needed'); continue; }
+
+  await trigger.click();
+  await new Promise((r) => setTimeout(r, 250));
+  const chosen = await page.evaluate(() => {
+    const opt = [...document.querySelectorAll('.picker-option')]
+      .find((o) => !/^All /.test(o.textContent));
+    if (!opt) return null;
+    const label = opt.textContent;
+    opt.click();
+    return label;
+  });
+  if (!chosen) { ok(`${path} scope`, 'nothing to choose'); continue; }
+
+  await settle();
+  const held = await page.evaluate(() => ({
+    label: document.querySelector('.toolbar .picker-value')?.textContent,
+    url: location.search,
+  }));
+  if (held.label === chosen && /repo=\d+/.test(held.url)) {
+    ok(`${path} scope`, `held ${chosen}`);
+  } else {
+    bad(`${path} scope`, `chose ${chosen}, got ${JSON.stringify(held)}`);
+  }
+}
+
 console.log('\n=== nothing overflows its container horizontally ===');
 for (const [path, label] of PAGES) {
   await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });

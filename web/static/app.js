@@ -246,22 +246,19 @@ function paintMeasureBar() {
     ),
   );
 
-  const sel = $('#measure-select');
-  if (!sel.options.length) {
-    const families = new Map();
-    for (const m of state.measures) {
-      if (!families.has(m.family)) families.set(m.family, []);
-      families.get(m.family).push(m);
-    }
-    sel.appendChild(h('option', { value: '' }, 'All measures…'));
-    for (const [family, list] of families) {
-      const group = h('optgroup', { label: family });
-      for (const m of list) group.appendChild(h('option', { value: m.key }, m.label));
-      sel.appendChild(group);
-    }
-    sel.addEventListener('change', () => sel.value && setMeasure(sel.value));
+  const host = $('#measure-select');
+  if (!host.firstChild) {
+    // Thirty-one measures grouped into families: worth searching, same as the
+    // repository list.
+    host.appendChild(searchSelect(
+      state.measures.map((m) => ({ value: m.key, label: m.label, group: m.family })),
+      { selected: state.measure, placeholder: 'Search measures\u2026',
+        onChange: (key) => key && setMeasure(key) },
+    ));
   }
-  sel.value = QUICK_MEASURES.includes(state.measure) ? '' : state.measure;
+  // The chips carry the eight quick measures; the picker shows whichever is
+  // active so the two never disagree about what is selected.
+  host.firstChild.value = state.measure;
 
   const spec = state.byKey.get(state.measure);
   $('#measure-hint').textContent = spec ? spec.summary : '';
@@ -1032,11 +1029,10 @@ const reposView = async (args, params) => {
   });
   search.addEventListener('input', debounce(() => applyFilters(), 280));
 
-  const langSel = h(
-    'select',
-    { class: 'input' },
-    h('option', { value: '' }, 'All languages'),
-    ...langs.languages.map((l) => h('option', { value: l.language, selected: params.lang === l.language }, `${l.language} (${l.n})`)),
+  const langSel = searchSelect(
+    langs.languages.map((l) => ({ value: l.language, label: `${l.language} (${l.n})` })),
+    { selected: params.lang || '', emptyLabel: 'All languages',
+      placeholder: 'Search languages\u2026', onChange: () => applyFilters() },
   );
   const statusSel = h(
     'select',
@@ -1045,7 +1041,6 @@ const reposView = async (args, params) => {
       h('option', { value: s, selected: params.status === s }, s || 'Any status'),
     ),
   );
-  langSel.addEventListener('change', () => applyFilters());
   statusSel.addEventListener('change', () => applyFilters());
 
   const applyFilters = () => {
@@ -1884,7 +1879,7 @@ const folderTrail = (repoId, path) => {
    count, and to say what the chart is actually claiming. */
 on('/insights/shape', async () => {
   const shape = await api('/api/overview/shape');
-  const wrap = await insightsShell('shape', null);
+  const wrap = await insightsShell('shape', null, [], null, { scoped: false });
   wrap.append(h('div', { class: 'grid grid-2' },
     ...Object.entries(SHAPE).map(([key, spec]) => {
       const rows = spec.rows(shape);
@@ -1907,7 +1902,8 @@ on('/insights/shape/:metric', async ({ metric }) => {
   const wrap = await insightsShell('shape', null, [[spec.title]],
     pageHead(spec.title, spec.says(rows),
       spec.more ? [h('a', { class: 'btn primary', href: spec.more, 'data-nav': true },
-                      'Open the full analysis')] : []));
+                      'Open the full analysis')] : []),
+    { scoped: false });
 
   // No stat strip here: buckets, total, largest and scale are all already on
   // the chart or in the table below it, and a figure that opens nothing is a
@@ -3283,7 +3279,8 @@ const INSIGHT_SECTIONS = [
  * section tabs and the scope selector. Scoped to a repository it is a rung of
  * the drill-down, so it breadcrumbs under that repository.
  */
-async function insightsShell(section, repoId, trail = [], head = null) {
+async function insightsShell(section, repoId, trail = [], head = null,
+                             { scoped = true } = {}) {
   const [ov, repos] = await Promise.all([
     api('/api/mining/overview'),
     api('/api/repos', { limit: 1000, order_by: 'commit_count' }),
@@ -3301,17 +3298,24 @@ async function insightsShell(section, repoId, trail = [], head = null) {
   // heading would otherwise sit above it and the page would carry two.
   wrap.append(head || pageHead('Insights', 'What history says about the code.'));
 
-  const repoSel = h('select', { class: 'input', style: 'min-width:230px' },
-    h('option', { value: '' }, 'All repositories'),
-    ...repos.repos.map((r) => h('option', { value: r.id, selected: r.id === repoId }, r.name)));
-  repoSel.addEventListener('change', () =>
-    go(`/insights/${section}${repoSel.value ? `?repo=${repoSel.value}` : ''}`));
+  const repoSel = repoSelect(repos.repos, {
+    selected: repoId,
+    onChange: (value) => go(`/insights/${section}${value ? `?repo=${value}` : ''}`),
+  });
 
   wrap.append(h('div', { class: 'tabs' }, ...INSIGHT_SECTIONS.map(([k, l]) =>
     h('button', { class: `tab${section === k ? ' active' : ''}`,
                   onclick: () => go(`/insights/${k}${repoId ? `?repo=${repoId}` : ''}`) }, l))));
-  wrap.append(h('div', { class: 'toolbar' },
-    h('div', { class: 'field' }, h('label', {}, 'Scope'), repoSel)));
+  // A section that reads corpus-wide aggregates has no scope to offer. Showing
+  // the selector anyway meant picking a repository navigated to ?repo=N, the
+  // section ignored it, and the control snapped back to "All repositories" --
+  // which reads as the page refusing the choice.
+  wrap.append(scoped
+    ? h('div', { class: 'toolbar' },
+        h('div', { class: 'field' }, h('label', {}, 'Scope'), repoSel))
+    : h('div', { class: 'toolbar' },
+        h('span', { class: 'card-sub' },
+          'Counted across every repository \u2014 these describe the corpus as a whole.')));
   wrap.repos = repos.repos;
   wrap.mining = wrapOv;
   return wrap;
@@ -3513,6 +3517,150 @@ function barChart(rows, { label = 'calls', scale = 'linear', height = 66,
     dense ? h('div', { class: 'cbars-axis' },
       h('span', {}, rows[0].label),
       h('span', {}, rows[rows.length - 1].label)) : null);
+}
+
+/**
+ * A dropdown you can type into.
+ *
+ * A native `select` cannot be searched, and the repository list is 164 long --
+ * finding one meant scrolling past six accounts. This keeps the shape of a
+ * select (a trigger showing the current value, a list below) and adds the one
+ * thing missing.
+ *
+ * `items` are `{ value, label, group }`. It is a combobox in the ARIA sense,
+ * so a keyboard reaches everything a mouse does: type to filter, arrows to
+ * move, Enter to choose, Escape to close.
+ */
+function searchSelect(items, { selected = null, placeholder = 'Search…',
+                               emptyLabel = null, onChange = null } = {}) {
+  const all = emptyLabel
+    ? [{ value: '', label: emptyLabel, group: null }, ...items]
+    : items;
+  let value = selected == null ? (emptyLabel ? '' : (all[0] && all[0].value)) : selected;
+  const labelFor = (v) => (all.find((i) => String(i.value) === String(v)) || {}).label || '';
+
+  const trigger = h('button', {
+    class: 'picker-trigger', type: 'button',
+    role: 'combobox', 'aria-expanded': 'false', 'aria-haspopup': 'listbox',
+  }, h('span', { class: 'picker-value' }, labelFor(value)),
+     h('span', { class: 'picker-caret' }, '\u25be'));
+
+  const search = h('input', {
+    class: 'picker-search input', type: 'search', placeholder,
+    autocomplete: 'off', spellcheck: 'false',
+  });
+  const list = h('div', { class: 'picker-list', role: 'listbox' });
+  const panel = h('div', { class: 'picker-panel', hidden: true }, search, list);
+  const root = h('div', { class: 'picker' }, trigger, panel);
+
+  let active = -1;          // index into the currently visible options
+  let visible = [];
+
+  const paint = () => {
+    const term = search.value.trim().toLowerCase();
+    // Match the group too: typing an account name should find its
+    // repositories, which is how someone looks for one they half-remember.
+    visible = all.filter((i) => !term
+      || i.label.toLowerCase().includes(term)
+      || (i.group || '').toLowerCase().includes(term));
+    list.replaceChildren();
+    if (!visible.length) {
+      list.append(h('div', { class: 'picker-empty' }, 'Nothing matches that.'));
+      return;
+    }
+    let group = Symbol('none');
+    visible.forEach((item, i) => {
+      if (item.group !== group) {
+        group = item.group;
+        if (group) list.append(h('div', { class: 'picker-group' }, group));
+      }
+      list.append(h('div', {
+        class: `picker-option${i === active ? ' active' : ''}`
+             + (String(item.value) === String(value) ? ' chosen' : ''),
+        role: 'option', 'aria-selected': String(item.value) === String(value) ? 'true' : 'false',
+        onclick: () => choose(item.value),
+      }, item.label));
+    });
+  };
+
+  const open = () => {
+    panel.hidden = false;
+    trigger.setAttribute('aria-expanded', 'true');
+    search.value = '';
+    active = -1;
+    paint();
+    search.focus();
+  };
+  const close = () => {
+    panel.hidden = true;
+    trigger.setAttribute('aria-expanded', 'false');
+  };
+  function choose(next) {
+    value = next;
+    trigger.firstChild.textContent = labelFor(next);
+    close();
+    if (onChange) onChange(String(next));
+  }
+
+  trigger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (panel.hidden) open(); else close();
+  });
+  search.addEventListener('input', () => { active = -1; paint(); });
+  search.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      active = Math.max(0, Math.min(visible.length - 1,
+                                    active + (e.key === 'ArrowDown' ? 1 : -1)));
+      paint();
+      list.querySelector('.picker-option.active')?.scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (visible[active]) choose(visible[active].value);
+      else if (visible.length === 1) choose(visible[0].value);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      close();
+      trigger.focus();
+    }
+  });
+  root.addEventListener('click', (e) => e.stopPropagation());
+  document.addEventListener('click', close);
+
+  // The call sites read `.value`, as they did from the select this replaces.
+  Object.defineProperty(root, 'value', {
+    get: () => value,
+    set: (v) => { value = v; trigger.firstChild.textContent = labelFor(v); },
+  });
+  return root;
+}
+
+/**
+ * A repository picker, grouped by the account that owns it.
+ *
+ * A repository name is unique only inside its account: two organisations can
+ * each have a `guava`, and a flat list renders both as "guava" with no way to
+ * tell which is which. The account is the group label, so the option carries
+ * only the part that varies -- which is also how the rest of the application
+ * addresses them, account then repository.
+ */
+function repoSelect(repos, { selected = null, allLabel = 'All repositories',
+                             onChange = null } = {}) {
+  const byAccount = new Map();
+  for (const r of repos) {
+    const owner = r.owner || (r.full_name || '').split('/')[0] || 'unknown';
+    if (!byAccount.has(owner)) byAccount.set(owner, []);
+    byAccount.get(owner).push(r);
+  }
+  // Accounts alphabetically, so a reader can find one; repositories within an
+  // account in the order given, which is busiest first.
+  const groups = [...byAccount.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+
+  return searchSelect(
+    groups.flatMap(([owner, rows]) =>
+      rows.map((r) => ({ value: r.id, label: r.name, group: owner }))),
+    { selected, emptyLabel: allLabel, placeholder: 'Search repositories…', onChange },
+  );
 }
 
 /** A labelled form control with an optional hint underneath. */

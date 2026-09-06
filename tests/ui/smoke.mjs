@@ -104,8 +104,15 @@ function report(label, ok, detail) {
 // Measure bar must be populated from /api/measures.
 report('measure chips rendered', $('#measure-chips').children.length >= 6,
        `${$('#measure-chips').children.length} chips`);
-report('measure select populated', $('#measure-select').options.length > 25,
-       `${$('#measure-select').options.length} options`);
+// A searchable combobox now, not a native select: 31 measures is past the
+// point where scrolling one is reasonable.
+{
+  const trigger = $('#measure-select').querySelector('.picker-trigger');
+  trigger.click();
+  const options = $('#measure-select').querySelectorAll('.picker-option').length;
+  report('measure picker populated', options > 25, `${options} options, searchable`);
+  window.document.body.click();
+}
 
 // Resolve real ids from the live corpus to build deep-link routes.
 const repos = await (await fetch(BASE + '/api/repos?limit=1&order_by=pair_count', withCookie())).json();
