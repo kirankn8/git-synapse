@@ -1132,7 +1132,7 @@ They come from one endpoint, not eight: these are full-table aggregates and
 together they are the most expensive read the landing page makes (~550ms). The
 hourly activity bars include the empty hours, because a chart drawn only from
 hours that had traffic closes the gaps and turns an outage into a smooth line.
-| Accounts · Measures · Jobs · Feedback | configuration, reference, operations |
+| Sources · Measures · Jobs · Feedback | configuration, reference, operations |
 
 Overview answers one question — is this deployment healthy, and is anything
 using it — and carries nothing that another tab owns. A shortened copy of the
@@ -1140,8 +1140,8 @@ repository list, or the run history, or header buttons duplicating the nav one
 line above, would each be a worse version of the page that owns it.
 
 ```
-/accounts                                   /insights            -> /insights/impact
-/accounts/7                                 /insights/impact       ?repo=5
+/sources                                    /insights            -> /insights/impact
+/sources/7                                  /insights/impact       ?repo=5
 /repos                                      /insights/impact/5/12  one edge, with bump evidence
 /repos/5                                    /insights/impact/graph nodes are repositories
 /repos/5/tree/src/main/java                 /insights/risk         ?repo=5
@@ -1151,7 +1151,7 @@ line above, would each be a worse version of the page that owns it.
                                             /insights/modules      ?repo=5
 ```
 
-Three consequences worth stating, because each is easy to get wrong:
+Four consequences worth stating, because each is easy to get wrong:
 
 **Folders and files are addressed by path, not by id.** Ids renumber on a
 re-ingest, so a link keyed on one silently comes to mean a different file —
@@ -1164,6 +1164,18 @@ became, and the address is then corrected to the current path.
 Insights opens `/repos/5/files/…`, because that is where the file lives. It
 reads as a jump only if clicking a *repository* lands somewhere other than that
 repository, which is the trap the rule exists to close.
+
+**A list of repositories is grouped by the source that owns them.** A
+repository is *in* an account, so `/repos` draws one collapsed line per
+`(owner, host)` — the pair, not the owner alone, because two hosts can carry
+the same owner name — ordered by commits, and opens the table only when a group
+is expanded. 240 undifferentiated rows read as a bag of names and lose the one
+relation the hierarchy is built on. The groups stay shut on arrival and each
+builds its table on first open, so the page is an index rather than sixty-six
+stacked tables; the filter searches `owner/name`, so typing a source name finds
+everything under it, and anything matching is opened — a search must never hide
+its own results behind a disclosure triangle. Inside one source, `/sources/7`
+is already the group, so it lists its repositories flat.
 
 **Insights opens on a map.** `/insights/graph` is the first section and the
 landing: with nothing scoped it draws every repository, and choosing one in

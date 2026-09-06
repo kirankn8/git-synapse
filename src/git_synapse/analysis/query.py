@@ -118,7 +118,8 @@ def list_repos(
 
     return query(
         f"""
-        SELECT id, account_id, full_name, owner, name, description, html_url, primary_language,
+        SELECT id, account_id, full_name, owner, name, host, provider,
+               description, html_url, primary_language,
                topics, is_private, is_fork, is_archived, stargazers, forks_count,
                open_issues, license_spdx, visibility, default_branch, disk_usage_kb,
                mirror_size_kb, clone_mode, has_churn, ingest_status, ingest_error,

@@ -668,12 +668,19 @@ tabs carry the application and nothing appears under both.
 |---|---|
 | **Overview** | Is this deployment healthy, and is anything using it: corpus scale, ingest health, eight distributions, who is calling. |
 | **Sources** | Where repositories come from: an owner on a host, tracked whole or by an explicit list. One field adds one — paste a URL. |
-| **Repositories** | The *things* — repositories, folders, files, pairs — and what is in them. Filter by language, visibility, status, then drill all the way down. |
+| **Repositories** | The *things* — repositories, folders, files, pairs — and what is in them. Grouped by the source that owns them; search by repository or source name, filter by language and status, then drill all the way down. |
 | **Insights** | Every analysis derived from history: **Map**, **Distributions**, **Cross-repo impact**, **Risk & bus factor**, **Coupling drift**, **De-facto modules**. Each takes an optional `?repo=`. |
 | **Activity** | Every call served on both surfaces, what it was given and what came back. |
 | **Measures** | The catalogue: formula, guidance, caveats. |
 | **Jobs** | Run history, the refresh schedule, and the access policy. |
 | **Feedback** | What agents reported back about the answers they were given. |
+
+The list itself is grouped, one collapsed line per source, ordered by commits —
+a repository is *in* an account, and a flat list of every repository in the
+corpus loses that. Open a group to get its table; type in the search box and
+whatever matches opens itself, so a result is never hidden behind a triangle.
+The search runs against `owner/name`, so a source name finds everything under
+it.
 
 Inside **Repositories**, the path keeps descending and the breadcrumb keeps up:
 

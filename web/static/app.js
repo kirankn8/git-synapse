@@ -1039,12 +1039,15 @@ const reposView = async (args, params) => {
     wrap.append(pageHead('Repositories', `${repos.count} repositories in the corpus`));
   }
 
+  // The filter runs against `full_name`, which is `owner/name` -- so typing a
+  // source name finds everything under it, and the placeholder says so rather
+  // than leaving the reader to discover it.
   const search = h('input', {
     class: 'input',
     type: 'search',
-    placeholder: 'Filter repositories…',
+    placeholder: 'Search repositories or sources…',
     value: params.q || '',
-    style: 'width:250px',
+    style: 'width:260px',
   });
   search.addEventListener('input', debounce(() => applyFilters(), 280));
 
@@ -1083,30 +1086,100 @@ const reposView = async (args, params) => {
     ),
   );
 
-  wrap.append(
-    card(
-      'All repositories',
-      dataTable(
-        repos.repos,
-        [
-          { key: 'full_name', label: 'Repository', render: (r) => h('div', {}, h('span', { class: 'mono', style: 'font-weight:550' }, r.name), r.description ? h('div', { style: 'font-size:11px;color:var(--text-faint);max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, r.description) : null) },
-          { key: 'primary_language', label: 'Lang', render: (r) => (r.primary_language ? h('span', { class: 'badge muted' }, r.primary_language) : '—') },
-          { key: 'is_private', label: 'Vis', render: (r) => h('span', { class: `badge ${r.is_private ? 'violet' : 'info'}` }, r.is_private ? 'private' : 'public') },
-          { key: 'commit_count', label: 'Commits', num: true, render: (r) => num(r.commit_count) },
-          { key: 'file_count', label: 'Files', num: true, render: (r) => num(r.file_count) },
-          { key: 'pair_count', label: 'Pairs', num: true, render: (r) => num(r.pair_count) },
-          { key: 'author_count', label: 'Authors', num: true, render: (r) => num(r.author_count) },
-          { key: 'clone_mode', label: 'Mirror', render: (r) => h('span', { class: `badge ${r.has_churn ? 'muted' : 'warn'}`, title: r.has_churn ? 'Full clone: line-level churn available' : 'Blobless mirror: coupling is complete, but no line counts' }, r.clone_mode || '—') },
-          { key: 'last_commit_at', label: 'Last commit', render: (r) => when(r.last_commit_at) },
-          { key: 'ingest_status', label: 'Status', render: (r) => (r.ingest_error ? h('span', { class: 'badge danger', title: r.ingest_error }, 'failed') : statusBadge(r.ingest_status)) },
-        ],
-        // Honour the sort a caller arrived with, so a chart that says "these
-        // repositories have gone quiet" lands on a list ordered by exactly that.
-        { initialSort: SORTABLE.has(params.order_by) ? params.order_by : 'commit_count',
-          onRow: (r) => go(`/repos/${r.id}`), empty: 'No repositories match those filters.' },
-      ),
-    ),
-  );
+  /* Grouped by source, never one flat list. A repository is *in* an account --
+     that is the rule the whole information architecture runs on -- and 240
+     undifferentiated rows make the corpus look like a bag of names. Two owners
+     can also share a name across hosts, so the group is (owner, host).
+
+     Collapsed by default because most owners hold one or two repositories:
+     sixty-six open cards would be worse than the flat list, while sixty-six
+     summary lines are an index you can read. Filtering opens what matches, so
+     a search never hides its own results behind a disclosure triangle. */
+  const cols = [
+    { key: 'name', label: 'Repository', render: (r) => h('div', {},
+        h('span', { class: 'mono', style: 'font-weight:550' }, r.name),
+        r.description ? h('div', { style: 'font-size:11px;color:var(--text-faint);max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, r.description) : null) },
+    { key: 'primary_language', label: 'Lang', render: (r) => (r.primary_language ? h('span', { class: 'badge muted' }, r.primary_language) : '\u2014') },
+    { key: 'is_private', label: 'Vis', render: (r) => h('span', { class: `badge ${r.is_private ? 'violet' : 'info'}` }, r.is_private ? 'private' : 'public') },
+    { key: 'commit_count', label: 'Commits', num: true, render: (r) => num(r.commit_count) },
+    { key: 'file_count', label: 'Files', num: true, render: (r) => num(r.file_count) },
+    { key: 'pair_count', label: 'Pairs', num: true, render: (r) => num(r.pair_count) },
+    { key: 'author_count', label: 'Authors', num: true, render: (r) => num(r.author_count) },
+    { key: 'clone_mode', label: 'Mirror', render: (r) => h('span', { class: `badge ${r.has_churn ? 'muted' : 'warn'}`, title: r.has_churn ? 'Full clone: line-level churn available' : 'Blobless mirror: coupling is complete, but no line counts' }, r.clone_mode || '\u2014') },
+    { key: 'last_commit_at', label: 'Last commit', render: (r) => when(r.last_commit_at) },
+    { key: 'ingest_status', label: 'Status', render: (r) => (r.ingest_error ? h('span', { class: 'badge danger', title: r.ingest_error }, 'failed') : statusBadge(r.ingest_status)) },
+  ];
+  const tableOpts = {
+    initialSort: SORTABLE.has(params.order_by) ? params.order_by : 'commit_count',
+    onRow: (r) => go(`/repos/${r.id}`),
+    empty: 'No repositories match those filters.',
+  };
+
+  if (account) {
+    // Already inside one source: the grouping is the page.
+    wrap.append(card(`${repos.count} repositories`,
+                     dataTable(repos.repos, cols, tableOpts)));
+    return wrap;
+  }
+
+  const groups = new Map();
+  for (const r of repos.repos) {
+    const key = `${r.owner}\u0000${r.host || 'github.com'}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  const ordered = [...groups.entries()]
+    .map(([key, rows]) => {
+      const [owner, host] = key.split('\u0000');
+      return { owner, host, rows,
+               commits: rows.reduce((n, r) => n + Number(r.commit_count || 0), 0),
+               accountId: rows[0].account_id };
+    })
+    .sort((a, b) => b.commits - a.commits || b.rows.length - a.rows.length);
+
+  // A filter is a search: what it finds should be open, not hidden one click
+  // further in.
+  const filtering = Boolean(params.q || params.lang || params.status);
+
+  wrap.append(h('div', { class: 'section-title' },
+    `${num(repos.count)} repositories across ${num(ordered.length)} sources`));
+
+  // One list, not sixty-six stacked blocks. The page rhythm is 16px between
+  // blocks; items *within* a list are tighter, and that is a real distinction
+  // rather than an exception -- so the list is one block and its own spacing is
+  // its own business.
+  const list = h('div', { class: 'repo-groups' });
+  wrap.append(list);
+
+  for (const g of ordered) {
+    const body = h('div', { class: 'card-body flush' });
+    let built = false;
+    const panel = h('details', { class: 'repo-group', open: filtering || ordered.length <= 3 },
+      h('summary', { class: 'repo-group-head' },
+        h('span', { class: 'repo-group-owner mono' }, g.owner),
+        h('span', { class: 'repo-group-host' }, g.host),
+        h('span', { class: 'repo-group-counts' },
+          `${num(g.rows.length)} ${g.rows.length === 1 ? 'repository' : 'repositories'}`,
+          h('span', { class: 'repo-group-dot' }, '\u00b7'),
+          `${num(g.commits)} commits`),
+        g.accountId
+          ? h('a', { class: 'repo-group-open', href: `/sources/${g.accountId}`,
+                     'data-nav': true,
+                     onclick: (e) => e.stopPropagation() }, 'open source \u2192')
+          : null),
+      body);
+    // Built on first open: sixty-six tables rendered up front is a lot of DOM
+    // for a page where most stay shut.
+    const build = () => {
+      if (built) return;
+      built = true;
+      body.append(dataTable(g.rows, cols, tableOpts));
+    };
+    if (panel.open) build();
+    panel.addEventListener('toggle', build);
+    list.append(panel);
+  }
+
   return wrap;
 };
 
