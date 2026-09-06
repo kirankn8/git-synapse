@@ -290,6 +290,24 @@ def _refresh_directories(conn: psycopg.Connection, repo_id: int) -> int:
         {"repo": repo_id},
     )
 
+    # A directory nothing lives in any more is not a directory. `directory` is
+    # insert-only -- ON CONFLICT DO NOTHING above -- while `file_directory` is
+    # rebuilt from scratch every pass, so a folder whose files were all renamed
+    # away or deleted keeps its row and, worse, the counts it had when it still
+    # had files. Eleven of them were live: a folder page offering "79 changes,
+    # 3 files" with nothing in it.
+    #
+    # Cascades to `file_directory`, `dir_pair` and `dir_pair_metric`, which is
+    # what should happen -- a directory that does not exist has no couplings.
+    conn.execute(
+        """
+        DELETE FROM directory d
+         WHERE d.repo_id = %s
+           AND NOT EXISTS (SELECT 1 FROM file_directory fd WHERE fd.dir_id = d.id)
+        """,
+        (repo_id,),
+    )
+
     # Directory marginals, computed independently of the file level: a
     # directory changes in a commit if ANY file beneath it changed, so these
     # cannot be summed up from file counts.

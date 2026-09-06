@@ -448,3 +448,40 @@ def test_feasible_counts_are_stored_unchanged_and_say_nothing(caplog):
         rows = score._score_batch(1, _Batch())
     assert [r[3:7] for r in rows] == [(5, 20, 30, 400), (2, 9, 4, 400)]
     assert "clamped" not in caplog.text
+
+
+def test_a_directory_nothing_lives_in_any_more_is_removed(db):
+    """`directory` is insert-only while `file_directory` is rebuilt every pass,
+    so a folder whose files were all renamed away or deleted kept its row --
+    and the counts it had when it still had files. Eleven were live: a folder
+    page offering "79 changes, 3 files" with nothing in it."""
+    from git_synapse.analysis import aggregate
+    from git_synapse.db.engine import connection, execute, query, query_one
+
+    repo = query_one(
+        "INSERT INTO repo (github_id, owner, name, full_name, host, provider,"
+        " is_enabled) VALUES (NULL,'dirs','t','dirs/t','github.com','github',TRUE)"
+        " RETURNING id")
+    rid = repo["id"]
+    try:
+        execute(
+            "INSERT INTO file (repo_id, path, dir_path, basename, extension,"
+            " depth, change_count) VALUES (%s,'kept/a.py','kept','a.py','py',1,3)",
+            (rid,))
+        # A directory left behind by a file that has since moved away, still
+        # carrying the counts it had when it had files.
+        execute(
+            "INSERT INTO directory (repo_id, path, depth, file_count,"
+            " change_count, pair_change_count) VALUES (%s,'gone',1,3,79,79)",
+            (rid,))
+
+        with connection() as conn:
+            aggregate._refresh_directories(conn, rid)
+            conn.commit()
+
+        paths = {r["path"] for r in
+                 query("SELECT path FROM directory WHERE repo_id = %s", (rid,))}
+        assert "gone" not in paths, "a directory with no files must not survive"
+        assert paths == {"", "kept"}, f"the real tree, root included: {paths}"
+    finally:
+        execute("DELETE FROM repo WHERE id = %s", (rid,))
