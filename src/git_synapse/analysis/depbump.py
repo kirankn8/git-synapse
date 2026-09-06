@@ -285,8 +285,10 @@ def extract_from_mirror(mirror: Path, repo_name: str, manifest: str = "go.mod", 
         log.warning("manifest scan failed for %s: %s", repo_name, proc.stderr[:200])
         return []
 
-    # Oldest first, so each snapshot is compared against what preceded it.
-    revisions = list(reversed(proc.stdout.split()))[:max_commits]
+    # Keep the newest revisions, then walk them oldest-first so each snapshot
+    # is compared against what preceded it. Slicing after reversing would keep
+    # the oldest history and silently discard recent dependency changes.
+    revisions = list(reversed(proc.stdout.split()[:max_commits]))
     edges: list[BumpEdge] = []
     previous: dict[str, manifests.Reference] = {}
     for sha in revisions:
@@ -599,10 +601,17 @@ def resolve_bumps(conn: psycopg.Connection | None = None) -> int:
         by_tag = c.execute(
             r"""
             UPDATE dep_bump b
-               SET dep_commit_id = COALESCE(rt.commit_id, rt.main_commit_id),
+               SET dep_commit_id = rt.commit_id,
                    resolution = CASE WHEN b.dep_version ~ '^[\^~><=]'
                                      THEN 'floor' ELSE 'tag' END
-              FROM ref_tag rt
+              FROM (
+                    SELECT repo_id, version_key,
+                           min(COALESCE(commit_id, main_commit_id)) AS commit_id
+                      FROM ref_tag
+                     WHERE COALESCE(commit_id, main_commit_id) IS NOT NULL
+                     GROUP BY repo_id, version_key
+                    HAVING count(DISTINCT COALESCE(commit_id, main_commit_id)) = 1
+                   ) rt
              WHERE b.dep_commit_id IS NULL
                AND b.version_key IS NOT NULL
                AND rt.repo_id = b.dep_repo_id
