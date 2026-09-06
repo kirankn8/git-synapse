@@ -1,0 +1,80 @@
+image:
+  repository: docker.io/kirankn8/git-synapse
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+secrets:
+  adminSetupToken: ""
+  githubToken: ""
+  gsSecretKey: ""
+  existingSecret: ""
+
+postgresql:
+  enabled: true
+  image: postgres:16-alpine
+  database: git_synapse
+  username: git_synapse
+  password: ""
+  storage:
+    size: 20Gi
+    storageClass: ""
+
+externalDatabase:
+  host: ""
+  port: 5432
+  database: git_synapse
+  username: git_synapse
+  password: ""
+  existingSecret: ""
+  passwordKey: POSTGRES_PASSWORD
+
+persistence:
+  enabled: true
+  size: 50Gi
+  storageClass: ""
+  accessModes:
+    - ReadWriteMany
+
+service:
+  type: ClusterIP
+  port: 8000
+
+mcp:
+  enabled: true
+  port: 8081
+  service:
+    type: ClusterIP
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: git-synapse.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+config:
+  logLevel: INFO
+  refreshCron: "0 * * * *"
+  discoverCron: "0 3 * * *"
+  schedulerTimezone: UTC
+  schedulerEnabled: true
+  refreshOnStart: false
+  githubOrg: ""
+  includePrivate: true
+  includeForks: false
+  includeArchived: true
+  ingestConcurrency: 8
+  maxFilesPerCommit: 60
+  minPairSupport: 2
+  includeMerges: false
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

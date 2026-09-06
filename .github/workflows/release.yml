@@ -1,0 +1,45 @@
+name: Release container and Helm chart
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push application image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: |
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/git-synapse:${{ github.ref_name }}
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/git-synapse:latest
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Set chart version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^version: .*/version: ${VERSION}/; s/^appVersion: .*/appVersion: \"${VERSION}\"/" charts/git-synapse/Chart.yaml
+          sed -i "s/^  tag: .*/  tag: \"${VERSION}\"/" charts/git-synapse/values.yaml
+
+      - name: Package and publish chart
+        run: |
+          helm package charts/git-synapse
+          helm push git-synapse-*.tgz oci://ghcr.io/${{ github.repository_owner }}/charts

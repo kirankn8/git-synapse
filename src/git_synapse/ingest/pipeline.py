@@ -15,7 +15,6 @@ operational situation from "nothing ran".
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import json
 import logging
@@ -144,11 +143,13 @@ def reconcile_stale_runs(max_age_hours: int = STALE_RUN_HOURS) -> int:
                      OR NOT EXISTS (
                          SELECT 1 FROM pg_locks
                           WHERE locktype = 'advisory'
+                            AND classid = %s
                             AND objid = %s
                      )
                    )
             """,
-            (max_age_hours, INGEST_LOCK_KEY & 0xFFFFFFFF),
+            (max_age_hours, (INGEST_LOCK_KEY >> 32) & 0xFFFFFFFF,
+             INGEST_LOCK_KEY & 0xFFFFFFFF),
         ).rowcount
     if count:
         log.warning("reconciled %d abandoned ingest run(s)", count)
@@ -892,12 +893,12 @@ def run_ingest(
     # One ingest at a time, across processes. A scheduled tick and a human's
     # `git-synapse ingest` used to run concurrently: they fetched the same mirrors,
     # redid the same global rebuilds, and left rows stuck in `running` that
-    # blocked the API refresh endpoint for six hours. An advisory lock is held
-    # for the life of the connection, so a crashed run releases it immediately
-    # rather than wedging the next one.
+    # blocked the API refresh endpoint for six hours. A transaction-scoped
+    # advisory lock is held until this connection exits, so a crashed run
+    # releases it immediately and a pooled connection can never retain it.
     with connection() as conn:
         if not conn.execute(
-            "SELECT pg_try_advisory_lock(%s)", (INGEST_LOCK_KEY,)
+            "SELECT pg_try_advisory_xact_lock(%s)", (INGEST_LOCK_KEY,)
         ).fetchone()[0]:
             log.warning("another ingest run holds the lock; skipping this one")
             run = RunResult(kind="full" if force_full else "sync")
@@ -905,19 +906,9 @@ def run_ingest(
             run.duration_s = time.monotonic() - started
             return run
 
-        try:
-            return _run_ingest_locked(
-                records, trigger, force_full, concurrency, started
-            )
-        finally:
-            # An advisory lock outlives the transaction and is released only by
-            # unlocking or by the session ending -- and a pooled connection's
-            # session does not end when it is returned. So the unlock has to
-            # happen, but it must not raise: a failing one would mask whatever
-            # actually went wrong, and the pool discards a broken connection,
-            # which ends its session and releases the lock anyway.
-            with contextlib.suppress(Exception):
-                conn.execute("SELECT pg_advisory_unlock(%s)", (INGEST_LOCK_KEY,))
+        return _run_ingest_locked(
+            records, trigger, force_full, concurrency, started
+        )
 
 
 def _run_ingest_locked(

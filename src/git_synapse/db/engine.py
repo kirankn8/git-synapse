@@ -1,8 +1,9 @@
-"""PostgreSQL connectivity: a shared pool, schema bootstrap, and COPY helpers.
+"""Low-level PostgreSQL infrastructure for schema and bulk analytical work.
 
-Uses psycopg 3 directly rather than an ORM. The workload here is bulk ingest and
-analytical aggregation -- both dominated by hand-written SQL and by COPY -- so an
-ORM would add a mapping layer that every hot path then has to bypass.
+Normal application CRUD belongs in :mod:`git_synapse.db.orm`. This module keeps
+the psycopg pool for schema bootstrap, COPY, and the set-based aggregate paths
+where a database-native bulk operation is materially faster than row-oriented
+ORM persistence.
 """
 
 from __future__ import annotations
@@ -55,12 +56,29 @@ def close_pool() -> None:
     if _pool is not None:
         _pool.close()
         _pool = None
+    # The ORM engine is a separate pool. Dispose it with the legacy bulk
+    # connection pool so tests and process restarts never retain connections
+    # or reflected table metadata for the previous database.
+    from git_synapse.db.orm import close as close_orm
+
+    close_orm()
 
 
 @contextmanager
 def connection() -> Iterator[psycopg.Connection]:
     """Check out a connection; commit on clean exit, roll back on exception."""
     with get_pool().connection() as conn:
+        # Session-level advisory locks survive a transaction and therefore
+        # survive returning a connection to the pool. The application uses
+        # transaction-scoped locks; clear any legacy/test lock before reuse so
+        # a dead pooled session cannot make the next run look live forever.
+        with contextlib.suppress(Exception):
+            previous_autocommit = conn.autocommit
+            try:
+                conn.autocommit = True
+                conn.execute("SELECT pg_advisory_unlock_all()")
+            finally:
+                conn.autocommit = previous_autocommit
         yield conn
 
 
@@ -309,10 +327,13 @@ def get_watermark(key: str) -> str | None:
     records a fingerprint of its inputs, and skips entirely when that
     fingerprint has not moved.
     """
-    row = query_one("SELECT value FROM meta WHERE key = %s", (f"watermark:{key}",))
-    if row is None:
-        return None
-    value = row.get("value")
+    from sqlalchemy import select
+
+    from git_synapse.db.orm import models, session_scope
+
+    with session_scope() as session:
+        Meta = models().Meta
+        value = session.scalar(select(Meta.value).where(Meta.key == f"watermark:{key}"))
     return str(value) if value is not None else None
 
 
@@ -324,18 +345,30 @@ def set_watermark(key: str, value: str, conn: Any = None) -> None:
     rolled back left the watermark advanced and the next run skipped it -- the
     table stayed a generation behind while the system reported it current.
     """
-    import json as _json
-
-    sql = """
-        INSERT INTO meta (key, value, updated_at)
-        VALUES (%s, %s::jsonb, now())
-        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
-        """
-    params = (f"watermark:{key}", _json.dumps(value))
     if conn is not None:
-        conn.execute(sql, params)
+        # Existing bulk/derived transactions use the psycopg connection and
+        # must keep the watermark in that same transaction.  New ORM callers
+        # should omit ``conn`` and use the session path below.
+        conn.execute(
+            """
+            INSERT INTO meta (key, value, updated_at)
+            VALUES (%s, %s::jsonb, now())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+            """,
+            (f"watermark:{key}", __import__("json").dumps(value)),
+        )
     else:
-        execute(sql, params)
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        from git_synapse.db.orm import models, session_scope
+
+        with session_scope() as session:
+            Meta = models().Meta
+            statement = pg_insert(Meta).values(key=f"watermark:{key}", value=value)
+            session.execute(statement.on_conflict_do_update(
+                index_elements=[Meta.key],
+                set_={"value": statement.excluded.value},
+            ))
 
 
 def copy_rows(

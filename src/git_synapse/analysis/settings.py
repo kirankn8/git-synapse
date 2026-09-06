@@ -13,10 +13,12 @@ be altered between two readings of the same table.
 """
 from __future__ import annotations
 
-import json
 import logging
 
-from git_synapse.db.engine import execute, query_one
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+from git_synapse.db.orm import models, session_scope
 
 log = logging.getLogger(__name__)
 
@@ -40,10 +42,9 @@ def _key(name: str) -> str:
 
 def get(name: str) -> str | None:
     """The stored override for one setting, or None when unset."""
-    row = query_one("SELECT value FROM meta WHERE key = %s", (_key(name),))
-    if row is None:
-        return None
-    value = row.get("value")
+    with session_scope() as session:
+        Meta = models().Meta
+        value = session.scalar(select(Meta.value).where(Meta.key == _key(name)))
     return str(value) if value is not None else None
 
 
@@ -51,19 +52,20 @@ def set(name: str, value: str) -> None:  # noqa: A001 - reads better than set_
     """Store an override. Callers validate; this only persists."""
     if name not in WRITABLE:
         raise ValueError(f"{name!r} is not a writable setting")
-    execute(
-        """
-        INSERT INTO meta (key, value, updated_at)
-        VALUES (%s, %s::jsonb, now())
-        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
-        """,
-        (_key(name), json.dumps(value)),
-    )
+    with session_scope() as session:
+        Meta = models().Meta
+        statement = pg_insert(Meta).values(key=_key(name), value=value)
+        session.execute(statement.on_conflict_do_update(
+            index_elements=[Meta.key],
+            set_={"value": statement.excluded.value},
+        ))
 
 
 def clear(name: str) -> None:
     """Drop an override, so the environment value applies again."""
-    execute("DELETE FROM meta WHERE key = %s", (_key(name),))
+    with session_scope() as session:
+        Meta = models().Meta
+        session.execute(delete(Meta).where(Meta.key == _key(name)))
 
 
 def effective(name: str, fallback: str) -> str:

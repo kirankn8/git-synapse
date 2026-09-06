@@ -19,9 +19,13 @@ import os
 import queue
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from git_synapse.db.engine import execute, query, query_one
+from sqlalchemy import Numeric, cast, delete, desc, func, literal, select
+from sqlalchemy.dialects.postgresql import INTERVAL
+
+from git_synapse.db.orm import models, session_scope
 
 log = logging.getLogger(__name__)
 
@@ -174,19 +178,17 @@ def _flush_once(block: bool = False, limit: int = 200) -> int:
         except queue.Empty:
             break
 
-    values = ",".join(["(%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,%s)"] * len(batch))
-    params: list[Any] = []
-    for row in batch:
-        params += [row["surface"], row["name"], row["method"], row["status"],
-                   row["duration_ms"], row["arguments"], row["result_preview"],
-                   row["result_bytes"], row["result_rows"], row["error"],
-                   row["client"]]
-    execute(
-        "INSERT INTO call_log (surface, name, method, status, duration_ms,"
-        " arguments, result_preview, result_bytes, result_rows, error, client)"
-        f" VALUES {values}",
-        tuple(params),
-    )
+    with session_scope() as session:
+        CallLog = models().CallLog
+        entries = []
+        for row in batch:
+            values = dict(row)
+            values["arguments"] = (json.loads(values["arguments"])
+                                    if values["arguments"] is not None else None)
+            values["result_preview"] = (json.loads(values["result_preview"])
+                                         if values["result_preview"] is not None else None)
+            entries.append(CallLog(**values))
+        session.add_all(entries)
     return len(batch)
 
 
@@ -203,14 +205,14 @@ def _drain_at_exit() -> None:  # pragma: no cover - process teardown
 
 def prune() -> int:
     """Drop rows past the retention bounds. Returns how many went."""
-    return int(execute(
-        """
-        DELETE FROM call_log
-        WHERE at < now() - make_interval(days => %(days)s)
-           OR id <= (SELECT max(id) - %(rows)s FROM call_log)
-        """,
-        {"days": KEEP_DAYS, "rows": KEEP_ROWS},
-    ) or 0)
+    with session_scope() as session:
+        CallLog = models().CallLog
+        cutoff = datetime.now(UTC) - timedelta(days=KEEP_DAYS)
+        oldest_kept = select((func.max(CallLog.id) - KEEP_ROWS).label("oldest")).scalar_subquery()
+        result = session.execute(delete(CallLog).where(
+            (CallLog.at < cutoff) | (CallLog.id <= oldest_kept),
+        ))
+        return int(result.rowcount or 0)
 
 
 # --------------------------------------------------------------------- reads
@@ -225,55 +227,44 @@ def known_mcp_tools() -> list[str]:
 
 def summary(hours: int = 24, surface: str | None = None) -> dict:
     """Headline counts an operator reads first: volume, failures, latency."""
-    clause = "at > now() - make_interval(hours => %(hours)s)"
-    params: dict[str, Any] = {"hours": hours}
-    if surface:
-        clause += " AND surface = %(surface)s"
-        params["surface"] = surface
-    row = query_one(
-        f"""
-        SELECT count(*)                                        AS calls,
-               count(*) FILTER (WHERE surface = 'mcp')         AS mcp_calls,
-               count(*) FILTER (WHERE surface = 'http')        AS http_calls,
-               count(*) FILTER (WHERE status = 'error')        AS errors,
-               count(DISTINCT client)                          AS clients,
-               round(percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms)::numeric, 1) AS p50_ms,
-               round(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::numeric, 1) AS p95_ms,
-               max(at)                                         AS last_call
-        FROM call_log WHERE {clause}
-        """,
-        params,
-    ) or {}
-    return {**row, "hours": hours, "surface": surface, "dropped": dropped()}
+    with session_scope() as session:
+        CallLog = models().CallLog
+        conditions = [CallLog.at > datetime.now(UTC) - timedelta(hours=hours)]
+        if surface:
+            conditions.append(CallLog.surface == surface)
+        row = session.execute(select(
+            func.count().label("calls"),
+            func.count().filter(CallLog.surface == "mcp").label("mcp_calls"),
+            func.count().filter(CallLog.surface == "http").label("http_calls"),
+            func.count().filter(CallLog.status == "error").label("errors"),
+            func.count(func.distinct(CallLog.client)).label("clients"),
+            func.round(cast(func.percentile_cont(0.5).within_group(CallLog.duration_ms), Numeric), 1).label("p50_ms"),
+            func.round(cast(func.percentile_cont(0.95).within_group(CallLog.duration_ms), Numeric), 1).label("p95_ms"),
+            func.max(CallLog.at).label("last_call"),
+        ).where(*conditions)).mappings().one()
+    return {**dict(row), "hours": hours, "surface": surface, "dropped": dropped()}
 
 
 def by_name(surface: str | None = None, hours: int = 24, limit: int = 50,
             status: str | None = None) -> list[dict]:
     """Which tools and routes are actually used, and how well they behave."""
-    clause = "at > now() - make_interval(hours => %(hours)s)"
-    params: dict[str, Any] = {"hours": hours, "limit": limit}
-    if surface:
-        clause += " AND surface = %(surface)s"
-        params["surface"] = surface
-    if status:
-        clause += " AND status = %(status)s"
-        params["status"] = status
-    rows = query(
-        f"""
-        SELECT surface, name,
-               count(*)                                 AS calls,
-               count(*) FILTER (WHERE status = 'error') AS errors,
-               round(avg(duration_ms)::numeric, 1)      AS avg_ms,
-               max(duration_ms)                         AS max_ms,
-               round(avg(result_rows)::numeric, 1)      AS avg_rows,
-               max(at)                                  AS last_call
-        FROM call_log WHERE {clause}
-        GROUP BY surface, name
-        ORDER BY calls DESC
-        LIMIT %(limit)s
-        """,
-        params,
-    )
+    with session_scope() as session:
+        CallLog = models().CallLog
+        conditions = [CallLog.at > datetime.now(UTC) - timedelta(hours=hours)]
+        if surface:
+            conditions.append(CallLog.surface == surface)
+        if status:
+            conditions.append(CallLog.status == status)
+        rows = [dict(row) for row in session.execute(select(
+            CallLog.surface, CallLog.name,
+            func.count().label("calls"),
+            func.count().filter(CallLog.status == "error").label("errors"),
+            func.round(cast(func.avg(CallLog.duration_ms), Numeric), 1).label("avg_ms"),
+            func.max(CallLog.duration_ms).label("max_ms"),
+            func.round(cast(func.avg(CallLog.result_rows), Numeric), 1).label("avg_rows"),
+            func.max(CallLog.at).label("last_call"),
+        ).where(*conditions).group_by(CallLog.surface, CallLog.name)
+          .order_by(desc("calls")).limit(limit)).mappings()]
     if surface == "http" or status:
         return rows
 
@@ -296,25 +287,22 @@ def timeline(hours: int = 24) -> list[dict]:
     drawn only from hours that had traffic silently closes the gaps and turns
     an outage into a smooth line.
     """
-    return query(
-        """
-        WITH buckets AS (
-            SELECT generate_series(
-                date_trunc('hour', now()) - make_interval(hours => %(hours)s - 1),
-                date_trunc('hour', now()),
-                interval '1 hour') AS hour
-        )
-        SELECT b.hour,
-               count(c.id)                                   AS calls,
-               count(c.id) FILTER (WHERE c.surface = 'mcp')  AS mcp,
-               count(c.id) FILTER (WHERE c.surface = 'http') AS http,
-               count(c.id) FILTER (WHERE c.status = 'error') AS errors
-        FROM buckets b
-        LEFT JOIN call_log c ON date_trunc('hour', c.at) = b.hour
-        GROUP BY b.hour ORDER BY b.hour
-        """,
-        {"hours": max(1, min(hours, 168))},
-    )
+    with session_scope() as session:
+        CallLog = models().CallLog
+        count = max(1, min(hours, 168))
+        buckets = select(func.generate_series(
+            func.date_trunc("hour", func.now()) - cast(literal(f"{count - 1} hours"), INTERVAL),
+            func.date_trunc("hour", func.now()), cast(literal("1 hour"), INTERVAL),
+        ).label("hour")).subquery("buckets")
+        rows = session.execute(select(
+            buckets.c.hour,
+            func.count(CallLog.id).label("calls"),
+            func.count(CallLog.id).filter(CallLog.surface == "mcp").label("mcp"),
+            func.count(CallLog.id).filter(CallLog.surface == "http").label("http"),
+            func.count(CallLog.id).filter(CallLog.status == "error").label("errors"),
+        ).outerjoin(CallLog, func.date_trunc("hour", CallLog.at) == buckets.c.hour)
+          .group_by(buckets.c.hour).order_by(buckets.c.hour)).mappings().all()
+        return [dict(row) for row in rows]
 
 
 def recent(
@@ -325,26 +313,25 @@ def recent(
     hours: int | None = None,
 ) -> list[dict]:
     """The call list itself, newest first, without the payloads."""
-    clauses: list[str] = ["TRUE"]
-    params: dict[str, Any] = {"limit": limit}
-    if hours:
-        clauses.append("at > now() - make_interval(hours => %(hours)s)")
-        params["hours"] = hours
-    for column, value in (("surface", surface), ("name", name), ("status", status)):
-        if value:
-            clauses.append(f"{column} = %({column})s")
-            params[column] = value
-    return query(
-        f"""
-        SELECT id, at, surface, name, method, status, duration_ms,
-               result_rows, result_bytes, error, client
-        FROM call_log WHERE {' AND '.join(clauses)}
-        ORDER BY at DESC, id DESC LIMIT %(limit)s
-        """,
-        params,
-    )
+    with session_scope() as session:
+        CallLog = models().CallLog
+        conditions = []
+        if hours:
+            conditions.append(CallLog.at > datetime.now(UTC) - timedelta(hours=hours))
+        for column, value in ((CallLog.surface, surface), (CallLog.name, name),
+                              (CallLog.status, status)):
+            if value:
+                conditions.append(column == value)
+        return [dict(row) for row in session.execute(select(
+            CallLog.id, CallLog.at, CallLog.surface, CallLog.name, CallLog.method,
+            CallLog.status, CallLog.duration_ms, CallLog.result_rows,
+            CallLog.result_bytes, CallLog.error, CallLog.client,
+        ).where(*conditions).order_by(CallLog.at.desc(), CallLog.id.desc()).limit(limit)).mappings()]
 
 
 def detail(call_id: int) -> dict | None:
     """One call in full: what was asked, and what came back."""
-    return query_one("SELECT * FROM call_log WHERE id = %s", (call_id,))
+    with session_scope() as session:
+        row = session.get(models().CallLog, call_id)
+        return ({column.name: getattr(row, column.name) for column in row.__table__.columns}
+                if row else None)

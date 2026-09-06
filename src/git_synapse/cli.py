@@ -13,6 +13,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from git_synapse import auth
 from git_synapse.analysis import depbump, mining, predict
 from git_synapse.analysis import query as q
 from git_synapse.analysis.aggregate import rebuild_repo, repos_needing_aggregation
@@ -28,6 +29,9 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+admin_app = typer.Typer(help="First-administrator and user administration helpers.",
+                         no_args_is_help=True)
+app.add_typer(admin_app, name="admin")
 console = Console()
 
 
@@ -47,6 +51,21 @@ def init() -> None:
     """Create the schema. Idempotent, and run automatically by every service."""
     _setup()
     console.print("[green]schema applied[/green]")
+
+
+@admin_app.command("setup-token")
+def admin_setup_token() -> None:
+    """Print the one-time token used to create the first administrator.
+
+    This is intentionally a CLI operation rather than a public API route: the
+    caller must already have access to the deployment's runtime/container.
+    It replaces fragile log-grepping in local and Kubernetes setup flows.
+    """
+    _setup()
+    if auth.count_users() > 0:
+        console.print("[yellow]The first administrator has already been created.[/yellow]")
+        raise typer.Exit(1)
+    console.print(auth.setup_token())
 
 
 @app.command("discover")

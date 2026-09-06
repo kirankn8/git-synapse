@@ -1,0 +1,19 @@
+name: Validate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  setup-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate installer shell syntax
+        run: bash -n scripts/install.sh
+      - name: Validate chart
+        uses: azure/setup-helm@v4
+      - run: helm lint charts/git-synapse
+      - run: helm template git-synapse charts/git-synapse >/tmp/git-synapse.yaml
+      - run: "grep -q 'kind: Secret' /tmp/git-synapse.yaml"
