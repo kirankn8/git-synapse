@@ -619,8 +619,9 @@ def test_resolving_a_url_reads_without_writing(no_accounts, monkeypatch):
     from git_synapse.ingest import accounts as acc
 
     monkeypatch.setattr(acc, "resolve_url",
-                        lambda url, limit=300, token="": {"kind": "repo", "repos": [],
-                                                          "owner": "acme"})
+                        lambda url, limit=300, token="", page=1: {"kind": "repo",
+                                                             "repos": [],
+                                                             "owner": "acme"})
     r = no_accounts.post("/api/accounts/resolve", json={"url": "https://github.com/acme/x"})
     assert r.status_code == 200 and r.json()["kind"] == "repo"
     # Whether a token could be kept at all, so the form knows to offer.
@@ -637,7 +638,7 @@ def test_a_host_that_refuses_is_reported_as_a_bad_gateway(no_accounts, monkeypat
     """It is not the caller's request that is wrong."""
     from git_synapse.ingest import accounts as acc
 
-    def _boom(url, limit=300, token=""):
+    def _boom(url, limit=300, token="", page=1):
         raise RuntimeError("connection reset")
 
     monkeypatch.setattr(acc, "resolve_url", _boom)
@@ -708,7 +709,7 @@ def test_a_resolve_that_names_no_owner_is_a_422(no_accounts, monkeypatch):
     from git_synapse.ingest import accounts as acc
     from git_synapse.ingest.accounts import AccountError
 
-    def _refuse(url, limit=300, token=""):
+    def _refuse(url, limit=300, token="", page=1):
         raise AccountError("git.corp has no API we can list")
 
     monkeypatch.setattr(acc, "resolve_url", _refuse)

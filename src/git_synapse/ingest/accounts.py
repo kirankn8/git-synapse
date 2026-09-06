@@ -454,7 +454,7 @@ def _cached_listing(key: tuple[str, str]) -> dict | None:
     return payload
 
 
-def resolve_url(url: str, limit: int = 300, token: str = "") -> dict:
+def resolve_url(url: str, limit: int = 300, token: str = "", page: int = 1) -> dict:
     """Work out what a pasted URL is, and what could be tracked from it.
 
     This is what makes adding something one field instead of six. The caller
@@ -469,6 +469,12 @@ def resolve_url(url: str, limit: int = 300, token: str = "") -> dict:
     the owner: pasting one repository from an organisation of 8,296 is a
     question about one repository, and answering it by paging through
     eighty-three listings would be the slowest possible way to say yes.
+
+    An owner comes back **one page at a time**. Every host caps a listing at a
+    hundred, so 8,296 repositories is 83 requests and roughly twenty-five
+    seconds -- which as a single blocking call is twenty-five seconds of blank
+    screen. The caller draws the first hundred immediately and asks for the
+    next while the reader is already reading.
     """
     from git_synapse.ingest import providers, sources
 
@@ -544,7 +550,7 @@ def resolve_url(url: str, limit: int = 300, token: str = "") -> dict:
 
     # A token changes what is visible, so it must not read another caller's
     # anonymous answer.
-    cache_key = (source.host, source.owner.lower()) if not secret else None
+    cache_key = (source.host, source.owner.lower(), page) if not secret else None
     if cache_key is not None:
         cached = _cached_listing(cache_key)
         if cached is not None:
@@ -557,7 +563,7 @@ def resolve_url(url: str, limit: int = 300, token: str = "") -> dict:
                 "single repository instead — it will still be cloned and "
                 "analysed in full.")
         try:
-            records = client.list_repos(source.owner)
+            found = client.list_page(source.owner, page)
         except Exception as exc:
             if not _is_rate_limited(exc):
                 raise
@@ -572,20 +578,17 @@ def resolve_url(url: str, limit: int = 300, token: str = "") -> dict:
                 "listing_error": _rate_limit_message(source),
             }
 
-    records.sort(key=lambda r: (-(r.stargazers or 0), r.name.lower()))
-    # The provider stops at LIST_CAP, so a listing that came back full is one
-    # that was cut: the true total is unknown and larger. Reporting `len` as
-    # the total would state the cap as a fact about the owner.
-    capped = len(records) >= providers.LIST_CAP
+    records = sorted(found.records, key=lambda r: (-(r.stargazers or 0), r.name.lower()))
     payload = {
         **base,
         "kind": "owner",
-        "repos": [_repo(r) for r in records[:limit]],
-        "total": None if capped else len(records),
-        "shown": len(records[:limit]),
-        # Nobody reads past a few hundred rows, and "track everything" is one
-        # flag rather than 8,296 names.
-        "truncated": capped or len(records) > limit,
+        "repos": [_repo(r) for r in records],
+        # What the owner actually has, where the host says so. Unknown stays
+        # unknown: reporting how many we have fetched as the total would state
+        # our own progress as a fact about somebody else's organisation.
+        "total": found.total,
+        "page": page,
+        "has_more": found.has_more,
         "cached": False,
     }
     if cache_key is not None:

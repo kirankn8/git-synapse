@@ -812,7 +812,24 @@ more than 2,500 repositories.
 
 **An owner URL is a question, not an instruction.** It comes back as a list to
 tick rather than being added whole, because "add microsoft" almost never means
-8,296 repositories. Forks and archived repositories are listed but not
+8,296 repositories.
+
+**And it arrives a page at a time.** Every host caps a listing at a hundred and
+silently ignores a larger number — asking GitHub for 500 returns 100 and a
+"there is more" link — so 8,296 repositories is 83 requests and roughly
+twenty-five seconds. As one blocking call that is twenty-five seconds of blank
+screen, so the first hundred are drawn immediately and the rest arrive behind
+the reader, who is already reading. The pages are walked in sequence rather
+than at once: the budget is hourly, and eighty-three requests fired
+simultaneously is how a host decides you are a robot. A page that fails stops
+the walk and keeps what arrived, because a partial list somebody can act on
+beats an error where a list was.
+
+The count shown is the owner's own, taken from the `rel="last"` link, GitLab's
+`X-Total` header or Bitbucket's `size` field — all of which are already in the
+response. Where a host will not say, it stays unknown: reporting how many have
+been fetched as the total would state our own progress as a fact about somebody
+else's organisation. Forks and archived repositories are listed but not
 pre-selected: a fork's history is its parent's, and an archive cannot change
 again, so both are usually noise — but "usually" is not "never", which is why
 they are shown at all. *Track everything under this owner* is a separate offer

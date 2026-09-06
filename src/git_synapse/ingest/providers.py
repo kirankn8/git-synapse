@@ -22,6 +22,7 @@ Each client implements two questions:
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -32,12 +33,32 @@ from git_synapse.ingest.sources import Source
 
 log = logging.getLogger(__name__)
 
-#: A picker is a list a person reads, and nobody reads past a few hundred. The
-#: cap keeps a paste of a 8,296-repository organisation from becoming ninety
-#: sequential requests before anything appears on screen; the ordering below
-#: makes the cut the *least* interesting repositories rather than an arbitrary
-#: page boundary, and "track everything" needs no list at all.
+#: What a host returns in one request. Every one of them caps at 100 and
+#: silently ignores a larger number -- asking GitHub for 500 returns 100 and a
+#: "there is more" link -- so this is a fact about the hosts, not a choice.
+PAGE = 100
+
+#: The cap on a *single blocking call*. Nothing is lost past it: the caller
+#: takes the next page, and the picker keeps asking in the background while the
+#: reader is already looking at the first hundred. Fetching all 83 pages of an
+#: 8,296-repository organisation before drawing anything would be twenty-five
+#: seconds of blank screen.
 LIST_CAP = 300
+
+
+@dataclass
+class Page:
+    """One page of a listing, and whether the host says there is more.
+
+    `total` is the owner's true repository count where the host will say --
+    from a `rel="last"` link, a header, or a field. None means unknown, which
+    must be rendered as unknown: stating the number fetched so far as the total
+    is stating our own progress as a fact about somebody else's organisation.
+    """
+
+    records: list[RepoRecord]
+    has_more: bool
+    total: int | None = None
 
 
 class ProviderError(RuntimeError):
@@ -81,6 +102,18 @@ class Provider:
     def list_repos(self, owner: str) -> list[RepoRecord]:
         raise NotImplementedError
 
+    def list_page(self, owner: str, page: int = 1) -> Page:
+        """One page, for a picker that draws as it loads.
+
+        The default walks `list_repos` and slices, which is correct for any
+        client that cannot do better; the three real ones override it so that
+        page five costs one request rather than five.
+        """
+        rows = self.list_repos(owner)
+        start = (page - 1) * PAGE
+        return Page(rows[start:start + PAGE], has_more=len(rows) > start + PAGE,
+                    total=len(rows))
+
     def supports_listing(self) -> bool:
         return type(self).list_repos is not Provider.list_repos
 
@@ -119,6 +152,7 @@ class GitHubProvider(Provider):
         super().__init__(source, patient, token)
         import dataclasses
 
+        self._kind: str | None = None
         cfg = get_config().github
         if source.api_url and source.api_url != cfg.api_url:
             cfg = dataclasses.replace(cfg, api_url=source.api_url)
@@ -140,6 +174,44 @@ class GitHubProvider(Provider):
 
     def get_repo(self, owner: str, name: str) -> RepoRecord:
         return self._record(self._client._get(f"/repos/{owner}/{name}").json())
+
+    def list_page(self, owner: str, page: int = 1) -> Page:
+        """One page of an owner's repositories.
+
+        Whether an owner is an organisation or a person is not knowable from a
+        URL, so the org endpoint is tried and a 404 falls back -- as part of
+        the real request rather than a probe before it. A probe would be an
+        extra request on every single lookup, which on an anonymous GitHub is
+        one of only sixty an hour.
+        """
+        import dataclasses
+        import re as _re
+
+        params = {"per_page": PAGE, "page": page, "type": "all", "sort": "pushed"}
+        kinds = [self._kind] if self._kind else ["orgs", "users"]
+        for i, kind in enumerate(kinds):
+            try:
+                response = self._client._get(f"/{kind}/{owner}/repos", params)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404 or i == len(kinds) - 1:
+                    raise
+                continue
+            self._kind = kind
+            break
+
+        rows = [dataclasses.replace(RepoRecord.from_api(p), host=self.source.host)
+                for p in response.json()]
+        link = response.headers.get("link", "")
+        last = _re.search(r'[?&]page=(\d+)[^>]*>;\s*rel="last"', link)
+        return Page(
+            rows,
+            has_more='rel="next"' in link,
+            # The last page number times the page size is an upper bound, not
+            # the count; the final page is rarely full. Good enough to say
+            # "about 8,300", which is what a progress line needs.
+            total=int(last.group(1)) * PAGE if last else (
+                (page - 1) * PAGE + len(rows) if 'rel="next"' not in link else None),
+        )
 
     def list_repos(self, owner: str) -> list[RepoRecord]:
         # An owner may be an organisation or a person, and the caller pasting a
@@ -213,6 +285,34 @@ class GitLabProvider(Provider):
 
         encoded = quote(f"{owner}/{name}", safe="")
         return self._record(self._get(f"/projects/{encoded}").json())
+
+    def list_page(self, owner: str, page: int = 1) -> Page:
+        """One page of a group's projects, subgroups included.
+
+        GitLab reports the totals in headers, and omits them once a set is
+        large enough that counting it would be expensive -- so a missing header
+        means unknown, not zero.
+        """
+        from urllib.parse import quote
+
+        encoded = quote(owner, safe="")
+        params = {"per_page": PAGE, "page": page, "include_subgroups": "true",
+                  "order_by": "star_count", "sort": "desc"}
+        try:
+            response = self._get(f"/groups/{encoded}/projects", params)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            # A user, not a group. Their projects have no subgroups to include.
+            response = self._get(f"/users/{encoded}/projects",
+                                 {"per_page": PAGE, "page": page})
+        rows = [self._record(p) for p in response.json()]
+        total = response.headers.get("x-total")
+        return Page(
+            rows,
+            has_more=bool(response.headers.get("x-next-page")) or len(rows) == PAGE,
+            total=int(total) if total and total.isdigit() else None,
+        )
 
     def list_repos(self, owner: str) -> list[RepoRecord]:
         from urllib.parse import quote
@@ -288,6 +388,17 @@ class BitbucketProvider(Provider):
         response = self._client.get(f"/repositories/{owner}/{name}")
         response.raise_for_status()
         return self._record(response.json())
+
+    def list_page(self, owner: str, page: int = 1) -> Page:
+        """Bitbucket pages by number and reports the total in `size`."""
+        response = self._client.get(f"/repositories/{owner}",
+                                    params={"pagelen": PAGE, "page": page})
+        response.raise_for_status()
+        payload = response.json()
+        rows = [self._record(p) for p in payload.get("values") or []]
+        size = payload.get("size")
+        return Page(rows, has_more=bool(payload.get("next")),
+                    total=int(size) if isinstance(size, int) else None)
 
     def list_repos(self, owner: str) -> list[RepoRecord]:
         out: list[RepoRecord] = []

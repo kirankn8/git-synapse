@@ -48,6 +48,16 @@ class _Fake:
             raise self.error
         return list(self.many or [])
 
+    def list_page(self, owner, page=1):
+        self.calls.append(("list_page", owner, page))
+        if self.error:
+            raise self.error
+        rows = list(self.many or [])
+        start = (page - 1) * providers.PAGE
+        chunk = rows[start:start + providers.PAGE]
+        return providers.Page(chunk, has_more=len(rows) > start + providers.PAGE,
+                              total=len(rows))
+
 
 @pytest.fixture
 def fake(monkeypatch):
@@ -78,7 +88,7 @@ def test_a_repository_url_costs_one_request_and_never_lists_the_owner(db, fake, 
                                     stargazers=190931)))
     found = accounts.resolve_url("https://github.com/microsoft/vscode")
     assert found["kind"] == "repo"
-    assert [c[0] for c in client.calls] == ["get_repo"]
+    assert [c[0] for c in client.calls] == ["get_repo"], "no listing at all"
     assert found["repos"][0]["full_name"] == "microsoft/vscode"
     assert found["total"] == 1
 
@@ -168,13 +178,35 @@ def test_an_error_that_is_neither_is_raised_as_it_is(db, fake, clean):
         accounts.resolve_url("https://github.com/acme/thing")
 
 
-def test_a_capped_listing_does_not_report_the_cap_as_the_total(db, fake, clean):
-    """`total` is what the owner has. Stating the cap would be stating our own
-    limit as a fact about somebody else's organisation."""
-    fake(_Fake(many=[_record(f"acme/r{i}") for i in range(providers.LIST_CAP)]))
-    found = accounts.resolve_url("https://github.com/acme")
-    assert found["total"] is None and found["truncated"] is True
-    assert found["shown"] == providers.LIST_CAP
+def test_an_owner_arrives_one_page_at_a_time(db, fake, clean):
+    """Every host caps a listing at a hundred, so 8,296 repositories is 83
+    requests -- which as one blocking call is twenty-five seconds of blank
+    screen. Page one is drawn, and the rest arrive behind the reader."""
+    fake(_Fake(many=[_record(f"acme/r{i}") for i in range(250)]))
+    first = accounts.resolve_url("https://github.com/acme")
+    assert len(first["repos"]) == providers.PAGE
+    assert first["page"] == 1 and first["has_more"] is True
+    # The total is what the owner has, not what we have fetched so far.
+    assert first["total"] == 250
+
+    last = accounts.resolve_url("https://github.com/acme", page=3)
+    assert len(last["repos"]) == 50 and last["has_more"] is False
+
+
+def test_a_later_page_costs_one_request(db, fake, clean):
+    """Page five must not be four pages of walking to reach it."""
+    client = fake(_Fake(many=[_record(f"acme/r{i}") for i in range(500)]))
+    accounts.resolve_url("https://github.com/acme", page=5)
+    assert client.calls == [("list_page", "acme", 5)]
+
+
+def test_each_page_is_cached_on_its_own(db, fake, clean):
+    client = fake(_Fake(many=[_record(f"acme/r{i}") for i in range(250)]))
+    accounts.resolve_url("https://github.com/acme", page=1)
+    accounts.resolve_url("https://github.com/acme", page=2)
+    assert accounts.resolve_url("https://github.com/acme", page=1)["cached"] is True
+    assert accounts.resolve_url("https://github.com/acme", page=2)["cached"] is True
+    assert len(client.calls) == 2
 
 
 # ------------------------------------------------------------------ writing
@@ -458,7 +490,7 @@ def test_a_second_look_at_the_same_owner_spends_nothing(db, fake, clean):
     first = accounts.resolve_url("https://github.com/acme")
     second = accounts.resolve_url("https://github.com/acme")
     assert first["cached"] is False and second["cached"] is True
-    assert [c[0] for c in client.calls] == ["list_repos"], "asked the host once"
+    assert [c[0] for c in client.calls] == ["list_page"], "asked the host once"
     assert second["repos"] == first["repos"]
 
 
@@ -481,7 +513,7 @@ def test_a_lookup_carrying_a_token_never_reads_the_anonymous_answer(db, fake, cl
     accounts.resolve_url("https://github.com/acme")
     found = accounts.resolve_url("https://github.com/acme", token="ghp_x")
     assert found["cached"] is False
-    assert len([c for c in client.calls if c[0] == "list_repos"]) == 2
+    assert len([c for c in client.calls if c[0] == "list_page"]) == 2
 
 
 def test_a_refused_listing_is_not_cached(db, fake, clean):

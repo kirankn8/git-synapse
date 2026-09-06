@@ -3768,6 +3768,12 @@ on('/sources', async () => {
     // whole owner -- which needs no list. Forcing the toggle on is the honest
     // rendering of that: the choice really has collapsed to one.
     const blind = !found.repos.length;
+    // Every host returns a hundred at a time, so the rest arrive behind the
+    // reader while they are already looking at the first hundred. `rows` is
+    // the accumulator; `found.repos` is only ever page one.
+    const rows = [...found.repos];
+    let more = !!found.has_more;
+    let loading = more;
     // Keyed on `key`, the path under the owner, not on `name`: GitLab groups
     // nest, so one owner can hold two projects called the same thing.
     const chosen = new Set(found.repos.filter((r) => r.suggested).map((r) => r.key));
@@ -3785,9 +3791,8 @@ on('/sources', async () => {
         ? (found.total == null
             ? `every repository under ${found.owner}, now and in future`
             : `every repository under ${found.owner} \u2014 ${num(found.total)} now, and any added later`)
-        : (found.total == null
-            ? `${num(chosen.size)} of the first ${num(found.shown)} selected`
-            : `${num(chosen.size)} of ${num(found.total)} selected`);
+        : `${num(chosen.size)} of ${found.total == null ? num(rows.length) : num(found.total)}`
+          + ` selected${loading ? ` \u00b7 loading ${num(rows.length)}\u2026` : ''}`;
       go.textContent = everything.checked
         ? `Track all of ${found.owner}`
         : `Track ${num(n)} ${n === 1 ? 'repository' : 'repositories'}`;
@@ -3797,7 +3802,7 @@ on('/sources', async () => {
 
     const paint = () => {
       const q = search.value.trim().toLowerCase();
-      const shown = found.repos.filter((r) => !q || r.key.toLowerCase().includes(q));
+      const shown = rows.filter((r) => !q || r.key.toLowerCase().includes(q));
       rowsBox.replaceChildren(...shown.map((r) => {
         const box = h('input', {
           type: 'checkbox', checked: chosen.has(r.key), disabled: r.already_tracked,
@@ -3819,7 +3824,50 @@ on('/sources', async () => {
             r.is_private ? h('span', { class: 'badge info' }, 'private') : null,
             r.already_tracked ? h('span', { class: 'badge ok' }, 'tracked') : null));
       }));
-      if (!shown.length) rowsBox.append(h('div', { class: 'empty' }, 'Nothing matches'));
+      if (!shown.length) {
+        rowsBox.append(h('div', { class: 'empty' },
+          loading ? 'Still loading\u2026' : 'Nothing matches'));
+      }
+    };
+
+    const note = h('div', { class: 'help', hidden: true });
+
+    /* Keep asking for the next page until the host says there is no more.
+       Sequential rather than parallel: the budget is per hour, and eighty-three
+       requests fired at once is how a host decides you are a robot. A page that
+       fails stops the walk and keeps what arrived -- a partial list somebody
+       can act on beats an error where a list was. */
+    const loadRest = async () => {
+      let page = found.page || 1;
+      while (more && !cancelled) {
+        page += 1;
+        let next;
+        try {
+          next = await apiSend('POST', '/api/accounts/resolve',
+                               { url: found.url, token: lastToken, page });
+        } catch (err) {
+          more = false;
+          loading = false;
+          note.textContent = `Stopped after ${num(rows.length)} of `
+            + `${found.total == null ? 'an unknown number' : num(found.total)}: `
+            + String(err.message || err);
+          note.hidden = false;
+          paint();
+          label();
+          return;
+        }
+        for (const r of next.repos) {
+          if (!rows.some((x) => x.key === r.key)) {
+            rows.push(r);
+            if (r.suggested) chosen.add(r.key);
+          }
+        }
+        more = !!next.has_more;
+        paint();
+        label();
+      }
+      loading = false;
+      label();
     };
 
     everything.onchange = label;
@@ -3841,6 +3889,7 @@ on('/sources', async () => {
     };
     paint();
     label();
+    if (more) loadRest();
 
     return h('div', {},
       h('div', { class: 'resolve-head' },
@@ -3860,6 +3909,7 @@ on('/sources', async () => {
             + 'To take just one repository, paste its own URL instead: that costs '
             + 'a single request.')
         : null,
+      note,
       found.repos.length > 8 ? h('div', { class: 'toolbar' }, search) : null,
       blind ? null : rowsBox,
       h('div', { class: 'form-actions' }, count, go));
@@ -3903,12 +3953,20 @@ on('/sources', async () => {
   // one that actually worked rather than whatever the field holds afterwards.
   let lastToken = '';
 
+  /* A background page-walk outlives the panel that started it. Without this a
+     second lookup leaves the first still appending rows into a list nobody is
+     looking at, and still spending request budget on it. */
+  let cancelled = false;
+
   const look = async () => {
     const value = url.value.trim();
     if (!value) { toast('Paste a repository or organisation URL', true); url.focus(); return; }
     submit.disabled = true;
     submit.textContent = 'Looking\u2026';
     panel.hidden = true;
+    cancelled = true;             // stop whatever the last lookup started
+    await Promise.resolve();
+    cancelled = false;
     try {
       const found = await apiSend('POST', '/api/accounts/resolve',
                                   { url: value, token: token.value.trim() });
