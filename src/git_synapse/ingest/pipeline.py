@@ -31,8 +31,8 @@ from git_synapse.analysis.aggregate import rebuild_repo
 from git_synapse.analysis.score import score_repo
 from git_synapse.config import get_config
 from git_synapse.db.engine import connection, copy_rows
-from git_synapse.ingest import accounts, gitops
-from git_synapse.ingest.github import GitHubClient, RepoRecord, select_repos
+from git_synapse.ingest import accounts, gitops, providers, sources
+from git_synapse.ingest.github import RepoRecord, select_repos
 from git_synapse.ingest.parser import iter_commits
 from git_synapse.ingest.store import load_commits, load_tags, upsert_repo
 
@@ -409,15 +409,48 @@ def discover(trigger: str = "manual") -> list[RepoRecord]:
 
 
 def _discover_account(account: dict) -> tuple[list[RepoRecord], int]:
-    """List and filter one account, returning the kept records and the raw count.
+    """List and filter one source, returning the kept records and the raw count.
 
     The raw count is what the shrink guard has to reason about: narrowing an
     allowlist legitimately collapses the *filtered* result, while a credential
     that has stopped working collapses the *listing*.
+
+    An allowlist is fetched, not filtered. Pasting one repository from an
+    organisation of 8,296 asks a question about one repository, and answering
+    it by paging through eighty-three listings -- on every nightly refresh --
+    is work nobody asked for. A source with an allowlist therefore costs one
+    request per named repository and never enumerates its owner at all.
     """
     cfg = accounts.config_for(account)
-    with GitHubClient(cfg) as client:
-        records = client.list_account_repos(account["login"], account["kind"])
+    source = sources.Source(
+        provider=account.get("provider") or "github",
+        host=account.get("host") or "github.com",
+        owner=account["login"],
+        repo=None,
+        api_url=account.get("api_url"),
+        web_url="",
+        clone_url="",
+    )
+    only = list(account.get("only_repos") or ())
+    token = accounts.credential_for(accounts._with_credential(account))
+    with providers.for_source(source, token=token) as client:
+        if only:
+            records = []
+            for name in only:
+                try:
+                    records.append(client.get_repo(account["login"], name))
+                except Exception as exc:  # noqa: BLE001 - one bad name must not
+                    # cost the others; the source's error field records it.
+                    log.warning("could not fetch %s/%s: %s",
+                                account["login"], name, exc)
+            # Already exactly what was asked for: running the filters here would
+            # let `include_forks` drop a repository somebody named explicitly.
+            return records, len(records)
+        if not client.supports_listing():
+            log.warning("%s has no API to enumerate; add its repositories by URL",
+                        account["login"])
+            return [], 0
+        records = client.list_repos(account["login"])
     return select_repos(records, cfg), len(records)
 
 
@@ -527,6 +560,16 @@ def _drop_unreachable_commits(repo_id: int, mirror: Path) -> int:
         )
 
 
+def _clone_token(record: RepoRecord) -> str:
+    """The access token for this repository's source, if it carries one."""
+    try:
+        account = accounts.find_by_login(record.owner, record.host)
+        return accounts.credential_for(accounts._with_credential(account))
+    except Exception:  # noqa: BLE001 - an unreadable credential must not stop
+        # the ingest; the deployment-wide token is a working fallback.
+        return ""
+
+
 def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
     """One attempt at mirroring, parsing, loading, aggregating and scoring."""
     cfg = get_config()
@@ -541,12 +584,16 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
         blobless = gitops.choose_clone_mode(record.disk_usage_kb, cfg.ingest)
         result.blobless = blobless
 
-        token = cfg.github.current_token()
+        # This repository's own source credential wins over the deployment
+        # one; `authed_clone_url` then refuses to embed either on a host that
+        # did not issue it.
+        token = _clone_token(record) or cfg.github.current_token()
         fetch = gitops.sync_mirror(
             record.full_name,
             record.authed_clone_url(token),
             public_url=record.clone_url,
             blobless=blobless,
+            host=record.host,
         )
         result.cloned = fetch.cloned
 
@@ -611,7 +658,7 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
             _mark_replays(repo_id, gitops.replayed_commits(fetch.path, branch), conn)
             # After the commits, so each tag resolves to a row rather than
             # leaving commit_id null on the first run.
-            mirror = gitops.mirror_path_for(record.full_name)
+            mirror = gitops.mirror_path_for(record.full_name, host=record.host)
             load_tags(repo_id, gitops.read_tags(mirror, gitops.default_branch(mirror)), conn)
             # Record the default branch tip as the next run's exclusion point.
             # This was every branch tip when the walk covered every branch;
@@ -884,56 +931,42 @@ def _run_ingest_locked(
 def load_repo_records() -> list[RepoRecord]:
     """Rebuild :class:`RepoRecord` objects from the database.
 
-    Lets a refresh run without calling the GitHub API, which is useful when
+    Lets a refresh run without calling any host's API, which is useful when
     re-processing after a config change or when the API is rate limited.
 
     Every descriptive column is read back, not just the handful the pipeline
     needs. The record is written straight back out by ``upsert_repo``, so a
     partial read here silently blanked everything it omitted: language,
     description, topics, licence and stars were wiped on every ingest.
+
+    Columns are named once and zipped into keyword arguments rather than read
+    by position. A positional read is how a column added in the middle of a
+    SELECT list shifts every field after it -- silently, wherever the types
+    happen to be compatible.
     """
+    columns = (
+        "github_id", "owner", "name", "full_name", "provider", "host",
+        "clone_url", "default_branch", "disk_usage_kb", "is_private", "is_fork",
+        "is_archived", "description", "homepage", "html_url", "ssh_url",
+        "primary_language", "topics", "license_spdx", "visibility",
+        "is_template", "is_disabled", "stargazers", "watchers", "forks_count",
+        "open_issues", "github_created_at", "github_updated_at",
+        "github_pushed_at",
+    )
     with connection() as conn:
         rows = conn.execute(
-            """
-            SELECT github_id, owner, name, full_name, clone_url, default_branch,
-                   disk_usage_kb, is_private, is_fork, is_archived,
-                   description, homepage, html_url, ssh_url, primary_language,
-                   topics, license_spdx, visibility, is_template, is_disabled,
-                   stargazers, watchers, forks_count, open_issues,
-                   github_created_at, github_updated_at, github_pushed_at
-            FROM repo WHERE is_enabled ORDER BY id
-            """
+            f"SELECT {', '.join(columns)} FROM repo WHERE is_enabled ORDER BY id"
         ).fetchall()
 
-    return [
-        RepoRecord(
-            github_id=r[0] or 0,
-            owner=r[1],
-            name=r[2],
-            full_name=r[3],
-            clone_url=r[4],
-            default_branch=r[5],
-            disk_usage_kb=r[6],
-            is_private=bool(r[7]),
-            is_fork=bool(r[8]),
-            is_archived=bool(r[9]),
-            description=r[10],
-            homepage=r[11],
-            html_url=r[12],
-            ssh_url=r[13],
-            primary_language=r[14],
-            topics=list(r[15] or []),
-            license_spdx=r[16],
-            visibility=r[17],
-            is_template=bool(r[18]),
-            is_disabled=bool(r[19]),
-            stargazers=r[20] or 0,
-            watchers=r[21] or 0,
-            forks_count=r[22] or 0,
-            open_issues=r[23] or 0,
-            github_created_at=r[24],
-            github_updated_at=r[25],
-            github_pushed_at=r[26],
-        )
-        for r in rows
-    ]
+    booleans = {"is_private", "is_fork", "is_archived", "is_template", "is_disabled"}
+    counts = {"stargazers", "watchers", "forks_count", "open_issues"}
+    out = []
+    for row in rows:
+        fields = dict(zip(columns, row, strict=True))
+        for key in booleans:
+            fields[key] = bool(fields[key])
+        for key in counts:
+            fields[key] = fields[key] or 0
+        fields["topics"] = list(fields["topics"] or [])
+        out.append(RepoRecord(**fields))
+    return out

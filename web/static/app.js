@@ -499,7 +499,7 @@ async function repoTrail(input) {
     const { accounts } = await allAccounts();
     const account = (accounts || []).find((a) => a.id === accountId);
     if (account) {
-      trail.push(['Accounts', '/accounts'], [account.login, `/accounts/${account.id}`]);
+      trail.push(['Sources', '/sources'], [account.login, `/sources/${account.id}`]);
     }
   }
   if (!trail.length) trail.push(['Repositories', '/repos']);
@@ -1032,7 +1032,7 @@ const reposView = async (args, params) => {
   if (account) {
     // An account owns repositories, so this is a rung of the hierarchy rather
     // than a filtered list that happens to look like one.
-    wrap.append(crumbs(['Accounts', '/accounts'], [account.login]));
+    wrap.append(crumbs(['Sources', '/sources'], [account.login]));
     wrap.append(pageHead(`${account.login} repositories`,
       `${repos.count} of the ${account.kind === 'org' ? 'organisation' : 'user'}'s repositories are scanned`));
   } else {
@@ -1067,7 +1067,7 @@ const reposView = async (args, params) => {
     if (search.value) p.set('q', search.value);
     if (langSel.value) p.set('lang', langSel.value);
     if (statusSel.value) p.set('status', statusSel.value);
-    const base = accountId ? `/accounts/${accountId}` : '/repos';
+    const base = accountId ? `/sources/${accountId}` : '/repos';
     go(`${base}${p.toString() ? '?' + p : ''}`);
   };
 
@@ -1242,7 +1242,8 @@ on('/repos/:id', async ({ id }, params) => {
 });
 
 on('/repos', reposView);
-on('/accounts/:id', reposView);
+on('/sources/:id', reposView);
+on('/accounts/:id', ({ id }) => { go(`/sources/${id}`); return h('div'); });
 
 /** Repository-level impact graph: nodes are repos, edges are validated impact. */
 async function repoImpactGraphView(params) {
@@ -3699,86 +3700,279 @@ const field = (label, control, hint) =>
     control,
     hint ? h('div', { class: 'field-hint' }, hint) : null);
 
-/** A checkbox with its label, returned with the input exposed for reading. */
-function toggle(label, checked, hint) {
-  const input = h('input', { type: 'checkbox', id: `t-${label.replace(/\W/g, '')}` });
-  input.checked = checked;
-  const node = h('label', { class: 'toggle' }, input,
-    h('span', {}, h('span', { class: 'toggle-label' }, label),
-      hint ? h('span', { class: 'toggle-hint' }, hint) : null));
-  node.input = input;
-  return node;
-}
+/* "Account" reads as a login you sign in with, which is not what this is: it
+   is a place repositories come from, and one of them may be a self-hosted git
+   server with no accounts at all. The old path still resolves, because links
+   to it exist. */
+on('/accounts', () => { go('/sources'); return h('div'); });
 
-on('/accounts', async () => {
+on('/sources', async () => {
   const data = await api('/api/accounts');
   const rows = data.accounts || [];
   const wrap = h('div');
 
-  wrap.append(pageHead('Accounts',
-    'The organisations and users whose repositories get discovered and scanned. Changes take effect on the next discovery run — nothing needs redeploying.'));
+  wrap.append(pageHead('Sources',
+    'Where repositories come from. Paste a URL from any git host \u2014 changes take effect on the next discovery run, so nothing needs redeploying.'));
 
   const enabled = rows.filter((r) => r.enabled);
   const discovered = rows.reduce((n, r) => n + Number(r.live_repo_count || 0), 0);
   wrap.append(h('div', { class: 'grid grid-stats' },
-    statTile('Accounts', num(rows.length), `${num(enabled.length)} enabled`),
-    statTile('Repositories', num(discovered), 'across every account', () => go('/repos')),
+    statTile('Sources', num(rows.length), `${num(enabled.length)} enabled`),
+    statTile('Repositories', num(discovered), 'across every source', () => go('/repos')),
     statTile('Never scanned', num(rows.filter((r) => !r.last_discovered_at).length), 'awaiting first discovery'),
     statTile('Failing', num(rows.filter((r) => r.last_discover_error).length), 'last discovery errored')));
 
-  // ---- add form -----------------------------------------------------------
-  const login = h('input', { class: 'input', placeholder: 'e.g. kubernetes', autocomplete: 'off', spellcheck: 'false' });
-  const kind = h('select', { class: 'input' },
-    ...(data.kinds || ['org', 'user']).map((k) => h('option', { value: k }, k === 'org' ? 'Organisation' : 'User account')));
-  const only = h('input', { class: 'input', placeholder: 'blank = every repository', autocomplete: 'off' });
-  const skip = h('input', { class: 'input', placeholder: 'comma-separated names to ignore', autocomplete: 'off' });
-  const tForks = toggle('Include forks', true);
-  const tArchived = toggle('Include archived', true);
-  const tPrivate = toggle('Include private', true, 'needs a token with repo scope');
-  const submit = h('button', { class: 'btn primary' }, 'Add account');
+  // ---- add by URL ---------------------------------------------------------
+  /* One field, because a person adding something has the URL in their
+     clipboard already. Decomposing it into a login, a kind, an allowlist and
+     three toggles is asking them to do work the string contains. */
+  const url = h('input', {
+    class: 'input mono', id: 'source-url', autocomplete: 'off', spellcheck: 'false',
+    placeholder: 'https://github.com/microsoft/vscode',
+  });
+  // Distinct from the confirm button the panel renders below it: both are
+  // primary buttons inside the same form, and a selector that cannot tell
+  // them apart is one a test -- or a keyboard user -- will get wrong.
+  const submit = h('button', { class: 'btn primary', id: 'source-lookup' }, 'Look up');
+  const panel = h('div', { class: 'resolve-panel', hidden: true });
 
-  const add = async () => {
-    const value = login.value.trim();
-    if (!value) { toast('Enter a login first', true); login.focus(); return; }
+  /* Most sources are public, so the token field is hidden until it is the
+     answer to something: the reader asks for it, or a lookup came back
+     not-found, which is what a private repository looks like from outside. */
+  const token = h('input', {
+    class: 'input mono', id: 'source-token', type: 'password',
+    autocomplete: 'off', spellcheck: 'false',
+    placeholder: 'ghp_… / glpat-… — only if the repository is private',
+  });
+  const tokenBox = h('div', { class: 'token-box', hidden: true },
+    h('label', { class: 'field-label', for: 'source-token' }, 'Access token'),
+    token,
+    h('div', { class: 'field-hint' },
+      'Kept for this source only, encrypted, and never shown again \u2014 just '
+      + 'the first and last few characters so you can recognise it. Leave it '
+      + 'empty to use whatever credential the deployment is configured with.'));
+  const tokenToggle = h('button', { class: 'linkish', type: 'button' },
+    'Private repository?');
+  tokenToggle.onclick = () => {
+    tokenBox.hidden = !tokenBox.hidden;
+    if (!tokenBox.hidden) token.focus();
+  };
+
+  /* The picker. An owner is shown as a list to tick rather than added whole,
+     because "add microsoft" means 8,296 repositories and almost never means
+     what the person wanted. Forks and archived repositories are listed but
+     start unticked: a fork's history is its parent's, so tracking both files
+     every commit twice. */
+  function picker(found) {
+    // With no list there is nothing to tick, so the only offer left is the
+    // whole owner -- which needs no list. Forcing the toggle on is the honest
+    // rendering of that: the choice really has collapsed to one.
+    const blind = !found.repos.length;
+    // Keyed on `key`, the path under the owner, not on `name`: GitLab groups
+    // nest, so one owner can hold two projects called the same thing.
+    const chosen = new Set(found.repos.filter((r) => r.suggested).map((r) => r.key));
+    const everything = h('input', { type: 'checkbox', checked: blind, disabled: blind });
+    const rowsBox = h('div', { class: 'pick-list' });
+    const search = h('input', {
+      class: 'input', placeholder: 'Filter\u2026', autocomplete: 'off',
+    });
+    const count = h('span', { class: 'card-sub' });
+    const go = h('button', { class: 'btn primary' });
+
+    const label = () => {
+      const n = everything.checked ? found.total : chosen.size;
+      count.textContent = everything.checked
+        ? (found.total == null
+            ? `every repository under ${found.owner}, now and in future`
+            : `every repository under ${found.owner} \u2014 ${num(found.total)} now, and any added later`)
+        : (found.total == null
+            ? `${num(chosen.size)} of the first ${num(found.shown)} selected`
+            : `${num(chosen.size)} of ${num(found.total)} selected`);
+      go.textContent = everything.checked
+        ? `Track all of ${found.owner}`
+        : `Track ${num(n)} ${n === 1 ? 'repository' : 'repositories'}`;
+      go.disabled = !everything.checked && chosen.size === 0;
+      rowsBox.classList.toggle('is-muted', everything.checked);
+    };
+
+    const paint = () => {
+      const q = search.value.trim().toLowerCase();
+      const shown = found.repos.filter((r) => !q || r.key.toLowerCase().includes(q));
+      rowsBox.replaceChildren(...shown.map((r) => {
+        const box = h('input', {
+          type: 'checkbox', checked: chosen.has(r.key), disabled: r.already_tracked,
+          onchange: () => {
+            if (box.checked) chosen.add(r.key); else chosen.delete(r.key);
+            label();
+          },
+        });
+        return h('label', { class: `pick-row${r.already_tracked ? ' is-done' : ''}` },
+          box,
+          // The key, not the name: two projects called `gitlab-runner` in
+          // different subgroups are indistinguishable by name alone.
+          h('span', { class: 'pick-name mono', title: r.full_name }, r.key),
+          h('span', { class: 'pick-meta' },
+            r.language ? h('span', { class: 'badge muted' }, r.language) : null,
+            r.stars ? h('span', {}, `\u2605 ${num(r.stars)}`) : null,
+            r.is_fork ? h('span', { class: 'badge warn' }, 'fork') : null,
+            r.is_archived ? h('span', { class: 'badge muted' }, 'archived') : null,
+            r.is_private ? h('span', { class: 'badge info' }, 'private') : null,
+            r.already_tracked ? h('span', { class: 'badge ok' }, 'tracked') : null));
+      }));
+      if (!shown.length) rowsBox.append(h('div', { class: 'empty' }, 'Nothing matches'));
+    };
+
+    everything.onchange = label;
+    search.oninput = paint;
+    go.onclick = async () => {
+      go.disabled = true;
+      try {
+        await apiSend('POST', '/api/accounts/from-url', {
+          url: found.url,
+          repos: everything.checked ? [] : [...chosen],
+          token: lastToken,
+        });
+        toast(`${found.owner} added \u2014 run a discovery to pick up its history`);
+        route();
+      } catch (err) {
+        toast(String(err.message || err), true);
+        go.disabled = false;
+      }
+    };
+    paint();
+    label();
+
+    return h('div', {},
+      h('div', { class: 'resolve-head' },
+        h('div', {},
+          h('div', { class: 'resolve-title mono' }, found.owner),
+          h('div', { class: 'card-sub' },
+            `${found.provider === 'git' ? 'git' : found.provider} \u00b7 ${found.host}`
+            + (found.truncated
+                ? ` \u00b7 the ${found.repos.length} most starred \u2014 there are more`
+                : ''))),
+        h('label', { class: `pick-all${blind ? ' is-only' : ''}` }, everything,
+          h('span', {}, 'Track everything under this owner'))),
+      found.listing_error
+        ? h('div', { class: 'help' },
+            h('strong', {}, `${found.listing_error} `),
+            'You can still track the whole owner \u2014 that needs no listing. '
+            + 'To take just one repository, paste its own URL instead: that costs '
+            + 'a single request.')
+        : null,
+      found.repos.length > 8 ? h('div', { class: 'toolbar' }, search) : null,
+      blind ? null : rowsBox,
+      h('div', { class: 'form-actions' }, count, go));
+  }
+
+  /* A single repository needs no list: it is one row and one button. */
+  function confirmRepo(found) {
+    const r = found.repos[0];
+    const go = h('button', { class: 'btn primary' },
+      r.already_tracked ? 'Already tracked' : 'Track this repository');
+    go.disabled = !!r.already_tracked;
+    go.onclick = async () => {
+      go.disabled = true;
+      try {
+        await apiSend('POST', '/api/accounts/from-url',
+                      { url: found.url, token: lastToken });
+        toast(`${r.full_name} added \u2014 run a discovery to pick up its history`);
+        route();
+      } catch (err) { toast(String(err.message || err), true); go.disabled = false; }
+    };
+    return h('div', {},
+      h('div', { class: 'resolve-head' },
+        h('div', {},
+          h('div', { class: 'resolve-title mono' }, r.full_name),
+          h('div', { class: 'card-sub' },
+            r.description || `${found.provider} \u00b7 ${found.host}`)),
+        h('div', { class: 'pick-meta' },
+          r.language ? h('span', { class: 'badge muted' }, r.language) : null,
+          r.stars ? h('span', {}, `\u2605 ${num(r.stars)}`) : null,
+          r.is_fork ? h('span', { class: 'badge warn' }, 'fork') : null,
+          r.is_archived ? h('span', { class: 'badge muted' }, 'archived') : null)),
+      !found.has_api
+        ? h('div', { class: 'help' },
+            'No API client for this host, so there is no description or language '
+            + 'to show. It clones, parses and scores exactly the same.')
+        : null,
+      h('div', { class: 'form-actions' }, go));
+  }
+
+  // The token that produced the panel now on screen, so confirming stores the
+  // one that actually worked rather than whatever the field holds afterwards.
+  let lastToken = '';
+
+  const look = async () => {
+    const value = url.value.trim();
+    if (!value) { toast('Paste a repository or organisation URL', true); url.focus(); return; }
     submit.disabled = true;
+    submit.textContent = 'Looking\u2026';
+    panel.hidden = true;
     try {
-      await apiSend('POST', '/api/accounts', {
-        login: value,
-        kind: kind.value,
-        only_repos: only.value.split(',').map((x) => x.trim()).filter(Boolean),
-        skip_repos: skip.value.split(',').map((x) => x.trim()).filter(Boolean),
-        include_forks: tForks.input.checked,
-        include_archived: tArchived.input.checked,
-        include_private: tPrivate.input.checked,
-      });
-      toast(`${value} added — run a discovery to pick up its repositories`);
-      route();
+      const found = await apiSend('POST', '/api/accounts/resolve',
+                                  { url: value, token: token.value.trim() });
+      lastToken = token.value.trim();
+      panel.replaceChildren(
+        found.tracks_everything
+          ? h('div', { class: 'help' },
+              `${found.owner} is already tracked in full, so everything under it `
+              + 'is in scope already.')
+          : found.kind === 'repo' ? confirmRepo(found) : picker(found));
+      panel.hidden = false;
     } catch (err) {
-      toast(String(err.message || err), true);
+      const msg = String(err.message || err);
+      // "Nothing there" is what a private repository looks like from outside,
+      // so this is the moment the token field stops being clutter.
+      if (/is private|nothing at/i.test(msg) && tokenBox.hidden) {
+        tokenBox.hidden = false;
+        token.focus();
+      }
+      panel.replaceChildren(h('div', { class: 'help' }, msg));
+      panel.hidden = false;
     } finally {
       submit.disabled = false;
+      submit.textContent = 'Look up';
     }
   };
-  submit.onclick = add;
-  login.onkeydown = (e) => { if (e.key === 'Enter') add(); };
+  submit.onclick = look;
+  url.onkeydown = (e) => { if (e.key === 'Enter') look(); };
 
-  wrap.append(card('Add an account',
+  /* The button shares the input's line, so the hint has to sit outside the
+     field block: inside it, the block's bottom edge is the bottom of the hint
+     text, and anything aligned to that edge lands below the input rather than
+     beside it. */
+  wrap.append(card('Add a source',
     h('div', { class: 'form' },
-      h('div', { class: 'form-row two' },
-        field('Organisation or user', login, 'The login exactly as GitHub spells it.'),
-        field('Kind', kind, 'Organisations list via /orgs, users via /users.')),
-      h('div', { class: 'form-row two' },
-        field('Only these repositories', only, 'An allowlist. When set, it overrides every filter below.'),
-        field('Skip these repositories', skip, 'Applied after the include filters.')),
-      h('div', { class: 'form-row toggles' }, tForks, tArchived, tPrivate),
-      h('div', { class: 'form-actions' }, submit)),
-    'Discovery reads this list, so onboarding is a write rather than a redeploy'));
+      h('div', { class: 'url-add' },
+        h('label', { class: 'field-label', for: 'source-url' },
+          'Repository or organisation URL'),
+        h('div', { class: 'url-add-row' }, url, submit),
+        h('div', { class: 'field-hint' },
+          'GitHub, GitLab, Bitbucket, or any git host \u2014 paste the page you '
+          + 'were looking at. A repository adds just that one; an organisation '
+          + 'lets you pick. ', tokenToggle)),
+      tokenBox,
+      panel),
+    'Nothing is added until you choose'));
 
   // ---- existing accounts --------------------------------------------------
   const setEnabled = async (row, value) => {
     try {
       await apiSend('PATCH', `/api/accounts/${row.id}`, { enabled: value });
       toast(`${row.login} ${value ? 'enabled' : 'disabled'}`);
+      route();
+    } catch (err) { toast(String(err.message || err), true); }
+  };
+
+  const clearToken = async (row) => {
+    if (!window.confirm(
+      `Remove the stored access token for ${row.login}?\n\n`
+      + 'Its private repositories will stop updating unless the deployment-wide '
+      + 'credential can see them.')) return;
+    try {
+      await apiSend('PUT', `/api/accounts/${row.id}/credential`, { token: '' });
+      toast(`token removed from ${row.login}`);
       route();
     } catch (err) { toast(String(err.message || err), true); }
   };
@@ -3796,7 +3990,8 @@ on('/accounts', async () => {
 
   const filterCell = (r) => {
     if (r.only_repos && r.only_repos.length) {
-      return h('span', { class: 'badge info', title: r.only_repos.join(', ') }, `only ${r.only_repos.length}`);
+      return h('span', { class: 'badge info', title: r.only_repos.join(', ') },
+               `${r.only_repos.length} chosen`);
     }
     const off = [
       !r.include_forks ? 'no forks' : null,
@@ -3810,16 +4005,28 @@ on('/accounts', async () => {
 
   wrap.append(card(`${rows.length} configured`,
     dataTable(rows, [
-      { key: 'login', label: 'Account', render: (r) => h('span', {},
+      { key: 'login', label: 'Source', render: (r) => h('span', {},
           h('strong', {}, r.login),
           h('span', { class: 'badge muted', style: 'margin-left:6px' }, r.kind)) },
+      // The host earns a column now that a login is only unique within one:
+      // an internal GitLab group commonly carries the company's GitHub name.
+      { key: 'host', label: 'Host', render: (r) => h('span', { class: 'mono', style: 'font-size:11px' },
+          r.host || 'github.com') },
       { key: 'live_repo_count', label: 'Repos', num: true,
         title: 'Repositories currently attributed to this account. Click to see them.',
         render: (r) => (Number(r.live_repo_count)
-          ? h('a', { class: 'mono', href: `/accounts/${r.id}`, 'data-nav': true,
+          ? h('a', { class: 'mono', href: `/sources/${r.id}`, 'data-nav': true,
                      onclick: (e) => e.stopPropagation() }, num(r.live_repo_count))
           : h('span', { class: 'muted-cell' }, '0')) },
       { key: 'filters', label: 'Filters', sortable: false, render: filterCell },
+      { key: 'credential_hint', label: 'Token', sortable: false,
+        title: 'A token stored for this source alone, used instead of the '
+             + 'deployment-wide credential. Click to remove it.',
+        render: (r) => (r.has_credential
+          ? h('button', { class: 'badge ok clickable', title: 'Click to remove',
+                          onclick: (e) => { e.stopPropagation(); clearToken(r); } },
+              r.credential_hint || 'set')
+          : h('span', { class: 'muted-cell' }, '\u2014')) },
       { key: 'last_discovered_at', label: 'Last discovery', render: (r) => (
           r.last_discover_error
             ? h('span', { class: 'badge danger', title: r.last_discover_error }, 'failed')
@@ -3834,10 +4041,10 @@ on('/accounts', async () => {
           onclick: (e) => { e.stopPropagation(); remove(r); },
         }, 'Remove') },
     ], { initialSort: 'live_repo_count',
-         onRow: (r) => (Number(r.live_repo_count) ? go(`/accounts/${r.id}`) : null),
-         empty: 'No accounts yet. Add one above and run a discovery.' }),
-    'An account owns repositories: open one to see just those. '
-    + 'Removing an account keeps them and everything mined from them.'));
+         onRow: (r) => (Number(r.live_repo_count) ? go(`/sources/${r.id}`) : null),
+         empty: 'Nothing tracked yet. Paste a URL above.' }),
+    'A source owns repositories: open one to see just those. '
+    + 'Removing a source keeps them and everything mined from them.'));
 
   return wrap;
 });

@@ -1,0 +1,319 @@
+"""Asking a host what it has, and coping when it will not say.
+
+Every client here is exercised against a recorded payload rather than the live
+API: the shapes are what matter, and a test that needs the internet is a test
+that fails for reasons nothing in this repository caused.
+"""
+from __future__ import annotations
+
+import httpx
+import pytest
+
+from git_synapse.ingest import providers, sources
+
+
+def _resp(status: int, payload=None) -> httpx.Response:
+    return httpx.Response(status, json=payload if payload is not None else {},
+                          request=httpx.Request("GET", "https://example/x"))
+
+
+# ------------------------------------------------------------------ routing
+
+@pytest.mark.parametrize("url,cls", [
+    ("https://github.com/a/b", providers.GitHubProvider),
+    ("https://gitlab.com/a/b", providers.GitLabProvider),
+    ("https://bitbucket.org/a/b", providers.BitbucketProvider),
+    ("https://git.corp/a/b", providers.GitProvider),
+])
+def test_each_host_gets_its_own_client(url, cls):
+    assert isinstance(providers.for_source(sources.parse(url)), cls)
+
+
+def test_a_host_with_no_api_still_produces_a_record():
+    """The whole point of the fallback: coupling needs a clone, not an API."""
+    source = sources.parse("https://git.corp/team/svc.git")
+    with providers.for_source(source) as client:
+        record = client.get_repo("team", "svc")
+    assert record.full_name == "team/svc"
+    assert record.clone_url == "https://git.corp/team/svc.git"
+    assert record.host == "git.corp" and record.provider == "git"
+    # It knows nothing about forks or archiving, and says so by leaving the
+    # defaults rather than inventing a value a filter would then act on.
+    assert record.is_fork is False and record.github_id is None
+
+
+def test_a_host_with_no_api_cannot_be_enumerated():
+    """`supports_listing` is what stops the picker offering an empty list."""
+    source = sources.parse("https://git.corp/team")
+    assert providers.for_source(source).supports_listing() is False
+    assert providers.for_source(sources.parse("https://github.com/a")).supports_listing()
+
+
+# ------------------------------------------------------------------ mapping
+
+def test_gitlab_projects_map_onto_the_record(monkeypatch):
+    payload = {
+        "path": "gitlab-runner", "path_with_namespace": "gitlab-org/gitlab-runner",
+        "namespace": {"full_path": "gitlab-org"}, "description": "the runner",
+        "web_url": "https://gitlab.com/gitlab-org/gitlab-runner",
+        "http_url_to_repo": "https://gitlab.com/gitlab-org/gitlab-runner.git",
+        "ssh_url_to_repo": "git@gitlab.com:gitlab-org/gitlab-runner.git",
+        "default_branch": "main", "topics": ["ci"], "visibility": "public",
+        "archived": True, "star_count": 2567, "forks_count": 12,
+        "forked_from_project": {"id": 1},
+    }
+    source = sources.parse("https://gitlab.com/gitlab-org/gitlab-runner")
+    client = providers.for_source(source)
+    monkeypatch.setattr(client, "_get", lambda path, params=None: _resp(200, payload))
+    r = client.get_repo("gitlab-org", "gitlab-runner")
+    assert (r.full_name, r.provider, r.host) == (
+        "gitlab-org/gitlab-runner", "gitlab", "gitlab.com")
+    assert (r.stargazers, r.is_archived, r.is_fork, r.is_private) == (2567, True, True, False)
+
+
+def test_bitbucket_repositories_map_onto_the_record(monkeypatch):
+    payload = {
+        "full_name": "atlassian/aui", "slug": "aui", "description": "d",
+        "links": {"html": {"href": "https://bitbucket.org/atlassian/aui"},
+                  "clone": [{"name": "ssh", "href": "git@..."},
+                            {"name": "https", "href": "https://bitbucket.org/atlassian/aui.git"}]},
+        "mainbranch": {"name": "master"}, "language": "java",
+        "is_private": True, "size": 2048,
+    }
+    source = sources.parse("https://bitbucket.org/atlassian/aui")
+    client = providers.for_source(source)
+    monkeypatch.setattr(client._client, "get", lambda path: _resp(200, payload))
+    r = client.get_repo("atlassian", "aui")
+    assert (r.full_name, r.owner, r.name) == ("atlassian/aui", "atlassian", "aui")
+    # The https clone URL, picked out of the list by name -- the ssh one would
+    # need a key in the container.
+    assert r.clone_url == "https://bitbucket.org/atlassian/aui.git"
+    assert (r.is_private, r.visibility, r.primary_language) == (True, "private", "java")
+
+
+def test_a_github_enterprise_record_carries_its_own_host(monkeypatch):
+    """`from_api` knows GitHub's payload shape but not which GitHub."""
+    source = sources.parse("https://ghe.corp/acme/thing")
+    source = type(source)(**{**source.__dict__, "provider": "github",
+                             "api_url": "https://ghe.corp/api/v3"})
+    client = providers.for_source(source)
+    payload = {"id": 7, "name": "thing", "full_name": "acme/thing",
+               "owner": {"login": "acme"}, "clone_url": "https://ghe.corp/acme/thing.git"}
+    monkeypatch.setattr(client._client, "_get", lambda path: _resp(200, payload))
+    assert client.get_repo("acme", "thing").host == "ghe.corp"
+
+
+# ------------------------------------------------------------- listing paths
+
+def test_a_github_owner_that_is_not_an_org_is_tried_as_a_user(monkeypatch):
+    """A person pasting a URL has no way to know which it is, and should not
+    have to answer for it."""
+    source = sources.parse("https://github.com/torvalds")
+    client = providers.for_source(source)
+    seen = []
+
+    def _list(login, kind):
+        seen.append(kind)
+        if kind == "org":
+            raise httpx.HTTPStatusError("nope", request=httpx.Request("GET", "https://x"),
+                                        response=_resp(404))
+        return []
+
+    monkeypatch.setattr(client._client, "list_account_repos", _list)
+    assert client.list_repos("torvalds") == []
+    assert seen == ["org", "user"]
+
+
+def test_a_listing_failure_that_is_not_a_404_is_not_retried_as_a_user(monkeypatch):
+    source = sources.parse("https://github.com/acme")
+    client = providers.for_source(source)
+
+    def _list(login, kind):
+        raise httpx.HTTPStatusError("boom", request=httpx.Request("GET", "https://x"),
+                                    response=_resp(500))
+
+    monkeypatch.setattr(client._client, "list_account_repos", _list)
+    with pytest.raises(httpx.HTTPStatusError):
+        client.list_repos("acme")
+
+
+def test_gitlab_falls_back_from_a_group_to_a_user(monkeypatch):
+    source = sources.parse("https://gitlab.com/someone")
+    client = providers.for_source(source)
+    seen = []
+
+    def _get(path, params=None):
+        seen.append(path)
+        if path.startswith("/groups"):
+            raise httpx.HTTPStatusError("nope", request=httpx.Request("GET", "https://x"),
+                                        response=_resp(404))
+        return _resp(200, [])
+
+    monkeypatch.setattr(client, "_get", _get)
+    assert client.list_repos("someone") == []
+    assert seen[0].startswith("/groups") and seen[1].startswith("/users")
+
+
+def test_bitbucket_follows_its_pagination_and_stops_at_the_cap(monkeypatch):
+    source = sources.parse("https://bitbucket.org/atlassian")
+    client = providers.for_source(source)
+    page = {"values": [{"full_name": f"atlassian/r{i}", "links": {}} for i in range(100)],
+            "next": "/repositories/atlassian?page=2"}
+
+    monkeypatch.setattr(client._client, "get", lambda url: _resp(200, page))
+    rows = client.list_repos("atlassian")
+    # Endless `next`, so only the cap stops it -- which is the point of the cap.
+    assert len(rows) >= providers.LIST_CAP
+
+
+def test_gitlab_stops_at_the_cap_too(monkeypatch):
+    source = sources.parse("https://gitlab.com/gitlab-org")
+    client = providers.for_source(source)
+    page = [{"path": f"r{i}", "path_with_namespace": f"gitlab-org/r{i}",
+             "namespace": {"full_path": "gitlab-org"}} for i in range(100)]
+    monkeypatch.setattr(client, "_get", lambda path, params=None: _resp(200, page))
+    assert len(client.list_repos("gitlab-org")) >= providers.LIST_CAP
+
+
+def test_gitlab_stops_when_a_page_comes_back_short(monkeypatch):
+    source = sources.parse("https://gitlab.com/small")
+    client = providers.for_source(source)
+    monkeypatch.setattr(client, "_get", lambda path, params=None: _resp(
+        200, [{"path": "one", "path_with_namespace": "small/one",
+               "namespace": {"full_path": "small"}}]))
+    assert len(client.list_repos("small")) == 1
+
+
+def test_an_empty_first_page_ends_the_walk(monkeypatch):
+    source = sources.parse("https://gitlab.com/empty")
+    client = providers.for_source(source)
+    monkeypatch.setattr(client, "_get", lambda path, params=None: _resp(200, []))
+    assert client.list_repos("empty") == []
+
+
+# ------------------------------------------------------------- credentials
+
+def test_a_source_token_overrides_the_environment_credential(monkeypatch):
+    monkeypatch.setenv("GITLAB_TOKEN", "from-the-environment")
+    from git_synapse.config import get_config
+
+    get_config.cache_clear()
+    try:
+        source = sources.parse("https://gitlab.com/a/b")
+        client = providers.for_source(source, token="this-source-only")
+        assert client._client.headers["PRIVATE-TOKEN"] == "this-source-only"
+        assert providers.for_source(source)._client.headers["PRIVATE-TOKEN"] \
+            == "from-the-environment"
+    finally:
+        get_config.cache_clear()
+
+
+def test_a_github_source_token_beats_the_token_file(monkeypatch, tmp_path):
+    """`current_token()` prefers the file, so a source credential that did not
+    also clear it would be silently ignored."""
+    from git_synapse.config import get_config
+
+    path = tmp_path / "tok"
+    path.write_text("ghu_" + "f" * 36)
+    monkeypatch.setenv("GITHUB_TOKEN_FILE", str(path))
+    get_config.cache_clear()
+    try:
+        client = providers.for_source(sources.parse("https://github.com/a/b"),
+                                      token="ghp_" + "s" * 36)
+        assert client._client.cfg.current_token() == "ghp_" + "s" * 36
+    finally:
+        get_config.cache_clear()
+
+
+def test_an_impatient_client_reports_a_rate_limit_instead_of_sleeping(monkeypatch):
+    """A handler someone is watching has seconds. Sleeping sixty of them is
+    indistinguishable from a hang."""
+    from git_synapse.ingest.github import GitHubClient
+
+    client = GitHubClient(patient=False)
+    monkeypatch.setattr(client._client, "get", lambda path, params=None: _resp(403))
+    monkeypatch.setattr("time.sleep", lambda *_: pytest.fail("it slept"))
+    with pytest.raises(httpx.HTTPStatusError):
+        client._get("/anything")
+    client.close()
+
+
+def test_the_base_provider_declares_what_a_client_must_answer():
+    """A subclass that forgets one should fail loudly rather than return None."""
+    from git_synapse.ingest.sources import Source
+
+    base = providers.Provider(Source("git", "h", "o", None, None, "", ""))
+    with pytest.raises(NotImplementedError):
+        base.get_repo("o", "r")
+    with pytest.raises(NotImplementedError):
+        base.list_repos("o")
+    assert base.close() is None
+
+
+def test_every_client_closes_its_connection():
+    """A leaked httpx client holds a socket open per lookup."""
+    for url in ["https://github.com/a/b", "https://gitlab.com/a/b",
+                "https://bitbucket.org/a/b"]:
+        with providers.for_source(sources.parse(url)) as client:
+            pass
+        inner = getattr(client, "_client", None)
+        inner = getattr(inner, "_client", inner)     # GitHubClient wraps one
+        assert inner.is_closed
+
+
+def test_bitbucket_uses_basic_auth_when_a_username_is_configured(monkeypatch):
+    """An app password is basic auth, so it is useless without the username."""
+    from git_synapse.config import get_config
+
+    monkeypatch.setenv("BITBUCKET_USER", "someone")
+    monkeypatch.setenv("BITBUCKET_TOKEN", "app-password")
+    get_config.cache_clear()
+    try:
+        client = providers.for_source(sources.parse("https://bitbucket.org/a/b"))
+        assert client._client.auth is not None
+    finally:
+        get_config.cache_clear()
+
+
+def test_a_bitbucket_token_without_a_username_is_not_sent(monkeypatch):
+    from git_synapse.config import get_config
+
+    monkeypatch.setenv("BITBUCKET_USER", "")
+    monkeypatch.setenv("BITBUCKET_TOKEN", "app-password")
+    get_config.cache_clear()
+    try:
+        assert providers.for_source(sources.parse("https://bitbucket.org/a/b"))._client.auth is None
+    finally:
+        get_config.cache_clear()
+
+
+def test_the_gitlab_get_helper_raises_on_an_error_status(monkeypatch):
+    client = providers.for_source(sources.parse("https://gitlab.com/a/b"))
+    monkeypatch.setattr(client._client, "get", lambda path, params=None: _resp(500))
+    with pytest.raises(httpx.HTTPStatusError):
+        client._get("/anything")
+
+
+def test_a_gitlab_listing_failure_on_a_later_page_is_not_retried_as_a_user(monkeypatch):
+    """The group/user fallback only makes sense for the very first request."""
+    source = sources.parse("https://gitlab.com/g")
+    client = providers.for_source(source)
+    calls = []
+
+    def _get(path, params=None):
+        calls.append(params.get("page"))
+        if params.get("page") == 2:
+            raise httpx.HTTPStatusError("nope", request=httpx.Request("GET", "https://x"),
+                                        response=_resp(404))
+        return _resp(200, [{"path": f"r{i}", "path_with_namespace": f"g/r{i}",
+                            "namespace": {"full_path": "g"}} for i in range(100)])
+
+    monkeypatch.setattr(client, "_get", _get)
+    with pytest.raises(httpx.HTTPStatusError):
+        client.list_repos("g")
+
+
+def test_the_gitlab_get_helper_returns_the_response_on_success(monkeypatch):
+    client = providers.for_source(sources.parse("https://gitlab.com/a/b"))
+    monkeypatch.setattr(client._client, "get", lambda path, params=None: _resp(200, {"ok": 1}))
+    assert client._get("/x").json() == {"ok": 1}

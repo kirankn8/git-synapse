@@ -352,12 +352,12 @@ def refresh_modules(conn: psycopg.Connection | None = None) -> int:
 
     def _run(c: psycopg.Connection) -> int:
         rows = c.execute(
-            "SELECT id, full_name, name FROM repo WHERE is_enabled ORDER BY id"
+            "SELECT id, full_name, name, host FROM repo WHERE is_enabled ORDER BY id"
         ).fetchall()
 
         payload = []
-        for repo_id, full_name, name in rows:
-            mirror = mirror_path_for(full_name)
+        for repo_id, full_name, name, host in rows:
+            mirror = mirror_path_for(full_name, host=host)
             if not mirror.is_dir():
                 continue
             manifests = [m for m, eco in manifest_paths(mirror) if eco == "go"]
@@ -434,7 +434,7 @@ def refresh_declared(
         )
         rows = c.execute(
             f"""
-            SELECT r.id, r.full_name, r.name FROM repo r
+            SELECT r.id, r.full_name, r.name, r.host FROM repo r
             WHERE r.is_enabled
               AND EXISTS (SELECT 1 FROM file f
                            WHERE f.repo_id = r.id AND f.basename = ANY(%(manifests)s))
@@ -451,8 +451,8 @@ def refresh_declared(
         by_full, by_name, by_pkg = _repo_lookups(c)
 
         payload = []
-        for repo_id, full_name, name in rows:
-            mirror = mirror_path_for(full_name)
+        for repo_id, full_name, name, host in rows:
+            mirror = mirror_path_for(full_name, host=host)
             if not mirror.is_dir():
                 continue
             for manifest, ecosystem in manifest_paths(mirror):
@@ -523,7 +523,7 @@ def refresh_declared(
         return _run(own)
 
 
-def _repos_to_scan(conn: psycopg.Connection, force: bool) -> list[tuple[int, str, str]]:
+def _repos_to_scan(conn: psycopg.Connection, force: bool) -> list[tuple[int, str, str, str]]:
     """Repositories with a manifest whose bump scan is stale.
 
     Staleness is judged on the HEAD sha, not a timestamp. ``last_ingest_at``
@@ -538,7 +538,7 @@ def _repos_to_scan(conn: psycopg.Connection, force: bool) -> list[tuple[int, str
     )
     rows = conn.execute(
         f"""
-        SELECT r.id, r.full_name, r.name
+        SELECT r.id, r.full_name, r.name, r.host
         FROM repo r
         WHERE r.is_enabled
           AND EXISTS (SELECT 1 FROM file f
@@ -548,7 +548,7 @@ def _repos_to_scan(conn: psycopg.Connection, force: bool) -> list[tuple[int, str
         """,
         {"manifests": list(manifests.MANIFEST_FILES)},
     ).fetchall()
-    return [(int(r[0]), r[1], r[2]) for r in rows]
+    return [(int(r[0]), r[1], r[2], r[3]) for r in rows]
 
 
 def resolve_bumps(conn: psycopg.Connection | None = None) -> int:
@@ -787,8 +787,8 @@ def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> Bump
         by_full, by_name, by_pkg = _repo_lookups(c)
 
         payload: list[tuple] = []
-        for repo_id, full_name, name in targets:
-            mirror = mirror_path_for(full_name)
+        for repo_id, full_name, name, host in targets:
+            mirror = mirror_path_for(full_name, host=host)
             if not mirror.is_dir():
                 continue
             stats.repos_scanned += 1

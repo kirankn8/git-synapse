@@ -7,14 +7,16 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
-from git_synapse import auth
+from git_synapse import auth, vault
 from git_synapse.analysis import calls, mining, predict, settings
 from git_synapse.analysis import query as q
 from git_synapse.config import get_config, live_cron
 from git_synapse.db.engine import query_one, scalar
 from git_synapse.ingest import accounts, pipeline
 from git_synapse.ingest.accounts import AccountError
+from git_synapse.ingest.sources import SourceError
 from git_synapse.stats.registry import DEFAULT_MEASURE
+from git_synapse.vault import VaultError
 
 log = logging.getLogger(__name__)
 
@@ -424,14 +426,23 @@ def delete_user(user_id: int, request: Request) -> dict:
 
 
 class AccountIn(BaseModel):
-    """A new account to scan. Only the login is required."""
+    """A new source to scan, described field by field.
 
-    login: str = Field(min_length=1, max_length=39)
+    Most callers want :class:`SourceIn` instead, which takes a URL. This is the
+    explicit form, for a caller that already knows every part.
+    """
+
+    login: str = Field(min_length=1, max_length=200)
     kind: str = "org"
+    provider: str = "github"
+    host: str = "github.com"
     api_url: str | None = None
     enabled: bool = True
     include_private: bool = True
-    include_forks: bool = True
+    #: A fork's history is its parent's history, so tracking both stores the
+    #: same commits twice and ranks a second copy of every coupling as if it
+    #: were independent evidence.
+    include_forks: bool = False
     include_archived: bool = True
     only_repos: list[str] = Field(default_factory=list)
     skip_repos: list[str] = Field(default_factory=list)
@@ -451,20 +462,101 @@ class AccountPatch(BaseModel):
     skip_repos: list[str] | None = None
 
 
+class SourceIn(BaseModel):
+    """Something a person pasted, plus what they chose to track from it.
+
+    No filter flags. In a URL-driven flow the URL and the ticks are the whole
+    answer: a repository someone named is one they want, fork or not, and a
+    toggle beside it could only contradict them. Filters apply to the one case
+    where nothing was named -- tracking a whole owner -- and there the answer
+    is fixed rather than asked, because a fork's history is its parent's.
+    """
+
+    url: str = Field(min_length=1, max_length=2000)
+    #: Which repositories under the owner. An empty list means *everything*,
+    #: including repositories created later -- the one intent an allowlist
+    #: cannot express. Omitted entirely for a repository URL, which names one.
+    repos: list[str] | None = None
+    #: This source's own access token, for a private repository. Stored
+    #: encrypted; never returned. Empty leaves the deployment-wide credential
+    #: in the environment as the only one.
+    token: str = Field(default="", max_length=500)
+
+
+class ResolveIn(BaseModel):
+    url: str = Field(min_length=1, max_length=2000)
+    #: Tried but not stored. The whole point of a lookup is to find out whether
+    #: a credential works before committing to it.
+    token: str = Field(default="", max_length=500)
+
+
 @router.get("/accounts", tags=["accounts"])
 def list_accounts(enabled_only: bool = False) -> dict:
-    """Every configured account, with how many repositories it has produced."""
+    """Every configured source, with how many repositories it has produced."""
     rows = accounts.list_accounts(enabled_only)
     return {"count": len(rows), "kinds": list(accounts.KINDS), "accounts": rows}
 
 
+@router.post("/accounts/resolve", tags=["accounts"])
+def resolve_source(body: ResolveIn) -> dict:
+    """What is at this URL, and what could be tracked from it.
+
+    Reads only. A repository URL comes back as one already-fetched repository
+    to confirm; an owner URL comes back with the repositories under it, for a
+    person to tick. Nothing is written until :func:`create_source`.
+    """
+    try:
+        return {**accounts.resolve_url(body.url, token=body.token),
+                # Whether a token *could* be kept, so the form knows to offer.
+                "can_store_token": vault.available()}
+    except SourceError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except AccountError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            502, f"could not read {body.url}: {exc}") from exc
+
+
+@router.post("/accounts/from-url", tags=["accounts"], status_code=201)
+def create_source(body: SourceIn) -> dict:
+    """Track what a person pasted and chose. Discovery picks it up next run."""
+    try:
+        return accounts.add_from_url(body.url, repos=body.repos, token=body.token)
+    except SourceError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except AccountError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except VaultError as exc:
+        # A token was offered and cannot be kept. Refusing is the point: the
+        # alternative is silently adding the source without it, which then
+        # fails to clone for a reason nothing on screen explains.
+        raise HTTPException(422, str(exc)) from exc
+
+
 @router.post("/accounts", tags=["accounts"], status_code=201)
 def create_account(body: AccountIn) -> dict:
-    """Add an organisation or user. Discovery picks it up on the next run."""
+    """Add a source field by field. Discovery picks it up on the next run."""
     try:
         return accounts.add_account(**body.model_dump())
     except AccountError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+class CredentialIn(BaseModel):
+    #: Empty clears it, which is the only way to take a token back out.
+    token: str = Field(default="", max_length=500)
+
+
+@router.put("/accounts/{account_id}/credential", tags=["accounts"])
+def set_credential(account_id: int, body: CredentialIn) -> dict:
+    """Replace or clear one source's access token. Never returns it."""
+    if accounts.get_account(account_id) is None:
+        raise HTTPException(404, f"account {account_id} not found")
+    try:
+        return accounts.set_credential(account_id, body.token) or {}
+    except VaultError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @router.get("/accounts/{account_id}", tags=["accounts"])

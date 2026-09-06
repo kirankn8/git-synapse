@@ -11,7 +11,7 @@
 ![Docker](https://img.shields.io/badge/Docker-compose-2496ED?style=flat-square&logo=docker&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-14%20tools-5eead4?style=flat-square)
 ![Measures](https://img.shields.io/badge/measures-31-a78bfa?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-1%2C347-3fb950?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-1%2C453-3fb950?style=flat-square)
 ![Coverage](https://img.shields.io/badge/backend%20coverage-100%25-3fb950?style=flat-square)
 ![Backtested](https://img.shields.io/badge/backtested-769k%20predictions-14b8a6?style=flat-square)
 
@@ -42,7 +42,7 @@ only the commits that preceded it — <a href="#does-it-actually-help">how this 
 |---|---|
 | [What it does](#what-it-does) · [The 31 measures](#the-31-measures) | the idea, and the statistics behind it |
 | [**Does it actually help?**](#does-it-actually-help) | the backtest that judges the product, not the corpus |
-| [Quick start](#quick-start) · [Which repositories get scanned](#which-repositories-get-scanned) | running it |
+| [Quick start](#quick-start) · [Which repositories get scanned](#which-repositories-get-scanned) · [Hosts](#hosts) | running it |
 | [Using it from a coding agent](#using-it-from-a-coding-agent-mcp) · [The web UI](#the-web-ui) · [Who may read it](#who-may-read-it) | the interfaces, and the door in front of them |
 | [CLI](#cli) · [Configuration](#configuration) · [Development](#development) | operating it |
 | [**DESIGN.md**](DESIGN.md) | how it works inside: the schema, every table, the trade-offs |
@@ -319,33 +319,98 @@ docker compose logs api | grep -A3 'setup token'
 Paste it in with your email, name and a password, and you are the
 administrator. The token stops being accepted the moment the account exists.
 
-Now add the organisations or user accounts to scan on the **Accounts** page —
-or from the CLI:
+Now add something to scan. On the **Sources** page there is one field: paste a
+URL.
+
+```
+https://github.com/microsoft/vscode      that repository, one API call
+https://github.com/microsoft             pick from a list of what is under it
+https://gitlab.com/gitlab-org/gitlab     GitLab
+https://bitbucket.org/atlassian/aui      Bitbucket
+git@github.com:you/private.git           an ssh remote
+https://git.internal.corp/team/svc.git   a host with no API at all
+```
+
+A **repository** URL adds that repository and never enumerates its owner —
+which matters, because `microsoft` is 8,296 repositories and asking for one of
+them should cost one request, not eighty-three pages, every night. An **owner**
+URL fetches what is under it and shows a list to tick, with a *track everything
+under this owner* option for the case an allowlist cannot express: everything,
+including repositories created later.
+
+Forks and archived repositories are listed but not pre-selected. A fork's
+history is its parent's history, so tracking both files every commit twice and
+ranks a second copy of every coupling as though it were independent evidence.
+
+Or from the CLI:
 
 ```bash
 docker compose run --rm cli account add my-org
-docker compose run --rm cli account add my-org --no-forks --no-archived
+docker compose run --rm cli account add my-org --only vscode,TypeScript
 docker compose run --rm cli account add someone --kind user
 docker compose run --rm cli ingest --all
 ```
 
 ### Which repositories get scanned
 
-Accounts live in the database, not the environment, so onboarding one is a write
-rather than a redeploy. Any number can be added, and each carries its own
-filters — the reason to skip forks in one org rarely applies to the next.
+Sources live in the database, not the environment, so onboarding one is a write
+rather than a redeploy. A source is an **owner on a host** — an organisation, a
+user, a GitLab group, a Bitbucket workspace — and it is either *everything under
+that owner* or *these specific repositories*.
 
-| Per account | Effect |
+| Per source | Effect |
 |---|---|
-| `only_repos` | Allowlist. When set, **overrides every filter below**. |
-| `skip_repos` | Denylist, applied after the include filters. |
-| include forks / archived / private | Default on; private needs a token with `repo` scope. |
-| enabled | Pause an account without deleting what it has already produced. |
+| `only_repos` | The chosen repositories. When set, they are fetched **by name**, so the owner is never enumerated — and no filter is applied on top, because naming a repository is already an explicit answer. |
+| `skip_repos` | Denylist, for a source that tracks a whole owner. |
+| include forks / archived / private | Only apply to a whole-owner source. Forks off, since a fork's history is its parent's. |
+| enabled | Pause a source without deleting what it has already produced. |
 
-Removing an account **keeps** its repositories and everything mined from them —
+The host is part of a source's identity, and of each repository's. `acme` on
+github.com and `acme` on an internal GitLab are two different places, and an
+internal group commonly carries the same name as the company's public
+organisation — merging their histories into one row would be undetectable from
+the outside.
+
+Removing a source **keeps** its repositories and everything mined from them —
 the statistics are the expensive part, and they stay valid whether or not the
-account that discovered them is still listed. Those repositories simply stop
+source that discovered them is still listed. Those repositories simply stop
 being refreshed.
+
+### Hosts
+
+| Host | What works |
+|---|---|
+| **GitHub** (and Enterprise) | Everything: one repository, whole-owner listing, full metadata. |
+| **GitLab** (and self-hosted) | Everything, including nested groups — `gitlab-org/security/gitlab` is one project, addressed by its full path. |
+| **Bitbucket** | Everything; an owner is a workspace. |
+| **Anything else** | Cloned, parsed, aggregated, scored and mined identically. No listing and no stars or fork flags, because there is no API to ask — which is the point: coupling is derived from `git log`, so a self-hosted server nobody has written a client for is still fully usable. Paste each repository's URL. |
+
+Credentials are all optional; a public repository on any host clones without
+one. `GITHUB_TOKEN`, `GITLAB_TOKEN`, `BITBUCKET_USER` + `BITBUCKET_TOKEN` are
+the deployment-wide ones. A token is only ever embedded in a clone URL on the
+host that issued it.
+
+### Private repositories
+
+A host answers "does not exist" and "exists but you cannot see it" identically,
+on purpose — so the UI cannot tell you which it is, and says both, naming the
+variable that separates them.
+
+Two ways in, in order of precedence:
+
+1. **A token on the source itself.** Paste it into *Private repository?* on the
+   Sources page. It is stored encrypted, shown afterwards only as `ghp_…mnop`,
+   and used instead of the deployment-wide credential — one organisation's
+   read-only token has no business being used against another's private
+   repositories.
+
+   This needs **`GS_SECRET_KEY`** set to any passphrase, which is what the
+   ciphertext is keyed on. Without it, storing a token is refused rather than
+   silently downgraded: the ciphertext lives in Postgres and the key lives in
+   the environment, so a dump, a backup or a replica leaks nothing on its own.
+
+2. **The deployment-wide token** in the environment, which applies to every
+   source on that host that has none of its own.
 
 `GITHUB_ORG` is a seed, not a setting: if it is set and no accounts are
 configured, it is adopted once as an account on the first discovery run, and
@@ -563,7 +628,7 @@ tabs carry the application and nothing appears under both.
 | Tab | Owns |
 |---|---|
 | **Overview** | Is this deployment healthy, and is anything using it: corpus scale, ingest health, eight distributions, who is calling. |
-| **Accounts** | The organisations and users being scanned, and their filters. |
+| **Sources** | Where repositories come from: an owner on a host, tracked whole or by an explicit list. One field adds one — paste a URL. |
 | **Repositories** | The *things* — repositories, folders, files, pairs — and what is in them. Filter by language, visibility, status, then drill all the way down. |
 | **Insights** | Every analysis derived from history: **Map**, **Distributions**, **Cross-repo impact**, **Risk & bus factor**, **Coupling drift**, **De-facto modules**. Each takes an optional `?repo=`. |
 | **Activity** | Every call served on both surfaces, what it was given and what came back. |
@@ -756,6 +821,16 @@ terminal:
 | Variable | Effect |
 |---|---|
 | `ADMIN_SETUP_TOKEN` | Use this value as the first-run setup token instead of minting one and printing it to the log. Ignored once anyone has an account, and never echoed back — whoever set it already has it. |
+| `GS_SECRET_KEY` | Any passphrase. Encrypts the per-source access tokens people paste into the UI. Unset, storing one is refused rather than downgraded, and the host credentials below stay the only way to reach a private repository. |
+
+Credentials for the hosts themselves, all optional — a public repository clones
+without any of them:
+
+| Variable | Host |
+|---|---|
+| `GITHUB_TOKEN` (or `GITHUB_TOKEN_FILE`) | GitHub. `repo` scope for private repositories; without one, GitHub allows 60 requests an hour, which one listing of a large organisation spends. |
+| `GITLAB_TOKEN` | GitLab, `read_api`. |
+| `BITBUCKET_USER` + `BITBUCKET_TOKEN` | Bitbucket app passwords are basic auth, so the username is required too. |
 
 ---
 
@@ -777,6 +852,8 @@ Integration tests skip cleanly when no database is reachable.
 | `test_backtest.py` | The backtest itself, most of it pinning down leakage: a pair first seen in the commit being scored must be unpredictable, and predictable once taught. |
 | `test_manifests.py` | Dependency references across 29 ecosystems, each classified at its true strength, and prose never read as a dependency. |
 | `test_api.py` | Every endpoint, including the door: who may read what, the first-run setup token, rate limiting, and tokens. |
+| `test_sources.py` · `test_providers.py` · `test_add_source.py` | What a pasted URL means, what each host answers, and what adding one costs — including that a repository URL never enumerates its owner. |
+| `test_vault.py` | The one secret that must be readable again: sealed, unreadable-fails-empty, and refused outright with no key. |
 | `tests/ui/smoke.mjs` | Boots the real front-end in jsdom against a running API and walks 39 routes, following every link it finds. Needs Node; see its README. |
 | `tests/ui/layout.mjs` | The same UI in headless Chrome, where boxes have positions: spacing, ragged rows, clipped charts, dead-end cards, and that a chart lands where its card's arrow does. jsdom does no layout and loads no stylesheet, so it cannot see any of this. |
 

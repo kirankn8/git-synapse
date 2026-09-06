@@ -608,7 +608,129 @@ def test_patching_leaves_unpassed_fields_alone(no_accounts):
     made = no_accounts.post("/api/accounts", json={"login": "kubernetes"}).json()
     patched = no_accounts.patch(f"/api/accounts/{made['id']}", json={"enabled": False}).json()
     assert patched["enabled"] is False
-    assert patched["include_forks"] is True
+    # Untouched by the patch, and off by default: a fork's history is its
+    # parent's, so tracking both files every commit twice.
+    assert patched["include_forks"] is False
+
+
+def test_resolving_a_url_reads_without_writing(no_accounts, monkeypatch):
+    """The lookup is how somebody finds out whether a thing is there. Writing
+    on a read would mean a typo becomes a tracked source."""
+    from git_synapse.ingest import accounts as acc
+
+    monkeypatch.setattr(acc, "resolve_url",
+                        lambda url, limit=300, token="": {"kind": "repo", "repos": [],
+                                                          "owner": "acme"})
+    r = no_accounts.post("/api/accounts/resolve", json={"url": "https://github.com/acme/x"})
+    assert r.status_code == 200 and r.json()["kind"] == "repo"
+    # Whether a token could be kept at all, so the form knows to offer.
+    assert "can_store_token" in r.json()
+    assert no_accounts.get("/api/accounts").json()["count"] == 0
+
+
+def test_an_unparseable_url_is_a_400_not_a_500(no_accounts):
+    r = no_accounts.post("/api/accounts/resolve", json={"url": "not a url"})
+    assert r.status_code == 400
+
+
+def test_a_host_that_refuses_is_reported_as_a_bad_gateway(no_accounts, monkeypatch):
+    """It is not the caller's request that is wrong."""
+    from git_synapse.ingest import accounts as acc
+
+    def _boom(url, limit=300, token=""):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(acc, "resolve_url", _boom)
+    r = no_accounts.post("/api/accounts/resolve", json={"url": "https://github.com/a/b"})
+    assert r.status_code == 502 and "connection reset" in r.json()["detail"]
+
+
+def test_adding_from_a_url_creates_the_source(no_accounts, monkeypatch):
+    from git_synapse.ingest import accounts as acc
+
+    monkeypatch.setattr(acc, "add_from_url",
+                        lambda url, repos=None, token="": {"login": "acme", "repos": repos,
+                                                           "token_seen": bool(token)})
+    r = no_accounts.post("/api/accounts/from-url",
+                         json={"url": "https://github.com/acme", "repos": ["one"],
+                               "token": "ghp_x"})
+    assert r.status_code == 201
+    assert r.json() == {"login": "acme", "repos": ["one"], "token_seen": True}
+
+
+def test_storing_a_token_without_a_key_is_refused_not_swallowed(no_accounts, monkeypatch):
+    from git_synapse import vault
+    from git_synapse.ingest import accounts as acc
+
+    monkeypatch.delenv(vault.ENV_KEY, raising=False)
+    monkeypatch.setattr(acc, "add_from_url",
+                        lambda url, repos=None, token="": (_ for _ in ()).throw(
+                            vault.VaultError("no key")))
+    r = no_accounts.post("/api/accounts/from-url",
+                         json={"url": "https://github.com/a/b", "token": "ghp_x"})
+    assert r.status_code == 422
+
+
+def test_a_credential_can_be_set_and_cleared_but_never_read(no_accounts, monkeypatch):
+    from git_synapse import vault
+
+    monkeypatch.setenv(vault.ENV_KEY, "a-passphrase")
+    made = no_accounts.post("/api/accounts", json={"login": "credorg"}).json()
+    put = no_accounts.put(f"/api/accounts/{made['id']}/credential",
+                          json={"token": "ghp_supersecrettokenvalue"})
+    assert put.status_code == 200
+    body = put.json()
+    assert body["has_credential"] is True
+    assert "supersecret" not in str(body), "no endpoint returns the token"
+    assert body["credential_hint"].startswith("ghp_")
+
+    cleared = no_accounts.put(f"/api/accounts/{made['id']}/credential", json={"token": ""})
+    assert cleared.json()["has_credential"] is False
+
+
+def test_setting_a_credential_on_a_missing_source_is_404(no_accounts):
+    assert no_accounts.put("/api/accounts/999999/credential",
+                           json={"token": "x"}).status_code == 404
+
+
+def test_setting_a_credential_with_no_key_configured_is_422(no_accounts, monkeypatch):
+    from git_synapse import vault
+
+    monkeypatch.delenv(vault.ENV_KEY, raising=False)
+    made = no_accounts.post("/api/accounts", json={"login": "nokeyorg"}).json()
+    r = no_accounts.put(f"/api/accounts/{made['id']}/credential", json={"token": "ghp_x"})
+    assert r.status_code == 422 and vault.ENV_KEY in r.json()["detail"]
+
+
+def test_a_resolve_that_names_no_owner_is_a_422(no_accounts, monkeypatch):
+    """An AccountError here is a well-formed URL we cannot act on -- a host
+    with no API asked to be enumerated -- not a malformed one."""
+    from git_synapse.ingest import accounts as acc
+    from git_synapse.ingest.accounts import AccountError
+
+    def _refuse(url, limit=300, token=""):
+        raise AccountError("git.corp has no API we can list")
+
+    monkeypatch.setattr(acc, "resolve_url", _refuse)
+    r = no_accounts.post("/api/accounts/resolve", json={"url": "https://git.corp/team"})
+    assert r.status_code == 422 and "no API" in r.json()["detail"]
+
+
+def test_adding_from_a_malformed_url_is_a_400(no_accounts):
+    r = no_accounts.post("/api/accounts/from-url", json={"url": "not a url"})
+    assert r.status_code == 400
+
+
+def test_adding_a_source_that_conflicts_is_a_409(no_accounts, monkeypatch):
+    from git_synapse.ingest import accounts as acc
+    from git_synapse.ingest.accounts import AccountError
+
+    def _clash(url, repos=None, token=""):
+        raise AccountError("acme is already configured on github.com")
+
+    monkeypatch.setattr(acc, "add_from_url", _clash)
+    r = no_accounts.post("/api/accounts/from-url", json={"url": "https://github.com/acme"})
+    assert r.status_code == 409
 
 
 def test_patching_a_missing_account_is_404(no_accounts):

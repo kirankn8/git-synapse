@@ -29,16 +29,25 @@ CREATE EXTENSION IF NOT EXISTS btree_gin;
 -- carry them are seeded here once and then ignored.
 CREATE TABLE IF NOT EXISTS account (
     id                  BIGSERIAL PRIMARY KEY,
-    -- The login exactly as GitHub spells it; lookups are case-insensitive.
+    -- The login exactly as the host spells it; lookups are case-insensitive.
+    -- A GitLab group may nest, so this can contain slashes.
     login               TEXT        NOT NULL,
-    -- 'org' lists via /orgs/{login}/repos, 'user' via /users/{login}/repos.
+    -- How to enumerate it. 'org' and 'user' are GitHub's two endpoints;
+    -- 'group' and 'workspace' are what GitLab and Bitbucket call the same
+    -- thing. 'repo' is a source that is one repository and enumerates nothing.
     kind                TEXT        NOT NULL DEFAULT 'org'
-                        CHECK (kind IN ('org', 'user')),
-    -- Set for GitHub Enterprise; NULL means the public API.
+                        CHECK (kind IN ('org', 'user', 'group', 'workspace', 'repo')),
+    provider            TEXT        NOT NULL DEFAULT 'github',
+    host                TEXT        NOT NULL DEFAULT 'github.com',
+    -- Set for a self-hosted install; NULL means the provider's public API, and
+    -- for provider 'git' it means there is no API to ask at all.
     api_url             TEXT,
     enabled             BOOLEAN     NOT NULL DEFAULT TRUE,
     include_private     BOOLEAN     NOT NULL DEFAULT TRUE,
-    include_forks       BOOLEAN     NOT NULL DEFAULT TRUE,
+    -- Off. A fork's history is its parent's history, so tracking both stores
+    -- the same commits twice and puts a second copy of every coupling in the
+    -- corpus, ranked as though it were independent evidence.
+    include_forks       BOOLEAN     NOT NULL DEFAULT FALSE,
     include_archived    BOOLEAN     NOT NULL DEFAULT TRUE,
     -- Allowlist. When non-empty it overrides every other filter for this account.
     only_repos          TEXT[]      NOT NULL DEFAULT '{}',
@@ -52,6 +61,9 @@ CREATE TABLE IF NOT EXISTS account (
 
 -- Case-insensitive: GitHub treats logins that way, and two rows differing only
 -- in case would discover the same repositories twice.
+-- A login is unique on a host and nowhere wider: an internal GitLab group
+-- commonly carries the same name as the company's GitHub organisation, and
+-- they are two different places with two different sets of repositories.
 CREATE UNIQUE INDEX IF NOT EXISTS account_login_idx ON account (lower(login));
 
 -- ===========================================================================
@@ -61,11 +73,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS account_login_idx ON account (lower(login));
 CREATE TABLE IF NOT EXISTS repo (
     id                  BIGSERIAL PRIMARY KEY,
     github_id           BIGINT UNIQUE,
+    -- Where this came from. 'git' means a host we have no API client for,
+    -- which is a normal state: cloning is all the coupling maths needs, and
+    -- refusing what we cannot introspect would refuse self-hosted entirely.
+    provider            TEXT        NOT NULL DEFAULT 'github',
+    host                TEXT        NOT NULL DEFAULT 'github.com',
     owner               TEXT        NOT NULL,
     name                TEXT        NOT NULL,
-    full_name           TEXT        NOT NULL UNIQUE,
+    -- owner/name, which is unique only *within* a host: a self-hosted GitLab
+    -- group commonly mirrors a public org's name, and merging two different
+    -- repositories' histories under one row is the worst failure this system
+    -- has -- nothing would look wrong.
+    full_name           TEXT        NOT NULL,
 
-    -- GitHub descriptive metadata
+    -- Descriptive metadata, as far as the host reports it
     description         TEXT,
     homepage            TEXT,
     html_url            TEXT,
@@ -149,6 +170,14 @@ CREATE INDEX IF NOT EXISTS repo_status_idx       ON repo (ingest_status);
 CREATE INDEX IF NOT EXISTS repo_language_idx     ON repo (primary_language);
 CREATE INDEX IF NOT EXISTS repo_pushed_idx       ON repo (github_pushed_at DESC NULLS LAST);
 CREATE INDEX IF NOT EXISTS repo_name_trgm_idx    ON repo USING gin (full_name gin_trgm_ops);
+
+-- Identity is (host, full_name). Applied as ALTER for databases created when
+-- the column did not exist, where CREATE TABLE above is a no-op.
+ALTER TABLE repo ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'github';
+ALTER TABLE repo ADD COLUMN IF NOT EXISTS host     TEXT NOT NULL DEFAULT 'github.com';
+ALTER TABLE repo DROP CONSTRAINT IF EXISTS repo_full_name_key;
+CREATE UNIQUE INDEX IF NOT EXISTS repo_host_full_name_key ON repo (host, full_name);
+CREATE INDEX IF NOT EXISTS repo_provider_idx ON repo (provider);
 CREATE INDEX IF NOT EXISTS repo_topics_idx       ON repo USING gin (topics);
 
 -- ===========================================================================
@@ -903,6 +932,25 @@ ALTER TABLE repo ADD COLUMN IF NOT EXISTS account_id BIGINT
     REFERENCES account (id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS repo_account_idx ON repo (account_id);
 
+ALTER TABLE account ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'github';
+ALTER TABLE account ADD COLUMN IF NOT EXISTS host     TEXT NOT NULL DEFAULT 'github.com';
+ALTER TABLE account DROP CONSTRAINT IF EXISTS account_kind_check;
+ALTER TABLE account ADD  CONSTRAINT account_kind_check
+    CHECK (kind IN ('org', 'user', 'group', 'workspace', 'repo'));
+ALTER TABLE account ALTER COLUMN include_forks SET DEFAULT FALSE;
+
+-- A per-source access token, encrypted with a key held in the environment, so
+-- a database dump is not enough to use it. Opt-in: with no key configured
+-- nothing is stored here and the deployment-wide credentials still apply.
+-- The hint is a few characters -- never enough to use, always enough for a
+-- person to recognise which token they pasted.
+ALTER TABLE account ADD COLUMN IF NOT EXISTS credential      TEXT;
+ALTER TABLE account ADD COLUMN IF NOT EXISTS credential_hint TEXT;
+
+DROP INDEX IF EXISTS account_login_idx;
+CREATE UNIQUE INDEX IF NOT EXISTS account_login_host_idx
+    ON account (lower(login), lower(host));
+
 -- The shipping-branch anchor for a tag. Added to existing databases, where
 -- CREATE TABLE IF NOT EXISTS above is a no-op.
 ALTER TABLE ref_tag ADD COLUMN IF NOT EXISTS main_sha TEXT;
@@ -1121,5 +1169,5 @@ CREATE TABLE IF NOT EXISTS meta (
 -- was not, so schema_is_current() was permanently false and every service boot
 -- re-ran the whole DDL, taking exactly the locks the fast path exists to avoid.
 INSERT INTO meta (key, value)
-VALUES ('schema_version', '28'::jsonb)
+VALUES ('schema_version', '30'::jsonb)
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
