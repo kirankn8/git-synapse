@@ -485,6 +485,10 @@ class SourceIn(BaseModel):
 
 class ResolveIn(BaseModel):
     url: str = Field(min_length=1, max_length=2000)
+    #: Which page of an owner's repositories. Every host caps a listing at a
+    #: hundred, so a large organisation is fetched a page at a time while the
+    #: reader is already looking at the first one.
+    page: int = Field(default=1, ge=1, le=500)
     #: Tried but not stored. The whole point of a lookup is to find out whether
     #: a credential works before committing to it.
     token: str = Field(default="", max_length=500)
@@ -506,7 +510,7 @@ def resolve_source(body: ResolveIn) -> dict:
     person to tick. Nothing is written until :func:`create_source`.
     """
     try:
-        return {**accounts.resolve_url(body.url, token=body.token),
+        return {**accounts.resolve_url(body.url, token=body.token, page=body.page),
                 # Whether a token *could* be kept, so the form knows to offer.
                 "can_store_token": vault.available()}
     except SourceError as exc:

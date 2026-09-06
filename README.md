@@ -11,7 +11,7 @@
 ![Docker](https://img.shields.io/badge/Docker-compose-2496ED?style=flat-square&logo=docker&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-14%20tools-5eead4?style=flat-square)
 ![Measures](https://img.shields.io/badge/measures-31-a78bfa?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-1%2C463-3fb950?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-1%2C477-3fb950?style=flat-square)
 ![Coverage](https://img.shields.io/badge/backend%20coverage-100%25-3fb950?style=flat-square)
 ![Backtested](https://img.shields.io/badge/backtested-769k%20predictions-14b8a6?style=flat-square)
 
@@ -337,6 +337,11 @@ them should cost one request, not eighty-three pages, every night. An **owner**
 URL fetches what is under it and shows a list to tick, with a *track everything
 under this owner* option for the case an allowlist cannot express: everything,
 including repositories created later.
+
+Every host returns at most 100 repositories per request — `per_page=500` gets
+you 100 and a "there's more" link — so a large owner is fetched a page at a
+time: the first hundred appear at once and the rest fill in behind you, with
+the count updating as they land.
 
 Forks and archived repositories are listed but not pre-selected. A fork's
 history is its parent's history, so tracking both files every commit twice and

@@ -317,3 +317,176 @@ def test_the_gitlab_get_helper_returns_the_response_on_success(monkeypatch):
     client = providers.for_source(sources.parse("https://gitlab.com/a/b"))
     monkeypatch.setattr(client._client, "get", lambda path, params=None: _resp(200, {"ok": 1}))
     assert client._get("/x").json() == {"ok": 1}
+
+
+# ---------------------------------------------------------------- paging
+
+def _page_resp(rows, link="", headers=None):
+    return httpx.Response(200, json=rows, headers={"link": link, **(headers or {})},
+                          request=httpx.Request("GET", "https://example/x"))
+
+
+def test_github_reads_the_page_it_was_asked_for_and_the_total_from_the_link(monkeypatch):
+    """`rel="last"` is already in the response, so knowing an organisation has
+    about 8,300 repositories costs nothing extra."""
+    source = sources.parse("https://github.com/acme")
+    client = providers.for_source(source)
+    seen = {}
+
+    def _get(path, params=None):
+        seen.update({"path": path, **(params or {})})
+        return _page_resp(
+            [{"id": i, "name": f"r{i}", "full_name": f"acme/r{i}",
+              "owner": {"login": "acme"}} for i in range(100)],
+            link='<https://api.github.com/x?page=2>; rel="next", '
+                 '<https://api.github.com/x?page=83>; rel="last"')
+
+    monkeypatch.setattr(client._client, "_get", _get)
+    page = client.list_page("acme", 3)
+    assert seen["page"] == 3 and seen["per_page"] == providers.PAGE
+    assert seen["path"] == "/orgs/acme/repos"
+    assert len(page.records) == 100 and page.has_more is True
+    assert page.total == 8300
+
+
+def test_github_falls_back_to_the_user_endpoint_within_the_same_request(monkeypatch):
+    """Probing first would be an extra request on every lookup, and anonymous
+    GitHub allows sixty an hour."""
+    client = providers.for_source(sources.parse("https://github.com/torvalds"))
+    seen = []
+
+    def _get(path, params=None):
+        seen.append(path)
+        if path.startswith("/orgs"):
+            raise httpx.HTTPStatusError("nope", request=httpx.Request("GET", "https://x"),
+                                        response=_resp(404))
+        return _page_resp([])
+
+    monkeypatch.setattr(client._client, "_get", _get)
+    client.list_page("torvalds", 1)
+    assert seen == ["/orgs/torvalds/repos", "/users/torvalds/repos"]
+
+    # And it is remembered, so page two does not repeat the 404.
+    seen.clear()
+    client.list_page("torvalds", 2)
+    assert seen == ["/users/torvalds/repos"]
+
+
+def test_a_github_error_that_is_not_a_404_is_not_retried_as_a_user(monkeypatch):
+    client = providers.for_source(sources.parse("https://github.com/acme"))
+
+    def _get(path, params=None):
+        raise httpx.HTTPStatusError("boom", request=httpx.Request("GET", "https://x"),
+                                    response=_resp(500))
+
+    monkeypatch.setattr(client._client, "_get", _get)
+    with pytest.raises(httpx.HTTPStatusError):
+        client.list_page("acme", 1)
+
+
+def test_a_last_page_reports_the_count_it_can_see(monkeypatch):
+    """No `next` link means this is the end, so the total is knowable exactly."""
+    client = providers.for_source(sources.parse("https://github.com/acme"))
+    monkeypatch.setattr(client._client, "_get", lambda path, params=None: _page_resp(
+        [{"id": i, "name": f"r{i}", "full_name": f"acme/r{i}", "owner": {"login": "acme"}}
+         for i in range(17)]))
+    page = client.list_page("acme", 1)
+    assert page.has_more is False and page.total == 17
+
+
+def test_a_page_with_a_next_but_no_last_link_reports_an_unknown_total(monkeypatch):
+    """Unknown must stay unknown rather than becoming what we have so far."""
+    client = providers.for_source(sources.parse("https://github.com/acme"))
+    monkeypatch.setattr(client._client, "_get", lambda path, params=None: _page_resp(
+        [{"id": i, "name": f"r{i}", "full_name": f"acme/r{i}", "owner": {"login": "acme"}}
+         for i in range(100)],
+        link='<https://api.github.com/x?page=2>; rel="next"'))
+    assert client.list_page("acme", 1).total is None
+
+
+def test_gitlab_reads_a_page_and_its_headers(monkeypatch):
+    client = providers.for_source(sources.parse("https://gitlab.com/gitlab-org"))
+    monkeypatch.setattr(client, "_get", lambda path, params=None: _page_resp(
+        [{"path": f"r{i}", "path_with_namespace": f"gitlab-org/r{i}",
+          "namespace": {"full_path": "gitlab-org"}} for i in range(100)],
+        headers={"x-total": "3713", "x-next-page": "2"}))
+    page = client.list_page("gitlab-org", 1)
+    assert page.total == 3713 and page.has_more is True and len(page.records) == 100
+
+
+def test_gitlab_without_a_total_header_says_unknown(monkeypatch):
+    """GitLab drops the header once a set is large enough that counting costs."""
+    client = providers.for_source(sources.parse("https://gitlab.com/g"))
+    monkeypatch.setattr(client, "_get", lambda path, params=None: _page_resp(
+        [{"path": "one", "path_with_namespace": "g/one", "namespace": {"full_path": "g"}}]))
+    page = client.list_page("g", 1)
+    assert page.total is None and page.has_more is False
+
+
+def test_gitlab_page_falls_back_from_a_group_to_a_user(monkeypatch):
+    client = providers.for_source(sources.parse("https://gitlab.com/someone"))
+    seen = []
+
+    def _get(path, params=None):
+        seen.append(path)
+        if path.startswith("/groups"):
+            raise httpx.HTTPStatusError("nope", request=httpx.Request("GET", "https://x"),
+                                        response=_resp(404))
+        return _page_resp([])
+
+    monkeypatch.setattr(client, "_get", _get)
+    client.list_page("someone", 1)
+    assert seen[0].startswith("/groups") and seen[1].startswith("/users")
+
+
+def test_a_gitlab_page_error_that_is_not_a_404_is_raised(monkeypatch):
+    client = providers.for_source(sources.parse("https://gitlab.com/g"))
+
+    def _get(path, params=None):
+        raise httpx.HTTPStatusError("boom", request=httpx.Request("GET", "https://x"),
+                                    response=_resp(500))
+
+    monkeypatch.setattr(client, "_get", _get)
+    with pytest.raises(httpx.HTTPStatusError):
+        client.list_page("g", 1)
+
+
+def test_bitbucket_pages_by_number_and_reads_its_size(monkeypatch):
+    client = providers.for_source(sources.parse("https://bitbucket.org/atlassian"))
+    seen = {}
+
+    def _get(path, params=None):
+        seen.update({"path": path, **(params or {})})
+        return _page_resp({"values": [{"full_name": f"atlassian/r{i}", "links": {}}
+                                      for i in range(100)],
+                           "size": 407, "next": "..."})
+
+    monkeypatch.setattr(client._client, "get", _get)
+    page = client.list_page("atlassian", 2)
+    assert seen["page"] == 2 and seen["pagelen"] == providers.PAGE
+    assert page.total == 407 and page.has_more is True
+
+
+def test_bitbucket_without_a_size_says_unknown(monkeypatch):
+    client = providers.for_source(sources.parse("https://bitbucket.org/team"))
+    monkeypatch.setattr(client._client, "get",
+                        lambda path, params=None: _page_resp({"values": []}))
+    page = client.list_page("team", 1)
+    assert page.total is None and page.has_more is False
+
+
+def test_a_client_that_cannot_page_is_sliced_out_of_a_full_listing():
+    """The default keeps any future client correct without needing to know how
+    that host paginates."""
+    class _Simple(providers.Provider):
+        def list_repos(self, owner):
+            from git_synapse.ingest.github import RepoRecord
+            return [RepoRecord(github_id=None, owner=owner, name=f"r{i}",
+                               full_name=f"{owner}/r{i}") for i in range(150)]
+
+    client = _Simple(sources.parse("https://git.corp/team"))
+    first = client.list_page("team", 1)
+    second = client.list_page("team", 2)
+    assert len(first.records) == providers.PAGE and first.has_more is True
+    assert len(second.records) == 50 and second.has_more is False
+    assert first.total == 150
