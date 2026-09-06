@@ -338,16 +338,21 @@ def _refresh_directories(conn: psycopg.Connection, repo_id: int) -> int:
     conn.execute(
         """
         WITH dir_commits AS (
-            SELECT DISTINCT fd.dir_id, c.id AS commit_id, c.pair_eligible, c.committed_at
+            SELECT fd.dir_id, c.id AS commit_id, c.pair_eligible, c.committed_at,
+                   sum(cf.insertions) AS insertions,
+                   sum(cf.deletions) AS deletions
             FROM commit_file cf
             JOIN commit c ON c.id = cf.commit_id
             JOIN file_directory fd ON fd.file_id = cf.file_id
             WHERE cf.repo_id = %(repo)s
+            GROUP BY fd.dir_id, c.id, c.pair_eligible, c.committed_at
         ),
         agg AS (
             SELECT dir_id,
                    count(*)                                AS change_count,
                    count(*) FILTER (WHERE pair_eligible)   AS pair_change_count,
+                   sum(insertions)                          AS insertions,
+                   sum(deletions)                           AS deletions,
                    min(committed_at)                       AS first_change_at,
                    max(committed_at)                       AS last_change_at
             FROM dir_commits GROUP BY dir_id
@@ -355,6 +360,8 @@ def _refresh_directories(conn: psycopg.Connection, repo_id: int) -> int:
         UPDATE directory d SET
             change_count      = agg.change_count,
             pair_change_count = agg.pair_change_count,
+            insertions        = COALESCE(agg.insertions, 0),
+            deletions         = COALESCE(agg.deletions, 0),
             first_change_at   = agg.first_change_at,
             last_change_at    = agg.last_change_at
         FROM agg WHERE d.id = agg.dir_id
