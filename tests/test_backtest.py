@@ -436,9 +436,10 @@ def sampled_commits(monkeypatch, n_commits, sample):
     seen = []
     history = flat([1, 2], bt.WARMUP_COMMITS) + [(1, [1, 2, 3])] * n_commits
     monkeypatch.setattr(bt, "_commit_shas",
-                        lambda repo_id: {i: (f"sha{i}", "org/repo")
+                        lambda repo_id: {i: (f"sha{i}", "org/repo", "github.com")
                                          for i in range(len(history))})
-    monkeypatch.setattr(bt, "mirror_path_for", lambda name: bt.Path("/nonexistent"))
+    monkeypatch.setattr(bt, "mirror_path_for",
+                        lambda name, host="": bt.Path("/nonexistent"))
 
     def spy(mirror, sha, seed_path, k):
         seen.append(int(sha.removeprefix("sha")))
@@ -480,9 +481,10 @@ def test_lift_is_never_divided_by_a_sampled_rate(monkeypatch):
     with the draw rather than with the product."""
     history = flat([1, 2], bt.WARMUP_COMMITS + 400)
     monkeypatch.setattr(bt, "_commit_shas",
-                        lambda repo_id: {i: (f"sha{i}", "org/repo")
+                        lambda repo_id: {i: (f"sha{i}", "org/repo", "github.com")
                                          for i in range(len(history))})
-    monkeypatch.setattr(bt, "mirror_path_for", lambda name: bt.Path("/nonexistent"))
+    monkeypatch.setattr(bt, "mirror_path_for",
+                        lambda name, host="": bt.Path("/nonexistent"))
     # A New Hire that answers everything, so it would top the table if allowed.
     monkeypatch.setattr(bt, "agent_search", lambda m, sha, path, k: [path])
     result = replay(monkeypatch, history, measures=("npmi",), grep_sample=50)
@@ -641,7 +643,7 @@ def test_commit_shas_are_read_with_their_repository_name(seeded, monkeypatch):
     conn, repo, _, (first, _) = seeded
     monkeypatch.setattr(bt, "query", lambda sql, params: _rows(conn, sql, repo))
     shas = bt._commit_shas(repo)
-    assert shas[first] == ("a" * 40, "acme/replay")
+    assert shas[first] == ("a" * 40, "acme/replay", "github.com")
 
 
 def test_the_path_index_groups_by_stem_and_by_directory(seeded, monkeypatch):
@@ -726,9 +728,10 @@ def test_prompts_that_defeat_both_free_rules_are_counted_separately(monkeypatch)
     paths = {1: "api/handler.py", 2: "web/template.html"}   # no shared stem or folder
     history = flat([1, 2], bt.WARMUP_COMMITS + 400)
     monkeypatch.setattr(bt, "_commit_shas",
-                        lambda repo_id: {i: (f"sha{i}", "org/repo")
+                        lambda repo_id: {i: (f"sha{i}", "org/repo", "github.com")
                                          for i in range(len(history))})
-    monkeypatch.setattr(bt, "mirror_path_for", lambda name: bt.Path("/nonexistent"))
+    monkeypatch.setattr(bt, "mirror_path_for",
+                        lambda name, host="": bt.Path("/nonexistent"))
     monkeypatch.setattr(bt, "agent_search", lambda *a, **k: [])   # the search finds nothing
 
     result = replay(monkeypatch, history, paths=paths,

@@ -294,7 +294,10 @@ if _web_root.is_dir():
     #: Every deeper view lives under the tab that owns it -- a file is
     #: /repos/{id}/files/{id}, not /file/{id} -- so this is exactly the nav.
     SPA_ROUTES = (
-        "accounts", "repos", "insights", "activity", "measures", "jobs", "feedback",
+        # "sources" is the tab; "accounts" stays reachable so a bookmark or a
+        # link somebody sent still lands, and the client redirects it.
+        "sources", "accounts",
+        "repos", "insights", "activity", "measures", "jobs", "feedback",
         # Reachable while signed out: the shell renders the sign-in form.
         "people", "tokens",
     )

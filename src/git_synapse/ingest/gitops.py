@@ -231,15 +231,24 @@ def run_git_network(
     raise last
 
 
-def mirror_path_for(full_name: str, cfg: IngestConfig | None = None) -> Path:
+def mirror_path_for(full_name: str, cfg: IngestConfig | None = None,
+                    host: str = "github.com") -> Path:
     """Filesystem location of a repo's bare mirror.
 
-    Uses ``<root>/<owner>/<name>.git``, mirroring GitHub's own layout so the
-    directory tree stays browsable.
+    ``<root>/<owner>/<name>.git`` for github.com and ``<root>/<host>/<owner>/
+    <name>.git`` for anything else. The host is in the path for the same reason
+    it is in the repository's database identity: `owner/name` is unique on one
+    host, and two mirrors sharing a directory would fetch into each other.
+
+    github.com keeps the shorter form so existing mirrors stay where they are
+    and the tree reads the way the URL does.
     """
     cfg = cfg or get_config().ingest
     owner, _, name = full_name.partition("/")
-    return cfg.mirror_root / owner / f"{name}.git"
+    root = cfg.mirror_root if host in ("", "github.com") else cfg.mirror_root / host
+    # A GitLab group nests, so `owner` may itself contain slashes; that is a
+    # directory tree, which is exactly what we want it to become.
+    return root / owner / f"{name}.git"
 
 
 def is_valid_mirror(path: Path) -> bool:
@@ -373,6 +382,7 @@ def sync_mirror(
     clone_url: str,
     public_url: str | None = None,
     blobless: bool = False,
+    host: str = "github.com",
 ) -> FetchResult:
     """Ensure a current mirror exists for ``full_name``.
 
@@ -383,7 +393,7 @@ def sync_mirror(
     mirrors once and wasted an hour of an outage the other time.
     """
     started = time.monotonic()
-    path = mirror_path_for(full_name)
+    path = mirror_path_for(full_name, host=host)
     cloned = False
 
     if not is_valid_mirror(path):
@@ -675,9 +685,9 @@ def repo_size_kb(path: Path) -> int:
     return total
 
 
-def remove_mirror(full_name: str) -> bool:
+def remove_mirror(full_name: str, host: str = "github.com") -> bool:
     """Delete a mirror from disk. Returns True if something was removed."""
-    path = mirror_path_for(full_name)
+    path = mirror_path_for(full_name, host=host)
     if path.exists():
         shutil.rmtree(path)
         return True

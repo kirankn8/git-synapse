@@ -20,6 +20,7 @@ database table and the decisions that materially change the numbers.
 | [**From a declared version to a commit**](#from-a-declared-version-to-a-commit) | the four tiers, and what each is allowed to claim |
 | [**What the backtest is measured against**](#what-the-backtest-is-measured-against) | the baselines, and why a weak one is worse than none |
 | [What is incremental](#what-is-incremental-and-what-isnt) | what a refresh actually redoes |
+| [Where repositories come from](#where-repositories-come-from) | one field, any git host, and why a repository URL costs one request |
 | [**How the UI is addressed**](#how-the-ui-is-addressed) | places nest in the path, analyses scope with a query |
 | [**Who may read this**](#who-may-read-this) | sign-in, roles, tokens, and the switch that turns it off |
 | [**What callers asked for**](#what-callers-asked-for) | the call log, and what it deliberately does not do |
@@ -38,8 +39,8 @@ operational state that belongs to the deployment rather than to the corpus.
 
 | Table | What it holds |
 |---|---|
-| `account` | An organisation or user to scan. Discovery reads this, so onboarding is a write rather than a redeploy. |
-| `repo` | One row per repository: the full GitHub record, ingest state, and the watermarks each stage resumes from. |
+| `account` | A **source**: an owner on a host, tracked whole or by an explicit list of repositories. Carries the provider and host, the optional per-source access token (encrypted), and the filters that apply only when nothing was named. Discovery reads this, so onboarding is a write rather than a redeploy. |
+| `repo` | One row per repository: everything the host reported, ingest state, and the watermarks each stage resumes from. Identity is `(host, full_name)` — `owner/name` is unique on one host and nowhere wider. |
 | `author` | Author identity, deduplicated by lowercased email. |
 | `file` | One row per canonical path per repo, carrying both marginal counts. A rename folds into the existing row rather than creating a new one. |
 | `file_alias` | Historical paths that resolve to a current `file` row, so a file renamed three times keeps one identity and one history. |
@@ -771,6 +772,95 @@ The API, MCP server, CLI and UI all enumerate from the registry, so nothing else
 ---
 
 
+## Where repositories come from
+
+Coupling is computed from `git log`. That is the whole input: *this commit
+touched this file*, which every git host yields identically. Everything a
+provider API adds — stars, languages, the fork and archived flags, the list of
+repositories under an owner — is convenience layered on top of something
+already sufficient.
+
+That ordering is the design, and it decides the fallback. `GitProvider` needs
+no API at all and builds a record from the URL alone, so a self-hosted server
+nobody has written a client for still clones, parses, aggregates, scores and
+mines identically. The alternative — refuse what cannot be introspected —
+refuses exactly the deployments this is most useful in. GitHub, GitLab and
+Bitbucket have clients; a record from anywhere else is sparse rather than
+guessed, because `is_fork = false` when we do not know is a value a filter
+downstream will act on.
+
+**Adding something is one field.** A person has the URL in their clipboard —
+the page they were just looking at. Asking them to decompose it into a login, a
+kind, an allowlist and three toggles is asking them to do work the string
+already contains, so `sources.parse` does it instead: the browser URL, the
+clone URL, the ssh remote, a deep link trimmed back to the repository it is
+inside, and a bare `owner/repo` because that is how people write it in prose.
+
+**A repository URL costs one request.** This is the property the whole design
+turns on. `microsoft` holds 8,296 repositories; enumerating it takes 83 pages,
+which is enough to trip GitHub's secondary rate limit, and it would happen
+again on every nightly refresh. So a source with an allowlist is *fetched by
+name*, never listed — and the filters are not applied to it either, since
+naming a repository is already an explicit answer that a fork toggle could only
+contradict.
+
+**An owner URL is a question, not an instruction.** It comes back as a list to
+tick rather than being added whole, because "add microsoft" almost never means
+8,296 repositories. Forks and archived repositories are listed but not
+pre-selected: a fork's history is its parent's, and an archive cannot change
+again, so both are usually noise — but "usually" is not "never", which is why
+they are shown at all. *Track everything under this owner* is a separate offer
+because it is the one intent an allowlist cannot express: everything, including
+what is created tomorrow.
+
+The list is keyed on the repository's path *under the owner*, not its name.
+GitLab groups nest, so `gitlab-org` holds both `gitlab-org/gitlab-runner` and
+`gitlab-org/ci-cd/gitlab-runner` — two different projects with one name. Keying
+on the name ticks both boxes for one choice and writes one allowlist entry that
+then matches both.
+
+**The host is half of every identity.** `repo` is unique on `(host,
+full_name)`, `account` on `(login, host)`, and the mirror path carries the host
+for anything that is not github.com. An internal GitLab group commonly mirrors
+the company's public organisation name, and merging two repositories' histories
+into one row is the worst failure this system has: nothing would look wrong.
+
+**A lookup a person is watching is impatient.** An ingest run has all night and
+should wait a rate limit out; a request someone is watching has seconds, and
+sleeping sixty of them inside the handler is indistinguishable from a hang. So
+the preview path raises instead — and says which of two situations it is,
+because "rate limited" alone sends someone to wait out something a token would
+fix. A refused *listing* is still not a dead end: taking the whole owner needs
+no list, so that door is offered rather than the request simply failing.
+
+**A token is only embedded in a clone URL on the host that issued it**, with
+the username that host expects — `x-access-token`, `oauth2`, `x-token-auth`,
+which are not interchangeable. Without that check, the deployment-wide GitHub
+token is handed to whatever server a self-hosted repository happens to live on.
+
+### The one secret that must be readable again
+
+Everything else here is stored as a hash: a session cookie, an API token, a
+password. That works because those are only ever *checked*. An access token for
+a private repository cannot be, because `git clone` needs the actual
+characters.
+
+So the guarantee weakens from "a dump yields nothing" to "a dump *alone* yields
+nothing": the ciphertext is in Postgres and the key is in the environment, so a
+backup or a replica leaks neither on its own. That is a real reduction, which
+is why it is opt-in — with no `GS_SECRET_KEY` configured, storing a token is
+refused rather than silently downgraded, and the deployment-wide credentials
+remain the only way in.
+
+Fernet from `cryptography`, which was already installed here, rather than
+anything written for the occasion: encryption is the one kind of code that
+fails silently and completely. A passphrase is accepted and stretched with
+scrypt, because the alternative is people losing `openssl rand` output and the
+feature going unused. Anything unreadable — a rotated key, a row from another
+deployment — decrypts to empty rather than raising: the caller's fallback is
+the environment credential, which works, while an exception would take a whole
+discovery run down over one source.
+
 ## Who may read this
 
 Everything here is derived from public repositories, but the deployment is not
@@ -1142,7 +1232,9 @@ grows a rung at each step.
 src/git_synapse/
   stats/       contingency tables + the 31 measures + registry   (pure, no I/O)
   db/          schema.sql, connection pool, COPY helpers
-  ingest/      github discovery, git mirroring, log parser, loader, pipeline
+  ingest/      discovery, git mirroring, log parser, loader, pipeline
+               sources.py    what a pasted URL means
+               providers.py  GitHub, GitLab, Bitbucket, and plain git
   analysis/    aggregation, scoring, read queries
                depbump.py    manifest-bump ground truth + declared deps
                predict.py    the declared dependency graph, ranked
@@ -1154,6 +1246,7 @@ src/git_synapse/
   mcp/         MCP server
   scheduler/   daily refresh
   auth.py      scrypt hashing, sessions, API tokens, access policy
+  vault.py     the one secret that has to be readable again
   cli.py       Typer CLI
 web/           index.html + app.js + graph.js + style.css   (no build step)
 skills/

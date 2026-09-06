@@ -28,16 +28,28 @@ MAX_RETRIES = 5
 
 @dataclass
 class RepoRecord:
-    """A repository as discovered from the GitHub API.
+    """A repository as discovered from a host.
 
-    Mirrors the named columns of the ``repo`` table. ``raw`` carries the
-    complete API payload.
+    Mirrors the named columns of the ``repo`` table; ``raw`` carries the
+    complete API payload. Named for GitHub because that is the shape it grew
+    from, and every other provider maps onto it -- the fields a host cannot
+    answer stay at their defaults rather than being guessed, since a filter
+    downstream will act on whatever is here.
+
+    ``github_id`` is None for anything not from GitHub, including a repository
+    cloned from a host with no API at all. Identity comes from the host and the
+    full name, not from a number one provider happens to mint.
     """
 
-    github_id: int
+    github_id: int | None
     owner: str
     name: str
     full_name: str
+    #: Which host, and which client spoke to it. Together with ``full_name``
+    #: this is the repository's identity: `owner/name` is unique on a host and
+    #: nowhere wider.
+    provider: str = "github"
+    host: str = "github.com"
     description: str | None = None
     homepage: str | None = None
     html_url: str | None = None
@@ -100,17 +112,35 @@ class RepoRecord:
             raw=payload,
         )
 
+    #: The username each host expects beside a token in an https clone URL.
+    #: GitHub ignores it, GitLab requires this exact word, Bitbucket takes the
+    #: account name -- so a token cloned with the wrong one simply 401s.
+    _CLONE_USER = {
+        "github": "x-access-token",
+        "gitlab": "oauth2",
+        "bitbucket": "x-token-auth",
+    }
+
     def authed_clone_url(self, token: str) -> str:
         """Clone URL with the token embedded, so private repos fetch without a prompt.
 
         The token never reaches disk: git is invoked with this URL in argv only
         for the initial clone, and the remote stored in the mirror is rewritten
         to the plain URL by :mod:`git_synapse.ingest.gitops`.
+
+        A token is only ever embedded in a URL on the host that issued it. The
+        deployment-wide GITHUB_TOKEN reaching a self-hosted GitLab would hand
+        that server a live GitHub credential, which is the kind of leak nobody
+        goes looking for.
         """
         base = self.clone_url or f"https://github.com/{self.full_name}.git"
-        if not token:
+        user = self._CLONE_USER.get(self.provider)
+        if not token or not user or not base.startswith("https://"):
             return base
-        return base.replace("https://", f"https://x-access-token:{token}@", 1)
+        host = base.split("/")[2].split("@")[-1]
+        if host.lower() != (self.host or "").lower():
+            return base
+        return base.replace("https://", f"https://{user}:{token}@", 1)
 
 
 def _parse_ts(value: str | None) -> datetime | None:
@@ -127,7 +157,16 @@ def _parse_ts(value: str | None) -> datetime | None:
 class GitHubClient:
     """Thin REST client with retry, rate-limit awareness and pagination."""
 
-    def __init__(self, cfg: GitHubConfig | None = None, timeout: float = 30.0) -> None:
+    def __init__(self, cfg: GitHubConfig | None = None, timeout: float = 30.0,
+                 patient: bool = True) -> None:
+        """`patient` decides what a rate limit means.
+
+        An ingest run has all night and should wait one out. A request a person
+        is watching has seconds, and sleeping 60s inside the handler turns a
+        rate limit into a hang with no explanation -- so the impatient client
+        raises instead, and the caller says what happened.
+        """
+        self.patient = patient
         self.cfg = cfg or get_config().github
         headers = {
             "Accept": "application/vnd.github+json",
@@ -176,6 +215,8 @@ class GitHubClient:
                 return response
 
             if response.status_code in (403, 429):
+                if not self.patient:
+                    response.raise_for_status()
                 wait = self._rate_limit_wait(response)
                 log.warning(
                     "GET %s rate limited (%s); sleeping %ds",

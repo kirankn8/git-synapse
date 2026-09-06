@@ -475,7 +475,7 @@ def reset(
     console.print("[green]all ingested data removed[/green]")
 
 
-account_app = typer.Typer(name="account", help="Manage the orgs and users that get scanned.", no_args_is_help=True)
+account_app = typer.Typer(name="account", help="Manage the sources that get scanned.", no_args_is_help=True)
 app.add_typer(account_app)
 
 
@@ -514,7 +514,7 @@ def account_add(
     only: str = typer.Option("", "--only", help="Comma-separated allowlist of repo names."),
     skip: str = typer.Option("", "--skip", help="Comma-separated denylist of repo names."),
 ) -> None:
-    """Add an organisation or user to scan."""
+    """Add a source to scan: an org, user, group or workspace."""
     _setup()
     try:
         row = accounts.add_account(

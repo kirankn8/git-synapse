@@ -81,22 +81,27 @@ def load_tags(repo_id: int, tags: list, conn: psycopg.Connection) -> int:
 def upsert_repo(record: RepoRecord, conn: psycopg.Connection | None = None, account_id: int | None = None) -> int:
     """Insert or update a repository row and return its id.
 
-    Every GitHub field is written, including the untouched payload in
-    ``raw_github`` so that unmodelled fields remain available later.
+    Every field the host reported is written, including the untouched payload
+    in ``raw_github`` so that unmodelled fields remain available later.
+
+    The conflict target is ``(host, full_name)``, not ``full_name``: the same
+    ``owner/name`` genuinely exists on more than one host, and merging two
+    histories into one row would be undetectable from the outside.
     """
 
     def _run(c: psycopg.Connection) -> int:
         row = c.execute(
             """
             INSERT INTO repo (
-                github_id, owner, name, full_name, description, homepage,
+                github_id, provider, host, owner, name, full_name, description, homepage,
                 html_url, clone_url, ssh_url, default_branch, primary_language,
                 languages, topics, license_spdx, visibility, is_private, is_fork,
                 is_archived, is_template, is_disabled, disk_usage_kb, stargazers,
                 watchers, forks_count, open_issues, github_created_at,
                 github_updated_at, github_pushed_at, raw_github, account_id, updated_at
             ) VALUES (
-                %(github_id)s, %(owner)s, %(name)s, %(full_name)s, %(description)s,
+                %(github_id)s, %(provider)s, %(host)s, %(owner)s, %(name)s,
+                %(full_name)s, %(description)s,
                 %(homepage)s, %(html_url)s, %(clone_url)s, %(ssh_url)s,
                 %(default_branch)s, %(primary_language)s, %(languages)s, %(topics)s,
                 %(license_spdx)s, %(visibility)s, %(is_private)s, %(is_fork)s,
@@ -105,8 +110,9 @@ def upsert_repo(record: RepoRecord, conn: psycopg.Connection | None = None, acco
                 %(github_created_at)s, %(github_updated_at)s, %(github_pushed_at)s,
                 %(raw_github)s, %(account_id)s, now()
             )
-            ON CONFLICT (full_name) DO UPDATE SET
+            ON CONFLICT (host, full_name) DO UPDATE SET
                 github_id         = EXCLUDED.github_id,
+                provider          = EXCLUDED.provider,
                 description       = COALESCE(EXCLUDED.description, repo.description),
                 homepage          = COALESCE(EXCLUDED.homepage, repo.homepage),
                 html_url          = EXCLUDED.html_url,
@@ -143,6 +149,8 @@ def upsert_repo(record: RepoRecord, conn: psycopg.Connection | None = None, acco
             """,
             {
                 "github_id": record.github_id,
+                "provider": record.provider,
+                "host": record.host,
                 "owner": record.owner,
                 "name": record.name,
                 "full_name": record.full_name,

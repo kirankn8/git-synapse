@@ -130,7 +130,10 @@ class GitHubConfig:
     api_url: str = field(default_factory=lambda: _env_str("GITHUB_API_URL", "https://api.github.com"))
     #: Include repositories the token can see but that are private.
     include_private: bool = field(default_factory=lambda: _env_bool("INCLUDE_PRIVATE", True))
-    include_forks: bool = field(default_factory=lambda: _env_bool("INCLUDE_FORKS", True))
+    #: Off. A fork's history is its parent's history, so tracking both stores
+    #: the same commits twice and puts a second copy of every coupling in the
+    #: corpus, ranked as though it were independent evidence.
+    include_forks: bool = field(default_factory=lambda: _env_bool("INCLUDE_FORKS", False))
     include_archived: bool = field(default_factory=lambda: _env_bool("INCLUDE_ARCHIVED", True))
     #: When set, restricts ingestion to exactly these repo names.
     only_repos: tuple[str, ...] = field(default_factory=lambda: _env_list("ONLY_REPOS"))
@@ -298,6 +301,21 @@ class ServerConfig:
 
 
 @dataclass(frozen=True)
+class ProviderConfig:
+    """Credentials for hosts other than GitHub.
+
+    All optional. A public repository on any of these clones and ingests with
+    no credential at all -- these only widen what is visible and lift the
+    anonymous rate limit, which is the same bargain GITHUB_TOKEN makes.
+    """
+
+    gitlab_token: str = field(default_factory=lambda: _env_str("GITLAB_TOKEN", ""))
+    #: Bitbucket app passwords are basic auth, so they need the username too.
+    bitbucket_user: str = field(default_factory=lambda: _env_str("BITBUCKET_USER", ""))
+    bitbucket_token: str = field(default_factory=lambda: _env_str("BITBUCKET_TOKEN", ""))
+
+
+@dataclass(frozen=True)
 class Config:
     """Top-level configuration aggregate."""
 
@@ -308,6 +326,7 @@ class Config:
     crossrepo: DependencyConfig = field(default_factory=DependencyConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
+    providers: ProviderConfig = field(default_factory=ProviderConfig)
     log_level: str = field(default_factory=lambda: _env_str("LOG_LEVEL", "INFO"))
 
 

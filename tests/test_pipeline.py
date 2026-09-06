@@ -135,9 +135,11 @@ def test_discovery_refuses_a_collapsed_listing(db, monkeypatch):
     class _Client:
         def __enter__(self): return self
         def __exit__(self, *a): return False
-        def list_org_repos(self): return []
+        def supports_listing(self): return True
+        def list_repos(self, login): return []
 
-    monkeypatch.setattr(pipeline, "GitHubClient", lambda cfg: _Client())
+    monkeypatch.setattr(pipeline.providers, "for_source",
+                        lambda src, patient=True, token="": _Client())
     monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: [])
 
     with pytest.raises(AuthError, match="already known"):
@@ -158,9 +160,11 @@ def test_discovery_accepts_a_listing_that_is_merely_smaller(db, monkeypatch):
     class _Client:
         def __enter__(self): return self
         def __exit__(self, *a): return False
-        def list_org_repos(self): return fake
+        def supports_listing(self): return True
+        def list_repos(self, login): return fake
 
-    monkeypatch.setattr(pipeline, "GitHubClient", lambda cfg: _Client())
+    monkeypatch.setattr(pipeline.providers, "for_source",
+                        lambda src, patient=True, token="": _Client())
     monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: fake)
     monkeypatch.setattr(pipeline, "upsert_repo", lambda record, conn: None)
 
@@ -659,17 +663,19 @@ def _record(full_name):
 
 
 def _client_returning(mapping):
-    """A GitHubClient whose listing depends on the account, or raises for it."""
+    """A provider whose listing depends on the owner, or raises for it."""
     class _Client:
         def __enter__(self): return self
         def __exit__(self, *a): return False
 
-        def list_account_repos(self, login, kind):
+        def supports_listing(self): return True
+
+        def list_repos(self, login):
             outcome = mapping[login]
             if isinstance(outcome, Exception):
                 raise outcome
             return outcome
-    return lambda cfg: _Client()
+    return lambda src, patient=True, token="": _Client()
 
 
 def test_discovery_with_no_accounts_says_how_to_add_one(db, monkeypatch):
@@ -687,7 +693,7 @@ def test_one_failing_account_does_not_stop_the_others(two_accounts, db, monkeypa
     """Discovery runs across accounts, so a single broken one must cost only
     its own repositories."""
     good = [_record("beta/keep")]
-    monkeypatch.setattr(pipeline, "GitHubClient", _client_returning(
+    monkeypatch.setattr(pipeline.providers, "for_source", _client_returning(
         {"alpha": RuntimeError("listing blew up"), "beta": good}))
     monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: list(records))
 
@@ -700,7 +706,7 @@ def test_every_account_failing_is_reported_as_one_error(two_accounts, db, monkey
     organisation, and must not be reported as the latter."""
     from git_synapse.ingest.pipeline import AuthError
 
-    monkeypatch.setattr(pipeline, "GitHubClient", _client_returning(
+    monkeypatch.setattr(pipeline.providers, "for_source", _client_returning(
         {"alpha": RuntimeError("down"), "beta": RuntimeError("also down")}))
     monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: [])
 
@@ -713,7 +719,7 @@ def test_a_discovered_repository_records_which_account_found_it(two_accounts, db
     history mined from it."""
     from git_synapse.db.engine import query_one
 
-    monkeypatch.setattr(pipeline, "GitHubClient", _client_returning(
+    monkeypatch.setattr(pipeline.providers, "for_source", _client_returning(
         {"alpha": [_record("alpha/one")], "beta": []}))
     monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: list(records))
     monkeypatch.setattr(pipeline, "DISCOVERY_SHRINK_FLOOR", 0.0)
@@ -727,7 +733,7 @@ def test_a_discovered_repository_records_which_account_found_it(two_accounts, db
 def test_the_shrink_guard_stands_down_when_an_account_errored(two_accounts, db, monkeypatch):
     """A collapse already explained by a reported failure is not evidence of a
     bad credential, and refusing the run twice for one cause helps nobody."""
-    monkeypatch.setattr(pipeline, "GitHubClient", _client_returning(
+    monkeypatch.setattr(pipeline.providers, "for_source", _client_returning(
         {"alpha": RuntimeError("down"), "beta": [_record("beta/still-here")]}))
     monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: list(records))
 
@@ -797,15 +803,16 @@ def test_a_bad_credential_stops_discovery_rather_than_repeating_itself(two_accou
     account and report a different failure for each."""
     from git_synapse.ingest.pipeline import AuthError
 
-    def _client(cfg):
+    def _client(src, patient=True, token=""):
         class _C:
             def __enter__(self): return self
             def __exit__(self, *a): return False
-            def list_account_repos(self, login, kind):
+            def supports_listing(self): return True
+            def list_repos(self, login):
                 raise AuthError("bad credential")
         return _C()
 
-    monkeypatch.setattr(pipeline, "GitHubClient", _client)
+    monkeypatch.setattr(pipeline.providers, "for_source", _client)
     with pytest.raises(AuthError, match="bad credential"):
         pipeline.discover()
 
@@ -823,7 +830,7 @@ def test_a_collapsed_listing_is_refused_even_with_accounts_configured(two_accoun
                          (f"bulk/r{i}", f"r{i}"))
         conn.commit()
     try:
-        monkeypatch.setattr(pipeline, "GitHubClient", _client_returning(
+        monkeypatch.setattr(pipeline.providers, "for_source", _client_returning(
             {"alpha": [_record("alpha/one")], "beta": []}))
         monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: list(records))
         with pytest.raises(AuthError, match="already known"):

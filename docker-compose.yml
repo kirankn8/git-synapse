@@ -22,8 +22,20 @@ x-app-env: &app-env
   GITHUB_TOKEN: ${GITHUB_TOKEN:-${GH_TOKEN:-}}
   GITHUB_TOKEN_FILE: /run/git-synapse/github-token
   GITHUB_ORG: ${GITHUB_ORG:-}
+  # Other hosts. All optional: a public repository on any of them clones with
+  # no credential at all.
+  GITLAB_TOKEN: ${GITLAB_TOKEN:-}
+  BITBUCKET_USER: ${BITBUCKET_USER:-}
+  BITBUCKET_TOKEN: ${BITBUCKET_TOKEN:-}
+  # Encrypts the per-source access tokens people paste into the UI. Without it
+  # they simply cannot be stored, and the variables above stay the only way to
+  # reach a private repository.
+  GS_SECRET_KEY: ${GS_SECRET_KEY:-}
   INCLUDE_PRIVATE: ${INCLUDE_PRIVATE:-true}
-  INCLUDE_FORKS: ${INCLUDE_FORKS:-true}
+  # Off. A fork's history is its parent's history, so tracking both stores the
+  # same commits twice and ranks a second copy of every coupling as though it
+  # were independent evidence.
+  INCLUDE_FORKS: ${INCLUDE_FORKS:-false}
   INCLUDE_ARCHIVED: ${INCLUDE_ARCHIVED:-true}
   ONLY_REPOS: ${ONLY_REPOS:-}
   SKIP_REPOS: ${SKIP_REPOS:-}

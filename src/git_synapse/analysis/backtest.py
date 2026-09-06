@@ -205,12 +205,17 @@ class BacktestResult:
                 f"({best.lift:.2f}x)" + tail)
 
 
-def _commit_shas(repo_id: int | None) -> dict[int, tuple[str, str]]:
-    """commit id -> (sha, repository full name), for the grep baseline."""
+def _commit_shas(repo_id: int | None) -> dict[int, tuple[str, str, str]]:
+    """commit id -> (sha, repository full name, host), for the grep baseline.
+
+    The host travels with the name because it is half the mirror's address:
+    `owner/name` is unique on one host, so without it two repositories can
+    resolve to the same directory on disk.
+    """
     where = "" if repo_id is None else "WHERE c.repo_id = %(repo)s"
-    rows = query(f"""SELECT c.id, c.sha, r.full_name FROM commit c
+    rows = query(f"""SELECT c.id, c.sha, r.full_name, r.host FROM commit c
                        JOIN repo r ON r.id = c.repo_id {where}""", {"repo": repo_id})
-    return {r["id"]: (r["sha"], r["full_name"]) for r in rows}
+    return {r["id"]: (r["sha"], r["full_name"], r["host"]) for r in rows}
 
 
 def _history(repo_id: int | None) -> list[tuple[int, list[int], int]]:
@@ -597,10 +602,10 @@ def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE
                     rr[spec.key] += 1.0 / rank if rank else 0.0
 
                 if grep_sample:
-                    sha, full_name = shas.get(commit_id, ("", ""))
+                    sha, full_name, host = shas.get(commit_id, ("", "", ""))
                     seed_path = paths.get(seed)
                     if sha and seed_path:
-                        entry = (full_name, sha, seed_path,
+                        entry = (full_name, host, sha, seed_path,
                                  frozenset(p for p in (paths.get(f) for f in targets) if p),
                                  len(targets), neighbour_solved, tuple(hit_here.items()))
                         candidates += 1
@@ -633,8 +638,8 @@ def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE
 
     # The sample is searched only now, so that every prompt in the replay had an
     # equal chance of being in it regardless of when it occurred.
-    for full_name, sha, seed_path, want, n_targets, solved, hits in reservoir:
-        got = agent_search(mirror_path_for(full_name), sha, seed_path, k)
+    for full_name, host, sha, seed_path, want, n_targets, solved, hits in reservoir:
+        got = agent_search(mirror_path_for(full_name, host=host), sha, seed_path, k)
         correct = [g for g in got if g in want]
         grep_n += 1
         grep_wanted += n_targets

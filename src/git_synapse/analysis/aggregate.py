@@ -142,11 +142,11 @@ def _head_tree_paths(conn: psycopg.Connection, repo_id: int) -> set[str] | None:
     from git_synapse.ingest.gitops import mirror_path_for
 
     row = conn.execute(
-        "SELECT full_name FROM repo WHERE id = %s", (repo_id,)
+        "SELECT full_name, host FROM repo WHERE id = %s", (repo_id,)
     ).fetchone()
     if row is None:
         return None
-    mirror = mirror_path_for(str(row[0]))
+    mirror = mirror_path_for(str(row[0]), host=str(row[1]))
     if not mirror.is_dir():
         return None
     try:

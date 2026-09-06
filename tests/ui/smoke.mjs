@@ -145,7 +145,7 @@ const impactRepoId = bumped.target ?? repoId;
 const routes = [
   ['#/',                                   'Overview'],
   ['#/repos',                              'Repositories'],
-  ['#/accounts',                           'Accounts'],
+  ['#/sources',                            'Sources'],
   [`#/repos/${repoId}`,                    'Repo (lands on files)'],
   [`#/repos/${repoId}?tab=overview`,       'Repo overview'],
   [`#/repos/${repoId}?tab=pairs`,          'Repo pairs'],
@@ -213,14 +213,14 @@ for (const [hash, label] of routes) {
 // Interaction: clicking a table row must navigate.
 console.log('\n=== drill-down trail ===');
 for (const [path, label, expect] of [
-  ['/repos/5', 'repository', ['Accounts', 'google']],
+  ['/repos/5', 'repository', ['Sources', 'google']],
   [`/repos/${repoId}/tree/${dirPath}`, 'folder',
-   ['Accounts', ...dirPath.split('/')]],
+   ['Sources', ...dirPath.split('/')]],
   [`/repos/${repoId}/files/${filePath}`, 'file',
-   ['Accounts', filePath.split('/').pop()]],
-  ['/insights/risk?repo=5', 'scoped insights', ['Accounts', 'google', 'guava', 'Insights']],
-  ['/insights/impact?repo=5', 'scoped impact',  ['Accounts', 'google', 'guava', 'Insights']],
-  ['/insights/graph?repo=5', 'scoped graph', ['Accounts', 'google', 'guava', 'Insights']],
+   ['Sources', filePath.split('/').pop()]],
+  ['/insights/risk?repo=5', 'scoped insights', ['Sources', 'google', 'guava', 'Insights']],
+  ['/insights/impact?repo=5', 'scoped impact',  ['Sources', 'google', 'guava', 'Insights']],
+  ['/insights/graph?repo=5', 'scoped graph', ['Sources', 'google', 'guava', 'Insights']],
 ]) {
   // The previous page's breadcrumb is still in the DOM until the new view
   // replaces it, and "the first non-empty trail" was therefore sometimes the
@@ -331,7 +331,7 @@ if (errors.length) {
 console.log('\n=== canonical paths ===');
 {
   const cases = [
-    ['/accounts/7',                     'account'],
+    ['/sources/7',                      'source'],
     ['/repos/5',                        'repository'],
     [`/repos/${repoId}/files/${filePath}`,      'file'],
     dirPath ? [`/repos/${repoId}/tree/${dirPath}`, 'folder'] : null,
@@ -407,6 +407,8 @@ console.log('\n=== click walk: account -> repo -> folder -> file ===');
     return true;
   };
 
+  // Deliberately the old path: links to it exist, so the redirect to
+  // /sources is part of what has to keep working.
   window.history.pushState({}, '', '/accounts');
   window.dispatchEvent(new window.PopStateEvent('popstate'));
   await settle();
@@ -415,7 +417,7 @@ console.log('\n=== click walk: account -> repo -> folder -> file ===');
   const step = (label, passed) => steps.push([label, passed, window.location.pathname]);
 
   let ok = await clickRow();
-  step('account row opens an account', ok && /^\/accounts\/\d+$/.test(window.location.pathname));
+  step('source row opens the source', ok && /^\/sources\/\d+$/.test(window.location.pathname));
 
   ok = await clickRow();
   step('repository row opens the repository',

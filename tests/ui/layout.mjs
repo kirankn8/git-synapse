@@ -32,7 +32,7 @@ const PAGES = [
   ['/insights/shape/commit_width', 'One distribution'],
   ['/insights/risk', 'Risk'],
   ['/insights/drift', 'Drift'],
-  ['/accounts', 'Accounts'],
+  ['/sources', 'Sources'],
   ['/jobs', 'Jobs'],
   ['/jobs?tab=settings', 'Jobs settings'],
   ['/activity', 'Activity'],
@@ -446,6 +446,51 @@ console.log('\n=== no page talks about its own past ===');
 /* A repository name is unique only inside its account: two organisations can
    each have a `guava`, and a flat list renders both as "guava" with no way to
    tell them apart. The account is the group label. */
+/* Adding a source is one field, so the field and its button share a line. They
+   did not: the hint lives inside the field block, so anything aligned to that
+   block's bottom edge lands under the input rather than beside it. */
+console.log('\n=== adding a source is one line and one field ===');
+{
+  await page.goto(BASE + '/sources', { waitUntil: 'domcontentloaded' });
+  await settle();
+  const m = await page.evaluate(() => {
+    const i = document.querySelector('#source-url');
+    const b = document.querySelector('#source-lookup');
+    if (!i || !b) return null;
+    const ib = i.getBoundingClientRect();
+    const bb = b.getBoundingClientRect();
+    return {
+      sameLine: Math.abs(ib.top - bb.top) < 2,
+      sameHeight: Math.abs(ib.height - bb.height) < 2,
+      gap: Math.round(bb.left - ib.right),
+      // The old form had six controls. One is the whole point.
+      inputs: document.querySelectorAll('.card .form input:not([hidden])').length,
+      hintBelow: document.querySelector('.url-add .field-hint')
+                   .getBoundingClientRect().top >= ib.bottom - 1,
+    };
+  });
+  if (m && m.sameLine && m.sameHeight && m.gap > 0 && m.gap < 24 && m.hintBelow) {
+    ok('source add row', `input and button share a line, ${m.gap}px apart`);
+  } else {
+    bad('source add row', JSON.stringify(m));
+  }
+  if (m && m.inputs <= 2) {
+    ok('source add fields', `${m.inputs} visible field(s), not a form of six`);
+  } else {
+    bad('source add fields', `${m && m.inputs} visible inputs`);
+  }
+
+  // The token field is hidden until it is the answer to something.
+  const before = await page.evaluate(() => document.querySelector('.token-box').hidden);
+  await page.click('.url-add .linkish');
+  const after = await page.evaluate(() => document.querySelector('.token-box').hidden);
+  if (before && !after) {
+    ok('token field', 'hidden until asked for');
+  } else {
+    bad('token field', `hidden before=${before} after=${after}`);
+  }
+}
+
 console.log('\n=== a repository picker is grouped by account ===');
 {
   await page.goto(BASE + '/insights/risk', { waitUntil: 'domcontentloaded' });

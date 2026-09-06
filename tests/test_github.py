@@ -17,8 +17,11 @@ from git_synapse.ingest.github import GitHubClient, RepoRecord, select_repos
 def _repo_payload(i: int, **over):
     payload = {
         "id": 1000 + i, "name": f"repo{i}", "full_name": f"acme/repo{i}",
-        "owner": {"login": "acme"}, "clone_url": f"https://x/repo{i}.git",
-        "ssh_url": f"git@x:repo{i}.git", "default_branch": "main",
+        "owner": {"login": "acme"},
+        # A real github.com clone URL, because the host is now load-bearing: a
+        # token is embedded only when the URL's host is the record's host.
+        "clone_url": f"https://github.com/acme/repo{i}.git",
+        "ssh_url": f"git@github.com:acme/repo{i}.git", "default_branch": "main",
         "size": 100, "archived": False, "fork": False, "disabled": False,
         "private": False, "visibility": "public", "language": "Go",
         "stargazers_count": 0, "topics": [], "description": None,
@@ -123,6 +126,38 @@ def test_authed_clone_url_embeds_the_token_and_leaves_no_trace_without_one():
     r = RepoRecord.from_api(_repo_payload(1))
     assert r.authed_clone_url("ghu_abc").startswith("https://x-access-token:ghu_abc@")
     assert r.authed_clone_url("") == r.clone_url
+
+
+def test_a_token_is_only_embedded_on_the_host_that_issued_it():
+    """Otherwise the deployment-wide GitHub token is handed to whatever server
+    a self-hosted repository happens to live on."""
+    import dataclasses
+
+    gh = RepoRecord.from_api(_repo_payload(1))
+    assert "ghu_abc@" in gh.authed_clone_url("ghu_abc")
+
+    # Same provider, different host: a GitHub Enterprise clone URL under a
+    # record whose token belongs to github.com.
+    elsewhere = dataclasses.replace(gh, clone_url="https://ghe.corp/o/r.git")
+    assert elsewhere.authed_clone_url("ghu_abc") == "https://ghe.corp/o/r.git"
+
+    # A host with no API client gets no credential at all.
+    plain = dataclasses.replace(gh, provider="git", host="git.corp",
+                                clone_url="https://git.corp/o/r.git")
+    assert plain.authed_clone_url("ghu_abc") == "https://git.corp/o/r.git"
+
+
+def test_each_host_gets_the_clone_username_it_expects():
+    """A token with the wrong username beside it is simply a 401."""
+    import dataclasses
+
+    gh = RepoRecord.from_api(_repo_payload(1))
+    gl = dataclasses.replace(gh, provider="gitlab", host="gitlab.com",
+                             clone_url="https://gitlab.com/o/r.git")
+    bb = dataclasses.replace(gh, provider="bitbucket", host="bitbucket.org",
+                             clone_url="https://bitbucket.org/o/r.git")
+    assert gl.authed_clone_url("glpat_x").startswith("https://oauth2:glpat_x@")
+    assert bb.authed_clone_url("bb_x").startswith("https://x-token-auth:bb_x@")
 
 
 # ------------------------------------------------------------------ filters
