@@ -173,7 +173,7 @@ class IngestConfig:
     #: A full clone yields line-level churn (insertions/deletions) and inexact
     #: rename detection, because both need blob contents. A blobless clone
     #: yields neither, but is one to two orders of magnitude smaller. Since the
-    #: 29 association measures depend only on which paths co-occur in a commit,
+    #: 31 association measures depend only on which paths co-occur in a commit,
     #: a blobless repo still produces complete and correct coupling statistics
     #: -- it just loses churn as an extra attribute.
     #:

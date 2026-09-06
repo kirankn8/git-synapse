@@ -1,4 +1,4 @@
-"""Materialisation of the 29 association measures over the pair tables.
+"""Materialisation of the 31 association measures over the pair tables.
 
 This is a pure function of the aggregates: it reads ``(n_ab, n_a, n_b, N)`` for
 each pair, evaluates every measure in the registry, and writes the results to

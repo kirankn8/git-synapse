@@ -91,7 +91,7 @@ app = FastAPI(
     version="1.0.0",
     summary="Change-coupling statistics over git history.",
     description=(
-        "Ranks the files that historically change together, using 29 association "
+        "Ranks the files that historically change together, using 31 association "
         "measures computed from commit co-occurrence. Built so a coding agent can "
         "ask 'I am editing X, what else must change?' and get a statistically "
         "grounded answer."

@@ -17,7 +17,7 @@ real repositories:
   by comparing blob SHAs in the tree, but inexact ones need content.
 
 ``--raw -M100%`` walks a blobless mirror completely and correctly, which is all
-the 29 association measures require: they depend only on *which paths* co-occur
+the 31 association measures require: they depend only on *which paths* co-occur
 in a commit, never on how many lines changed. A blobless repo therefore yields
 complete coupling statistics and merely loses churn as an extra attribute.
 

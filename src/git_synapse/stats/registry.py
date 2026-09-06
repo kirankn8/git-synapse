@@ -612,8 +612,9 @@ _ALIASES: dict[str, str] = {
     alias: spec.key for spec in MEASURES for alias in spec.aliases
 }
 
-#: The 29 measures the project specification calls for, excluding the two
-#: directional extras. Used by the aggregation job to decide what to persist.
+#: The symmetric measures: every family except DIRECTIONAL. Scoring persists
+#: ALL_KEYS, so this is not a subset anything stores -- it is the set for which
+#: `m(A,B) == m(B,A)` holds, which is what the symmetry tests parametrise over.
 CORE_KEYS: tuple[str, ...] = tuple(
     spec.key for spec in MEASURES if spec.family != Family.DIRECTIONAL
 )
