@@ -124,8 +124,11 @@ fager                  ->   0.923  (n_ab=177)  go.sum <-> go.mod
 ```
 
 The first three show textbook **rare-item bias**: a pair seen twice, always
-together, maxes out any unpenalised measure. Log-likelihood and Fager — which
-weight evidence — find the real answer. The UI labels every biased measure.
+together, maxes out any unpenalised measure. Log-likelihood weights the evidence
+and finds the real answer; Fager's penalty pulls in the same direction here, but
+it is driven by the *commoner* file, so it bounds small-sample optimism rather
+than removing it — a single co-change between two files that each changed once
+still scores 0.5. The UI labels every biased measure.
 
 Which of them actually predicts is not a matter of opinion here: the
 [backtest](#does-it-actually-help) measures it against history, and `P(B|A)`
