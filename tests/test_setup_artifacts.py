@@ -1,5 +1,5 @@
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 
 ROOT = Path(__file__).parents[1]
@@ -36,3 +36,11 @@ def test_setup_docs_explain_both_paths_and_secret_location() -> None:
     assert "helm upgrade --install git-synapse" in docs
     assert "Kubernetes Secret" in docs
     assert "docker compose run --rm cli admin setup-token" in docs
+
+
+def test_github_pages_publishes_docs_root() -> None:
+    workflow = (ROOT / ".github/workflows/pages.yml").read_text()
+    index = (ROOT / "docs/index.html").read_text()
+    assert "actions/deploy-pages" in workflow
+    assert "path: docs" in workflow
+    assert "setup.html" in index
