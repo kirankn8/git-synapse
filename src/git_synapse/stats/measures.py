@@ -28,14 +28,19 @@ right one matters more than computing all of them:
 from __future__ import annotations
 
 import numpy as np
+from scipy import special as sp_special
 from scipy import stats as sp_stats
 
 from git_synapse.stats.contingency import Contingency, safe_div, xlog2y, xlogy
 
 # Significance measures are reported as -log10(p) so that "bigger is stronger"
-# holds uniformly across every measure in the registry. p=0 (underflow) is
-# clamped here rather than becoming inf.
-MAX_NEG_LOG10_P = 300.0
+# holds uniformly across every measure in the registry. The cap exists only to
+# turn an infinity into a number a DOUBLE PRECISION column and a table cell can
+# hold -- it is not the working range. At 300 it was: a repository of ten
+# million commits produces tails past 200,000, and every pair beyond 300 shared
+# one value, so the two measures stopped ordering anything exactly where their
+# evidence was strongest.
+MAX_NEG_LOG10_P = 1e6
 
 
 # --------------------------------------------------------------------------
@@ -377,16 +382,29 @@ def poisson_significance(t: Contingency) -> np.ndarray:
 
     Models co-occurrence counts as Poisson with rate ``E = n_a * n_b / N``,
     which is the natural null when commits mix files independently at random.
-    Higher means less likely under chance. Clamped to
-    ``MAX_NEG_LOG10_P`` to keep the value finite when the tail underflows.
+    Higher means less likely under chance. Computed in log space, so the tail
+    keeps ordering pairs far past the point where the probability itself
+    underflows to zero; ``MAX_NEG_LOG10_P`` is the last resort, not the working
+    range.
 
     Better calibrated than :func:`z_score` for small expected counts, since it
     uses the actual discrete distribution rather than a normal approximation.
     """
     lam = np.maximum(t.expected, 1e-12)
     with np.errstate(divide="ignore", invalid="ignore"):
-        sf = sp_stats.poisson.sf(t.a - 1, lam)
-    return _neg_log10(sf)
+        # In log space. `sf` underflows to exactly 0 well inside the range a
+        # real repository reaches, and every pair past that point then shares
+        # one saturated value -- which is the ordering this measure exists to
+        # provide, gone precisely where the evidence is strongest.
+        log_sf = sp_stats.poisson.logsf(t.a - 1, lam)
+        # scipy's own logsf underflows too, at around a = 10^5. Far out in the
+        # tail the sum P(X >= a) is dominated by its first term, so ln P(X = a)
+        # is both a lower bound and asymptotically the answer -- and unlike -inf
+        # it still orders one pair against another.
+        a = np.asarray(t.a, dtype=np.float64)
+        log_pmf = -lam + a * np.log(lam) - sp_special.gammaln(a + 1.0)
+        log_sf = np.where(np.isfinite(log_sf), log_sf, log_pmf)
+    return _neg_log10_from_log(log_sf)
 
 
 def hypergeometric_significance(t: Contingency) -> np.ndarray:
@@ -402,19 +420,28 @@ def hypergeometric_significance(t: Contingency) -> np.ndarray:
     the primary ranking pass over millions of pairs.
     """
     with np.errstate(divide="ignore", invalid="ignore"):
-        sf = sp_stats.hypergeom.sf(t.a - 1, t.n, t.n_a, t.n_b)
-    return _neg_log10(sf)
+        log_sf = sp_stats.hypergeom.logsf(t.a - 1, t.n, t.n_a, t.n_b)
+    return _neg_log10_from_log(log_sf)
 
 
-def _neg_log10(p: np.ndarray) -> np.ndarray:
-    """Convert a p-value array to ``-log10(p)``, clamped and nan-safe."""
-    p = np.asarray(p, dtype=np.float64)
-    p = np.where(np.isfinite(p), p, 1.0)
-    p = np.clip(p, 10.0**-MAX_NEG_LOG10_P, 1.0)
-    # `+ 0.0` normalises the sign bit: np.clip(-log10(1.0), 0, ...) is -0.0,
-    # which is what a p-value of exactly 1 produces, and -0.0 then reaches
-    # the database and the UI as "-0".
-    return np.clip(-np.log10(p), 0.0, MAX_NEG_LOG10_P) + 0.0
+def _neg_log10_from_log(log_p: np.ndarray) -> np.ndarray:
+    """``-log10(p)`` from ``ln(p)``, which is how the tails are computed.
+
+    Taking the survival function directly loses the tail: it underflows to
+    exactly 0.0 at around p = 1e-308, and a corpus of any size has many pairs
+    past that. Every one of them then reports the same clamped number, so the
+    two significance measures stop ordering anything at exactly the point they
+    are most confident. ``logsf`` has no such floor -- ln(p) = -5000 is an
+    ordinary float -- so the conversion happens once, here.
+
+    A -inf (p underflowed even in log space) becomes the cap rather than an
+    infinity, since the column is a double and the UI has to print it.
+    """
+    log_p = np.asarray(log_p, dtype=np.float64)
+    out = np.where(np.isnan(log_p), 0.0, -log_p / np.log(10.0))
+    # `+ 0.0` normalises the sign bit: -0.0 is what ln(p) = 0 produces, and it
+    # reaches the database and the UI as "-0".
+    return np.clip(out, 0.0, MAX_NEG_LOG10_P) + 0.0
 
 
 # --------------------------------------------------------------------------

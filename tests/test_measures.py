@@ -444,3 +444,34 @@ def test_a_p_value_of_one_is_positive_zero():
     for key in ("poisson_significance", "hypergeometric_significance"):
         v = np.asarray(BY_KEY[key].compute(_tbl(0, 10, 10, 80))).ravel()[0]
         assert not np.signbit(v), f"{key} produced negative zero"
+
+
+def test_the_significance_tails_keep_ordering_past_where_p_underflows():
+    """Both measures saturated at the cap on any large repository, so every
+    pair past that point shared one value -- the ordering they exist to provide,
+    gone exactly where the evidence is strongest. Two tables that differ by a
+    factor of two in their co-change count both reported 300.0."""
+    strong = _tbl(10**6, 10**6, 10**6, 8 * 10**6)
+    stronger = _tbl(5 * 10**5, 5 * 10**5, 5 * 10**5, 8_500_000)
+    for key in ("poisson_significance", "hypergeometric_significance"):
+        a = float(BY_KEY[key].compute(strong))
+        b = float(BY_KEY[key].compute(stronger))
+        assert np.isfinite(a) and np.isfinite(b), key
+        assert a != b, f"{key} cannot tell these two tables apart"
+        assert min(a, b) > 1000, f"{key} is still saturating low"
+
+
+def test_the_significance_tails_are_unchanged_on_ordinary_tables():
+    """Computing in log space must not move the numbers anyone actually sees."""
+    expected = {
+        (5, 20, 30, 400): (1.731049, 1.930029),
+        (2, 9, 4, 400): (2.418505, 2.577796),
+        (0, 10, 10, 100): (0.0, 0.0),
+        (50, 60, 60, 100): (1.806310, 8.304686),
+    }
+    for (ab, n_a, n_b, n), (pois, hyp) in expected.items():
+        table = Contingency.from_counts(n_ab=ab, n_a=n_a, n_b=n_b, n_total=n)
+        assert float(BY_KEY["poisson_significance"].compute(table)) == \
+            pytest.approx(pois, abs=1e-5)
+        assert float(BY_KEY["hypergeometric_significance"].compute(table)) == \
+            pytest.approx(hyp, abs=1e-5)
