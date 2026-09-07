@@ -223,3 +223,91 @@ def test_a_rebuild_can_run_inside_a_callers_transaction(impact_corpus):
 
     with connection() as conn:
         assert predict.rebuild(conn, force=True).rows_written > 0
+
+
+# ------------------------------------- rankings do not spend slots on the dead
+
+@pytest.fixture
+def dead_file(db):
+    """A repository of our own holding one file deleted at HEAD.
+
+    Its own repository, not whichever one happens to exist: a test that borrows
+    another test's data passes or fails on the order they run in, which is the
+    flake this suite has been bitten by before.
+    """
+    from git_synapse.db.engine import execute, query_one
+
+    repo = query_one(
+        """
+        INSERT INTO repo (github_id, owner, name, full_name, host, provider,
+                          is_enabled, commit_count, pair_population)
+        VALUES (NULL, 'ranktest', 'dead', 'ranktest/dead', 'github.com',
+                'github', TRUE, 500, 500)
+        ON CONFLICT (host, full_name) DO UPDATE SET updated_at = now()
+        RETURNING id
+        """)
+    file_row = query_one(
+        """
+        INSERT INTO file (repo_id, path, dir_path, basename, extension, depth,
+                          is_deleted, change_count, pair_change_count, author_count)
+        VALUES (%s, 'gone/removed.py', 'gone', 'removed.py', 'py', 1,
+                TRUE, 9999, 9999, 3)
+        RETURNING id
+        """, (repo["id"],))
+    yield repo["id"], file_row["id"]
+    execute("DELETE FROM file_risk WHERE file_id = %s", (file_row["id"],))
+    execute("DELETE FROM file WHERE id = %s", (file_row["id"],))
+    execute("DELETE FROM repo WHERE id = %s", (repo["id"],))
+
+
+def test_hotspots_leave_out_files_that_no_longer_exist(dead_file):
+    """A ranking says "look here". A file deleted at HEAD is not somewhere
+    anyone can look, and each one spends a slot the reader came for."""
+    from git_synapse.analysis import query as q
+
+    repo_id, fid = dead_file
+    assert fid not in {r["id"] for r in q.hotspots(repo_id=repo_id, limit=10)}, \
+        "9,999 changes, top of the repository, and still excluded"
+    # Not hidden, only unranked: it was real while the file existed.
+    assert fid in {r["id"] for r in
+                   q.hotspots(repo_id=repo_id, limit=10, include_deleted=True)}
+
+
+def test_risk_leaves_out_files_that_no_longer_exist(dead_file):
+    """Risk answers "what happens if I change this, and who understands it" --
+    a question that cannot be asked of a file that is gone."""
+    from git_synapse.analysis import mining
+    from git_synapse.db.engine import execute
+
+    repo_id, fid = dead_file
+    execute(
+        "INSERT INTO file_risk (file_id, repo_id, churn_pct, coupling_pct,"
+        " ownership_hhi, effective_authors, author_count, partner_count,"
+        " change_count, risk_score) VALUES (%s,%s,1,1,1,1,3,40,9999,1.99)"
+        " ON CONFLICT (file_id) DO NOTHING", (fid, repo_id))
+    assert fid not in {r["file_id"] for r in mining.risky_files(repo_id=repo_id, limit=10)}, \
+        "the highest possible score, and still out"
+    assert fid in {r["file_id"] for r in
+                   mining.risky_files(repo_id=repo_id, limit=10, include_deleted=True)}
+
+
+def test_a_coupling_query_still_reports_a_deleted_partner(db):
+    """The opposite judgement, and deliberately so: the reader asked about one
+    specific file, the coupling is a historical fact, and the answer labels it
+    rather than hiding it."""
+    from git_synapse.analysis import query as q
+    from git_synapse.db.engine import query_one
+
+    row = query_one(
+        """
+        SELECT p.repo_id, p.file_a_id, p.file_b_id FROM file_pair p
+          JOIN file fb ON fb.id = p.file_b_id
+         WHERE fb.is_deleted LIMIT 1
+        """)
+    if row is None:
+        import pytest
+
+        pytest.skip("no deleted partner in this corpus")
+    partners = q.coupled_files(row["file_a_id"], limit=500)
+    assert any(pt.get("is_deleted") for pt in partners), \
+        "a deleted partner must still be offered, marked"

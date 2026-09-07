@@ -52,6 +52,13 @@ class MeasureSpec:
             with tiny marginals; the UI warns on these.
         saturates_on_sparse: True for measures that count joint absence and so
             sit near their maximum for almost every commit-data pair.
+        zero_when_unobserved: True where the measure returns 0 for a pair that
+            never co-occurred, by convention rather than by limit -- PMI's true
+            value there is -inf. Declared rather than left implicit because it
+            collides with ``neutral``: the same 0 then means both "independent"
+            and "never seen together", so a pair observed once can score *below*
+            a pair never observed at all. Nothing materialises such a pair --
+            support is at least 1 -- but a caller passing its own table can.
         hit_rate: what the reference backtest measured -- the share of prompts
             where a file that really changed appeared in this measure's top 5.
             Not a recommendation. Which question a caller wants asked depends on
@@ -73,6 +80,7 @@ class MeasureSpec:
     is_significance: bool = False
     rare_item_bias: bool = False
     saturates_on_sparse: bool = False
+    zero_when_unobserved: bool = False
     #: Measured, not asserted. See MEASURED_ON for the corpus.
     hit_rate: float | None = None
     aliases: tuple[str, ...] = field(default_factory=tuple)
@@ -204,13 +212,18 @@ MEASURES: tuple[MeasureSpec, ...] = (
         formula="a / sqrt(n_a * n_b) - 1 / (2 * sqrt(max(n_a, n_b)))",
         summary="Ochiai adjusted by a penalty for small samples.",
         detail=(
-            "Subtracts a correction that is large for rarely-changed files and "
-            "negligible for well-observed ones. This makes it one of the few "
-            "similarity measures that is safe to run over the long tail without a "
-            "separate support filter."
+            "Subtracts a correction driven by the *commoner* of the two files, "
+            "as Fager and McGowan define it: the penalty shrinks as the busier "
+            "partner accumulates changes and is flat in the rarer one. It bounds "
+            "the optimism of a small sample rather than replacing a support "
+            "filter -- a single co-change between two files that each changed "
+            "once still scores 0.5, ahead of five co-changes out of ten."
         ),
         fn=m.fager,
-        lower=None,
+        # -0.5, not unbounded: the worst case is n_a = n_b = 1 with a = 0, where
+        # ochiai is 0 and the penalty is its largest. Declaring it None meant
+        # the bounds test skipped this measure entirely.
+        lower=-0.5,
         upper=1.0,
         signed=True,
     ),
@@ -277,7 +290,10 @@ MEASURES: tuple[MeasureSpec, ...] = (
         lower=-1.0,
         upper=1.0,
         signed=True,
-        neutral=0.0,
+        # No neutral value. Hamann is zero iff a + d == b + c, which has nothing
+        # to do with independence: the independent tables (4,16,16,64) and
+        # (1,9,9,81) score +0.36 and +0.64. Its siblings in this family
+        # correctly declare none either.
         saturates_on_sparse=True,
     ),
     MeasureSpec(
@@ -326,6 +342,7 @@ MEASURES: tuple[MeasureSpec, ...] = (
             "possible score on a single observation."
         ),
         fn=m.pmi,
+        zero_when_unobserved=True,
         signed=True,
         neutral=0.0,
         rare_item_bias=True,
@@ -361,6 +378,7 @@ MEASURES: tuple[MeasureSpec, ...] = (
             "noise. Retains PMI's rare-item bias on the positive side."
         ),
         fn=m.ppmi,
+        zero_when_unobserved=True,
         lower=0.0,
         rare_item_bias=True,
     ),

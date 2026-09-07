@@ -340,3 +340,107 @@ def test_vectorisation_matches_scalar_evaluation() -> None:
             assert batched[i] == pytest.approx(
                 val(spec.fn, single), rel=1e-9, abs=1e-12
             ), f"{spec.key} mismatch at index {i}"
+
+
+# ---------------------------------------------- degenerate tables, revisited
+#
+# Each of these passed before the measure it names was fixed, because the
+# existing degenerate-case tests assert "does not raise" and "is finite", and
+# every one of these bugs returned a perfectly finite, perfectly wrong number.
+
+def _tbl(a, b, c, d):
+    return Contingency.from_counts(n_ab=a, n_a=a + b, n_b=a + c, n_total=a + b + c + d)
+
+
+def test_a_pair_that_never_co_occurred_does_not_score_as_chance():
+    """t_score divided by sqrt(a). At a = 0 the guard returned the fill value,
+    which is 0.0 -- the declared *neutral* score. So two files that have never
+    once changed together were reported as exactly independent, and ranked
+    above every pair that merely co-occurred less often than expected."""
+    never = BY_KEY["t_score"].compute(_tbl(0, 50, 50, 900))
+    independent = BY_KEY["t_score"].compute(_tbl(4, 16, 16, 64))
+    under = BY_KEY["t_score"].compute(_tbl(2, 18, 18, 62))
+
+    assert float(independent) == pytest.approx(0.0), "this one really is chance"
+    assert float(never) < float(under) < float(independent), \
+        "never-together must be worse than under-associated, worse than chance"
+    assert float(never) == pytest.approx(-2.5), "-E, the expectation it missed"
+
+
+def test_only_an_independent_table_scores_the_neutral_value():
+    """The invariant behind `neutral`: if a measure declares one, no degenerate
+    table may land on it by accident."""
+    degenerate = [(0, 50, 50, 900), (0, 0, 10, 90), (0, 10, 0, 90),
+                  (5, 0, 0, 95), (1, 0, 0, 0)]
+    for spec in MEASURES:
+        if spec.neutral is None or spec.zero_when_unobserved:
+            # zero_when_unobserved says so on purpose: PMI's limit at a = 0 is
+            # -inf and the literature convention is 0. Declared, so it shows in
+            # the catalogue rather than surprising a reader.
+            continue
+        for cells in degenerate:
+            table = _tbl(*cells)
+            a, b, c, d = cells
+            n = a + b + c + d
+            if n and abs(a * n - (a + b) * (a + c)) < 1e-9:
+                continue          # genuinely independent; neutral is correct
+            value = float(np.asarray(spec.compute(table)).ravel()[0])
+            assert value != pytest.approx(spec.neutral, abs=1e-12), (
+                f"{spec.key} calls {cells} exactly neutral without it being "
+                "independent")
+
+
+def test_hamann_declares_no_neutral_because_it_has_none():
+    """hamann = 2(a+d)/N - 1, which is zero iff a+d == b+c -- unrelated to
+    independence. It declared 0.0, and independent tables score +0.36, +0.64."""
+    assert BY_KEY["hamann"].neutral is None
+    for cells in [(4, 16, 16, 64), (1, 9, 9, 81), (6, 4, 24, 16)]:
+        a, b, c, d = cells
+        n = a + b + c + d
+        assert abs(a * n - (a + b) * (a + c)) < 1e-9, "table is independent"
+        assert abs(float(BY_KEY["hamann"].compute(_tbl(*cells)))) > 0.1, \
+            "and hamann is nowhere near zero on it"
+
+
+def test_fager_scores_nothing_when_no_association_is_possible():
+    """A file that never changed cannot be associated with anything. Ochiai
+    collapses to 0, but the penalty term survived on max(n_a, n_b) > 0 and left
+    a bare negative score for a pair with no shared evidence at all."""
+    for cells in [(0, 0, 10, 90), (0, 0, 1, 99), (0, 10, 0, 90)]:
+        assert float(BY_KEY["fager"].compute(_tbl(*cells))) == 0.0, cells
+    # Both files observed but never together is a real, scoreable situation.
+    assert float(BY_KEY["fager"].compute(_tbl(0, 1, 1, 98))) == pytest.approx(-0.5)
+
+
+def test_every_declared_bound_is_the_real_bound():
+    """`lower=None` on fager meant the bounds test skipped it, hiding that its
+    true minimum is exactly -0.5."""
+    worst: dict[str, float] = {}
+    best: dict[str, float] = {}
+    for n_a in range(10):
+        for n_b in range(10):
+            for ab in range(min(n_a, n_b) + 1):
+                table = _tbl(ab, n_a - ab, n_b - ab,
+                             max(20 - n_a - n_b + ab, 0))
+                for spec in MEASURES:
+                    v = float(np.asarray(spec.compute(table)).ravel()[0])
+                    if not np.isfinite(v):
+                        continue
+                    worst[spec.key] = min(worst.get(spec.key, v), v)
+                    best[spec.key] = max(best.get(spec.key, v), v)
+    for spec in MEASURES:
+        if spec.lower is not None:
+            assert worst[spec.key] >= spec.lower - 1e-9, \
+                f"{spec.key} reached {worst[spec.key]}, below its declared {spec.lower}"
+        if spec.upper is not None:
+            assert best[spec.key] <= spec.upper + 1e-9, \
+                f"{spec.key} reached {best[spec.key]}, above its declared {spec.upper}"
+    assert worst["fager"] == pytest.approx(-0.5), "the bound is tight, not a guess"
+
+
+def test_a_p_value_of_one_is_positive_zero():
+    """np.clip(-log10(1.0), 0, ...) is -0.0: clip does not normalise the sign
+    bit, and -0 reached the database and the UI."""
+    for key in ("poisson_significance", "hypergeometric_significance"):
+        v = np.asarray(BY_KEY[key].compute(_tbl(0, 10, 10, 80))).ravel()[0]
+        assert not np.signbit(v), f"{key} produced negative zero"

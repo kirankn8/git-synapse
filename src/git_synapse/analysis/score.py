@@ -151,11 +151,37 @@ def _iter_pair_batches(
 
 
 def _score_batch(repo_id: int, batch: _Batch) -> list[tuple]:
-    """Evaluate every registered measure over a batch and build COPY rows."""
+    """Evaluate every registered measure over a batch and build COPY rows.
+
+    The cells written are the ones the measures were computed from, not the raw
+    aggregates. ``Contingency.from_counts`` clamps input to the feasible region
+    -- ``n_ab`` above either marginal comes down, a marginal above ``N`` comes
+    down, and inclusion-exclusion can force ``a`` *up* from a reported zero when
+    ``n_a + n_b > N``. Writing the raw numbers beside scores derived from the
+    clamped ones breaks the property the whole design rests on: that any number
+    in the UI traces back to four counts, and those four counts reproduce it.
+
+    Clamping should never fire on data this pipeline produced -- the marginals
+    come from the same commits as the joint count -- so a difference means an
+    aggregate is stale, and is logged rather than passed over.
+    """
     table = Contingency.from_counts(
         n_ab=batch.n_ab, n_a=batch.n_a, n_b=batch.n_b, n_total=batch.n_total
     )
     scores = [BY_KEY[key].compute(table) for key in ALL_KEYS]
+
+    cell_ab = np.asarray(table.a, dtype=np.int64)
+    cell_a = np.asarray(table.a + table.b, dtype=np.int64)
+    cell_b = np.asarray(table.a + table.c, dtype=np.int64)
+    adjusted = int(np.count_nonzero(
+        (cell_ab != np.asarray(batch.n_ab))
+        | (cell_a != np.asarray(batch.n_a))
+        | (cell_b != np.asarray(batch.n_b))))
+    if adjusted:
+        log.warning(
+            "repo %s: %d pair(s) had infeasible counts and were clamped to the "
+            "feasible table before scoring; an aggregate is likely stale",
+            repo_id, adjusted)
 
     # Transpose column-wise arrays into row tuples for COPY. zip over the
     # arrays is materially faster than indexing each array per row.
@@ -167,9 +193,9 @@ def _score_batch(repo_id: int, batch: _Batch) -> list[tuple]:
         for a, b, ab, na, nb, values in zip(
             batch.a_ids,
             batch.b_ids,
-            batch.n_ab,
-            batch.n_a,
-            batch.n_b,
+            cell_ab,
+            cell_a,
+            cell_b,
             zip(*(np.asarray(s, dtype=np.float64).tolist() for s in scores),
                 strict=True),
             strict=True,

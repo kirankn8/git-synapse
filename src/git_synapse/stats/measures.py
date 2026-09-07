@@ -121,12 +121,23 @@ def fager(t: Contingency) -> np.ndarray:
 
     ``a / sqrt(n_a * n_b) - 1 / (2 * sqrt(max(n_a, n_b)))``.
 
-    The correction term shrinks as the rarer item accumulates observations, so
-    a pair seen twice is punished hard while a pair seen two hundred times is
-    barely touched. This makes it one of the better-behaved similarity measures
-    for the long tail of rarely-changed files, which is most of any repository.
+    The correction is in the *commoner* of the two items, as Fager and McGowan
+    define it -- so it shrinks as the busier partner accumulates changes, and is
+    flat in the rarer one. That is worth stating plainly because it is easy to
+    assume the opposite: a pair seen exactly once together, where both files
+    have changed only once, scores 0.5, which beats a pair seen five times out
+    of ten. The penalty bounds the optimism of a small sample; it does not
+    replace a support filter.
+
+    Where no association is possible at all -- one of the items never changed,
+    so ``n_a`` or ``n_b`` is zero -- the result is 0, as it is for every other
+    similarity measure here. Subtracting the penalty from an undefined
+    similarity previously produced a bare negative score (-0.5 at its worst)
+    for a pair with no shared evidence whatsoever.
     """
-    return ochiai(t) - safe_div(1.0, 2.0 * np.sqrt(np.maximum(t.n_a, t.n_b)))
+    possible = np.minimum(t.n_a, t.n_b) > 0
+    score = ochiai(t) - safe_div(1.0, 2.0 * np.sqrt(np.maximum(t.n_a, t.n_b)))
+    return np.where(possible, score, 0.0)
 
 
 # --------------------------------------------------------------------------
@@ -333,8 +344,21 @@ def t_score(t: Contingency) -> np.ndarray:
     frequency -- high-frequency pairs win even at modest effect size -- which
     makes it a good complement to PMI's opposite bias. Values above ~2 are
     conventionally treated as significant.
+
+    The denominator is floored at 1 rather than left to divide by zero. With
+    ``a = 0`` the true value diverges to -inf, and a plain guard returning the
+    fill value put it at exactly 0.0 -- the *neutral* score. A pair that has
+    never once co-occurred was therefore reported as "exactly chance", and
+    ranked above every pair that merely co-occurred less often than expected.
+    Flooring gives ``-E``, which keeps the ordering the measure exists for: the
+    more a never-seen pair was expected, the worse it scores.
+
+    Pairs with ``a = 0`` are not stored -- ``MIN_PAIR_SUPPORT`` is at least 1 --
+    so this changes no materialised number. It matters to anyone calling the
+    library directly, and to the invariant that only an independent table
+    scores neutral.
     """
-    return safe_div(t.a - t.expected, np.sqrt(t.a))
+    return safe_div(t.a - t.expected, np.sqrt(np.maximum(t.a, 1.0)))
 
 
 def z_score(t: Contingency) -> np.ndarray:
@@ -387,7 +411,10 @@ def _neg_log10(p: np.ndarray) -> np.ndarray:
     p = np.asarray(p, dtype=np.float64)
     p = np.where(np.isfinite(p), p, 1.0)
     p = np.clip(p, 10.0**-MAX_NEG_LOG10_P, 1.0)
-    return np.clip(-np.log10(p), 0.0, MAX_NEG_LOG10_P)
+    # `+ 0.0` normalises the sign bit: np.clip(-log10(1.0), 0, ...) is -0.0,
+    # which is what a p-value of exactly 1 produces, and -0.0 then reaches
+    # the database and the UI as "-0".
+    return np.clip(-np.log10(p), 0.0, MAX_NEG_LOG10_P) + 0.0
 
 
 # --------------------------------------------------------------------------
