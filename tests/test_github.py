@@ -330,3 +330,37 @@ def test_a_private_repository_is_excluded_unless_asked_for():
                                          GitHubConfig(org="acme", include_private=False))} == {"open"}
     assert {r.name for r in select_repos([public, secret],
                                          GitHubConfig(org="acme", include_private=True))} == {"open", "shut"}
+
+
+def test_giving_up_reports_what_the_host_actually_said(monkeypatch):
+    """`failed after 5 attempts: None` was the message a reader got for a rate
+    limit -- last_error is only set by transport errors, so the status and the
+    host's own sentence, the two useful things, were both dropped."""
+    import httpx
+
+    from git_synapse.ingest.github import GitHubClient
+
+    client = GitHubClient(patient=True)
+    monkeypatch.setattr(client._client, "get", lambda path, params=None: httpx.Response(
+        403, json={"message": "API rate limit exceeded for 1.2.3.4"},
+        request=httpx.Request("GET", "https://x")))
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    with pytest.raises(RuntimeError) as exc:
+        client._get("/orgs/microsoft/repos")
+    assert "HTTP 403" in str(exc.value)
+    assert "rate limit exceeded" in str(exc.value)
+    client.close()
+
+
+def test_a_server_error_is_reported_with_its_status_too(monkeypatch):
+    import httpx
+
+    from git_synapse.ingest.github import GitHubClient
+
+    client = GitHubClient(patient=True)
+    monkeypatch.setattr(client._client, "get", lambda path, params=None: httpx.Response(
+        503, text="upstream unavailable", request=httpx.Request("GET", "https://x")))
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        client._get("/x")
+    client.close()

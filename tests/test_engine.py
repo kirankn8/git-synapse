@@ -181,7 +181,7 @@ def test_apply_schema_gives_up_with_a_clear_error_rather_than_looping(db, monkey
     fast and say so instead of blocking readers indefinitely."""
     import psycopg
 
-    monkeypatch.setattr(engine, "schema_is_current", lambda: False)
+    monkeypatch.setattr(engine, "recorded_schema_version", lambda: None)
     monkeypatch.setattr(engine.time, "sleep", lambda _s: None, raising=False)
 
     def blocked(*a, **kw):
@@ -410,7 +410,7 @@ def test_applying_the_schema_retries_while_a_lock_is_held(monkeypatch):
         raise psycopg.errors.QueryCanceled("canceling statement due to lock timeout")
 
     monkeypatch.setattr(psycopg, "connect", flaky)
-    monkeypatch.setattr(engine, "schema_is_current", lambda: False)
+    monkeypatch.setattr(engine, "recorded_schema_version", lambda: None)
     monkeypatch.setattr(engine.time, "sleep", lambda s: None)
     with pytest.raises(RuntimeError, match="could not apply schema"):
         engine.apply_schema()
@@ -442,7 +442,7 @@ def test_applying_the_schema_succeeds_once_the_lock_clears(monkeypatch):
         return _Conn()
 
     monkeypatch.setattr(psycopg, "connect", flaky)
-    monkeypatch.setattr(engine, "schema_is_current", lambda: False)
+    monkeypatch.setattr(engine, "recorded_schema_version", lambda: None)
     monkeypatch.setattr(engine.time, "sleep", lambda s: None)
     engine.apply_schema()
     assert attempts["n"] == 2
@@ -529,3 +529,65 @@ def test_copy_into_temp_creates_the_table_and_stages_the_rows(db):
         )
         assert staged == 3
         assert conn.execute("SELECT sum(repo_id) FROM t_staged").fetchone()[0] == 6
+
+
+# ------------------------------------------------- older code, newer schema
+
+def test_a_database_ahead_of_this_process_is_detected(db, monkeypatch):
+    """The state a partial rebuild leaves behind: one service applies the new
+    DDL and the others keep running old SQL against it. `schema_is_current`
+    cannot see it -- it answers "may I skip the DDL", and ahead is skippable,
+    and therefore silent."""
+    from git_synapse.db import engine
+
+    monkeypatch.setattr(engine, "recorded_schema_version",
+                        lambda: engine.SCHEMA_VERSION + 2)
+    assert engine.schema_drift() == 2
+    assert engine.schema_is_current() is True, "which is exactly why it is silent"
+
+
+def test_a_database_at_or_behind_this_process_is_not_drift(db, monkeypatch):
+    from git_synapse.db import engine
+
+    for recorded in (engine.SCHEMA_VERSION, engine.SCHEMA_VERSION - 1, None):
+        monkeypatch.setattr(engine, "recorded_schema_version", lambda r=recorded: r)
+        assert engine.schema_drift() == 0
+
+
+def test_a_live_database_reports_the_version_this_code_expects(db):
+    """If these disagree, every service that boots is either about to re-run
+    the whole DDL or about to write with the wrong SQL."""
+    from git_synapse.db import engine
+
+    assert engine.recorded_schema_version() == engine.SCHEMA_VERSION
+
+
+def test_a_stale_process_refuses_to_run_rather_than_failing_repo_by_repo(db, monkeypatch):
+    """163 Postgres errors nobody reads as "rebuild your containers", against
+    one sentence that says exactly that."""
+    from git_synapse.ingest import pipeline
+
+    monkeypatch.setattr(pipeline, "schema_drift", lambda: 1)
+    run = pipeline.run_ingest(trigger="test")
+    assert run.status == "failed"
+
+    from git_synapse.db.engine import query_one
+
+    row = query_one("SELECT error FROM ingest_run WHERE id = %s", (run.run_id,))
+    assert "make up" in row["error"] and "older code" in row["error"]
+
+
+def test_applying_the_schema_says_so_when_the_process_is_the_stale_one(db, monkeypatch, caplog):
+    """The one line that turns 163 Postgres errors into a fixable sentence, and
+    it has to appear on the boot path -- every service calls apply_schema, and
+    the stale one is precisely the one that skips the DDL."""
+    import logging
+
+    from git_synapse.db import engine
+
+    monkeypatch.setattr(engine, "recorded_schema_version",
+                        lambda: engine.SCHEMA_VERSION + 1)
+    with caplog.at_level(logging.ERROR, logger="git_synapse.db.engine"):
+        engine.apply_schema()
+    assert "older code" in caplog.text and "make up" in caplog.text
+    assert str(engine.SCHEMA_VERSION + 1) in caplog.text

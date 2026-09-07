@@ -416,7 +416,13 @@ console.log('\n=== click walk: account -> repo -> folder -> file ===');
   const steps = [];
   const step = (label, passed) => steps.push([label, passed, window.location.pathname]);
 
-  let ok = await clickRow();
+  // A source that has actually been scanned: the walk descends folder → file,
+  // which needs history to descend into. A paused or never-scanned source is a
+  // legitimate row and simply has no tree below it.
+  let ok = await clickRow((r) => {
+    const n = Number((r.children[2]?.textContent || '0').replace(/[^0-9]/g, ''));
+    return n > 0 && !/paused/i.test(r.textContent);
+  });
   step('source row opens the source', ok && /^\/sources\/\d+$/.test(window.location.pathname));
 
   ok = await clickRow();

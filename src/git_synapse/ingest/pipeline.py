@@ -16,10 +16,12 @@ operational situation from "nothing ran".
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import logging
 import subprocess
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,7 +32,7 @@ from git_synapse.analysis import depbump, mining, predict
 from git_synapse.analysis.aggregate import rebuild_repo
 from git_synapse.analysis.score import score_repo
 from git_synapse.config import get_config
-from git_synapse.db.engine import connection, copy_rows
+from git_synapse.db.engine import SCHEMA_VERSION, connection, copy_rows, schema_drift
 from git_synapse.ingest import accounts, gitops, providers, sources
 from git_synapse.ingest.github import RepoRecord, select_repos
 from git_synapse.ingest.parser import iter_commits
@@ -208,6 +210,31 @@ def _prune_call_log() -> None:
         log.warning("could not prune expired sessions", exc_info=True)
 
 
+def _failure_summary(run: RunResult) -> str | None:
+    """One sentence explaining a failed run, or None when nothing failed.
+
+    A run whose repositories all fail identically is one systemic problem --
+    a migration, a credential, a full disk -- not N independent ones, and the
+    shared message is the whole diagnosis. Without this the row said `failed`
+    with an empty error, and the per-repository table could not help either:
+    it is keyed on a repository id, and a repository that fails before it has
+    one records nothing at all. Which is exactly the earliest, most systemic
+    failures.
+    """
+    if not run.failed:
+        return None
+
+    counts = Counter((r.error or "unknown error").strip().splitlines()[0][:300]
+                     for r in run.failed)
+    top, n = counts.most_common(1)[0]
+    lead = f"{len(run.failed)} of {len(run.repos)} repositories failed"
+    if len(counts) == 1:
+        return f"{lead}, every one with: {top}"
+    others = len(counts) - 1
+    return (f"{lead}; the most common ({n}) was: {top}"
+            f" \u2014 and {others} other kind{'s' if others > 1 else ''} of error")
+
+
 def _finish_run(run: RunResult) -> None:
     status = "success"
     if run.failed and run.ok:
@@ -222,7 +249,8 @@ def _finish_run(run: RunResult) -> None:
             UPDATE ingest_run SET
                 status = %s, finished_at = now(), duration_s = %s,
                 repos_ok = %s, repos_failed = %s, commits_added = %s,
-                files_added = %s, pairs_written = %s
+                files_added = %s, pairs_written = %s,
+                error = %s
             WHERE id = %s
             """,
             (
@@ -233,6 +261,7 @@ def _finish_run(run: RunResult) -> None:
                 run.commits_added,
                 sum(r.files_created for r in run.repos),
                 sum(r.pairs for r in run.repos),
+                _failure_summary(run),
                 run.run_id,
             ),
         )
@@ -408,14 +437,6 @@ def discover(trigger: str = "manual") -> list[RepoRecord]:
     return selected
 
 
-#: Names above which listing the owner once and filtering beats fetching each
-#: one. A listing returns a hundred repositories per request, so this loses only
-#: for an owner with more than `NAME_FETCH_MAX * 100` repositories -- and wins
-#: enormously for the case it exists for, a handful of names pasted out of a
-#: very large organisation.
-NAME_FETCH_MAX = 25
-
-
 def _discover_account(account: dict) -> tuple[list[RepoRecord], int]:
     """List and filter one source, returning the kept records and the raw count.
 
@@ -423,50 +444,99 @@ def _discover_account(account: dict) -> tuple[list[RepoRecord], int]:
     allowlist legitimately collapses the *filtered* result, while a credential
     that has stopped working collapses the *listing*.
 
-    A short allowlist is fetched by name rather than filtered out of a listing.
-    Pasting one repository from an organisation of 8,296 asks a question about
-    one repository, and answering it by paging through eighty-three listings --
-    on every nightly refresh -- is work nobody asked for.
+    For a source that names its repositories, the cheap way to get them depends
+    entirely on how big the owner is, which is not knowable in advance -- and
+    guessing it from the number of names is how a fixed threshold gets this
+    exactly backwards. Naming seven repositories in an org that holds thirty
+    costs seven requests by name and *one* by listing; naming one out of
+    microsoft's 8,296 costs one by name and eighty-three by listing.
 
-    Past `NAME_FETCH_MAX` the arithmetic flips, and the naive rule becomes the
-    expensive one: fetching by name costs one request per name, while a listing
-    costs one per hundred repositories the owner has. A source naming 122 of
-    google's repositories is 122 requests a night against a listing's two. So
-    the long case lists once and filters, which is what `select_repos` already
-    does with the allowlist.
+    So the first page is fetched either way -- one request, which the listing
+    needs anyway -- and it reports how many the owner has. The choice is then
+    arithmetic rather than a guess:
+
+    * the owner fits in that page, so there is nothing left to fetch;
+    * or the remaining pages cost less than the remaining names, so keep going;
+    * or the names are cheaper, so ask for exactly those.
     """
     cfg = accounts.config_for(account)
-    source = sources.Source(
-        provider=account.get("provider") or "github",
-        host=account.get("host") or "github.com",
-        owner=account["login"],
-        repo=None,
-        api_url=account.get("api_url"),
-        web_url="",
-        clone_url="",
-    )
+    # Built through `parse` rather than by hand. Assembling a Source field by
+    # field here meant `api_url` came straight from the account row, where NULL
+    # means "the provider's public API" -- and `has_api` reads None as "no API
+    # at all", so every ordinary GitHub source fell through to the no-API
+    # fallback and re-imported 164 repositories as bare git URLs.
+    host = account.get("host") or "github.com"
+    source = sources.parse(f"https://{host}/{account['login']}")
+    overrides = {}
+    if account.get("provider"):
+        overrides["provider"] = account["provider"]
+    if account.get("api_url"):
+        # A self-hosted install: the account knows the endpoint, the host does not.
+        overrides["api_url"] = account["api_url"]
+    if overrides:
+        source = dataclasses.replace(source, **overrides)
+
+    login = account["login"]
     only = list(account.get("only_repos") or ())
     token = accounts.credential_for(accounts._with_credential(account))
+
     with providers.for_source(source, token=token) as client:
-        by_name = only and (len(only) <= NAME_FETCH_MAX or not client.supports_listing())
-        if by_name:
-            records = []
-            for name in only:
-                try:
-                    records.append(client.get_repo(account["login"], name))
-                except Exception as exc:  # noqa: BLE001 - one bad name must not
-                    # cost the others; the source's error field records it.
-                    log.warning("could not fetch %s/%s: %s",
-                                account["login"], name, exc)
-            # Already exactly what was asked for: running the filters here would
-            # let `include_forks` drop a repository somebody named explicitly.
-            return records, len(records)
         if not client.supports_listing():
-            log.warning("%s has no API to enumerate; add its repositories by URL",
-                        account["login"])
-            return [], 0
-        records = client.list_repos(account["login"])
+            if not only:
+                log.warning("%s has no API to enumerate; add its repositories by URL",
+                            login)
+                return [], 0
+            # Nothing to compare against: by name is the only way in. Note that
+            # a host with no API cannot tell us a name is wrong, so a stale
+            # entry becomes a record that fails at clone time instead.
+            return _fetch_by_name(client, login, only), len(only)
+
+        first = client.list_page(login, 1)
+        if not first.has_more:
+            records = first.records
+        else:
+            remaining_pages = (
+                (first.total - len(first.records) + providers.PAGE - 1) // providers.PAGE
+                if first.total else None
+            )
+            if only and (remaining_pages is None or remaining_pages > len(only)):
+                # The owner is large and the allowlist is short: ask for exactly
+                # what was named and stop paging.
+                return _fetch_by_name(client, login, only), len(only)
+            records = list(first.records)
+            page = 1
+            while True:
+                page += 1
+                nxt = client.list_page(login, page)
+                records.extend(nxt.records)
+                if not nxt.has_more:
+                    break
+
+    if only:
+        # An allowlist is an explicit answer, so it decides on its own; running
+        # the include filters over it as well would let `include_forks` drop a
+        # repository somebody named.
+        wanted = {n.lower() for n in only}
+        kept = [r for r in records
+                if r.name.lower() in wanted or r.full_name.lower() in wanted
+                or r.full_name.lower().removeprefix(f"{login.lower()}/") in wanted]
+        return kept, len(records)
     return select_repos(records, cfg), len(records)
+
+
+def _fetch_by_name(client, login: str, names: list[str]) -> list[RepoRecord]:
+    """Fetch exactly the repositories an allowlist names, one request each.
+
+    One bad name must not cost the others: a repository that was renamed or
+    deleted upstream is a fact about that repository, not about the source.
+    """
+    out: list[RepoRecord] = []
+    for name in names:
+        try:
+            out.append(client.get_repo(login, name))
+        except Exception as exc:  # noqa: BLE001 - recorded, then carry on
+            log.warning("could not fetch %s/%s: %s", login, name, exc)
+    return out
 
 
 #: Attempts for a repository whose transaction lost a deadlock or serialization
@@ -817,6 +887,30 @@ def _run_ingest_locked(
     # Required only when something private is in scope: refusing to run at all
     # on a wholly public corpus blocked a legitimate configuration for no
     # reason, since those clone over plain HTTPS.
+    # Older code than the database was migrated to. Every write would fail
+    # against a constraint this process still expects, one repository at a
+    # time, so refuse once with something a reader can act on.
+    drift = schema_drift()
+    if drift:
+        exc = AuthError(
+            f"This service expects schema version {SCHEMA_VERSION} but the "
+            f"database is at {SCHEMA_VERSION + drift}. It is running older code "
+            "than the database was migrated to, which happens when only some "
+            "services were rebuilt. Run `make up` to rebuild them all."
+        )
+        log.error("aborting run: %s", exc)
+        run = RunResult(kind="full" if force_full else "sync")
+        run.run_id = _start_run(run.kind, trigger, 0)
+        run.duration_s = time.monotonic() - started
+        run.status = "failed"
+        with connection() as conn:
+            conn.execute(
+                "UPDATE ingest_run SET status='failed', finished_at=now(),"
+                " duration_s=%s, error=%s WHERE id=%s",
+                (run.duration_s, str(exc)[:4000], run.run_id),
+            )
+        return run
+
     try:
         verify_credentials(required=private_repos_in_scope() > 0)
     except AuthError as exc:

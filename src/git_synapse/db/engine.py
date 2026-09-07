@@ -198,22 +198,48 @@ SCHEMA_LOCK_TIMEOUT_MS = 5000
 SCHEMA_RETRIES = 5
 
 
-def schema_is_current() -> bool:
-    """True if the schema has already been applied at the current version.
-
-    Read-only and cheap, so it can gate the DDL on every service boot. Returns
-    False when the ``meta`` table does not exist yet, which is the first-run case.
-    """
+def recorded_schema_version() -> int | None:
+    """The version the database has been migrated to, or None if unknowable."""
     try:
         with psycopg.connect(get_config().db.dsn, connect_timeout=5) as conn:
             row = conn.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()
     except psycopg.errors.UndefinedTable:
-        return False
-    except Exception:  # noqa: BLE001 - treat any probe failure as "needs applying"
-        return False
-    return bool(row) and int(row[0]) >= SCHEMA_VERSION
+        return None
+    except Exception:  # noqa: BLE001 - treat any probe failure as "unknown"
+        return None
+    return int(row[0]) if row else None
+
+
+def schema_drift() -> int:
+    """How many versions the database is *ahead* of this process. 0 if not.
+
+    Non-zero means this container is running older code than the database was
+    migrated to, which is the state a partial rebuild leaves behind: one
+    service applies the new DDL and the others keep running the old SQL against
+    it. That fails in the least helpful way available -- a migration that drops
+    a constraint makes every `ON CONFLICT` naming it raise, so an entire run
+    fails one repository at a time with a Postgres error nobody reads as
+    "rebuild your containers".
+
+    It cannot be inferred from `schema_is_current`, which answers "may I skip
+    the DDL": ahead is skippable, and therefore silent.
+    """
+    recorded = recorded_schema_version()
+    if recorded is None:
+        return 0
+    return max(0, recorded - SCHEMA_VERSION)
+
+
+def schema_is_current() -> bool:
+    """True if the schema has already been applied at the current version.
+
+    Read-only and cheap, so it can gate the DDL on every service boot. Returns
+    False when the ``meta`` table does not exist yet, which is the first-run case.
+    """
+    recorded = recorded_schema_version()
+    return recorded is not None and recorded >= SCHEMA_VERSION
 
 
 def apply_schema(force: bool = False) -> None:
@@ -232,7 +258,21 @@ def apply_schema(force: bool = False) -> None:
     Args:
         force: apply the DDL even if the recorded version is already current.
     """
-    if not force and schema_is_current():
+    # One probe, answering both questions: is this process behind the database
+    # (which is silent breakage), and may the DDL be skipped (which is the
+    # common case on every boot after the first).
+    recorded = recorded_schema_version()
+    if recorded is not None and recorded > SCHEMA_VERSION:
+        # Loud, because the alternative is discovering it from a Postgres error
+        # repeated once per repository.
+        log.error(
+            "This process expects schema version %d but the database is at %d. "
+            "It is running older code than the database was migrated to, which "
+            "happens when only some services were rebuilt. Run `make up` to "
+            "rebuild them all.",
+            SCHEMA_VERSION, recorded,
+        )
+    if not force and recorded is not None and recorded >= SCHEMA_VERSION:
         log.debug("schema already at version %d; skipping DDL", SCHEMA_VERSION)
         return
 

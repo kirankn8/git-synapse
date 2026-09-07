@@ -110,6 +110,11 @@ def upsert_repo(record: RepoRecord, conn: psycopg.Connection | None = None, acco
                 %(github_created_at)s, %(github_updated_at)s, %(github_pushed_at)s,
                 %(raw_github)s, %(account_id)s, now()
             )
+            -- A record from a host with no API client knows nothing about
+            -- stars, forks or visibility, and says so by leaving the defaults.
+            -- Writing those defaults over what an API run collected would be
+            -- destruction dressed as an update, so provider 'git' keeps what is
+            -- already there for every field it cannot have an opinion on.
             ON CONFLICT (host, full_name) DO UPDATE SET
                 github_id         = EXCLUDED.github_id,
                 provider          = EXCLUDED.provider,
@@ -123,20 +128,34 @@ def upsert_repo(record: RepoRecord, conn: psycopg.Connection | None = None, acco
                 languages         = EXCLUDED.languages,
                 topics            = EXCLUDED.topics,
                 license_spdx      = COALESCE(EXCLUDED.license_spdx, repo.license_spdx),
-                visibility        = COALESCE(EXCLUDED.visibility, repo.visibility),
-                is_private        = EXCLUDED.is_private,
-                is_fork           = EXCLUDED.is_fork,
-                is_archived       = EXCLUDED.is_archived,
-                is_template       = EXCLUDED.is_template,
-                is_disabled       = EXCLUDED.is_disabled,
-                disk_usage_kb     = EXCLUDED.disk_usage_kb,
-                stargazers        = EXCLUDED.stargazers,
-                watchers          = EXCLUDED.watchers,
-                forks_count       = EXCLUDED.forks_count,
-                open_issues       = EXCLUDED.open_issues,
-                github_created_at = EXCLUDED.github_created_at,
-                github_updated_at = EXCLUDED.github_updated_at,
-                github_pushed_at  = EXCLUDED.github_pushed_at,
+                visibility = CASE WHEN EXCLUDED.provider = 'git'
+                    THEN repo.visibility ELSE EXCLUDED.visibility END,
+                is_private = CASE WHEN EXCLUDED.provider = 'git'
+                    THEN repo.is_private ELSE EXCLUDED.is_private END,
+                is_fork = CASE WHEN EXCLUDED.provider = 'git'
+                    THEN repo.is_fork ELSE EXCLUDED.is_fork END,
+                is_archived = CASE WHEN EXCLUDED.provider = 'git'
+                    THEN repo.is_archived ELSE EXCLUDED.is_archived END,
+                is_template = CASE WHEN EXCLUDED.provider = 'git'
+                    THEN repo.is_template ELSE EXCLUDED.is_template END,
+                is_disabled = CASE WHEN EXCLUDED.provider = 'git'
+                    THEN repo.is_disabled ELSE EXCLUDED.is_disabled END,
+                disk_usage_kb = CASE WHEN EXCLUDED.provider = 'git'
+                    THEN repo.disk_usage_kb ELSE EXCLUDED.disk_usage_kb END,
+                stargazers = CASE WHEN EXCLUDED.provider = 'git'
+                    THEN repo.stargazers ELSE EXCLUDED.stargazers END,
+                watchers = CASE WHEN EXCLUDED.provider = 'git'
+                    THEN repo.watchers ELSE EXCLUDED.watchers END,
+                forks_count = CASE WHEN EXCLUDED.provider = 'git'
+                    THEN repo.forks_count ELSE EXCLUDED.forks_count END,
+                open_issues = CASE WHEN EXCLUDED.provider = 'git'
+                    THEN repo.open_issues ELSE EXCLUDED.open_issues END,
+                github_created_at = CASE WHEN EXCLUDED.provider = 'git'
+                    THEN repo.github_created_at ELSE EXCLUDED.github_created_at END,
+                github_updated_at = CASE WHEN EXCLUDED.provider = 'git'
+                    THEN repo.github_updated_at ELSE EXCLUDED.github_updated_at END,
+                github_pushed_at = CASE WHEN EXCLUDED.provider = 'git'
+                    THEN repo.github_pushed_at ELSE EXCLUDED.github_pushed_at END,
                 -- COALESCE across the descriptive columns: a caller holding a
                 -- partial record must not blank what discovery collected.
                 raw_github        = CASE WHEN EXCLUDED.raw_github = '{}'::jsonb

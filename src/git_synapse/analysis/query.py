@@ -73,12 +73,23 @@ def list_repos(
     limit: int | None = 500,
     offset: int = 0,
     account_id: int | None = None,
+    include_paused: bool = False,
 ) -> list[dict]:
     """List repositories with their ingest state and history summary.
 
-    `account_id` is what makes the hierarchy navigable: an account owns
-    repositories, and without it the Accounts page can only send a reader to
+    `account_id` is what makes the hierarchy navigable: a source owns
+    repositories, and without it the Sources page can only send a reader to
     every repository in the corpus and leave them to find the ones it scanned.
+
+    Repositories of a **paused** source are left out of the corpus-wide list,
+    which is what pausing means -- they are not being refreshed and their
+    numbers are not moving. Asking for one source by `account_id` shows them
+    regardless: having opened that source, its repositories are exactly what
+    the reader came for.
+
+    The distinction is not cosmetic. Pausing a source that had enumerated 8,105
+    repositories otherwise leaves them ranked ahead of the corpus by count,
+    each one a row that opens a page with no history behind it.
     """
     allowed = {
         "commit_count", "file_count", "pair_count", "author_count", "name",
@@ -102,6 +113,8 @@ def list_repos(
     if account_id is not None:
         clauses.append("account_id = %(account_id)s")
         params["account_id"] = account_id
+    elif not include_paused:
+        clauses.append("is_enabled")
 
     return query(
         f"""

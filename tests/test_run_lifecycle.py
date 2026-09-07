@@ -140,3 +140,70 @@ def test_abandoned_runs_are_reconciled_and_stop_blocking(scratch_db):
         with connection() as conn:
             conn.execute("DELETE FROM ingest_run WHERE id = ANY(%s)",
                          ([stale_id, fresh_id],))
+
+
+# --------------------------------------------------------- why a run failed
+
+def test_a_failed_run_records_why(db):
+    """A run row that says `failed` with an empty error is the worst of both:
+    it tells a reader something is wrong and nothing about what."""
+    from git_synapse.ingest import pipeline
+
+    run = pipeline.RunResult(kind="sync")
+    run.repos = [
+        pipeline.RepoResult(full_name=f"acme/r{i}", status="failed",
+                            error="psycopg.errors.InvalidColumnReference: there is "
+                                  "no unique or exclusion constraint matching the "
+                                  "ON CONFLICT specification")
+        for i in range(163)
+    ]
+    summary = pipeline._failure_summary(run)
+    assert "163 of 163 repositories failed" in summary
+    assert "every one with" in summary, "identical failures are one problem"
+    assert "InvalidColumnReference" in summary
+
+
+def test_a_mixed_failure_names_the_commonest_and_counts_the_rest(db):
+    from git_synapse.ingest import pipeline
+
+    run = pipeline.RunResult(kind="sync")
+    run.repos = (
+        [pipeline.RepoResult(full_name=f"a/r{i}", status="failed", error="disk full")
+         for i in range(5)]
+        + [pipeline.RepoResult(full_name="a/x", status="failed", error="bad ref")]
+        + [pipeline.RepoResult(full_name="a/ok", status="success")]
+    )
+    summary = pipeline._failure_summary(run)
+    assert "6 of 7 repositories failed" in summary
+    assert "the most common (5) was: disk full" in summary
+    assert "1 other kind of error" in summary
+
+
+def test_only_the_first_line_of_a_traceback_reaches_the_summary(db):
+    """A run row is read in a table cell. Twenty lines of Python there is worse
+    than nothing, because it pushes the rest of the page off screen."""
+    from git_synapse.ingest import pipeline
+
+    run = pipeline.RunResult(kind="sync")
+    run.repos = [pipeline.RepoResult(
+        full_name="a/r", status="failed",
+        error="RuntimeError: it broke\n  File \"x.py\", line 1\n    boom()")]
+    summary = pipeline._failure_summary(run)
+    assert summary.endswith("RuntimeError: it broke")
+    assert "\n" not in summary
+
+
+def test_a_failure_with_no_message_still_counts(db):
+    from git_synapse.ingest import pipeline
+
+    run = pipeline.RunResult(kind="sync")
+    run.repos = [pipeline.RepoResult(full_name="a/r", status="failed")]
+    assert "unknown error" in pipeline._failure_summary(run)
+
+
+def test_a_clean_run_has_nothing_to_explain(db):
+    from git_synapse.ingest import pipeline
+
+    run = pipeline.RunResult(kind="sync")
+    run.repos = [pipeline.RepoResult(full_name="a/r", status="success")]
+    assert pipeline._failure_summary(run) is None
