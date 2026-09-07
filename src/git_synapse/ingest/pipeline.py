@@ -480,7 +480,12 @@ def _discover_account(account: dict) -> tuple[list[RepoRecord], int]:
     only = list(account.get("only_repos") or ())
     token = accounts.credential_for(accounts._with_credential(account))
 
-    with providers.for_source(source, token=token) as client:
+    # Impatient, unlike the clone path. Waiting out a rate limit is right for
+    # one repository's mirror; across a hundred sources it is not -- five
+    # retries of sixty seconds each, per source, is most of a day asleep inside
+    # a single run. Discovery repeats hourly, so giving up on a source and
+    # recording why costs nothing that the next run does not recover.
+    with providers.for_source(source, token=token, patient=False) as client:
         if not client.supports_listing():
             if not only:
                 log.warning("%s has no API to enumerate; add its repositories by URL",

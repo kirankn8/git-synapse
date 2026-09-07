@@ -852,3 +852,37 @@ def test_a_collapsed_listing_is_refused_even_with_accounts_configured(two_accoun
         with connection() as conn:
             conn.execute("DELETE FROM repo WHERE owner = 'bulk'")
             conn.commit()
+
+
+def test_discovery_gives_up_on_a_rate_limit_instead_of_sleeping_through_it(
+        db, monkeypatch):
+    """Waiting out a rate limit is right for one repository's mirror. Across a
+    hundred sources it is not: five retries of sixty seconds each, per source,
+    is most of a day asleep inside a single run -- and discovery repeats hourly,
+    so the wait buys nothing a retry does not."""
+    from git_synapse.ingest import accounts, providers
+
+    seen = {}
+
+    def _spy(source, patient=True, token=""):
+        seen["patient"] = patient
+        raise RuntimeError("stop; the flag is what is under test")
+
+    monkeypatch.setattr(providers, "for_source", _spy)
+    row = accounts.add_account("impatient-org", kind="org", provider="github",
+                               host="github.com")
+    try:
+        with pytest.raises(RuntimeError):
+            pipeline._discover_account(accounts.get_account(row["id"]))
+        assert seen["patient"] is False
+    finally:
+        accounts.remove_account(row["id"])
+
+
+def test_the_clone_path_stays_patient(db):
+    """The trade is the other way for a mirror: one repository, all night."""
+    import inspect
+
+    src = inspect.getsource(pipeline._sync_repo_once)
+    assert "patient=False" not in src, \
+        "a clone should wait out a rate limit rather than fail the repository"
