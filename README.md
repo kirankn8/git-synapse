@@ -21,6 +21,14 @@ not parse a particular programming language: the base fact is simply
 **“this commit touched this file.”** From that, it builds file, module,
 cross-repository, and transitive impact graphs.
 
+## License
+
+Git Synapse is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+Commercial use is permitted under the AGPL when its terms are followed. A separate
+commercial license, hosted service, and enterprise support are available for
+organizations that need proprietary modifications, closed redistribution, or
+managed operation.
+
 ## Why it helps
 
 An agent can find names and imports in the current checkout. Git Synapse adds
