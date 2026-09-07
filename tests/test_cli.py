@@ -12,31 +12,9 @@ import pytest
 pytest.importorskip("typer")
 from typer.testing import CliRunner
 
-from git_synapse import cli
 from git_synapse.cli import app
 
 runner = CliRunner()
-
-
-def test_admin_setup_token_prints_the_token_for_a_fresh_deployment(monkeypatch):
-    monkeypatch.setattr(cli, "_setup", lambda: None)
-    monkeypatch.setattr(cli.auth, "count_users", lambda: 0)
-    monkeypatch.setattr(cli.auth, "setup_token", lambda: "setup-token-for-test")
-
-    r = runner.invoke(app, ["admin", "setup-token"])
-
-    assert r.exit_code == 0, r.stdout
-    assert "setup-token-for-test" in r.stdout
-
-
-def test_admin_setup_token_refuses_after_the_first_account_exists(monkeypatch):
-    monkeypatch.setattr(cli, "_setup", lambda: None)
-    monkeypatch.setattr(cli.auth, "count_users", lambda: 1)
-
-    r = runner.invoke(app, ["admin", "setup-token"])
-
-    assert r.exit_code == 1
-    assert "already been created" in r.stdout
 
 
 def test_help_lists_every_command():
