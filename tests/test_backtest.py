@@ -575,81 +575,79 @@ def test_the_search_declines_a_seed_it_cannot_name(tmp_path):
 @pytest.fixture
 def seeded(db):
     """A repository with three commits, one of them not pair-eligible."""
-    from git_synapse.db.engine import connection
+    from datetime import UTC, datetime
 
-    with connection() as conn:
-        repo = conn.execute(
-            "INSERT INTO repo (full_name, name, owner) VALUES "
-            "('acme/replay','replay','acme') RETURNING id").fetchone()[0]
-        files = [conn.execute(
-            "INSERT INTO file (repo_id, path, dir_path) VALUES (%s, %s, %s) RETURNING id",
-            (repo, p, p.rsplit("/", 1)[0])).fetchone()[0]
-            for p in ("pkg/a.go", "pkg/a_test.go", "web/b.go")]
+    from git_synapse.db.orm import models, session_scope
+
+    with session_scope() as session:
+        old = session.query(models().Repo).filter_by(full_name="acme/replay").one_or_none()
+        if old is not None:
+            session.query(models().CommitFile).filter_by(repo_id=old.id).delete(synchronize_session=False)
+            session.query(models().Commit).filter_by(repo_id=old.id).delete(synchronize_session=False)
+            session.query(models().File).filter_by(repo_id=old.id).delete(synchronize_session=False)
+            session.delete(old)
+            session.flush()
+        repo_row = models().Repo(full_name="acme/replay", name="replay", owner="acme")
+        session.add(repo_row)
+        session.flush()
+        repo = repo_row.id
+        file_rows = [models().File(repo_id=repo, path=p, dir_path=p.rsplit("/", 1)[0], basename=p.rsplit("/", 1)[-1])
+                     for p in ("pkg/a.go", "pkg/a_test.go", "web/b.go")]
+        session.add_all(file_rows)
+        session.flush()
+        files = [row.id for row in file_rows]
 
         def commit(sha, when, eligible, touched):
-            cid = conn.execute(
-                "INSERT INTO commit (repo_id, sha, authored_at, committed_at, "
-                "pair_eligible) VALUES (%s,%s,%s,%s,%s) RETURNING id",
-                (repo, sha, when, when, eligible)).fetchone()[0]
+            row = models().Commit(repo_id=repo, sha=sha, authored_at=datetime.fromisoformat(when).replace(tzinfo=UTC),
+                                  committed_at=datetime.fromisoformat(when).replace(tzinfo=UTC), pair_eligible=eligible)
+            session.add(row)
+            session.flush()
+            cid = row.id
             for f in touched:
-                conn.execute("INSERT INTO commit_file (repo_id, commit_id, file_id, "
-                             "change_type) VALUES (%s,%s,%s,'M')", (repo, cid, f))
+                session.add(models().CommitFile(repo_id=repo, commit_id=cid, file_id=f, change_type="M"))
             return cid
 
         first = commit("a" * 40, "2024-01-01", True, files[:2])
         second = commit("b" * 40, "2024-02-01", True, files)
         commit("c" * 40, "2024-03-01", False, files)      # a sweep: excluded
-        yield conn, repo, files, (first, second)
-        conn.rollback()
+    yield repo, files, (first, second)
 
 
 def test_the_replay_reads_commits_oldest_first(seeded, monkeypatch):
     """Prequential scoring depends on the order: a commit scored before its
     predecessors were learned from would be judged on a history that had not
     happened yet."""
-    conn, repo, _files, (first, second) = seeded
-    monkeypatch.setattr(bt, "query", lambda sql, params: _rows(conn, sql, repo))
+    repo, _files, (first, second) = seeded
 
     history = bt._history(repo)
     assert [cid for _, _, cid in history] == [first, second]
 
 
-def _rows(conn, sql, repo):
-    with conn.cursor() as cur:
-        cur.execute(sql, {"repo": repo})
-        cols = [c.name for c in cur.description]
-        return [dict(zip(cols, r, strict=False)) for r in cur.fetchall()]
-
-
 def test_a_commit_excluded_from_pairs_never_becomes_a_prompt(seeded, monkeypatch):
     """`pair_eligible` is the one switch that keeps a sweep out of the
     statistics, so the replay has to honour it at the source."""
-    conn, repo, _files, _ = seeded
-    monkeypatch.setattr(bt, "query", lambda sql, params: _rows(conn, sql, repo))
+    repo, _files, _ = seeded
     assert len(bt._history(repo)) == 2, "the ineligible commit must not appear"
 
 
 def test_the_replay_carries_the_repository_with_each_commit(seeded, monkeypatch):
     """Counts are kept per repository, so the owner has to travel with the
     commit rather than being looked up later."""
-    conn, repo, _, _ = seeded
-    monkeypatch.setattr(bt, "query", lambda sql, params: _rows(conn, sql, repo))
+    repo, _, _ = seeded
     assert {r for r, _, _ in bt._history(repo)} == {repo}
 
 
 def test_commit_shas_are_read_with_their_repository_name(seeded, monkeypatch):
     """The search baseline needs both: the sha to check out, and the name to
     find the mirror on disk."""
-    conn, repo, _, (first, _) = seeded
-    monkeypatch.setattr(bt, "query", lambda sql, params: _rows(conn, sql, repo))
+    repo, _, (first, _) = seeded
     shas = bt._commit_shas(repo)
     assert shas[first] == ("a" * 40, "acme/replay", "github.com")
 
 
 def test_the_path_index_groups_by_stem_and_by_directory(seeded, monkeypatch):
     """Both are what the free baselines answer from."""
-    conn, repo, files, _ = seeded
-    monkeypatch.setattr(bt, "query", lambda sql, params: _rows(conn, sql, repo))
+    repo, files, _ = seeded
     paths, by_stem, by_dir = bt._path_index(repo)
 
     assert paths[files[0]] == "pkg/a.go"

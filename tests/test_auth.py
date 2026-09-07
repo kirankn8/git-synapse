@@ -112,11 +112,16 @@ def test_signing_out_ends_that_session_only(person):
 
 
 def test_an_expired_session_is_nobody(person):
-    from git_synapse.db.engine import execute
+    from datetime import UTC, datetime, timedelta
+
+    from git_synapse.db.orm import models, session_scope
 
     token, _ = auth.sign_in(person["email"], "a-sufficiently-long-pass")
-    execute("UPDATE user_session SET expires_at = now() - interval '1 hour'"
-            " WHERE user_id = %s", (person["id"],))
+    with session_scope() as session:
+        session.query(models().UserSession).filter_by(user_id=person["id"]).update(
+            {models().UserSession.expires_at: datetime.now(UTC) - timedelta(hours=1)},
+            synchronize_session=False,
+        )
     assert auth.session_user(token) is None
     assert auth.prune_sessions() >= 1
 
@@ -180,12 +185,13 @@ def test_a_token_acts_as_the_person_who_made_it(person):
 def test_the_token_secret_is_not_recoverable(person):
     """Stored as a hash: whoever holds the database cannot use the tokens in
     it, and a listing is not a set of working credentials."""
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
     secret, _ = auth.create_token(person["id"], "a token")
-    row = query_one("SELECT * FROM api_token WHERE user_id = %s", (person["id"],))
-    assert secret not in str(row.values())
-    assert row["token_hash"] != secret
+    with session_scope() as session:
+        row = session.query(models().ApiToken).filter_by(user_id=person["id"]).first()
+    assert secret not in str(row.__dict__)
+    assert row.token_hash != secret
 
 
 @pytest.mark.parametrize("bad", [None, "", "not-a-token", "gss_wrong", "Bearer x"])
@@ -211,11 +217,16 @@ def test_a_token_cannot_be_revoked_by_someone_else(person, db):
 
 
 def test_an_expired_token_is_nobody(person):
-    from git_synapse.db.engine import execute
+    from datetime import UTC, datetime, timedelta
+
+    from git_synapse.db.orm import models, session_scope
 
     secret, _ = auth.create_token(person["id"], "short-lived", days=1)
-    execute("UPDATE api_token SET expires_at = now() - interval '1 day'"
-            " WHERE user_id = %s", (person["id"],))
+    with session_scope() as session:
+        session.query(models().ApiToken).filter_by(user_id=person["id"]).update(
+            {models().ApiToken.expires_at: datetime.now(UTC) - timedelta(days=1)},
+            synchronize_session=False,
+        )
     assert auth.token_user(secret) is None
 
 
@@ -330,13 +341,18 @@ def test_signing_in_clears_the_count(person):
 
 
 def test_attempts_past_the_window_stop_counting(person):
-    from git_synapse.db.engine import execute
+    from datetime import UTC, datetime, timedelta
+
+    from git_synapse.db.orm import models, session_scope
 
     for _ in range(auth.MAX_FAILURES):
         with pytest.raises(auth.AuthError):
             auth.sign_in(person["email"], "wrong")
-    execute("UPDATE login_attempt SET at = now() - make_interval(mins => %s)",
-            (auth.LOCKOUT_MINUTES + 1,))
+    with session_scope() as session:
+        session.query(models().LoginAttempt).filter_by(email=person["email"]).update(
+            {models().LoginAttempt.at: datetime.now(UTC) - timedelta(minutes=auth.LOCKOUT_MINUTES + 1)},
+            synchronize_session=False,
+        )
     assert auth.recent_failures(person["email"]) == 0
     assert auth.prune_login_attempts() >= auth.MAX_FAILURES
     # And the door opens again.

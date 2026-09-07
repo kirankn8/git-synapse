@@ -14,39 +14,30 @@ os.environ.setdefault("POSTGRES_PORT", "55432")
 
 @pytest.fixture(scope="module")
 def scratch_db(db):
-    """A throwaway database for tests that write.
+    """Use the configured ORM database for isolated run-lifecycle tests.
 
-    Module-scoped, not session-scoped: switching ``POSTGRES_DB`` is process-wide,
-    so a session-scoped switch would point the tests that read the real corpus at
-    an empty database for the rest of the run.
-
-    Tests that create fixture repositories or call a global ``rebuild()`` used to
-    run against whatever ``POSTGRES_DB`` pointed at, which in practice was the
-    production corpus: those rebuilds TRUNCATE shared tables, so running the
-    suite silently replaced real analysis results and left orphan rows behind.
+    Database creation is deployment work, not an application query.  The test
+    environment supplies a dedicated database through ``POSTGRES_DB``; this
+    fixture only applies the declarative schema and never opens a driver
+    connection or executes SQL text.
     """
-    import psycopg
-
     from git_synapse.config import get_config, reset_config_cache
     from git_synapse.db.engine import apply_schema, close_pool
 
-    cfg = get_config().db
-    name = f"{cfg.database}_test"
-    maintenance = (
-        f"host={cfg.host} port={cfg.port} user={cfg.user} "
-        f"password={cfg.password} dbname=postgres"
-    )
-    with psycopg.connect(maintenance, autocommit=True) as conn:
-        if not conn.execute(
-            "SELECT 1 FROM pg_database WHERE datname = %s", (name,)
-        ).fetchone():
-            conn.execute(f'CREATE DATABASE "{name}"')
-
+    base = get_config().db.database
+    name = os.environ.get("TEST_POSTGRES_DB", f"{base}_test")
     previous = os.environ.get("POSTGRES_DB")
     os.environ["POSTGRES_DB"] = name
     reset_config_cache()
     close_pool()
     apply_schema()
+    # The dedicated test database can survive an interrupted run. Reset auth
+    # rows so API tests always begin in first-run state.
+    from git_synapse.db.orm import models, session_scope
+    with session_scope() as session:
+        for model in (models().UserSession, models().ApiToken, models().LoginAttempt):
+            session.query(model).delete(synchronize_session=False)
+        session.query(models().AppUser).delete(synchronize_session=False)
     try:
         yield name
     finally:
@@ -61,14 +52,41 @@ def scratch_db(db):
 @pytest.fixture(scope="session")
 def db():
     """Yield a working database, or skip the test when none is reachable."""
-    from git_synapse.db.engine import apply_schema, wait_for_database
+    from git_synapse.config import get_config, reset_config_cache
+    from git_synapse.db.engine import apply_schema, close_pool, wait_for_database
+
+    base = get_config().db.database
+    name = os.environ.get("TEST_POSTGRES_DB", f"{base}_test")
+    previous = os.environ.get("POSTGRES_DB")
+    os.environ["POSTGRES_DB"] = name
+    reset_config_cache()
+    close_pool()
 
     try:
         wait_for_database(timeout_s=5, interval_s=0.5)
     except Exception as exc:  # noqa: BLE001 - any failure means "no database"
+        close_pool()
+        if previous is None:
+            os.environ.pop("POSTGRES_DB", None)
+        else:
+            os.environ["POSTGRES_DB"] = previous
+        reset_config_cache()
         pytest.skip(f"no database available: {exc}")
     apply_schema()
-    return True
+    from git_synapse.db.orm import models, session_scope
+    with session_scope() as session:
+        for model in (models().UserSession, models().ApiToken, models().LoginAttempt):
+            session.query(model).delete(synchronize_session=False)
+        session.query(models().AppUser).delete(synchronize_session=False)
+    try:
+        yield True
+    finally:
+        close_pool()
+        if previous is None:
+            os.environ.pop("POSTGRES_DB", None)
+        else:
+            os.environ["POSTGRES_DB"] = previous
+        reset_config_cache()
 
 
 # --------------------------------------------------------------- corpus
@@ -157,9 +175,8 @@ def corpus(scratch_db, tmp_path_factory):
         assert res.status != "failed", res.error
 
     with connection() as conn:
-        ids = {r[1]: r[0] for r in conn.execute(
-            "SELECT id, name FROM repo WHERE github_id = ANY(%s)", ([920001, 920002],)
-        ).fetchall()}
+        Repo = __import__("git_synapse.db.orm", fromlist=["models"]).models().Repo
+        ids = {r.name: r.id for r in conn.query(Repo).filter(Repo.github_id.in_([920001, 920002])).all()}
         for rid in ids.values():
             aggregate.rebuild_repo(rid, conn)
     with connection() as conn:

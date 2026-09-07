@@ -20,17 +20,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, func, select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.orm import aliased
-
-# Kept as a narrow test-cleanup compatibility export. Production auth writes
-# use the ORM session layer above.
-# Narrow test-cleanup compatibility export; production auth writes use the ORM.
-import git_synapse.db.engine as _db_engine
 from git_synapse.db.orm import models, session_scope
-
-execute = _db_engine.execute
 
 log = logging.getLogger(__name__)
 
@@ -126,29 +116,24 @@ def _row(user: dict | None) -> dict | None:
 def count_users() -> int:
     with session_scope() as session:
         User = models().AppUser
-        return int(session.scalar(select(func.count()).select_from(User)) or 0)
+        return session.query(User).count()
 
 
 def list_users() -> list[dict]:
     with session_scope() as session:
         User, Session = models().AppUser, models().UserSession
-        Creator = aliased(User)
-        active_sessions = (
-            select(func.count())
-            .where(Session.user_id == User.id, Session.expires_at > func.now())
-            .correlate(User)
-            .scalar_subquery()
-        )
-        rows = session.execute(
-            select(
-                User.id, User.email, User.name, User.role, User.is_active,
-                User.created_at, User.last_login_at,
-                Creator.email.label("created_by_email"),
-                active_sessions.label("active_sessions"),
-            ).outerjoin(Creator, Creator.id == User.created_by)
-            .order_by(User.created_at)
-        ).mappings().all()
-        return [dict(row) for row in rows]
+        users = session.query(User).order_by(User.created_at).all()
+        creators = {row.id: row.email for row in users}
+        now = datetime.now(UTC)
+        return [{
+            "id": row.id, "email": row.email, "name": row.name,
+            "role": row.role, "is_active": row.is_active,
+            "created_at": row.created_at, "last_login_at": row.last_login_at,
+            "created_by_email": creators.get(row.created_by),
+            "active_sessions": session.query(Session).filter_by(user_id=row.id).filter(
+                Session.expires_at > now,
+            ).count(),
+        } for row in users]
 
 
 def get_user(user_id: int) -> dict | None:
@@ -162,7 +147,8 @@ def by_email(email: str) -> dict | None:
     """Including the hash: only the sign-in path uses this."""
     with session_scope() as session:
         User = models().AppUser
-        user = session.scalar(select(User).where(func.lower(User.email) == email.strip().lower()))
+        user = next((row for row in session.query(User).all()
+                     if row.email.lower() == email.strip().lower()), None)
         return ({column.name: getattr(user, column.name) for column in user.__table__.columns}
                 if user else None)
 
@@ -217,8 +203,10 @@ def update_user(user_id: int, **fields: Any) -> dict | None:
 
     with session_scope() as session:
         User = models().AppUser
-        session.execute(update(User).where(User.id == user_id).values(**sets))
         user = session.get(User, user_id)
+        if user is not None:
+            for key, value in sets.items():
+                setattr(user, key, value)
         row = ({column.name: getattr(user, column.name) for column in user.__table__.columns}
                if user else None)
     # A password change or a deactivation must end the sessions it was meant to
@@ -230,9 +218,11 @@ def update_user(user_id: int, **fields: Any) -> dict | None:
 
 def delete_user(user_id: int) -> bool:
     with session_scope() as session:
-        User = models().AppUser
-        result = session.execute(delete(User).where(User.id == user_id))
-        return bool(result.rowcount)
+        user = session.get(models().AppUser, user_id)
+        if user is None:
+            return False
+        session.delete(user)
+        return True
 
 
 def admin_count(exclude: int | None = None) -> int:
@@ -240,10 +230,9 @@ def admin_count(exclude: int | None = None) -> int:
     change that would leave the deployment with nobody able to add a person."""
     with session_scope() as session:
         User = models().AppUser
-        conditions = [User.role == "admin", User.is_active.is_(True)]
-        if exclude is not None:
-            conditions.append(User.id != exclude)
-        return int(session.scalar(select(func.count()).select_from(User).where(*conditions)) or 0)
+        return sum(1 for user in session.query(User).all()
+                   if user.role == "admin" and user.is_active and
+                   (exclude is None or user.id != exclude))
 
 
 # ------------------------------------------------------------------ sessions
@@ -256,9 +245,8 @@ def recent_failures(email: str) -> int:
     with session_scope() as session:
         Attempt = models().LoginAttempt
         cutoff = datetime.now(UTC) - timedelta(minutes=LOCKOUT_MINUTES)
-        return int(session.scalar(select(func.count()).select_from(Attempt).where(
-            func.lower(Attempt.email) == email.strip().lower(), Attempt.at > cutoff,
-        )) or 0)
+        return sum(1 for attempt in session.query(Attempt).all()
+                   if attempt.email.lower() == email.strip().lower() and attempt.at > cutoff)
 
 
 def prune_login_attempts() -> int:
@@ -266,8 +254,10 @@ def prune_login_attempts() -> int:
     with session_scope() as session:
         Attempt = models().LoginAttempt
         cutoff = datetime.now(UTC) - timedelta(minutes=LOCKOUT_MINUTES)
-        result = session.execute(delete(Attempt).where(Attempt.at < cutoff))
-        return int(result.rowcount or 0)
+        rows = [row for row in session.query(Attempt).all() if row.at < cutoff]
+        for row in rows:
+            session.delete(row)
+        return len(rows)
 
 
 def sign_in(email: str, password: str, user_agent: str | None = None) -> tuple[str, dict]:
@@ -303,12 +293,16 @@ def sign_in(email: str, password: str, user_agent: str | None = None) -> tuple[s
             expires_at=datetime.now(UTC) + timedelta(days=SESSION_DAYS),
             user_agent=(user_agent or "")[:200],
         ))
-        session.execute(update(User).where(User.id == user["id"]).values(last_login_at=func.now()))
+        row = session.get(User, user["id"])
+        if row is not None:
+            row.last_login_at = datetime.now(UTC)
     # A success clears the record: the person proved it was them, and a stale
     # count would lock them out on their next typo.
     with session_scope() as session:
         Attempt = models().LoginAttempt
-        session.execute(delete(Attempt).where(func.lower(Attempt.email) == email.strip().lower()))
+        for row in session.query(Attempt).all():
+            if row.email.lower() == email.strip().lower():
+                session.delete(row)
     return token, _row(user)
 
 
@@ -323,34 +317,31 @@ def session_user(token: str | None) -> dict | None:
         return None
     with session_scope() as session:
         UserSession, User = models().UserSession, models().AppUser
-        row = session.execute(
-            select(User).join(UserSession, User.id == UserSession.user_id).where(
-                UserSession.token_hash == _token_hash(token),
-                UserSession.expires_at > func.now(), User.is_active.is_(True),
-            )
-        ).scalar_one_or_none()
-        if row is None:
+        session_row = session.get(UserSession, _token_hash(token))
+        row = session.get(User, session_row.user_id) if session_row else None
+        if row is None or session_row.expires_at <= datetime.now(UTC) or not row.is_active:
             return None
         row_dict = {column.name: getattr(row, column.name) for column in row.__table__.columns}
-        session.execute(update(UserSession).where(
-            UserSession.token_hash == _token_hash(token),
-        ).values(last_seen_at=func.now(), expires_at=datetime.now(UTC) + timedelta(days=SESSION_DAYS)))
+        session_row.last_seen_at = datetime.now(UTC)
+        session_row.expires_at = datetime.now(UTC) + timedelta(days=SESSION_DAYS)
         return _row(row_dict)
 
 
 def sign_out(token: str | None) -> None:
     if token:
         with session_scope() as session:
-            session.execute(delete(models().UserSession).where(
-                models().UserSession.token_hash == _token_hash(token),
-            ))
+            row = session.get(models().UserSession, _token_hash(token))
+            if row is not None:
+                session.delete(row)
 
 
 def revoke_all(user_id: int) -> int:
     with session_scope() as session:
         Session = models().UserSession
-        result = session.execute(delete(Session).where(Session.user_id == user_id))
-        return int(result.rowcount or 0)
+        rows = session.query(Session).filter_by(user_id=user_id).all()
+        for row in rows:
+            session.delete(row)
+        return len(rows)
 
 
 # -------------------------------------------------------------- api tokens
@@ -386,18 +377,22 @@ def create_token(user_id: int, name: str, days: int | None = None) -> tuple[str,
 def list_tokens(user_id: int) -> list[dict]:
     with session_scope() as session:
         Token = models().ApiToken
-        return [dict(row) for row in session.execute(select(
-            Token.id, Token.prefix, Token.name, Token.created_at,
-            Token.expires_at, Token.last_used_at,
-        ).where(Token.user_id == user_id).order_by(Token.created_at.desc())).mappings()]
+        return [{"id": row.id, "prefix": row.prefix, "name": row.name,
+                 "created_at": row.created_at, "expires_at": row.expires_at,
+                 "last_used_at": row.last_used_at}
+                for row in session.query(Token).filter_by(user_id=user_id)
+                .order_by(Token.created_at.desc()).all()]
 
 
 def delete_token(token_id: int, user_id: int) -> bool:
     """Scoped to the owner: a token id is not a capability to revoke it."""
     with session_scope() as session:
         Token = models().ApiToken
-        result = session.execute(delete(Token).where(Token.id == token_id, Token.user_id == user_id))
-        return bool(result.rowcount)
+        row = session.query(Token).filter_by(id=token_id, user_id=user_id).one_or_none()
+        if row is None:
+            return False
+        session.delete(row)
+        return True
 
 
 def token_user(secret: str | None) -> dict | None:
@@ -406,16 +401,14 @@ def token_user(secret: str | None) -> dict | None:
         return None
     with session_scope() as session:
         Token, User = models().ApiToken, models().AppUser
-        row = session.execute(select(User).join(Token, User.id == Token.user_id).where(
-            Token.token_hash == _token_hash(secret), User.is_active.is_(True),
-            (Token.expires_at.is_(None) | (Token.expires_at > func.now())),
-        )).scalar_one_or_none()
-        if row is None:
+        token_row = session.query(Token).filter_by(token_hash=_token_hash(secret)).one_or_none()
+        row = session.get(User, token_row.user_id) if token_row else None
+        if row is None or not row.is_active or (
+            token_row.expires_at is not None and token_row.expires_at <= datetime.now(UTC)
+        ):
             return None
         row_dict = {column.name: getattr(row, column.name) for column in row.__table__.columns}
-        session.execute(update(Token).where(Token.token_hash == _token_hash(secret)).values(
-            last_used_at=func.now(),
-        ))
+        token_row.last_used_at = datetime.now(UTC)
         return _row(row_dict)
 
 
@@ -441,8 +434,8 @@ def setup_token() -> str:
     it from anything already in the deployment makes it guessable from that
     thing, and generating it per process gives every worker a different answer.
 
-    The INSERT is the arbitration. Four workers racing on a cold database all
-    attempt it, exactly one row survives, and the SELECT that follows returns
+    The unique row is the arbitration. Four workers racing on a cold database all
+    attempt it, exactly one row survives, and the ORM lookup that follows returns
     that row to all four.
     """
     from git_synapse.config import get_config
@@ -453,10 +446,12 @@ def setup_token() -> str:
 
     with session_scope() as session:
         Meta = models().Meta
-        secret = secrets.token_urlsafe(32)
-        statement = pg_insert(Meta).values(key=_SETUP_KEY, value=secret)
-        session.execute(statement.on_conflict_do_nothing(index_elements=[Meta.key]))
-        return str(session.scalar(select(Meta.value).where(Meta.key == _SETUP_KEY)))
+        row = session.query(Meta).filter_by(key=_SETUP_KEY).one_or_none()
+        if row is None:
+            row = Meta(key=_SETUP_KEY, value=secrets.token_urlsafe(32))
+            session.add(row)
+            session.flush()
+        return str(row.value)
 
 
 def setup_token_is_minted() -> bool:
@@ -490,7 +485,9 @@ def clear_setup_token() -> None:
     that nothing will ever check again."""
     with session_scope() as session:
         Meta = models().Meta
-        session.execute(delete(Meta).where(Meta.key == _SETUP_KEY))
+        row = session.query(Meta).filter_by(key=_SETUP_KEY).one_or_none()
+        if row is not None:
+            session.delete(row)
 
 
 def claim_first_admin(
@@ -509,15 +506,21 @@ def claim_first_admin(
         # two first-run requests.  The lock is deliberately held through the
         # account, session, and setup-secret writes.
         User, Meta, UserSession = models().AppUser, models().Meta, models().UserSession
-        session.scalar(select(func.pg_advisory_xact_lock(0x47534649525354)))
-        if session.scalar(select(func.count()).select_from(User)) > 0:
+        # The canonical schema row exists after bootstrap; locking it through
+        # the ORM serializes first-admin claims without SQL functions.
+        lock_row = session.query(Meta).filter_by(key="schema_version").with_for_update().one_or_none()
+        if lock_row is None:
+            lock_row = Meta(key="schema_version", value=0)
+            session.add(lock_row)
+            session.flush()
+        if session.query(User).count() > 0:
             raise SetupAlreadyClaimed("this deployment already has users")
         if not _EMAIL.match(email):
             raise AuthError(f"{email!r} does not look like an email address")
         if not name:
             raise AuthError("a name is required")
-        stored = session.scalar(select(Meta.value).where(Meta.key == _SETUP_KEY))
-        expected = configured or (str(stored) if stored is not None else "")
+        stored = session.query(Meta).filter_by(key=_SETUP_KEY).one_or_none()
+        expected = configured or (str(stored.value) if stored is not None else "")
         if not hmac.compare_digest(setup_secret.strip(), expected):
             raise AuthError("that is not the setup token for this deployment")
 
@@ -530,8 +533,9 @@ def claim_first_admin(
             expires_at=datetime.now(UTC) + timedelta(days=SESSION_DAYS),
             user_agent=(user_agent or "")[:200],
         ))
-        session.execute(update(User).where(User.id == user["id"]).values(last_login_at=func.now()))
-        session.execute(delete(Meta).where(Meta.key == _SETUP_KEY))
+        row.last_login_at = datetime.now(UTC)
+        if stored is not None:
+            session.delete(stored)
         user = {key: user[key] for key in
                 ("id", "email", "name", "role", "is_active", "created_at", "last_login_at")}
         return token, user
@@ -566,5 +570,9 @@ def prune_sessions() -> int:
     """Drop expired sessions. Called from the ingest run, like the call log."""
     with session_scope() as session:
         Session = models().UserSession
-        result = session.execute(delete(Session).where(Session.expires_at < func.now()))
-        return int(result.rowcount or 0)
+        now = datetime.now(UTC)
+        rows = [row for row in session.query(Session).all()
+                if row.expires_at is not None and row.expires_at < now]
+        for row in rows:
+            session.delete(row)
+        return len(rows)

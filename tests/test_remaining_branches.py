@@ -18,6 +18,7 @@ def test_directory_rollups_handle_a_repo_with_only_root_files(scratch_db):
 
     from git_synapse.analysis.aggregate import rebuild_repo
     from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.parser import FileChange, ParsedCommit
     from git_synapse.ingest.store import load_commits, upsert_repo
@@ -40,7 +41,7 @@ def test_directory_rollups_handle_a_repo_with_only_root_files(scratch_db):
         stats = rebuild_repo(rid, conn)
     assert stats is not None
     with connection() as conn:
-        conn.execute("DELETE FROM repo WHERE id=%s", (rid,))
+        conn.delete(conn.get(models().Repo, rid))
 
 
 # ----------------------------------------------------------------- score
@@ -52,7 +53,8 @@ def test_scoring_a_repo_with_a_single_file_produces_no_pairs(scratch_db):
 
     from git_synapse.analysis.aggregate import rebuild_repo
     from git_synapse.analysis.score import score_repo
-    from git_synapse.db.engine import connection, query_one
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.parser import FileChange, ParsedCommit
     from git_synapse.ingest.store import load_commits, upsert_repo
@@ -74,10 +76,11 @@ def test_scoring_a_repo_with_a_single_file_produces_no_pairs(scratch_db):
         rebuild_repo(rid, conn)
     with connection() as conn:
         score_repo(rid, conn)
-    n = query_one("SELECT count(*) AS n FROM file_pair WHERE repo_id=%s", (rid,))["n"]
+    with connection() as conn:
+        n = conn.query(models().FilePair).filter_by(repo_id=rid).count()
     assert n == 0
     with connection() as conn:
-        conn.execute("DELETE FROM repo WHERE id=%s", (rid,))
+        conn.delete(conn.get(models().Repo, rid))
 
 
 # ----------------------------------------------------------------- query
@@ -204,40 +207,17 @@ def test_depbump_prints_adoption_delays_when_there_are_any(db):
 def test_impact_prints_rows_for_a_repo_that_has_them(db):
     from typer.testing import CliRunner
 
-    from git_synapse.analysis.query import query_one
     from git_synapse.cli import app
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one(
-        """
-        SELECT r.name FROM repo_impact i JOIN repo r ON r.id = i.source_repo_id
-        LIMIT 1
-        """
-    )
+    with session_scope() as session:
+        row = session.query(models().Repo.name).join(
+            models().RepoImpact, models().RepoImpact.source_repo_id == models().Repo.id,
+        ).first()
     if row is None:
         pytest.skip("impact table empty")
-    r = CliRunner().invoke(app, ["impact", row["name"]])
+    r = CliRunner().invoke(app, ["impact", row.name])
     assert r.exit_code == 0, r.stdout
-
-
-# ------------------------------------------------------------ copy helpers
-
-def test_copy_into_temp_creates_and_loads_in_one_step(db):
-    from git_synapse.db.engine import connection, copy_into_temp
-
-    with connection() as conn:
-        n = copy_into_temp(
-            conn, "probe_tmp", [("a", "int"), ("b", "text")],
-            [(1, "x"), (2, "y")],
-        )
-        assert n == 2
-        assert conn.execute("SELECT count(*) FROM probe_tmp").fetchone()[0] == 2
-
-
-def test_copy_into_temp_with_no_rows(db):
-    from git_synapse.db.engine import connection, copy_into_temp
-
-    with connection() as conn:
-        assert copy_into_temp(conn, "probe_tmp_empty", [("a", "int")], []) == 0
 
 
 # ------------------------------------------------ manifest scanning limits
@@ -287,25 +267,3 @@ def test_declared_at_head_on_an_unreadable_mirror_is_empty(tmp_path):
     junk = tmp_path / "junk2"
     junk.mkdir()
     assert declared_at_head(junk, "x", "go.mod", "go") == []
-
-
-# ---------------------------------------------------------- engine defaults
-
-def test_query_helpers_accept_dict_parameters(db):
-    from git_synapse.db.engine import query, query_one, scalar
-
-    assert query("SELECT %(v)s::int AS v", {"v": 3})[0]["v"] == 3
-    assert query_one("SELECT %(v)s::int AS v", {"v": 4})["v"] == 4
-    assert scalar("SELECT %(v)s::int", {"v": 5}) == 5
-
-
-def test_scalar_returns_none_by_default_when_absent(db):
-    from git_synapse.db.engine import scalar
-
-    assert scalar("SELECT 1 WHERE false") is None
-
-
-def test_get_pool_is_reused_across_calls(db):
-    from git_synapse.db.engine import get_pool
-
-    assert get_pool() is get_pool()

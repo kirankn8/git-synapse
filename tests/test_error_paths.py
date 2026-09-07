@@ -122,11 +122,15 @@ def test_a_malformed_numeric_setting_fails_loudly_and_names_itself(monkeypatch):
 
 
 def test_the_dsn_contains_every_part_it_needs():
+    from urllib.parse import urlparse
+
     from git_synapse.config import get_config
 
-    dsn = get_config().db.dsn
-    for part in ("host=", "port=", "user=", "dbname="):
-        assert part in dsn
+    parsed = urlparse(get_config().db.url)
+    assert parsed.hostname == get_config().db.host
+    assert parsed.port == get_config().db.port
+    assert parsed.username == get_config().db.user
+    assert parsed.path.removeprefix("/") == get_config().db.database
 
 
 # ------------------------------------------------------------ configuration

@@ -46,10 +46,9 @@ def test_the_stated_tool_count_matches_the_registry(name):
 
 
 def _schema_tables() -> list[str]:
-    # Anchored to the start of a line: the file also *mentions* the statement in
-    # a comment explaining why a column is added with ALTER instead.
-    return re.findall(r"^CREATE TABLE IF NOT EXISTS (\w+)",
-                      (ROOT / "src/git_synapse/db/schema.sql").read_text(), re.MULTILINE)
+    from git_synapse.db.schema import metadata
+
+    return list(metadata.tables)
 
 
 def test_design_lists_every_table_in_the_schema():

@@ -20,6 +20,7 @@ from git_synapse.analysis.depbump import (
     resolve_repo,
 )
 from git_synapse.analysis.manifests import _PSEUDO
+from git_synapse.db.orm import models
 
 # --------------------------------------------------------- pseudo-versions
 
@@ -403,47 +404,52 @@ def test_documentation_is_not_scanned_for_dependencies(tmp_path, monkeypatch):
 @pytest.fixture
 def bump_env(db):
     """An open transaction holding two repositories, rolled back afterwards."""
-    from git_synapse.db.engine import connection
+    from uuid import uuid4
 
-    with connection() as conn:
-        repo = conn.execute(
-            "INSERT INTO repo (full_name, name, owner) VALUES "
-            "('acme/consumer','consumer','acme') RETURNING id").fetchone()[0]
-        dep = conn.execute(
-            "INSERT INTO repo (full_name, name, owner) VALUES "
-            "('acme/library','library','acme') RETURNING id").fetchone()[0]
-        yield conn, repo, dep
-        conn.rollback()
+    from git_synapse.db.orm import models, session_scope
+
+    with session_scope() as conn:
+        suffix = uuid4().hex[:10]
+        consumer = models().Repo(full_name=f"acme/consumer-{suffix}", name="consumer", owner="acme")
+        library = models().Repo(full_name=f"acme/library-{suffix}", name="library", owner="acme")
+        conn.add_all([consumer, library])
+        conn.flush()
+        yield conn, consumer.id, library.id
 
 
 def _commit(conn, repo_id, sha, when):
-    return conn.execute(
-        "INSERT INTO commit (repo_id, sha, authored_at, committed_at) "
-        "VALUES (%s, %s, %s, %s) RETURNING id", (repo_id, sha, when, when)).fetchone()[0]
+    from datetime import UTC, datetime
+    row = models().Commit(repo_id=repo_id, sha=sha,
+                          authored_at=datetime.fromisoformat(when).replace(tzinfo=UTC),
+                          committed_at=datetime.fromisoformat(when).replace(tzinfo=UTC))
+    conn.add(row)
+    conn.flush()
+    return row.id
 
 
 def _tag(conn, repo_id, name, commit_id, main_commit_id, key, at="2024-01-01"):
-    conn.execute(
-        "INSERT INTO ref_tag (repo_id, name, commit_sha, tagged_at, annotated, "
-        "commit_id, main_commit_id, version_key) "
-        "VALUES (%s, %s, %s, %s, FALSE, %s, %s, %s)",
-        (repo_id, name, "0" * 40, at, commit_id, main_commit_id, key))
+    from datetime import UTC, datetime
+    conn.add(models().RefTag(repo_id=repo_id, name=name, commit_sha="0" * 40,
+                             tagged_at=datetime.fromisoformat(at).replace(tzinfo=UTC),
+                             annotated=False, commit_id=commit_id, main_commit_id=main_commit_id,
+                             version_key=key))
 
 
 def _bump(conn, repo_id, dep_repo_id, version, at, name="library", ecosystem="maven"):
     sha = f"{abs(hash((version, at, name))):040x}"[:40]
     _commit(conn, repo_id, sha, at)
-    return conn.execute(
-        "INSERT INTO dep_bump (consumer_repo_id, consumer_sha, dep_repo_id, "
-        "dep_name, dep_version, manifest, bumped_at, ecosystem) "
-        "VALUES (%s, %s, %s, %s, %s, 'pom.xml', %s, %s) RETURNING id",
-        (repo_id, sha, dep_repo_id, name, version, at, ecosystem)).fetchone()[0]
+    from datetime import UTC, datetime
+    row = models().DepBump(consumer_repo_id=repo_id, consumer_sha=sha, dep_repo_id=dep_repo_id,
+                           dep_name=name, dep_version=version, manifest="pom.xml",
+                           bumped_at=datetime.fromisoformat(at).replace(tzinfo=UTC), ecosystem=ecosystem)
+    conn.add(row)
+    conn.flush()
+    return row.id
 
 
 def _resolved(conn, bump_id):
-    return tuple(conn.execute(
-        "SELECT dep_commit_id, resolution FROM dep_bump WHERE id = %s",
-        (bump_id,)).fetchone())
+    row = conn.get(models().DepBump, bump_id)
+    return row.dep_commit_id, row.resolution
 
 
 def test_a_declared_version_resolves_through_the_shipping_branch_anchor(bump_env):
@@ -525,11 +531,10 @@ def test_tag_resolution_is_revalidated_when_the_tag_mapping_changes(bump_env):
     depbump.resolve_bumps(conn)
     assert _resolved(conn, row) == (first, "tag")
 
-    conn.execute(
-        "UPDATE ref_tag SET commit_id = %s, main_commit_id = %s "
-        "WHERE repo_id = %s AND version_key = '1'",
-        (second, second, dep),
-    )
+    tag = conn.query(models().RefTag).filter_by(repo_id=dep, version_key="1").one()
+    tag.commit_id = second
+    tag.main_commit_id = second
+    conn.flush()
     depbump.resolve_bumps(conn)
     assert _resolved(conn, row) == (second, "tag")
 
@@ -611,50 +616,70 @@ def test_what_a_repository_publishes_beats_a_name_that_merely_matches():
     assert resolve_repo("github.com/acme/utils", by_full, by_name, {}, "go") == 1
 
 
-def test_a_coordinate_two_repositories_claim_resolves_to_neither():
+def test_a_coordinate_two_repositories_claim_resolves_to_neither(db):
     """Two projects publishing an artifact called `core` is ordinary, and
     picking one of them would invent an edge."""
+    from uuid import uuid4
+
     from git_synapse.analysis.depbump import _repo_lookups
+    from git_synapse.db.orm import models, session_scope
 
-    class _Conn:
-        def __init__(self):
-            self.calls = 0
-
-        def execute(self, sql, *a):
-            self.calls += 1
-            rows = ([("acme", "core", 1), ("other", "core", 2)] if "FROM repo" in sql
-                    and "repo_package" not in sql
-                    else [("maven", "core", 1), ("maven", "core", 2)])
-            return type("R", (), {"fetchall": lambda _self: rows})()
-
-    _, _, by_package = _repo_lookups(_Conn())
+    with session_scope() as session:
+        suffix = uuid4().hex[:10]
+        first = models().Repo(full_name=f"acme/core-coordinate-{suffix}", name="core", owner="acme")
+        second = models().Repo(full_name=f"other/core-coordinate-{suffix}", name="core", owner="other")
+        session.add_all([first, second])
+        session.flush()
+        session.add_all([
+            models().RepoPackage(repo_id=first.id, ecosystem="maven", name="core"),
+            models().RepoPackage(repo_id=second.id, ecosystem="maven", name="core"),
+        ])
+        _, _, by_package = _repo_lookups(session)
     assert "core" not in by_package
+
+
+def test_a_bare_repository_name_is_not_resolved_when_names_are_ambiguous(db):
+    """A name-only reference must not pick an arbitrary owner."""
+    from uuid import uuid4
+
+    from git_synapse.analysis.depbump import _repo_lookups
+    from git_synapse.db.orm import models, session_scope
+
+    with session_scope() as session:
+        suffix = uuid4().hex[:10]
+        first = models().Repo(full_name=f"acme/core-name-{suffix}", name="core", owner="acme")
+        second = models().Repo(full_name=f"otherco/core-name-{suffix}", name="core", owner="otherco")
+        session.add_all([first, second])
+        session.flush()
+        by_full, by_name, by_package = _repo_lookups(session)
+        first_id = first.id
+    assert by_full[("acme", "core")] == first_id
+    assert "core" not in by_name
+    assert resolve_repo("core", by_full, by_name, by_package, "") is None
 
 
 def test_a_bump_is_linked_to_the_repository_that_publishes_the_coordinate(bump_env):
     """A coordinate becomes attributable only once the repository publishing it
     has had its own manifests read, which can happen long after the bump."""
     conn, repo, dep = bump_env
-    conn.execute("INSERT INTO repo_package (repo_id, ecosystem, name) "
-                 "VALUES (%s, 'maven', 'geocoder')", (dep,))
-    row = _bump(conn, repo, None, version="1.0.0", at="2024-01-01", name="geocoder")
+    from uuid import uuid4
+    package = f"geocoder-{uuid4().hex[:10]}"
+    conn.add(models().RepoPackage(repo_id=dep, ecosystem="maven", name=package))
+    row = _bump(conn, repo, None, version="1.0.0", at="2024-01-01", name=package)
 
     depbump.resolve_bumps(conn)
-    assert conn.execute("SELECT dep_repo_id FROM dep_bump WHERE id = %s",
-                        (row,)).fetchone()[0] == dep
+    assert conn.get(models().DepBump, row).dep_repo_id == dep
 
 
 def test_a_reference_to_the_consumer_itself_is_not_a_repository_edge(bump_env):
     """A monorepo names its own modules. That is a module edge, not a
     dependency between two repositories."""
     conn, repo, _ = bump_env
-    conn.execute("INSERT INTO repo_package (repo_id, ecosystem, name) "
-                 "VALUES (%s, 'maven', 'geocoder')", (repo,))
+    conn.add(models().RepoPackage(repo_id=repo, ecosystem="maven", name="geocoder"))
     row = _bump(conn, repo, None, version="1.0.0", at="2024-01-01", name="geocoder")
 
     depbump.resolve_bumps(conn)
-    assert conn.execute("SELECT dep_repo_id FROM dep_bump WHERE id = %s",
-                        (row,)).fetchone()[0] is None
+    assert conn.get(models().DepBump, row).dep_repo_id is None
 
 
 def test_every_resolved_bump_records_how_it_was_resolved(bump_env):
@@ -668,9 +693,9 @@ def test_every_resolved_bump_records_how_it_was_resolved(bump_env):
     _bump(conn, repo, dep, version="^1.0.0", at="2024-03-01", name="lib2")
 
     depbump.resolve_bumps(conn)
-    orphans = conn.execute(
-        "SELECT count(*) FROM dep_bump "
-        " WHERE dep_commit_id IS NOT NULL AND resolution IS NULL").fetchone()[0]
+    orphans = conn.query(models().DepBump).filter(
+        models().DepBump.dep_commit_id.is_not(None), models().DepBump.resolution.is_(None)
+    ).count()
     assert orphans == 0
 
 
@@ -680,16 +705,17 @@ def test_a_coordinate_does_not_cross_ecosystems(bump_env):
     ecosystem made every npm dependency on `events` an edge into a PHP
     repository."""
     conn, repo, dep = bump_env
-    conn.execute("INSERT INTO repo_package (repo_id, ecosystem, name) "
-                 "VALUES (%s, 'composer', 'events')", (dep,))
+    from uuid import uuid4
+    package = f"events-{uuid4().hex[:10]}"
+    conn.add(models().RepoPackage(repo_id=dep, ecosystem="composer", name=package))
     npm = _bump(conn, repo, None, version="3.3.0", at="2024-01-01",
-                name="events", ecosystem="npm")
+                name=package, ecosystem="npm")
     php = _bump(conn, repo, None, version="9.0.0", at="2024-01-01",
-                name="events", ecosystem="composer")
+                name=package, ecosystem="composer")
 
     depbump.resolve_bumps(conn)
-    linked = dict(conn.execute(
-        "SELECT id, dep_repo_id FROM dep_bump WHERE id = ANY(%s)", ([npm, php],)).fetchall())
+    linked = {row.id: row.dep_repo_id for row in conn.query(models().DepBump).filter(
+        models().DepBump.id.in_([npm, php])).all()}
     assert linked[npm] is None, "an npm package must not resolve to a PHP repository"
     assert linked[php] == dep
 

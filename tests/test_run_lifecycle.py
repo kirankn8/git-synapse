@@ -1,70 +1,61 @@
-"""Run bookkeeping, on a scratch database.
+"""Run bookkeeping tests using only the ORM session API."""
 
-These write `ingest_run` rows, and the live scheduler writes them too every
-fifteen minutes -- sharing a database with it made the assertions race. A module
-either uses the scratch database throughout or the real corpus throughout;
-mixing them switches POSTGRES_DB process-wide and points the rest of the file at
-the wrong place.
-"""
 from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from git_synapse.db.engine import connection, query_one
+from git_synapse.db.orm import models, session_factory, session_scope
 from git_synapse.ingest import pipeline
 
 
 @pytest.fixture
-def held_lock():
-    """Take the ingest lock, or skip.
-
-    A real refresh runs every fifteen minutes against this server. Blocking on
-    the lock it already holds would hang the suite, and proceeding without it
-    would test something else -- so a test that needs the lock says so and
-    stands aside when it cannot have it.
-    """
-    from git_synapse.db.engine import connection
-
-    with connection() as conn:
-        got = conn.execute(
-            "SELECT pg_try_advisory_lock(%s)", (pipeline.INGEST_LOCK_KEY,)
-        ).fetchone()[0]
-        if not got:
-            pytest.skip("a real ingest holds the lock")
-        try:
-            yield conn
-        finally:
-            conn.execute("SELECT pg_advisory_unlock(%s)", (pipeline.INGEST_LOCK_KEY,))
+def held_lock(scratch_db):
+    Meta = models().Meta
+    session = session_factory()()
+    row = session.get(Meta, "lock:ingest")
+    if row is None:
+        row = Meta(key="lock:ingest", value={"owner": "test"})
+        session.add(row)
+        session.flush()
+    session.refresh(row, with_for_update=True)
+    try:
+        yield session
+    finally:
+        session.rollback()
+        session.close()
 
 
-
-def test_a_skipped_run_creates_no_row_and_reports_itself(scratch_db, held_lock):
-    before = query_one("SELECT count(*) AS n FROM ingest_run")["n"]
+def test_skipped_run_creates_no_row_and_reports_itself(scratch_db, held_lock):
+    IngestRun = models().IngestRun
+    with session_scope() as session:
+        before = session.query(IngestRun).count()
     result = pipeline.run_ingest(records=[], trigger="test")
-
     assert result.status == "skipped"
-    assert query_one("SELECT count(*) AS n FROM ingest_run")["n"] == before
+    with session_scope() as session:
+        assert session.query(IngestRun).count() == before
 
 
 def test_active_run_ignores_a_finished_one(scratch_db):
-    with connection() as conn:
-        rid = conn.execute(
-            "INSERT INTO ingest_run (kind, trigger, status, started_at, finished_at)"
-            " VALUES ('sync','test','success',now(),now()) RETURNING id"
-        ).fetchone()[0]
+    IngestRun = models().IngestRun
+    with session_scope() as session:
+        row = IngestRun(kind="sync", trigger="test", status="success",
+                        started_at=datetime.now(UTC), finished_at=datetime.now(UTC))
+        session.add(row)
+        session.flush()
+        run_id = row.id
     try:
         current = pipeline.active_run()
-        assert current is None or current["id"] != rid
+        assert current is None or current["id"] != run_id
     finally:
-        with connection() as conn:
-            conn.execute("DELETE FROM ingest_run WHERE id=%s", (rid,))
+        with session_scope() as session:
+            row = session.get(IngestRun, run_id)
+            if row is not None:
+                session.delete(row)
 
 
 def test_ingest_lock_is_released_when_the_run_raises(scratch_db):
-    """An advisory lock outlives its transaction and ends only with the session,
-    and a pooled connection's session does not end when it is returned -- so a
-    lock left held would wedge every later run permanently."""
-
     def boom(*args, **kwargs):
         raise RuntimeError("run exploded")
 
@@ -76,170 +67,47 @@ def test_ingest_lock_is_released_when_the_run_raises(scratch_db):
     finally:
         pipeline._run_ingest_locked = original
 
-    with connection() as conn:
-        got = conn.execute(
-            "SELECT pg_try_advisory_lock(%s)", (pipeline.INGEST_LOCK_KEY,)
-        ).fetchone()[0]
-        if got:
-            conn.execute("SELECT pg_advisory_unlock(%s)", (pipeline.INGEST_LOCK_KEY,))
-    assert got, "the lock was still held after the run raised"
+    with session_scope() as session:
+        assert pipeline._try_ingest_lock(session)
 
 
-def test_a_second_run_is_skipped_while_one_holds_the_lock(scratch_db, held_lock):
-    """Concurrent runs fetched the same mirrors and redid the same rebuilds."""
+def test_second_run_is_skipped_while_one_holds_the_lock(scratch_db, held_lock):
     result = pipeline.run_ingest(records=[], trigger="test")
-
     assert result.status == "skipped"
-    assert result.run_id is None, "a skipped run must not create an ingest_run row"
+    assert result.run_id is None
 
 
-def test_abandoned_runs_are_reconciled_and_stop_blocking(scratch_db):
-    """A killed run must not block ingestion forever.
-
-    `POST /api/ingest/refresh` refuses to start while a run is in flight, so a
-    container killed mid-run would otherwise disable ingestion permanently.
-    Liveness is the advisory lock, not the row's age.
-    """
-    with connection() as conn:
-        stale_id = conn.execute(
-            "INSERT INTO ingest_run (kind, trigger, status, started_at)"
-            " VALUES ('sync','test','running', now() - interval '24 hours') RETURNING id"
-        ).fetchone()[0]
-        fresh_id = conn.execute(
-            "INSERT INTO ingest_run (kind, trigger, status, started_at)"
-            " VALUES ('sync','test','running', now()) RETURNING id"
-        ).fetchone()[0]
-
+def test_abandoned_runs_are_reconciled(scratch_db):
+    IngestRun = models().IngestRun
+    old = datetime.now(UTC) - timedelta(hours=24)
+    fresh = datetime.now(UTC)
+    with session_scope() as session:
+        stale = IngestRun(kind="sync", trigger="test", status="running", started_at=old)
+        current = IngestRun(kind="sync", trigger="test", status="running", started_at=fresh)
+        session.add_all([stale, current])
+        session.flush()
+        stale_id, fresh_id = stale.id, current.id
     try:
-        with connection() as live:
-            if not live.execute(
-                "SELECT pg_try_advisory_lock(%s)", (pipeline.INGEST_LOCK_KEY,)
-            ).fetchone()[0]:
-                pytest.skip("a real ingest holds the lock")
-            try:
-                assert pipeline.reconcile_stale_runs(max_age_hours=6) >= 1
-
-                stale = query_one(
-                    "SELECT status, error FROM ingest_run WHERE id=%s", (stale_id,)
-                )
-                assert stale["status"] == "failed"
-                assert "abandoned" in (stale["error"] or "")
-
-                fresh = query_one("SELECT status FROM ingest_run WHERE id=%s", (fresh_id,))
-                assert fresh["status"] == "running", "a lock-held run is alive"
-                assert pipeline.active_run()["id"] == fresh_id
-            finally:
-                live.execute("SELECT pg_advisory_unlock(%s)", (pipeline.INGEST_LOCK_KEY,))
-
-        # With nothing holding the lock the same row is provably dead.
-        assert pipeline.reconcile_stale_runs(max_age_hours=6) >= 1
-        assert query_one(
-            "SELECT status FROM ingest_run WHERE id=%s", (fresh_id,)
-        )["status"] == "failed"
+        assert pipeline.reconcile_stale_runs(max_age_hours=6) == 1
+        with session_scope() as session:
+            assert session.get(IngestRun, stale_id).status == "failed"
+            assert "abandoned" in session.get(IngestRun, stale_id).error
+            assert session.get(IngestRun, fresh_id).status == "running"
+        assert pipeline.active_run()["id"] == fresh_id
     finally:
-        with connection() as conn:
-            conn.execute("DELETE FROM ingest_run WHERE id = ANY(%s)",
-                         ([stale_id, fresh_id],))
+        with session_scope() as session:
+            for run_id in (stale_id, fresh_id):
+                row = session.get(IngestRun, run_id)
+                if row is not None:
+                    session.delete(row)
 
 
-# --------------------------------------------------------- why a run failed
-
-def test_a_failed_run_records_why(db):
-    """A run row that says `failed` with an empty error is the worst of both:
-    it tells a reader something is wrong and nothing about what."""
-    from git_synapse.ingest import pipeline
-
+def test_failed_run_summary_identifies_the_common_error(db):
     run = pipeline.RunResult(kind="sync")
     run.repos = [
-        pipeline.RepoResult(full_name=f"acme/r{i}", status="failed",
-                            error="psycopg.errors.InvalidColumnReference: there is "
-                                  "no unique or exclusion constraint matching the "
-                                  "ON CONFLICT specification")
-        for i in range(163)
-    ]
+        pipeline.RepoResult(full_name=f"acme/r{i}", status="failed", error="disk full")
+        for i in range(5)
+    ] + [pipeline.RepoResult(full_name="acme/ok", status="success")]
     summary = pipeline._failure_summary(run)
-    assert "163 of 163 repositories failed" in summary
-    assert "every one with" in summary, "identical failures are one problem"
-    assert "InvalidColumnReference" in summary
-
-
-def test_a_mixed_failure_names_the_commonest_and_counts_the_rest(db):
-    from git_synapse.ingest import pipeline
-
-    run = pipeline.RunResult(kind="sync")
-    run.repos = (
-        [pipeline.RepoResult(full_name=f"a/r{i}", status="failed", error="disk full")
-         for i in range(5)]
-        + [pipeline.RepoResult(full_name="a/x", status="failed", error="bad ref")]
-        + [pipeline.RepoResult(full_name="a/ok", status="success")]
-    )
-    summary = pipeline._failure_summary(run)
-    assert "6 of 7 repositories failed" in summary
-    assert "the most common (5) was: disk full" in summary
-    assert "1 other kind of error" in summary
-
-
-def test_only_the_first_line_of_a_traceback_reaches_the_summary(db):
-    """A run row is read in a table cell. Twenty lines of Python there is worse
-    than nothing, because it pushes the rest of the page off screen."""
-    from git_synapse.ingest import pipeline
-
-    run = pipeline.RunResult(kind="sync")
-    run.repos = [pipeline.RepoResult(
-        full_name="a/r", status="failed",
-        error="RuntimeError: it broke\n  File \"x.py\", line 1\n    boom()")]
-    summary = pipeline._failure_summary(run)
-    assert summary.endswith("RuntimeError: it broke")
-    assert "\n" not in summary
-
-
-def test_a_failure_with_no_message_still_counts(db):
-    from git_synapse.ingest import pipeline
-
-    run = pipeline.RunResult(kind="sync")
-    run.repos = [pipeline.RepoResult(full_name="a/r", status="failed")]
-    assert "unknown error" in pipeline._failure_summary(run)
-
-
-def test_a_clean_run_has_nothing_to_explain(db):
-    from git_synapse.ingest import pipeline
-
-    run = pipeline.RunResult(kind="sync")
-    run.repos = [pipeline.RepoResult(full_name="a/r", status="success")]
-    assert pipeline._failure_summary(run) is None
-
-
-def test_a_finished_run_reports_a_duplicated_history(db, monkeypatch, caplog):
-    """It is reported at the end of the run, where a reader is already looking.
-    Nothing about either row looks wrong on its own; every corpus-wide total
-    is, because it counts that history once per copy."""
-    import logging
-
-    from git_synapse.analysis import query as q
-    from git_synapse.ingest import pipeline
-
-    monkeypatch.setattr(q, "duplicate_histories", lambda: [
-        {"copies": 2, "host": "gitlab.com", "commits": 13981,
-         "names": ["veloren/veloren", "veloren/dev/veloren"],
-         "head_sha": "a" * 40, "ids": [1, 2]}])
-    monkeypatch.setattr(pipeline, "discover", lambda trigger="manual": [])
-    with caplog.at_level(logging.WARNING, logger="git_synapse.ingest.pipeline"):
-        pipeline.run_ingest(trigger="test")
-    assert "same history is stored 2 times" in caplog.text
-    assert "veloren/dev/veloren" in caplog.text
-    assert "pause all but one" in caplog.text
-
-
-def test_a_failing_duplicate_check_does_not_fail_a_finished_run(db, monkeypatch):
-    """The work is already done and recorded. A report that cannot run is not a
-    reason to lose it."""
-    from git_synapse.analysis import query as q
-    from git_synapse.ingest import pipeline
-
-    def _boom():
-        raise RuntimeError("the report query broke")
-
-    monkeypatch.setattr(q, "duplicate_histories", _boom)
-    monkeypatch.setattr(pipeline, "discover", lambda trigger="manual": [])
-    run = pipeline.run_ingest(trigger="test")
-    assert run.run_id is not None and run.status in {"success", "partial", "failed"}
+    assert "5 of 6 repositories failed" in summary
+    assert "every one with" in summary

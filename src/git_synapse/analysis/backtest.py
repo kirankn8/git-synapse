@@ -51,7 +51,7 @@ from pathlib import Path
 
 import numpy as np
 
-from git_synapse.db.engine import query
+from git_synapse.db.orm import models, session_scope
 from git_synapse.ingest.gitops import _base_env, mirror_path_for
 from git_synapse.stats.contingency import Contingency
 from git_synapse.stats.registry import DEFAULT_MEASURE, resolve
@@ -212,10 +212,13 @@ def _commit_shas(repo_id: int | None) -> dict[int, tuple[str, str, str]]:
     `owner/name` is unique on one host, so without it two repositories can
     resolve to the same directory on disk.
     """
-    where = "" if repo_id is None else "WHERE c.repo_id = %(repo)s"
-    rows = query(f"""SELECT c.id, c.sha, r.full_name, r.host FROM commit c
-                       JOIN repo r ON r.id = c.repo_id {where}""", {"repo": repo_id})
-    return {r["id"]: (r["sha"], r["full_name"], r["host"]) for r in rows}
+    Commit, Repo = models().Commit, models().Repo
+    with session_scope() as session:
+        query = session.query(Commit, Repo).join(Repo, Repo.id == Commit.repo_id)
+        if repo_id is not None:
+            query = query.filter(Commit.repo_id == repo_id)
+        rows = query.all()
+    return {commit.id: (commit.sha, repo.full_name, repo.host) for commit, repo in rows}
 
 
 def _history(repo_id: int | None) -> list[tuple[int, list[int], int]]:
@@ -227,21 +230,20 @@ def _history(repo_id: int | None) -> list[tuple[int, list[int], int]]:
     can never hit -- which does not weaken the baseline honestly, it breaks it,
     and every lift measured against it is inflated.
     """
-    where = "WHERE c.pair_eligible" + ("" if repo_id is None else " AND c.repo_id = %(repo)s")
-    rows = query(
-        f"""
-        SELECT c.id AS commit_id, c.repo_id, cf.file_id
-          FROM commit c JOIN commit_file cf ON cf.commit_id = c.id
-          {where}
-      ORDER BY c.committed_at, c.id, cf.file_id
-        """,
-        {"repo": repo_id},
-    )
+    Commit, Change = models().Commit, models().CommitFile
+    with session_scope() as session:
+        query = session.query(Commit.id, Commit.repo_id, Change.file_id).join(
+            Change, Change.commit_id == Commit.id
+        ).filter(Commit.pair_eligible.is_(True))
+        if repo_id is not None:
+            query = query.filter(Commit.repo_id == repo_id)
+        rows = query.order_by(Commit.committed_at, Commit.id, Change.file_id).all()
     grouped: dict[int, list[int]] = defaultdict(list)
     owner: dict[int, int] = {}
     for row in rows:
-        grouped[row["commit_id"]].append(row["file_id"])
-        owner[row["commit_id"]] = row["repo_id"]
+        commit_id, repo_id_value, file_id = row
+        grouped[commit_id].append(file_id)
+        owner[commit_id] = repo_id_value
     return [(owner[cid], files, cid) for cid, files in grouped.items()]
 
 
@@ -408,13 +410,17 @@ def agent_search(mirror: Path, sha: str, seed_path: str, k: int) -> list[str]:
 
 def _path_index(repo_id: int | None) -> tuple[dict[int, str], dict[str, list[int]], dict[str, list[int]]]:
     """File paths, grouped by name stem and by directory, for the baselines."""
-    where = "" if repo_id is None else "WHERE repo_id = %(repo)s"
-    rows = query(f"SELECT id, path, dir_path FROM file {where}", {"repo": repo_id})
+    File = models().File
+    with session_scope() as session:
+        query = session.query(File)
+        if repo_id is not None:
+            query = query.filter_by(repo_id=repo_id)
+        rows = query.all()
     paths, by_stem, by_dir = {}, defaultdict(list), defaultdict(list)
     for r in rows:
-        paths[r["id"]] = r["path"]
-        by_stem[stem_of(r["path"])].append(r["id"])
-        by_dir[r["dir_path"] or ""].append(r["id"])
+        paths[r.id] = r.path
+        by_stem[stem_of(r.path)].append(r.id)
+        by_dir[r.dir_path or ""].append(r.id)
     return paths, by_stem, by_dir
 
 

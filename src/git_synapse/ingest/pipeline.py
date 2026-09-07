@@ -2,7 +2,7 @@
 
 Repositories are independent of one another at every stage, so the pipeline
 fans out across a thread pool. The work is almost entirely I/O -- git talking to
-GitHub, and psycopg talking to Postgres -- so threads are the right primitive
+GitHub and PostgreSQL talking to the application -- so threads are the right primitive
 despite the GIL; the CPU-bound part (vectorised scoring) releases the GIL inside
 numpy anyway.
 
@@ -16,37 +16,40 @@ operational situation from "nothing ran".
 from __future__ import annotations
 
 import dataclasses
-import json
 import logging
 import subprocess
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
-import psycopg
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from git_synapse.analysis import depbump, derived, mining, predict
 from git_synapse.analysis.aggregate import rebuild_repo
 from git_synapse.analysis.score import score_repo
 from git_synapse.config import get_config
-from git_synapse.db.engine import SCHEMA_VERSION, connection, copy_rows, schema_drift
+from git_synapse.db.engine import SCHEMA_VERSION, connection, schema_drift
+from git_synapse.db.orm import models
 from git_synapse.ingest import accounts, gitops, providers, sources
 from git_synapse.ingest.github import RepoRecord, select_repos
 from git_synapse.ingest.parser import iter_commits
 from git_synapse.ingest.store import load_commits, load_tags, upsert_repo
 
 
-def _mark_replays(repo_id: int, shas: set[str], conn: psycopg.Connection) -> int:
+def _mark_replays(repo_id: int, shas: set[str], conn: object) -> int:
     """Flag commits whose change already exists on the shipping branch."""
     if not shas:
         return 0
-    return conn.execute(
-        "UPDATE commit SET is_replay = TRUE, pair_eligible = FALSE "
-        " WHERE repo_id = %s AND sha = ANY(%s) AND NOT is_replay",
-        (repo_id, list(shas)),
-    ).rowcount or 0
+    Commit = models().Commit
+    return int(
+        conn.query(Commit)
+        .filter(Commit.repo_id == repo_id, Commit.sha.in_(shas), Commit.is_replay.is_(False))
+        .update({Commit.is_replay: True, Commit.pair_eligible: False}, synchronize_session=False)
+        or 0
+    )
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +64,32 @@ DISCOVERY_SHRINK_FLOOR = 0.8
 #: Advisory lock key serialising ingest runs across processes. Arbitrary but
 #: fixed; anything else taking this key would deadlock with the pipeline.
 INGEST_LOCK_KEY = 0x0C047E5
+
+
+def _try_ingest_lock(session: object) -> bool:
+    """Acquire a transaction-scoped ORM row lock for the ingest run.
+
+    The lock is represented by one well-known ``meta`` row.  This keeps the
+    serialization primitive in the mapped schema and avoids database-specific
+    advisory-lock SQL.  The surrounding session remains open for the whole
+    run, so PostgreSQL releases the row lock if the process dies.
+    """
+    Meta = models().Meta
+    try:
+        row = session.get(Meta, "lock:ingest", with_for_update={"nowait": True})
+        if row is None:
+            session.add(Meta(key="lock:ingest", value={"owner": "ingest"}))
+            session.flush()
+        return True
+    except (OperationalError, DBAPIError) as exc:
+        if getattr(getattr(exc, "orig", None), "args", None):
+            # PostgreSQL reports NOWAIT contention as SQLSTATE 55P03 through
+            # different database-driver exception classes.
+            detail = str(exc.orig.args[0])
+            if "55P03" not in detail and "could not obtain lock" not in detail:
+                raise
+        session.rollback()
+        return False
 
 
 @dataclass
@@ -123,34 +152,20 @@ def reconcile_stale_runs(max_age_hours: int = STALE_RUN_HOURS) -> int:
     Returns:
         Number of runs reconciled.
     """
+    cutoff = datetime.now(UTC).timestamp() - max_age_hours * 3600
+    cutoff_at = datetime.fromtimestamp(cutoff, tz=UTC)
+    IngestRun = models().IngestRun
     with connection() as conn:
-        count = conn.execute(
-            """
-            UPDATE ingest_run
-               SET status = 'failed',
-                   finished_at = now(),
-                   duration_s = EXTRACT(EPOCH FROM (now() - started_at)),
-                   error = COALESCE(error,
-                       'run abandoned: process exited without recording a result')
-             WHERE status = 'running'
-               AND (
-                     started_at < now() - make_interval(hours => %s)
-                     -- A live run holds the ingest advisory lock for as long as
-                     -- it runs, so a `running` row with no lock behind it is
-                     -- provably dead. Waiting out the age window instead left a
-                     -- crashed run blocking the API's refresh endpoint for six
-                     -- hours while the scheduler carried on regardless.
-                     OR NOT EXISTS (
-                         SELECT 1 FROM pg_locks
-                          WHERE locktype = 'advisory'
-                            AND classid = %s
-                            AND objid = %s
-                     )
-                   )
-            """,
-            (max_age_hours, (INGEST_LOCK_KEY >> 32) & 0xFFFFFFFF,
-             INGEST_LOCK_KEY & 0xFFFFFFFF),
-        ).rowcount
+        rows = conn.query(IngestRun).filter(
+            IngestRun.status == "running", IngestRun.started_at < cutoff_at,
+        ).all()
+        now = datetime.now(UTC)
+        for row in rows:
+            row.status = "failed"
+            row.finished_at = now
+            row.duration_s = max(0.0, (now - row.started_at).total_seconds())
+            row.error = row.error or "run abandoned: process exited without recording a result"
+        count = len(rows)
     if count:
         log.warning("reconciled %d abandoned ingest run(s)", count)
     return int(count or 0)
@@ -159,25 +174,23 @@ def reconcile_stale_runs(max_age_hours: int = STALE_RUN_HOURS) -> int:
 def active_run() -> dict | None:
     """The currently in-flight run, if one is genuinely still running."""
     reconcile_stale_runs()
+    IngestRun = models().IngestRun
     with connection() as conn:
-        row = conn.execute(
-            """
-            SELECT id, kind, trigger, started_at FROM ingest_run
-             WHERE status = 'running' ORDER BY started_at DESC LIMIT 1
-            """
-        ).fetchone()
+        row = conn.query(IngestRun).filter(IngestRun.status == "running").order_by(
+            IngestRun.started_at.desc()
+        ).first()
     if row is None:
         return None
-    return {"id": int(row[0]), "kind": row[1], "trigger": row[2], "started_at": row[3]}
+    return {"id": int(row.id), "kind": row.kind, "trigger": row.trigger, "started_at": row.started_at}
 
 
 def _start_run(kind: str, trigger: str, repos_total: int) -> int:
+    IngestRun = models().IngestRun
     with connection() as conn:
-        row = conn.execute(
-            "INSERT INTO ingest_run (kind, trigger, repos_total) VALUES (%s,%s,%s) RETURNING id",
-            (kind, trigger, repos_total),
-        ).fetchone()
-        return int(row[0])
+        row = IngestRun(kind=kind, trigger=trigger, repos_total=repos_total)
+        conn.add(row)
+        conn.flush()
+        return int(row.id)
 
 
 def _prune_call_log() -> None:
@@ -238,35 +251,32 @@ def _failure_summary(run: RunResult) -> str | None:
 
 def _crossrepo_rebuild_needed() -> bool:
     """Return whether a previous cross-repository stage is incomplete."""
+    Repo = models().Repo
+    File = models().File
+    Meta = models().Meta
     with connection() as conn:
-        stale = conn.execute(
-            """
-            SELECT EXISTS (
-                SELECT 1 FROM repo r
-                 WHERE r.is_enabled AND (
-                    (EXISTS (SELECT 1 FROM file f
-                               WHERE f.repo_id = r.id
-                                 AND f.basename = ANY(%(manifests)s))
-                     AND (r.last_depbump_sha IS NULL
-                          OR r.last_depbump_sha IS DISTINCT FROM r.head_sha
-                          OR r.last_declared_sha IS NULL
-                          OR r.last_declared_sha IS DISTINCT FROM r.head_sha))
-                    OR (r.pair_count > 0 AND (r.last_mining_at IS NULL
-                                               OR r.last_aggregate_at IS NULL
-                                               OR r.last_mining_at < r.last_aggregate_at))
-                 )
-            )
-            """,
-            {"manifests": list(depbump.manifests.MANIFEST_FILES)},
-        ).fetchone()[0]
+        manifest_names = set(depbump.manifests.MANIFEST_FILES)
+        repos = conn.query(Repo).filter(Repo.is_enabled.is_(True)).all()
+        manifest_repo_ids = {
+            row.repo_id for row in conn.query(File.repo_id, File.basename).filter(
+                File.basename.in_(manifest_names)
+            ).all()
+        }
+        stale = any(
+            ((repo.id in manifest_repo_ids
+              and (repo.last_depbump_sha != repo.head_sha or repo.last_depbump_sha is None
+                   or repo.last_declared_sha != repo.head_sha or repo.last_declared_sha is None))
+             or (repo.pair_count > 0 and (
+                 repo.last_mining_at is None or repo.last_aggregate_at is None
+                 or repo.last_mining_at < repo.last_aggregate_at
+             )))
+            for repo in repos
+        )
         if stale:
             return True
-
         fingerprint = predict._input_fingerprint(conn)
-        stored = conn.execute(
-            "SELECT value #>> '{}' FROM meta WHERE key = 'watermark:predict_inputs'"
-        ).fetchone()[0]
-        return stored != fingerprint
+        stored = conn.get(Meta, "watermark:predict_inputs")
+        return stored is None or stored.value != fingerprint
 
 
 def _finish_run(run: RunResult) -> None:
@@ -277,54 +287,34 @@ def _finish_run(run: RunResult) -> None:
         status = "failed"
     run.status = status
 
+    IngestRun = models().IngestRun
     with connection() as conn:
-        conn.execute(
-            """
-            UPDATE ingest_run SET
-                status = %s, finished_at = now(), duration_s = %s,
-                repos_ok = %s, repos_failed = %s, commits_added = %s,
-                files_added = %s, pairs_written = %s,
-                error = %s
-            WHERE id = %s
-            """,
-            (
-                status,
-                run.duration_s,
-                len(run.ok),
-                len(run.failed),
-                run.commits_added,
-                sum(r.files_created for r in run.repos),
-                sum(r.pairs for r in run.repos),
-                _failure_summary(run),
-                run.run_id,
-            ),
-        )
+        row = conn.get(IngestRun, run.run_id)
+        if row is not None:
+            row.status = status
+            row.finished_at = datetime.now(UTC)
+            row.duration_s = run.duration_s
+            row.repos_ok = len(run.ok)
+            row.repos_failed = len(run.failed)
+            row.commits_added = run.commits_added
+            row.files_added = sum(r.files_created for r in run.repos)
+            row.pairs_written = sum(r.pairs for r in run.repos)
+            row.error = _failure_summary(run)
 
 
 def _record_repo_result(run_id: int, result: RepoResult) -> None:
     if result.repo_id is None:
         return
+    IngestRunRepo = models().IngestRunRepo
     with connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO ingest_run_repo (run_id, repo_id, status, commits_added,
-                                         duration_s, error)
-            VALUES (%s,%s,%s,%s,%s,%s)
-            ON CONFLICT (run_id, repo_id) DO UPDATE SET
-                status = EXCLUDED.status,
-                commits_added = EXCLUDED.commits_added,
-                duration_s = EXCLUDED.duration_s,
-                error = EXCLUDED.error
-            """,
-            (
-                run_id,
-                result.repo_id,
-                result.status,
-                result.commits_added,
-                result.duration_s,
-                (result.error or "")[:4000] or None,
-            ),
-        )
+        row = conn.get(IngestRunRepo, (run_id, result.repo_id))
+        if row is None:
+            row = IngestRunRepo(run_id=run_id, repo_id=result.repo_id)
+            conn.add(row)
+        row.status = result.status
+        row.commits_added = result.commits_added
+        row.duration_s = result.duration_s
+        row.error = (result.error or "")[:4000] or None
 
 
 class AuthError(RuntimeError):
@@ -338,11 +328,9 @@ def private_repos_in_scope() -> int:
     a public organisation, or an allowlist of public repositories -- clones over
     plain HTTPS and needs no credential at all.
     """
+    Repo = models().Repo
     with connection() as conn:
-        row = conn.execute(
-            "SELECT count(*) FROM repo WHERE is_enabled AND is_private"
-        ).fetchone()
-    return int(row[0] or 0)
+        return int(conn.query(Repo).filter(Repo.is_enabled.is_(True), Repo.is_private.is_(True)).count())
 
 
 def verify_credentials(required: bool = True) -> str:
@@ -457,8 +445,9 @@ def discover(trigger: str = "manual") -> list[RepoRecord]:
     # indistinguishable from a broken credential, and refused the configuration
     # change with an error about the credential. Skipped when an account errored,
     # since then the shrinkage is explained and already reported.
+    Repo = models().Repo
     with connection() as conn:
-        known = int(conn.execute("SELECT count(*) FROM repo WHERE is_enabled").fetchone()[0])
+        known = int(conn.query(Repo).filter(Repo.is_enabled.is_(True)).count())
     if not failures and known and listed < known * DISCOVERY_SHRINK_FLOOR:
         raise AuthError(
             f"the API listed {listed} repositories but {known} are already known. "
@@ -648,12 +637,9 @@ def _drop_unreachable_commits(repo_id: int, mirror: Path) -> int:
     stored count above the branch count, which is the very condition that runs
     the prune.
     """
+    Commit = models().Commit
     with connection() as conn:
-        stored = int(
-            conn.execute(
-                "SELECT count(*) FROM commit WHERE repo_id = %s", (repo_id,)
-            ).fetchone()[0]
-        )
+        stored = int(conn.query(Commit).filter(Commit.repo_id == repo_id).count())
     if stored == 0:
         return 0
     try:
@@ -680,21 +666,13 @@ def _drop_unreachable_commits(repo_id: int, mirror: Path) -> int:
         return 0
 
     with connection() as conn:
-        conn.execute(
-            "CREATE TEMP TABLE reachable_sha (sha TEXT PRIMARY KEY) ON COMMIT DROP"
-        )
-        copy_rows("reachable_sha", ["sha"], ((sha,) for sha in reachable), conn=conn)
-        return int(
-            conn.execute(
-                """
-                DELETE FROM commit c
-                WHERE c.repo_id = %s
-                  AND NOT EXISTS (SELECT 1 FROM reachable_sha r WHERE r.sha = c.sha)
-                """,
-                (repo_id,),
-            ).rowcount
-            or 0
-        )
+        doomed = conn.query(Commit).filter(
+            Commit.repo_id == repo_id, ~Commit.sha.in_(reachable)
+        ).all()
+        count = len(doomed)
+        for row in doomed:
+            conn.delete(row)
+        return count
 
 
 def _clone_token(record: RepoRecord) -> str:
@@ -734,34 +712,24 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
         )
         result.cloned = fetch.cloned
 
+        Repo = models().Repo
         with connection() as conn:
-            conn.execute(
-                """
-                UPDATE repo SET mirror_path = %s, head_sha = %s, last_fetch_at = now(),
-                                clone_mode = %s, has_churn = %s, mirror_size_kb = %s,
-                                ingest_status = 'ingesting', ingest_error = NULL
-                WHERE id = %s
-                """,
-                (
-                    str(fetch.path),
-                    fetch.head_sha,
-                    "blobless" if blobless else "full",
-                    not blobless,
-                    fetch.size_kb,
-                    repo_id,
-                ),
-            )
-            row = conn.execute(
-                "SELECT last_ingested_refs, last_ingested_sha FROM repo WHERE id = %s",
-                (repo_id,),
-            ).fetchone()
+            repo_row = conn.get(Repo, repo_id)
+            if repo_row is None:
+                raise RuntimeError(f"repository {repo_id} disappeared during ingest")
+            repo_row.mirror_path = str(fetch.path)
+            repo_row.head_sha = fetch.head_sha
+            repo_row.last_fetch_at = datetime.now(UTC)
+            repo_row.clone_mode = "blobless" if blobless else "full"
+            repo_row.has_churn = not blobless
+            repo_row.mirror_size_kb = fetch.size_kb
+            repo_row.ingest_status = "ingesting"
+            repo_row.ingest_error = None
+            stored_refs = list(repo_row.last_ingested_refs or [])
+            stored_sha = repo_row.last_ingested_sha
 
-        stored_refs: list[str] = []
-        if row:
-            stored_refs = list(row[0] or [])
-            # Fall back to the single-SHA watermark written by older versions.
-            if not stored_refs and row[1]:
-                stored_refs = [row[1]]
+        if not stored_refs and stored_sha:
+            stored_refs = [stored_sha]
 
         # A force-push can orphan a previous tip. Asking git for `^<missing>` is
         # a hard error, so drop any SHA the mirror no longer contains rather
@@ -801,15 +769,11 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
             # This was every branch tip when the walk covered every branch;
             # excluding more than the walk visits would skip commits that must
             # still be read when their branch merges.
-            conn.execute(
-                """
-                UPDATE repo SET last_ingest_at = now(),
-                                last_ingested_sha = COALESCE(%s, last_ingested_sha),
-                                last_ingested_refs = %s::jsonb
-                WHERE id = %s
-                """,
-                (fetch.head_sha, json.dumps(gitops.ref_tips(fetch.path)), repo_id),
-            )
+            repo_row = conn.get(Repo, repo_id)
+            if repo_row is not None:
+                repo_row.last_ingest_at = datetime.now(UTC)
+                repo_row.last_ingested_sha = fetch.head_sha or repo_row.last_ingested_sha
+                repo_row.last_ingested_refs = gitops.ref_tips(fetch.path)
 
         result.commits_added = stats.commits_written
         result.files_created = stats.files_created
@@ -824,12 +788,9 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
         # second condition that failure was permanent: the commit watermark had
         # already advanced, so every later run saw nothing to do.
         with connection() as conn:
+            repo_row = conn.get(Repo, repo_id)
             stale_aggregate = bool(
-                conn.execute(
-                    "SELECT last_aggregate_sha IS DISTINCT FROM last_ingested_sha"
-                    " FROM repo WHERE id = %s",
-                    (repo_id,),
-                ).fetchone()[0]
+                repo_row is not None and repo_row.last_aggregate_sha != repo_row.last_ingested_sha
             )
         if stats.commits_written > 0 or removed or force_full or stale_aggregate:
             with connection() as conn:
@@ -839,17 +800,15 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
                 score_repo(repo_id, conn)
             # Only now is the repository's derived state actually current.
             with connection() as conn:
-                conn.execute(
-                    "UPDATE repo SET last_aggregate_sha = last_ingested_sha"
-                    " WHERE id = %s",
-                    (repo_id,),
-                )
+                repo_row = conn.get(Repo, repo_id)
+                if repo_row is not None:
+                    repo_row.last_aggregate_sha = repo_row.last_ingested_sha
 
         with connection() as conn:
-            conn.execute(
-                "UPDATE repo SET ingest_status='ready', ingest_duration_s=%s WHERE id=%s",
-                (time.monotonic() - started, repo_id),
-            )
+            repo_row = conn.get(Repo, repo_id)
+            if repo_row is not None:
+                repo_row.ingest_status = "ready"
+                repo_row.ingest_duration_s = time.monotonic() - started
 
         result.status = "success"
 
@@ -860,10 +819,10 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
         if result.repo_id is not None:
             try:
                 with connection() as conn:
-                    conn.execute(
-                        "UPDATE repo SET ingest_status='failed', ingest_error=%s WHERE id=%s",
-                        (result.error[:4000], result.repo_id),
-                    )
+                    repo_row = conn.get(Repo, result.repo_id)
+                    if repo_row is not None:
+                        repo_row.ingest_status = "failed"
+                        repo_row.ingest_error = result.error[:4000]
             except Exception:
                 log.exception("could not record failure status for %s", record.full_name)
 
@@ -890,16 +849,10 @@ def run_ingest(
     """
     started = time.monotonic()
 
-    # One ingest at a time, across processes. A scheduled tick and a human's
-    # `git-synapse ingest` used to run concurrently: they fetched the same mirrors,
-    # redid the same global rebuilds, and left rows stuck in `running` that
-    # blocked the API refresh endpoint for six hours. A transaction-scoped
-    # advisory lock is held until this connection exits, so a crashed run
-    # releases it immediately and a pooled connection can never retain it.
+    # One ingest at a time, across processes. The mapped meta row is locked for
+    # this transaction and released automatically if the process exits.
     with connection() as conn:
-        if not conn.execute(
-            "SELECT pg_try_advisory_xact_lock(%s)", (INGEST_LOCK_KEY,)
-        ).fetchone()[0]:
+        if not _try_ingest_lock(conn):
             log.warning("another ingest run holds the lock; skipping this one")
             run = RunResult(kind="full" if force_full else "sync")
             run.status = "skipped"
@@ -946,11 +899,12 @@ def _run_ingest_locked(
         run.duration_s = time.monotonic() - started
         run.status = "failed"
         with connection() as conn:
-            conn.execute(
-                "UPDATE ingest_run SET status='failed', finished_at=now(),"
-                " duration_s=%s, error=%s WHERE id=%s",
-                (run.duration_s, str(exc)[:4000], run.run_id),
-            )
+            row = conn.get(models().IngestRun, run.run_id)
+            if row is not None:
+                row.status = "failed"
+                row.finished_at = datetime.now(UTC)
+                row.duration_s = run.duration_s
+                row.error = str(exc)[:4000]
         return run
 
     try:
@@ -966,11 +920,12 @@ def _run_ingest_locked(
         run.duration_s = time.monotonic() - started
         run.status = "failed"
         with connection() as conn:
-            conn.execute(
-                "UPDATE ingest_run SET status='failed', finished_at=now(),"
-                " duration_s=%s, error=%s WHERE id=%s",
-                (run.duration_s, str(exc)[:4000], run.run_id),
-            )
+            row = conn.get(models().IngestRun, run.run_id)
+            if row is not None:
+                row.status = "failed"
+                row.finished_at = datetime.now(UTC)
+                row.duration_s = run.duration_s
+                row.error = str(exc)[:4000]
         return run
 
     if records is None:
@@ -1118,7 +1073,7 @@ def load_repo_records() -> list[RepoRecord]:
 
     Columns are named once and zipped into keyword arguments rather than read
     by position. A positional read is how a column added in the middle of a
-    SELECT list shifts every field after it -- silently, wherever the types
+    A positional projection shifts every field after it -- silently, wherever the types
     happen to be compatible.
     """
     columns = (
@@ -1130,16 +1085,15 @@ def load_repo_records() -> list[RepoRecord]:
         "open_issues", "github_created_at", "github_updated_at",
         "github_pushed_at",
     )
+    Repo = models().Repo
     with connection() as conn:
-        rows = conn.execute(
-            f"SELECT {', '.join(columns)} FROM repo WHERE is_enabled ORDER BY id"
-        ).fetchall()
+        rows = conn.query(Repo).filter(Repo.is_enabled.is_(True)).order_by(Repo.id).all()
 
     booleans = {"is_private", "is_fork", "is_archived", "is_template", "is_disabled"}
     counts = {"stargazers", "watchers", "forks_count", "open_issues"}
     out = []
     for row in rows:
-        fields = dict(zip(columns, row, strict=True))
+        fields = {column: getattr(row, column) for column in columns}
         for key in booleans:
             fields[key] = bool(fields[key])
         for key in counts:

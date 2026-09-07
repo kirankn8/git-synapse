@@ -18,12 +18,17 @@ from git_synapse.analysis import mining, predict
 def test_impact_and_upstream_are_exact_inverses(db):
     """If A is upstream of B then B must be downstream of A, or the two tools
     contradict each other about the same edge."""
-    from git_synapse.db.engine import query
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
-    edges = query(
-        "SELECT source_repo_id s, target_repo_id t FROM repo_impact"
-        " WHERE is_declared OR has_bump_history LIMIT 12"
-    )
+    with connection() as session:
+        edges = [
+            {"s": row.source_repo_id, "t": row.target_repo_id}
+            for row in session.query(models().RepoImpact)
+            .filter((models().RepoImpact.is_declared.is_(True)) |
+                    (models().RepoImpact.has_bump_history.is_(True)))
+            .limit(12).all()
+        ]
     if not edges:
         pytest.skip("no validated edges")
 
@@ -35,17 +40,22 @@ def test_impact_and_upstream_are_exact_inverses(db):
 
 
 def test_no_repository_is_its_own_upstream(db):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
-    assert query_one(
-        "SELECT count(*) AS n FROM repo_impact WHERE source_repo_id = target_repo_id"
-    )["n"] == 0
+    with connection() as session:
+        assert session.query(models().RepoImpact).filter(
+            models().RepoImpact.source_repo_id == models().RepoImpact.target_repo_id
+        ).count() == 0
 
 
 def test_impact_scores_are_probabilities_and_ranked(db):
-    from git_synapse.db.engine import query
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
-    rows = query("SELECT source_repo_id FROM repo_impact LIMIT 1")
+    with connection() as session:
+        first = session.query(models().RepoImpact.source_repo_id).first()
+    rows = [{"source_repo_id": first[0]}] if first else []
     if not rows:
         pytest.skip("impact table empty")
     out = predict.impact_for(rows[0]["source_repo_id"], limit=20)
@@ -66,9 +76,12 @@ def test_impact_on_a_nonexistent_repo_is_empty_not_an_error(db, repo_id):
 
 def test_chains_never_revisit_a_repository(db):
     """A cycle would loop forever or report a repo as its own ancestor."""
-    from git_synapse.db.engine import query
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
-    rows = query("SELECT DISTINCT target_repo_id t FROM repo_impact LIMIT 8")
+    with connection() as session:
+        rows = [{"t": value[0]} for value in session.query(
+            models().RepoImpact.target_repo_id).distinct().limit(8).all()]
     for r in rows:
         for chain in predict.upstream_chains(r["t"], max_depth=3, limit=5):
             path = list(chain["path"])
@@ -81,9 +94,12 @@ def test_chains_never_revisit_a_repository(db):
 def test_cross_directory_modules_span_more_than_one_directory(db):
     """The whole point of the label-propagation clusters is finding modules the
     directory tree does not show."""
-    from git_synapse.db.engine import query
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
-    rows = query("SELECT DISTINCT repo_id FROM file_cluster LIMIT 5")
+    with connection() as session:
+        rows = [{"repo_id": value[0]} for value in session.query(
+            models().FileCluster.repo_id).distinct().limit(5).all()]
     if not rows:
         pytest.skip("no clusters mined")
     for r in rows:
@@ -122,45 +138,63 @@ def impact_corpus(scratch_db):
     it the same way: a manifest row in `repo_dependency`, and version changes in
     `dep_bump`.
     """
+    from datetime import UTC, datetime, timedelta
+
     from git_synapse.analysis import predict
     from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
     with connection() as conn:
-        conn.execute("TRUNCATE repo, dep_bump, repo_dependency, repo_impact"
-                     " RESTART IDENTITY CASCADE")
+        for model in (models().RepoImpact, models().DepBump,
+                      models().RepoDependency, models().Repo):
+            conn.query(model).delete(synchronize_session=False)
         ids = {}
         for name in ("signer", "packager", "runtime", "unrelated"):
-            ids[name] = conn.execute(
-                "INSERT INTO repo (github_id, owner, name, full_name, clone_url,"
-                " default_branch) VALUES (%s,'acme',%s,%s,'','main') RETURNING id",
-                (abs(hash(name)) % 100000, name, f"acme/{name}"),
-            ).fetchone()[0]
+            row = models().Repo(github_id=abs(hash(name)) % 100000,
+                                owner="acme", name=name,
+                                full_name=f"acme/{name}", clone_url="",
+                                default_branch="main")
+            conn.add(row)
+            conn.flush()
+            ids[name] = row.id
 
         # packager declares signer and has bumped it; runtime declares packager
         # but has never moved it.
         for consumer, dep in (("packager", "signer"), ("runtime", "packager")):
-            conn.execute(
-                "INSERT INTO repo_dependency (consumer_repo_id, dep_repo_id,"
-                " dep_name, manifest, ecosystem) VALUES (%s,%s,%s,'go.mod','go')",
-                (ids[consumer], ids[dep], f"github.com/acme/{dep}"),
-            )
+            conn.add(models().RepoDependency(
+                consumer_repo_id=ids[consumer], dep_repo_id=ids[dep],
+                dep_name=f"github.com/acme/{dep}", manifest="go.mod", ecosystem="go",
+            ))
         for i in range(5):
-            conn.execute(
-                "INSERT INTO dep_bump (consumer_repo_id, consumer_sha, dep_repo_id,"
-                " dep_name, dep_version, manifest, bumped_at, adoption_seconds)"
-                " VALUES (%s,%s,%s,'github.com/acme/signer',%s,'go.mod',"
-                " now() - make_interval(days => %s), %s)",
-                (ids["packager"], f"{i:040x}", ids["signer"], f"v1.{i}.0", i * 10, 86400 * 2),
-            )
+            conn.add(models().DepBump(
+                consumer_repo_id=ids["packager"], consumer_sha=f"{i:040x}",
+                dep_repo_id=ids["signer"], dep_name="github.com/acme/signer",
+                dep_version=f"v1.{i}.0", manifest="go.mod",
+                bumped_at=datetime.now(UTC) - timedelta(days=i * 10),
+                adoption_seconds=86400 * 2,
+            ))
     predict.rebuild(force=True)
     return ids
 
 
 def _edges():
-    from git_synapse.db.engine import query
-    return query("SELECT i.*, s.name AS source, t.name AS target FROM repo_impact i"
-                 " JOIN repo s ON s.id = i.source_repo_id"
-                 " JOIN repo t ON t.id = i.target_repo_id")
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
+
+    with connection() as session:
+        rows = session.query(models().RepoImpact,
+                             models().Repo.name,
+                             models().Repo.name).join(
+            models().Repo, models().Repo.id == models().RepoImpact.source_repo_id
+        ).all()
+        # Resolve target names explicitly through the ORM identity map.
+        repos = {r.id: r.name for r in session.query(models().Repo).all()}
+        return [{**{column: getattr(edge, column) for column in (
+            "source_repo_id", "target_repo_id", "score", "rank_in_source",
+            "is_declared", "has_bump_history", "bump_count", "median_adoption_days",
+            "features")}, "source": repos[edge.source_repo_id],
+                 "target": repos[edge.target_repo_id]}
+                for edge, _, _ in rows]
 
 
 def test_a_declared_dependency_becomes_an_edge(impact_corpus):
@@ -205,11 +239,15 @@ def test_no_repository_is_its_own_dependency(impact_corpus):
 
 
 def test_edges_are_ranked_within_each_source(impact_corpus):
-    from git_synapse.db.engine import query
-    rows = query("SELECT source_repo_id, rank_in_source, score FROM repo_impact"
-                 " ORDER BY source_repo_id, rank_in_source")
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
+    with connection() as session:
+        rows = session.query(models().RepoImpact).order_by(
+            models().RepoImpact.source_repo_id,
+            models().RepoImpact.rank_in_source,
+        ).all()
     for row in rows:
-        assert row["rank_in_source"] >= 1
+        assert row.rank_in_source >= 1
 
 
 def test_a_second_rebuild_is_skipped_when_no_input_changed(impact_corpus):
@@ -235,29 +273,29 @@ def dead_file(db):
     another test's data passes or fails on the order they run in, which is the
     flake this suite has been bitten by before.
     """
-    from git_synapse.db.engine import execute, query_one
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
-    repo = query_one(
-        """
-        INSERT INTO repo (github_id, owner, name, full_name, host, provider,
-                          is_enabled, commit_count, pair_population)
-        VALUES (NULL, 'ranktest', 'dead', 'ranktest/dead', 'github.com',
-                'github', TRUE, 500, 500)
-        ON CONFLICT (host, full_name) DO UPDATE SET updated_at = now()
-        RETURNING id
-        """)
-    file_row = query_one(
-        """
-        INSERT INTO file (repo_id, path, dir_path, basename, extension, depth,
-                          is_deleted, change_count, pair_change_count, author_count)
-        VALUES (%s, 'gone/removed.py', 'gone', 'removed.py', 'py', 1,
-                TRUE, 9999, 9999, 3)
-        RETURNING id
-        """, (repo["id"],))
-    yield repo["id"], file_row["id"]
-    execute("DELETE FROM file_risk WHERE file_id = %s", (file_row["id"],))
-    execute("DELETE FROM file WHERE id = %s", (file_row["id"],))
-    execute("DELETE FROM repo WHERE id = %s", (repo["id"],))
+    with connection() as session:
+        repo = models().Repo(owner="ranktest", name="dead", full_name="ranktest/dead",
+                              host="github.com", provider="github", is_enabled=True,
+                              commit_count=500, pair_population=500)
+        session.add(repo)
+        session.flush()
+        file_row = models().File(repo_id=repo.id, path="gone/removed.py", dir_path="gone",
+                                 basename="removed.py", extension="py", depth=1,
+                                 is_deleted=True, change_count=9999,
+                                 pair_change_count=9999, author_count=3)
+        session.add(file_row)
+        session.flush()
+        repo_id, file_id = repo.id, file_row.id
+    yield repo_id, file_id
+    with connection() as session:
+        risk = session.get(models().FileRisk, file_id)
+        if risk is not None:
+            session.delete(risk)
+        session.delete(session.get(models().File, file_id))
+        session.delete(session.get(models().Repo, repo_id))
 
 
 def test_hotspots_leave_out_files_that_no_longer_exist(dead_file):
@@ -277,14 +315,17 @@ def test_risk_leaves_out_files_that_no_longer_exist(dead_file):
     """Risk answers "what happens if I change this, and who understands it" --
     a question that cannot be asked of a file that is gone."""
     from git_synapse.analysis import mining
-    from git_synapse.db.engine import execute
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
     repo_id, fid = dead_file
-    execute(
-        "INSERT INTO file_risk (file_id, repo_id, churn_pct, coupling_pct,"
-        " ownership_hhi, effective_authors, author_count, partner_count,"
-        " change_count, risk_score) VALUES (%s,%s,1,1,1,1,3,40,9999,1.99)"
-        " ON CONFLICT (file_id) DO NOTHING", (fid, repo_id))
+    with connection() as session:
+        if session.get(models().FileRisk, fid) is None:
+            session.add(models().FileRisk(
+                file_id=fid, repo_id=repo_id, churn_pct=1, coupling_pct=1,
+                ownership_hhi=1, effective_authors=1, author_count=3,
+                partner_count=40, change_count=9999, risk_score=1.99,
+            ))
     assert fid not in {r["file_id"] for r in mining.risky_files(repo_id=repo_id, limit=10)}, \
         "the highest possible score, and still out"
     assert fid in {r["file_id"] for r in
@@ -296,19 +337,18 @@ def test_a_coupling_query_still_reports_a_deleted_partner(db):
     specific file, the coupling is a historical fact, and the answer labels it
     rather than hiding it."""
     from git_synapse.analysis import query as q
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
-    row = query_one(
-        """
-        SELECT p.repo_id, p.file_a_id, p.file_b_id FROM file_pair p
-          JOIN file fb ON fb.id = p.file_b_id
-         WHERE fb.is_deleted LIMIT 1
-        """)
+    with connection() as session:
+        row = session.query(models().FilePair).join(
+            models().File, models().File.id == models().FilePair.file_b_id
+        ).filter(models().File.is_deleted.is_(True)).first()
     if row is None:
         import pytest
 
         pytest.skip("no deleted partner in this corpus")
-    partners = q.coupled_files(row["file_a_id"], limit=500)
+    partners = q.coupled_files(row.file_a_id, limit=500)
     assert any(pt.get("is_deleted") for pt in partners), \
         "a deleted partner must still be offered, marked"
 
@@ -326,7 +366,6 @@ def test_label_propagation_does_not_allocate_a_node_by_node_matrix():
     import tracemalloc
 
     import numpy as np
-    import psycopg
 
     from git_synapse.analysis import mining
 
@@ -364,7 +403,7 @@ def test_label_propagation_does_not_allocate_a_node_by_node_matrix():
     stats = mining.MiningStats()
     tracemalloc.start()
     # The stub stops at the first write; the sweep has already run by then.
-    with contextlib.suppress(psycopg.Error, AttributeError, TypeError):
+    with contextlib.suppress(AttributeError, TypeError):
         mining._cluster_repo(_Conn(), 1, stats)
     _cur, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()

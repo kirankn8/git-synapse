@@ -15,9 +15,6 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import delete, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-
 from git_synapse.db.orm import models, session_scope
 
 log = logging.getLogger(__name__)
@@ -44,8 +41,8 @@ def get(name: str) -> str | None:
     """The stored override for one setting, or None when unset."""
     with session_scope() as session:
         Meta = models().Meta
-        value = session.scalar(select(Meta.value).where(Meta.key == _key(name)))
-    return str(value) if value is not None else None
+        row = session.query(Meta).filter_by(key=_key(name)).one_or_none()
+    return str(row.value) if row is not None else None
 
 
 def set(name: str, value: str) -> None:  # noqa: A001 - reads better than set_
@@ -54,18 +51,20 @@ def set(name: str, value: str) -> None:  # noqa: A001 - reads better than set_
         raise ValueError(f"{name!r} is not a writable setting")
     with session_scope() as session:
         Meta = models().Meta
-        statement = pg_insert(Meta).values(key=_key(name), value=value)
-        session.execute(statement.on_conflict_do_update(
-            index_elements=[Meta.key],
-            set_={"value": statement.excluded.value},
-        ))
+        row = session.query(Meta).filter_by(key=_key(name)).one_or_none()
+        if row is None:
+            session.add(Meta(key=_key(name), value=value))
+        else:
+            row.value = value
 
 
 def clear(name: str) -> None:
     """Drop an override, so the environment value applies again."""
     with session_scope() as session:
         Meta = models().Meta
-        session.execute(delete(Meta).where(Meta.key == _key(name)))
+        row = session.query(Meta).filter_by(key=_key(name)).one_or_none()
+        if row is not None:
+            session.delete(row)
 
 
 def effective(name: str, fallback: str) -> str:

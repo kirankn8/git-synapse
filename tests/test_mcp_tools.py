@@ -20,41 +20,46 @@ def test_a_name_that_is_not_a_repository_is_refused(db, name):
 
 
 def test_real_names_full_names_and_case_all_resolve(db):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one("SELECT name, full_name FROM repo WHERE is_enabled LIMIT 1")
+    with session_scope() as session:
+        candidates = session.query(models().Repo).filter_by(is_enabled=True).all()
+        counts = {}
+        for candidate in candidates:
+            counts[candidate.name] = counts.get(candidate.name, 0) + 1
+        row = next((candidate for candidate in candidates if counts[candidate.name] == 1), None)
     if row is None:
         pytest.skip("no repositories")
-    for form in (row["name"], row["full_name"], row["name"].upper()):
+    for form in (row.name, row.full_name, row.name.upper()):
         out = server.upstream_repos(repo=form)
         assert "error" not in out, f"{form!r} failed to resolve"
-        assert out["repo"] == row["full_name"]
+        assert out["repo"] == row.full_name
 
 
 # ---------------------------------------------------------- coupled_files
 
 def test_coupled_files_rejects_an_unknown_path_with_a_hint(corpus):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
-    out = server.coupled_files(repo=row["name"], path="no/such/file.go")
+    with session_scope() as session:
+        row = session.query(models().Repo).filter_by(is_enabled=True).first()
+    out = server.coupled_files(repo=row.name, path="no/such/file.go")
     assert "error" in out and "hint" in out
 
 
 def test_coupled_files_shape_is_stable(db):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one(
-        """
-        SELECT r.name AS repo, f.path FROM file f JOIN repo r ON r.id = f.repo_id
-        WHERE f.change_count > 30 AND NOT f.is_deleted LIMIT 1
-        """
-    )
+    with session_scope() as session:
+        row = session.query(models().Repo.name, models().File.path).join(
+            models().File, models().File.repo_id == models().Repo.id,
+        ).filter(models().Repo.is_enabled.is_(True), models().File.change_count > 30,
+                 models().File.is_deleted.is_(False)).first()
     if row is None:
         pytest.skip("no busy file")
-    out = server.coupled_files(repo=row["repo"], path=row["path"], min_support=3, limit=5)
+    out = server.coupled_files(repo=row.name, path=row.path, min_support=3, limit=5)
     assert "error" not in out, out
-    assert out["file"]["path"] == row["path"]
+    assert out["file"]["path"] == row.path
     for p in out["partners"]:
         for key in ("path", "score", "co_changes", "partner_total_changes",
                     "probability_also_changes", "informative", "currency"):
@@ -64,12 +69,13 @@ def test_coupled_files_shape_is_stable(db):
 
 
 def test_an_unknown_measure_is_refused(corpus):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one(
-        "SELECT r.name AS repo, f.path FROM file f JOIN repo r ON r.id=f.repo_id LIMIT 1"
-    )
-    out = server.coupled_files(repo=row["repo"], path=row["path"], measure="nope")
+    with session_scope() as session:
+        row = session.query(models().Repo.name, models().File.path).join(
+            models().File, models().File.repo_id == models().Repo.id,
+        ).filter(models().Repo.is_enabled.is_(True)).first()
+    out = server.coupled_files(repo=row.name, path=row.path, measure="nope")
     assert "error" in out
 
 
@@ -100,28 +106,27 @@ def test_currency_is_absent_when_recency_is_unknown():
 # ------------------------------------------------------------- module tools
 
 def test_module_context_rejects_a_path_that_does_not_exist(corpus):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
-    out = server.module_context(repo=row["name"], path="not/real.go")
+    with session_scope() as session:
+        row = session.query(models().Repo).filter_by(is_enabled=True).first()
+    out = server.module_context(repo=row.name, path="not/real.go")
     assert "error" in out
 
 
 def test_coupled_directories_accepts_a_file_or_a_directory(db):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one(
-        """
-        SELECT r.name AS repo, f.path, f.dir_path
-        FROM file f JOIN repo r ON r.id = f.repo_id
-        WHERE f.dir_path <> '' AND f.change_count > 20 LIMIT 1
-        """
-    )
+    with session_scope() as session:
+        row = session.query(models().Repo.name, models().File.path, models().File.dir_path).join(
+            models().File, models().File.repo_id == models().Repo.id,
+        ).filter(models().Repo.is_enabled.is_(True), models().File.dir_path != "",
+                 models().File.change_count > 20).first()
     if row is None:
         pytest.skip("no suitable file")
-    by_file = server.coupled_directories(repo=row["repo"], path=row["path"], limit=5)
-    by_dir = server.coupled_directories(repo=row["repo"], path=row["dir_path"], limit=5)
-    assert by_file["directory"]["path"] == by_dir["directory"]["path"] == row["dir_path"]
+    by_file = server.coupled_directories(repo=row.name, path=row.path, limit=5)
+    by_dir = server.coupled_directories(repo=row.name, path=row.dir_path, limit=5)
+    assert by_file["directory"]["path"] == by_dir["directory"]["path"] == row.dir_path
 
 
 # --------------------------------------------------------------- catalogue
@@ -142,9 +147,10 @@ def test_list_repositories_returns_usable_names(corpus):
 
 
 def test_search_files_finds_a_known_path(db):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one("SELECT basename FROM file WHERE basename = 'go.mod' LIMIT 1")
+    with session_scope() as session:
+        row = session.query(models().File).filter_by(basename="go.mod").first()
     if row is None:
         pytest.skip("no go.mod indexed")
     out = server.search_files(term="go.mod", limit=5)
@@ -154,6 +160,7 @@ def test_search_files_finds_a_known_path(db):
 
 def test_report_gap_rejects_an_opinion_and_accepts_a_defect(db):
     from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
     bad = server.report_gap(kind="opinion", detail="I disagree with the ranking")
     assert "error" in bad
@@ -164,7 +171,7 @@ def test_report_gap_rejects_an_opinion_and_accepts_a_defect(db):
     )
     assert "error" not in good and good.get("id")
     with connection() as conn:
-        conn.execute("DELETE FROM feedback WHERE id=%s", (good["id"],))
+        conn.delete(conn.get(models().Feedback, good["id"]))
 
 
 # ------------------------------------------------------- the explain tools
@@ -172,111 +179,119 @@ def test_report_gap_rejects_an_opinion_and_accepts_a_defect(db):
 def test_explain_pair_answers_in_the_callers_argument_order(db):
     """Storage canonicalises by id; returning that order silently transposed
     the answer, so confidence_ab was the reverse conditional half the time."""
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one(
-        """
-        SELECT r.name AS repo, fa.path AS a, fb.path AS b
-        FROM file_pair_metric m
-        JOIN file fa ON fa.id = m.file_a_id
-        JOIN file fb ON fb.id = m.file_b_id
-        JOIN repo r ON r.id = m.repo_id
-        WHERE m.n_ab > 5 LIMIT 1
-        """
-    )
+    with session_scope() as session:
+        row = session.query(models().Repo.name, models().File.path, models().FilePairMetric).join(
+            models().FilePairMetric, models().FilePairMetric.repo_id == models().Repo.id,
+        ).join(models().File, models().File.id == models().FilePairMetric.file_a_id).filter(
+            models().FilePairMetric.n_ab > 5,
+        ).first()
     if row is None:
         pytest.skip("no supported pair")
 
-    fwd = server.explain_pair(repo=row["repo"], path_a=row["a"], path_b=row["b"])
-    rev = server.explain_pair(repo=row["repo"], path_a=row["b"], path_b=row["a"])
-    assert fwd["path_a"] == row["a"] and rev["path_a"] == row["b"]
+    # The first joined file is `a`; choose its partner from the same metric.
+    with session_scope() as session:
+        metric = row[2]
+        partner = session.get(models().File, metric.file_b_id)
+    fwd = server.explain_pair(repo=row[0], path_a=row[1], path_b=partner.path)
+    rev = server.explain_pair(repo=row[0], path_a=partner.path, path_b=row[1])
+    assert fwd["path_a"] == row[1] and rev["path_a"] == partner.path
     assert fwd["measures"]["confidence_ab"] == rev["measures"]["confidence_ba"]
 
 
 def test_explain_pair_rejects_an_unknown_path(corpus):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one(
-        "SELECT r.name AS repo, f.path FROM file f JOIN repo r ON r.id=f.repo_id LIMIT 1"
-    )
-    out = server.explain_pair(repo=row["repo"], path_a=row["path"], path_b="no/such.go")
+    with session_scope() as session:
+        row = session.query(models().Repo.name, models().File.path).join(
+            models().File, models().File.repo_id == models().Repo.id,
+        ).filter(models().Repo.is_enabled.is_(True)).first()
+    out = server.explain_pair(repo=row.name, path_a=row.path, path_b="no/such.go")
     assert "error" in out
 
 
 def test_impact_of_change_and_upstream_agree(db):
-    from git_synapse.db.engine import query_one
+    from sqlalchemy.orm import aliased
 
-    row = query_one(
-        """
-        SELECT p.name AS src, c.name AS tgt FROM repo_impact i
-        JOIN repo p ON p.id = i.source_repo_id
-        JOIN repo c ON c.id = i.target_repo_id
-        WHERE i.is_declared OR i.has_bump_history LIMIT 1
-        """
-    )
+    from git_synapse.db.orm import models, session_scope
+
+    with session_scope() as session:
+        target_repo = aliased(models().Repo)
+        row = session.query(models().Repo.name, models().RepoImpact, target_repo).join(
+            models().RepoImpact, models().RepoImpact.source_repo_id == models().Repo.id,
+        ).join(target_repo, target_repo.id == models().RepoImpact.target_repo_id).filter(
+            models().RepoImpact.is_declared.is_(True) |
+            models().RepoImpact.has_bump_history.is_(True),
+        ).first()
     if row is None:
         pytest.skip("no validated edge")
 
-    down = server.impact_of_change(repo=row["src"])
-    up = server.upstream_repos(repo=row["tgt"])
-    assert any(x["repo"].endswith(row["tgt"]) for x in down.get("downstream", []))
-    assert any(x["repo"].endswith(row["src"]) for x in up.get("upstream", []))
+    # Query the endpoint using the two repository names; the exact projection
+    # is deliberately kept ORM-only in this fixture.
+    source = row[0]
+    target = row[2].name
+    down = server.impact_of_change(repo=source)
+    up = server.upstream_repos(repo=target)
+    assert any(x["repo"].endswith(target) for x in down.get("downstream", []))
+    assert any(x["repo"].endswith(source) for x in up.get("upstream", []))
 
 
 def test_file_history_returns_commits_for_a_real_file(db):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one(
-        """
-        SELECT r.name AS repo, f.path FROM file f JOIN repo r ON r.id=f.repo_id
-        WHERE f.change_count > 5 LIMIT 1
-        """
-    )
+    with session_scope() as session:
+        row = session.query(models().Repo.name, models().File.path).join(
+            models().File, models().File.repo_id == models().Repo.id,
+        ).filter(models().File.change_count > 5, models().Repo.is_enabled.is_(True)).first()
     if row is None:
         pytest.skip("no busy file")
-    out = server.file_history(repo=row["repo"], path=row["path"], limit=5)
+    out = server.file_history(repo=row.name, path=row.path, limit=5)
     assert "error" not in out
     assert out["recent_commits"]
     assert out["total_changes"] >= len(out["recent_commits"])
 
 
 def test_repo_hotspots_are_ranked(corpus):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one("SELECT name FROM repo WHERE is_enabled ORDER BY commit_count DESC LIMIT 1")
-    out = server.repo_hotspots(repo=row["name"], limit=5)
+    with session_scope() as session:
+        row = session.query(models().Repo).filter_by(is_enabled=True).order_by(
+            models().Repo.commit_count.desc(),
+        ).first()
+    out = server.repo_hotspots(repo=row.name, limit=5)
     rows = out.get("hotspots", [])
     counts = [h["changes"] for h in rows]
     assert counts == sorted(counts, reverse=True)
 
 
 def test_coupling_chain_direction_is_honoured(corpus):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
-    up = server.coupling_chain(repo=row["name"], direction="upstream")
-    down = server.coupling_chain(repo=row["name"], direction="downstream")
+    with session_scope() as session:
+        row = session.query(models().Repo).filter_by(is_enabled=True).first()
+    up = server.coupling_chain(repo=row.name, direction="upstream")
+    down = server.coupling_chain(repo=row.name, direction="downstream")
     assert up["direction"] == "upstream"
     assert down["direction"] == "downstream"
 
 
 def test_an_empty_chain_explains_itself(db):
     """A bare [] conflated "searched and found nothing" with "nothing to search"."""
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one(
-        """
-        SELECT r.name FROM repo r
-        WHERE EXISTS (SELECT 1 FROM repo_impact i WHERE i.target_repo_id=r.id)
-          AND NOT EXISTS (SELECT 1 FROM repo_impact i
-                          WHERE i.target_repo_id=r.id
-                            AND (i.is_declared OR i.has_bump_history))
-        LIMIT 1
-        """
-    )
+    with session_scope() as session:
+        candidates = session.query(models().Repo).join(
+            models().RepoImpact, models().RepoImpact.target_repo_id == models().Repo.id,
+        ).all()
+        row = next((repo for repo in candidates if not session.query(models().RepoImpact).filter(
+            models().RepoImpact.target_repo_id == repo.id,
+            models().RepoImpact.is_declared.is_(True) |
+            models().RepoImpact.has_bump_history.is_(True),
+        ).first()), None)
     if row is None:
         pytest.skip("no all-discovery repository")
-    out = server.coupling_chain(repo=row["name"], direction="upstream")
+    out = server.coupling_chain(repo=row.name, direction="upstream")
     assert out["chains"] == [] and out["explanation"]
 
 
@@ -285,20 +300,17 @@ def test_an_empty_chain_explains_itself(db):
 def test_module_context_describes_a_multi_module_repository(db):
     """In a monorepo the module graph is the structure; the guidance has to say
     which direction a change propagates."""
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one(
-        """
-        SELECT r.name AS repo, f.path
-        FROM module_dependency m
-        JOIN repo r ON r.id = m.repo_id
-        JOIN file f ON f.repo_id = r.id AND f.dir_path LIKE m.consumer_module || '%'
-        LIMIT 1
-        """
-    )
+    with session_scope() as session:
+        row = session.query(models().Repo.name, models().File.path).join(
+            models().ModuleDependency, models().ModuleDependency.repo_id == models().Repo.id,
+        ).join(models().File, models().File.repo_id == models().Repo.id).filter(
+            models().File.dir_path.startswith(models().ModuleDependency.consumer_module),
+        ).first()
     if row is None:
         pytest.skip("no multi-module repository indexed")
-    out = server.module_context(repo=row["repo"], path=row["path"])
+    out = server.module_context(repo=row.name, path=row.path)
     assert "error" not in out, out
     assert out["multi_module"] is True
     assert out.get("guidance")
@@ -306,32 +318,31 @@ def test_module_context_describes_a_multi_module_repository(db):
 
 def test_module_context_says_so_for_a_single_module_repository(db):
     """"There is no internal module graph" is a real answer, not an empty one."""
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one(
-        """
-        SELECT r.name AS repo, f.path
-        FROM file f JOIN repo r ON r.id = f.repo_id
-        WHERE NOT EXISTS (SELECT 1 FROM module_dependency m WHERE m.repo_id = r.id)
-          AND f.change_count > 5
-        LIMIT 1
-        """
-    )
+    with session_scope() as session:
+        row = next((candidate for candidate in session.query(models().Repo.id, models().Repo.name, models().File.path).join(
+            models().File, models().File.repo_id == models().Repo.id,
+        ).filter(models().File.change_count > 5).all()
+                    if session.query(models().ModuleDependency).filter_by(repo_id=candidate[0]).first() is None), None)
     if row is None:
         pytest.skip("every repository is multi-module")
-    out = server.module_context(repo=row["repo"], path=row["path"])
+    out = server.module_context(repo=row.name, path=row.path)
     assert out.get("multi_module") is False
     assert "single-module" in (out.get("note") or "")
 
 
 def test_search_files_scoped_to_a_repository_stays_in_it(corpus):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one("SELECT name FROM repo WHERE is_enabled ORDER BY commit_count DESC LIMIT 1")
-    out = server.search_files(term="go", repo=row["name"], limit=5)
+    with session_scope() as session:
+        row = session.query(models().Repo).filter_by(is_enabled=True).order_by(
+            models().Repo.commit_count.desc(),
+        ).first()
+    out = server.search_files(term="go", repo=row.name, limit=5)
     files = out["files"] if isinstance(out, dict) else out
     for f in files:
-        assert f.get("repo", "").endswith(row["name"])
+        assert f.get("repo", "").endswith(row.name)
 
 
 def test_search_files_with_no_match_is_an_empty_list_not_an_error(db):
@@ -341,13 +352,14 @@ def test_search_files_with_no_match_is_an_empty_list_not_an_error(db):
 
 
 def test_list_repositories_can_be_filtered(corpus):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
-    out = server.list_repositories(search=row["name"], limit=10)
+    with session_scope() as session:
+        row = session.query(models().Repo).filter_by(is_enabled=True).first()
+    out = server.list_repositories(search=row.name, limit=10)
     repos = out["repositories"] if isinstance(out, dict) else out
     # The tool reports full names, which is what an agent should pass back.
-    assert any(r["name"].endswith(f'/{row["name"]}') or r["name"] == row["name"]
+    assert any(r["name"].endswith(f'/{row.name}') or r["name"] == row.name
                for r in repos), [r["name"] for r in repos][:5]
 
 
@@ -392,17 +404,15 @@ REPO_TOOLS = [
 
 
 def test_a_directory_with_no_coupling_says_so_rather_than_returning_nothing(db):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one(
-        """
-        SELECT r.name AS repo, d.path FROM directory d JOIN repo r ON r.id = d.repo_id
-        WHERE d.change_count <= 1 LIMIT 1
-        """
-    )
+    with session_scope() as session:
+        row = session.query(models().Repo.name, models().Directory.path).join(
+            models().Directory, models().Directory.repo_id == models().Repo.id,
+        ).filter(models().Directory.change_count <= 1).first()
     if row is None:
         pytest.skip("no quiet directory")
-    out = server.coupled_directories(repo=row["repo"], path=row["path"])
+    out = server.coupled_directories(repo=row.name, path=row.path)
     if "error" in out:
         pytest.skip("directory not indexed for coupling")
     assert out["summary"], "an empty result still needs a sentence"
@@ -461,20 +471,20 @@ def test_coupled_files_warns_when_its_partners_are_all_noise(db, monkeypatch):
 
 
 def _coupled_on_any_file(monkeypatch):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one(
-        "SELECT r.name AS repo, f.path FROM file f JOIN repo r ON r.id = f.repo_id"
-        " WHERE f.path LIKE '%.go' LIMIT 1"
-    )
+    with session_scope() as session:
+        row = session.query(models().Repo.name, models().File.path).join(
+            models().File, models().File.repo_id == models().Repo.id,
+        ).filter(models().File.path.like("%.go")).first()
     if row is None:
         pytest.skip("no files")
     monkeypatch.setattr(server.q, "resolve_file", lambda *a, **k: {
-        "id": 1, "repo": row["repo"], "path": "a/handler.go", "repo_id": 1,
+        "id": 1, "repo": row.name, "path": "a/handler.go", "repo_id": 1,
         "change_count": 50, "author_count": 3, "last_change_at": None,
         "is_deleted": False, "pair_population": 120,
     })
-    return server.coupled_files(repo=row["repo"], path=row["path"])
+    return server.coupled_files(repo=row.name, path=row.path)
 
 
 def test_a_mock_file_is_labelled_generated_not_coupled_behaviour():
@@ -487,9 +497,10 @@ def test_a_mock_file_is_labelled_generated_not_coupled_behaviour():
 def test_two_files_that_never_changed_together_say_so_rather_than_erroring(db,
                                                                           monkeypatch):
     """`coupled: false` with a reason is actionable; an error is not."""
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one("SELECT r.name AS repo FROM repo r WHERE r.is_enabled LIMIT 1")
+    with session_scope() as session:
+        row = session.query(models().Repo).filter_by(is_enabled=True).first()
     if row is None:
         pytest.skip("no repositories")
     monkeypatch.setattr(server.q, "resolve_file", lambda repo, path: {
@@ -498,7 +509,7 @@ def test_two_files_that_never_changed_together_say_so_rather_than_erroring(db,
         "last_change_at": None, "is_deleted": False,
     })
     monkeypatch.setattr(server.q, "pair_detail", lambda *a, **k: None)
-    out = server.explain_pair(repo=row["repo"], path_a="a.go", path_b="b.go")
+    out = server.explain_pair(repo=row.name, path_a="a.go", path_b="b.go")
     assert out["coupled"] is False
     assert "never changed in the same commit" in out["reason"]
 
@@ -512,14 +523,15 @@ def test_an_empty_chain_explains_which_kind_of_empty_it_is(db, monkeypatch,
                                                            counts, must_contain):
     """"No chains" from an unvalidated corpus and "no chains" from a genuinely
     flat one are different answers, and an agent acts differently on each."""
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
+    with session_scope() as session:
+        row = session.query(models().Repo).filter_by(is_enabled=True).first()
     if row is None:
         pytest.skip("no repositories")
     monkeypatch.setattr(server.predict, "impact_chains", lambda *a, **k: [])
-    monkeypatch.setattr(server.q, "query_one", lambda *a, **k: counts)
-    out = server.coupling_chain(repo=row["name"], direction="downstream")
+    monkeypatch.setattr(server.q, "impact_edge_counts", lambda *a, **k: counts)
+    out = server.coupling_chain(repo=row.name, direction="downstream")
     assert must_contain.lower() in out["explanation"].lower()
 
 
@@ -528,15 +540,13 @@ def test_every_impact_edge_carries_evidence(corpus, db):
     asserted: an edge is written only from a dependency declared in a manifest
     or from an observed version bump. There is no inferred tier to withhold,
     warn about, or filter -- so no surface offers to."""
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one(
-        "SELECT count(*) AS total,"
-        " count(*) FILTER (WHERE NOT is_declared AND NOT has_bump_history) AS unprovable"
-        " FROM repo_impact"
-    )
-    assert row["unprovable"] == 0, (
-        f"{row['unprovable']} of {row['total']} impact edges rest on nothing; "
+    with session_scope() as session:
+        rows = session.query(models().RepoImpact).all()
+    unprovable = sum(not row.is_declared and not row.has_bump_history for row in rows)
+    assert unprovable == 0, (
+        f"{unprovable} of {len(rows)} impact edges rest on nothing; "
         "predict.rebuild must only write declared or bump-backed rows"
     )
 
@@ -546,22 +556,25 @@ def test_an_empty_shortlist_is_described_not_left_blank():
 
 
 def test_coupled_directories_refuses_a_measure_it_does_not_have(db):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one("SELECT r.name AS repo, f.path FROM file f"
-                    " JOIN repo r ON r.id = f.repo_id WHERE f.path LIKE '%/%' LIMIT 1")
+    with session_scope() as session:
+        row = session.query(models().Repo.name, models().File.path).join(
+            models().File, models().File.repo_id == models().Repo.id,
+        ).filter(models().File.path.like("%/%")).first()
     if row is None:
         pytest.skip("no files")
-    out = server.coupled_directories(repo=row["repo"], path=row["path"],
+    out = server.coupled_directories(repo=row.name, path=row.path,
                                      measure="not_a_measure")
     assert "error" in out
 
 
 def test_module_context_calls_a_leaf_a_leaf(db, monkeypatch):
     """Silence and "nothing depends on this" are different answers."""
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
+    with session_scope() as session:
+        row = session.query(models().Repo).filter_by(is_enabled=True).first()
     if row is None:
         pytest.skip("no repositories")
     monkeypatch.setattr(server.q, "resolve_file", lambda repo, path: {
@@ -572,7 +585,7 @@ def test_module_context_calls_a_leaf_a_leaf(db, monkeypatch):
         "owning_module": "gateway", "declares": [], "declared_by": [],
         "modules": ["gateway", "core"], "manifest": "gateway/go.mod",
     })
-    out = server.module_context(repo=row["name"], path="gateway/main.go")
+    out = server.module_context(repo=row.name, path="gateway/main.go")
     assert "leaf" in out["guidance"]
 
 
@@ -582,12 +595,13 @@ def test_search_files_refuses_a_repository_it_cannot_resolve(db):
 
 
 def test_search_files_scopes_to_a_repository_when_one_resolves(db):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
+    with session_scope() as session:
+        row = session.query(models().Repo).filter_by(is_enabled=True).first()
     if row is None:
         pytest.skip("no repositories")
-    out = server.search_files(term="a", repo=row["name"], limit=3)
+    out = server.search_files(term="a", repo=row.name, limit=3)
     assert "error" not in out
 
 
@@ -689,10 +703,10 @@ def test_explain_repo_pair_reports_every_kind_of_evidence(monkeypatch):
 
     impact = {"score": 0.8, "bump_count": 3, "is_declared": True,
               "median_adoption_days": 4.0, "rank_in_source": 1}
-    monkeypatch.setattr("git_synapse.db.engine.query_one", lambda sql, *ar, **kw: (
-        impact if "repo_impact" in sql and "%s" in sql else
-        {"dep_name": "lib", "dep_version": "1.2.3", "manifest": "pom.xml"}))
-    monkeypatch.setattr("git_synapse.db.engine.query", lambda sql, *ar, **kw: [
+    monkeypatch.setattr(server.q, "impact_pair", lambda *args, **kwargs: impact)
+    monkeypatch.setattr(server.q, "declared_dependency", lambda *args, **kwargs: {
+        "dep_name": "lib", "dep_version": "1.2.3", "manifest": "pom.xml"})
+    monkeypatch.setattr(server.q, "repo_pair_bumps", lambda *args, **kwargs: [
         {"consumer_sha": "a" * 40, "dep_version": "1.2.3", "dep_sha": "b" * 12,
          "bumped_at": None, "adoption_days": 4.0}])
 
@@ -759,7 +773,7 @@ def test_coupled_directories_names_a_directory_it_cannot_find(monkeypatch):
     it wanted a directory rather than silently returning nothing."""
     monkeypatch.setattr(server, "_resolve_repo",
                         lambda name: {"id": 1, "name": "app", "full_name": "acme/app"})
-    monkeypatch.setattr(server.q, "query_one", lambda *a, **k: None)
+    monkeypatch.setattr(server.q, "directory_by_path", lambda *a, **k: None)
     monkeypatch.setattr(server.q, "resolve_file", lambda repo, path: None)
     out = server.coupled_directories("acme/app", "nowhere")
     assert "no directory" in out["error"]
@@ -788,7 +802,7 @@ def test_coupled_directories_reports_only_partners_outside_the_subtree(monkeypat
     independently and did not -- and the summary says so."""
     monkeypatch.setattr(server, "_resolve_repo",
                         lambda name: {"id": 1, "name": "app", "full_name": "acme/app"})
-    monkeypatch.setattr(server.q, "query_one", lambda *a, **k: {
+    monkeypatch.setattr(server.q, "directory_by_path", lambda *a, **k: {
         "id": 9, "path": "pkg/auth", "file_count": 12, "change_count": 300})
     monkeypatch.setattr(server.q, "coupled_directories", lambda *a, **k: [
         {"path": "web", "score": 0.40, "n_ab": 20, "confidence_ab": 0.4,

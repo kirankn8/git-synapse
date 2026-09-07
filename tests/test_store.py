@@ -1,7 +1,7 @@
 """Integration tests for the ingest loader.
 
 These run against a real Postgres because the behaviour under test -- batched
-COPY, sequence-block id allocation, rename identity and idempotent re-ingest --
+ORM writes, identity preservation, rename identity and idempotent re-ingest --
 is defined by the database, not by Python. Mocking it would test nothing.
 """
 
@@ -11,7 +11,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from git_synapse.db.engine import connection, query, query_one
+from git_synapse.db.engine import connection
+from git_synapse.db.orm import models, session_scope
 from git_synapse.ingest.github import RepoRecord
 from git_synapse.ingest.parser import FileChange, ParsedCommit
 from git_synapse.ingest.store import COMMIT_FLUSH_SIZE, load_commits, upsert_repo
@@ -49,18 +50,20 @@ def temp_repo(scratch_db):
     )
     with connection() as conn:
         repo_id = upsert_repo(record, conn)
-        conn.execute("DELETE FROM commit WHERE repo_id = %s", (repo_id,))
-        conn.execute("DELETE FROM file WHERE repo_id = %s", (repo_id,))
     yield repo_id
-    with connection() as conn:
-        conn.execute("DELETE FROM repo WHERE id = %s", (repo_id,))
+    with session_scope() as session:
+        Repo, Commit, File, _Author = models().Repo, models().Commit, models().File, models().Author
+        session.query(Commit).filter_by(repo_id=repo_id).delete(synchronize_session=False)
+        session.query(File).filter_by(repo_id=repo_id).delete(synchronize_session=False)
+        session.query(Repo).filter_by(id=repo_id).delete(synchronize_session=False)
 
 
 def counts(repo_id: int) -> tuple[int, int, int]:
-    with connection() as conn:
-        commits = conn.execute("SELECT count(*) FROM commit WHERE repo_id=%s", (repo_id,)).fetchone()[0]
-        changes = conn.execute("SELECT count(*) FROM commit_file WHERE repo_id=%s", (repo_id,)).fetchone()[0]
-        files = conn.execute("SELECT count(*) FROM file WHERE repo_id=%s", (repo_id,)).fetchone()[0]
+    with session_scope() as session:
+        Commit, Change, File = models().Commit, models().CommitFile, models().File
+        commits = session.query(Commit).filter_by(repo_id=repo_id).count()
+        changes = session.query(Change).filter_by(repo_id=repo_id).count()
+        files = session.query(File).filter_by(repo_id=repo_id).count()
     return commits, changes, files
 
 
@@ -128,23 +131,18 @@ def test_rename_preserves_file_identity(temp_repo):
     with connection() as conn:
         load_commits(temp_repo, history, conn)
 
-    with connection() as conn:
-        files = conn.execute(
-            "SELECT id, path FROM file WHERE repo_id=%s ORDER BY path", (temp_repo,)
-        ).fetchall()
-        aliases = conn.execute(
-            "SELECT old_path, file_id FROM file_alias WHERE repo_id=%s", (temp_repo,)
-        ).fetchall()
+    with session_scope() as session:
+        File, Alias = models().File, models().FileAlias
+        files = [(r.id, r.path) for r in session.query(File).filter_by(repo_id=temp_repo).order_by(File.path)]
+        aliases = [(r.old_path, r.file_id) for r in session.query(Alias).filter_by(repo_id=temp_repo)]
 
     assert len(files) == 1, f"rename should not create a second file row: {files}"
     file_id, path = files[0]
     assert path == "new/name.go", "file.path must hold the most recent name"
     assert aliases == [("old/name.go", file_id)]
 
-    with connection() as conn:
-        n = conn.execute(
-            "SELECT count(*) FROM commit_file WHERE file_id=%s", (file_id,)
-        ).fetchone()[0]
+    with session_scope() as session:
+        n = session.query(models().CommitFile).filter_by(file_id=file_id).count()
     assert n == 4, "all four commits must attach to the single surviving file id"
 
 
@@ -157,11 +155,9 @@ def test_oversized_commits_are_stored_but_not_pair_eligible(temp_repo):
 
     assert stats.skipped_oversized == 1
     assert stats.pair_eligible == 1
-    with connection() as conn:
-        rows = conn.execute(
-            "SELECT n_files, pair_eligible FROM commit WHERE repo_id=%s ORDER BY n_files",
-            (temp_repo,),
-        ).fetchall()
+    with session_scope() as session:
+        Commit = models().Commit
+        rows = [(r.n_files, r.pair_eligible) for r in session.query(Commit).filter_by(repo_id=temp_repo).order_by(Commit.n_files)]
     assert rows == [(2, True), (200, False)]
     # The oversized commit's changes are still recorded in full.
     assert counts(temp_repo)[1] == 202
@@ -172,10 +168,8 @@ def test_merge_commits_are_not_pair_eligible(temp_repo):
     with connection() as conn:
         stats = load_commits(temp_repo, [merge], conn)
     assert stats.pair_eligible == 0
-    with connection() as conn:
-        row = conn.execute(
-            "SELECT is_merge, pair_eligible FROM commit WHERE repo_id=%s", (temp_repo,)
-        ).fetchone()
+    with session_scope() as session:
+        row = session.query(models().Commit.is_merge, models().Commit.pair_eligible).filter_by(repo_id=temp_repo).one()
     assert row == (True, False)
 
 
@@ -191,7 +185,7 @@ def test_duplicate_paths_within_one_commit_are_collapsed(temp_repo):
 def test_rename_onto_an_occupied_path_does_not_cross_identities(temp_repo):
     """A rename whose destination another file already holds must not be carried.
 
-    flush() guards its UPDATE against violating the unique index, so the row kept
+    flush() guards its mutation against violating the unique index, so the row kept
     its old path while the in-memory map pointed the new path at it. Every later
     commit to that path landed on the wrong file, and the file that genuinely
     lived there sat frozen -- 10,586 rows across 55 repositories.
@@ -206,20 +200,17 @@ def test_rename_onto_an_occupied_path_does_not_cross_identities(temp_repo):
     with connection() as conn:
         load_commits(repo_id, [both, rename, later], conn)
 
-    rows = {r["path"]: r["id"] for r in query(
-        "SELECT id, path FROM file WHERE repo_id = %s", (repo_id,))}
+    with session_scope() as session:
+        File = models().File
+        rows = {r.path: r.id for r in session.query(File).filter_by(repo_id=repo_id)}
     assert "new.txt" in rows, "the occupant must keep its own row"
     assert rows.get("old.txt") != rows.get("new.txt"), "identities must stay separate"
 
-    owner = query_one(
-        """
-        SELECT cf.file_id FROM commit_file cf
-        JOIN commit c ON c.id = cf.commit_id
-        WHERE c.sha = %s AND cf.repo_id = %s
-        """,
-        (f"{3:040x}", repo_id),
-    )
-    assert owner["file_id"] == rows["new.txt"], (
+    with session_scope() as session:
+        Commit, Change = models().Commit, models().CommitFile
+        owner = session.query(Change.file_id).join(Commit, Commit.id == Change.commit_id).filter(
+            Commit.sha == f"{3:040x}", Change.repo_id == repo_id).scalar()
+    assert owner == rows["new.txt"], (
         "a later change must land on the file that lives at that path"
     )
 
@@ -245,7 +236,7 @@ def test_a_refresh_does_not_blank_the_metadata_discovery_collected(db):
     """`load_repo_records` rebuilds a record from the database and hands it
     straight back to `upsert_repo`. When it read only the columns the pipeline
     needed, every ingest wiped language, description, topics and stars."""
-    from git_synapse.db.engine import connection, query_one
+    from git_synapse.db.engine import connection
     from git_synapse.ingest.pipeline import load_repo_records
 
     full = RepoRecord(
@@ -262,23 +253,20 @@ def test_a_refresh_does_not_blank_the_metadata_discovery_collected(db):
     with connection() as conn:
         upsert_repo(reloaded[0], conn)
 
-    row = query_one("SELECT primary_language, description, topics, license_spdx,"
-                    " stargazers FROM repo WHERE full_name = 'acme/meta-probe'")
-    assert row["primary_language"] == "Rust"
-    assert row["description"] == "a description"
-    assert row["topics"] == ["a", "b"]
-    assert row["license_spdx"] == "MIT"
-    assert row["stargazers"] == 42
-
-    from git_synapse.db.engine import execute
-    execute("DELETE FROM repo WHERE full_name = 'acme/meta-probe'")
+    with session_scope() as session:
+        row = session.query(models().Repo).filter_by(full_name="acme/meta-probe").one()
+        assert row.primary_language == "Rust"
+        assert row.description == "a description"
+        assert row.topics == ["a", "b"]
+        assert row.license_spdx == "MIT"
+        assert row.stargazers == 42
+        session.delete(row)
 
 
 def test_tags_are_indexed_and_resolved_to_their_commit(db):
     """The tag loader was unreachable while mirrors excluded tags, so nothing
-    exercised it: the first real tag hit `Connection.executemany`, which psycopg
-    puts on the cursor."""
-    from git_synapse.db.engine import connection, execute, query
+    exercised it: the first real tag must be persisted and resolved by the ORM."""
+    from git_synapse.db.engine import connection
     from git_synapse.ingest.gitops import Tag
     from git_synapse.ingest.store import load_tags
 
@@ -289,26 +277,28 @@ def test_tags_are_indexed_and_resolved_to_their_commit(db):
         load_commits(repo_id, [make_commit(0, ["a.py"])], conn)
         # Read through the same connection: the commits are not committed yet,
         # and the query helper checks out a different one from the pool.
-        sha = conn.execute("SELECT sha FROM commit WHERE repo_id = %s",
-                           (repo_id,)).fetchone()[0]
+        sha = conn.query(models().Commit).filter_by(repo_id=repo_id).one().sha
         written = load_tags(repo_id, [
             Tag(name="v1.0.0", commit_sha=sha, tagged_at=BASE, annotated=False),
             Tag(name="v1.1.0", commit_sha="f" * 40, tagged_at=BASE, annotated=True),
         ], conn)
 
     assert written == 2
-    rows = {r["name"]: r for r in query(
-        "SELECT name, commit_id, annotated FROM ref_tag WHERE repo_id = %s", (repo_id,))}
-    assert rows["v1.0.0"]["commit_id"] is not None, "a tag on an ingested commit resolves"
-    assert rows["v1.1.0"]["commit_id"] is None, "a tag off the shipped branch stays unresolved"
-    assert rows["v1.1.0"]["annotated"] is True
+    with session_scope() as session:
+        rows = {r.name: r for r in session.query(models().RefTag).filter_by(repo_id=repo_id)}
+        assert rows["v1.0.0"].commit_id is not None, "a tag on an ingested commit resolves"
+        assert rows["v1.1.0"].commit_id is None, "a tag off the shipped branch stays unresolved"
+        assert rows["v1.1.0"].annotated is True
 
     # Replaced wholesale, so a deleted or moved tag cannot linger.
     with connection() as conn:
         load_tags(repo_id, [Tag(name="v2.0.0", commit_sha=sha, tagged_at=BASE, annotated=False)], conn)
-    assert {r["name"] for r in query(
-        "SELECT name FROM ref_tag WHERE repo_id = %s", (repo_id,))} == {"v2.0.0"}
-    execute("DELETE FROM repo WHERE id = %s", (repo_id,))
+    with session_scope() as session:
+        assert {r.name for r in session.query(models().RefTag).filter_by(repo_id=repo_id)} == {"v2.0.0"}
+        session.query(models().CommitFile).filter_by(repo_id=repo_id).delete(synchronize_session=False)
+        session.query(models().Commit).filter_by(repo_id=repo_id).delete(synchronize_session=False)
+        session.query(models().File).filter_by(repo_id=repo_id).delete(synchronize_session=False)
+        session.query(models().Repo).filter_by(id=repo_id).delete(synchronize_session=False)
 
 
 def test_a_record_from_a_host_with_no_api_cannot_blank_what_one_collected(db):
@@ -337,24 +327,18 @@ def test_a_record_from_a_host_with_no_api_cannot_blank_what_one_collected(db):
     )
     assert upsert_repo(bare) == repo_id, "same repository, not a second row"
 
-    from git_synapse.db.engine import query_one
-
-    row = query_one(
-        "SELECT stargazers, is_fork, is_archived, visibility, forks_count,"
-        " disk_usage_kb, primary_language FROM repo WHERE id = %s", (repo_id,))
-    assert row["stargazers"] == 4200
-    assert row["is_fork"] is True and row["is_archived"] is True
-    assert row["visibility"] == "public", "not overwritten with 'unknown'"
-    assert row["forks_count"] == 7 and row["disk_usage_kb"] == 512
-    assert row["primary_language"] == "Rust"
-
-    from git_synapse.db.engine import execute
-    execute("DELETE FROM repo WHERE id = %s", (repo_id,))
+    with session_scope() as session:
+        row = session.get(models().Repo, repo_id)
+        assert row.stargazers == 4200
+        assert row.is_fork is True and row.is_archived is True
+        assert row.visibility == "public", "not overwritten with 'unknown'"
+        assert row.forks_count == 7 and row.disk_usage_kb == 512
+        assert row.primary_language == "Rust"
+        session.delete(row)
 
 
 def test_a_real_api_record_still_updates_those_fields(db):
     """The guard must not freeze them: a repository really does get archived."""
-    from git_synapse.db.engine import execute, query_one
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.store import upsert_repo
 
@@ -367,7 +351,7 @@ def test_a_real_api_record_still_updates_those_fields(db):
 
     repo_id = upsert_repo(record())
     upsert_repo(record(stargazers=9, is_archived=True, visibility="private"))
-    row = query_one("SELECT stargazers, is_archived, visibility FROM repo WHERE id = %s",
-                    (repo_id,))
-    assert (row["stargazers"], row["is_archived"], row["visibility"]) == (9, True, "private")
-    execute("DELETE FROM repo WHERE id = %s", (repo_id,))
+    with session_scope() as session:
+        row = session.get(models().Repo, repo_id)
+        assert (row.stargazers, row.is_archived, row.visibility) == (9, True, "private")
+        session.delete(row)

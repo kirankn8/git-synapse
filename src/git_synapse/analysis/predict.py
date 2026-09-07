@@ -1,48 +1,22 @@
-"""Impact prediction: the ranked answer to "I am changing X, what else?".
-
-Built entirely from what repositories **declare** about each other. A manifest
-naming a dependency is dated, directional and provable; it needs no statistical
-argument and cannot produce an edge between codebases that share no code.
-
-No statistical ensemble ranks these edges, because the obvious one does not
-work: over a time-binned, directed co-change table, two of the public
-repositories in the test corpus -- sharing no code at all -- score G2 = 570
-against each other, since two busy repositories occupy the same time bins
-whatever they contain. Correlation over calendar time cannot tell propagation
-from a shared release era.
-
-What ranks an edge
-------------------
-Only facts, in order of weight:
-
-* **declared** -- the consumer's manifest names the dependency at HEAD.
-* **bump history** -- how many times the consumer has actually raised the
-  version. A dependency bumped forty times is a live relationship; one declared
-  and never moved is inert.
-* **recency** -- when it was last bumped.
-* **observed lag** -- the median delay between an upstream commit and the
-  consumer picking it up, where a version resolved to one.
-
-Every one of those is auditable back to a line in a file in a commit.
-"""
+"""Evidence-backed repository impact prediction using the ORM."""
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
+from collections import defaultdict
 from dataclasses import dataclass
-
-import psycopg
+from datetime import UTC, datetime, timedelta
 
 from git_synapse.db.engine import connection, get_watermark, set_watermark
+from git_synapse.db.orm import models
 
 log = logging.getLogger(__name__)
 
 
 @dataclass
 class PredictStats:
-    """Outcome of one impact rebuild."""
-
     sources: int = 0
     rows_written: int = 0
     declared_edges: int = 0
@@ -50,298 +24,155 @@ class PredictStats:
     duration_s: float = 0.0
 
 
-def _input_fingerprint(conn: psycopg.Connection) -> str:
-    """Stable signature of every input value that affects the impact graph."""
-    row = conn.execute(
-        """
-        SELECT md5(
-                 COALESCE((SELECT string_agg(
-                             format('%s|%s|%s|%s|%s|%s',
-                                    consumer_repo_id, COALESCE(dep_repo_id::text, ''),
-                                    dep_name, manifest, ecosystem,
-                                    COALESCE(dep_version, '')),
-                             E'\n' ORDER BY consumer_repo_id, dep_name, manifest)
-                           FROM repo_dependency), '')
-                 || '|' ||
-                 COALESCE((SELECT string_agg(
-                             format('%s|%s|%s|%s|%s|%s|%s',
-                                    consumer_repo_id, COALESCE(dep_repo_id::text, ''),
-                                    dep_name, dep_version, bumped_at,
-                                    adoption_seconds, COALESCE(version_key, '')),
-                             E'\n' ORDER BY id)
-                           FROM dep_bump), '')
-               )
-        """
-    ).fetchone()[0]
-    return str(row)
+def _as_dict(row: object) -> dict:
+    return {attr.key: getattr(row, attr.key) for attr in row.__mapper__.column_attrs}
 
 
-def rebuild(conn: psycopg.Connection | None = None, force: bool = False) -> PredictStats:
-    """Recompute ``repo_impact`` from the declared dependency graph.
+def _input_fingerprint(conn: object) -> str:
+    Dependency, Bump = models().RepoDependency, models().DepBump
+    # The caller may have appended dependency/bump rows in the same
+    # autoflush-disabled transaction. Fingerprinting must include those writes
+    # before deciding whether a rebuild can be skipped.
+    conn.flush()
+    dependencies = conn.query(Dependency).order_by(
+        Dependency.consumer_repo_id, Dependency.dep_name, Dependency.manifest,
+    ).all()
+    bumps = conn.query(Bump).order_by(Bump.id).all()
+    parts = ["|".join(str(x) for x in (r.consumer_repo_id, r.dep_repo_id or "", r.dep_name,
+                                          r.manifest, r.ecosystem, r.dep_version or "")) for r in dependencies]
+    parts += ["|".join(str(x) for x in (r.consumer_repo_id, r.dep_repo_id or "", r.dep_name,
+                                          r.dep_version, r.bumped_at, r.adoption_seconds,
+                                          r.version_key or "")) for r in bumps]
+    return hashlib.md5("\n".join(parts).encode(), usedforsecurity=False).hexdigest()
 
-    One row per declared ``(dependency -> consumer)`` edge. Skipped when neither
-    ``repo_dependency`` nor ``dep_bump`` has changed since the last run.
-    """
 
-    def _run(c: psycopg.Connection) -> PredictStats:
+def rebuild(conn: object | None = None, force: bool = False) -> PredictStats:
+    """Recompute the repository impact graph from declared and bump facts."""
+    def run(session: object) -> PredictStats:
         started = time.monotonic()
         stats = PredictStats()
-
-        fingerprint = _input_fingerprint(c)
+        fingerprint = _input_fingerprint(session)
         if not force and get_watermark("predict_inputs") == fingerprint:
-            log.debug("impact inputs unchanged; skipping rebuild")
             return stats
-
-        c.execute("TRUNCATE repo_impact")
-        c.execute(
-            """
-            WITH bumps AS (
-                SELECT dep_repo_id, consumer_repo_id,
-                       count(*)                       AS bump_count,
-                       max(bumped_at)                 AS last_bump,
-                       percentile_cont(0.5) WITHIN GROUP (
-                           ORDER BY adoption_seconds) / 86400.0 AS median_adoption_days
-                  FROM dep_bump
-                 WHERE dep_repo_id IS NOT NULL
-              GROUP BY dep_repo_id, consumer_repo_id
-            ),
-            edges AS (
-                SELECT d.dep_repo_id      AS source_repo_id,
-                       d.consumer_repo_id AS target_repo_id,
-                       TRUE               AS is_declared,
-                       COALESCE(b.bump_count, 0) AS bump_count,
-                       b.last_bump, b.median_adoption_days
-                  FROM repo_dependency d
-             LEFT JOIN bumps b ON b.dep_repo_id = d.dep_repo_id
-                              AND b.consumer_repo_id = d.consumer_repo_id
-                 WHERE d.dep_repo_id IS NOT NULL
-                   AND d.dep_repo_id <> d.consumer_repo_id
-              GROUP BY 1, 2, 3, 4, b.last_bump, b.median_adoption_days
-                UNION
-                -- A dependency dropped from the manifest but bumped in the past
-                -- is still a real historical relationship.
-                SELECT b.dep_repo_id, b.consumer_repo_id, FALSE,
-                       b.bump_count, b.last_bump, b.median_adoption_days
-                  FROM bumps b
-                 WHERE b.dep_repo_id <> b.consumer_repo_id
-                   AND NOT EXISTS (
-                       SELECT 1 FROM repo_dependency d
-                        WHERE d.dep_repo_id = b.dep_repo_id
-                          AND d.consumer_repo_id = b.consumer_repo_id)
-            ),
-            scored AS (
-                SELECT *,
-                       -- Declared is the strong signal; bumps show the edge is
-                       -- live; recency breaks ties. Bounded to [0, 1] so the
-                       -- number is comparable across repositories.
-                       LEAST(1.0,
-                             (CASE WHEN is_declared THEN 0.5 ELSE 0.2 END)
-                           + LEAST(0.3, bump_count * 0.02)
-                           + CASE
-                               WHEN last_bump IS NULL THEN 0.0
-                               WHEN last_bump > now() - interval '90 days'  THEN 0.2
-                               WHEN last_bump > now() - interval '365 days' THEN 0.1
-                               ELSE 0.0
-                             END
-                       ) AS score
-                  FROM edges
-            )
-            INSERT INTO repo_impact (
-                source_repo_id, target_repo_id, score, rank_in_source,
-                is_declared, has_bump_history, bump_count, median_adoption_days, features)
-            SELECT source_repo_id, target_repo_id, score,
-                   row_number() OVER (PARTITION BY source_repo_id ORDER BY score DESC),
-                   is_declared, bump_count > 0, bump_count, median_adoption_days,
-                   jsonb_build_object(
-                       'scored_by', 'declared',
-                       'bump_count', bump_count,
-                       'last_bump', last_bump)
-              FROM scored
-            """
-        )
-        row = c.execute(
-            """
-            SELECT count(*), count(DISTINCT source_repo_id),
-                   count(*) FILTER (WHERE is_declared),
-                   count(*) FILTER (WHERE has_bump_history)
-              FROM repo_impact
-            """
-        ).fetchone()
-        stats.rows_written, stats.sources = int(row[0]), int(row[1])
-        stats.declared_edges, stats.bumped_edges = int(row[2]), int(row[3])
-        set_watermark("predict_inputs", fingerprint, c)
+        Dependency, Bump, Impact = models().RepoDependency, models().DepBump, models().RepoImpact
+        dependencies = session.query(Dependency).filter(Dependency.dep_repo_id.is_not(None)).all()
+        bumps = session.query(Bump).filter(Bump.dep_repo_id.is_not(None)).all()
+        grouped: dict[tuple[int, int], list[object]] = defaultdict(list)
+        for bump in bumps:
+            if bump.dep_repo_id != bump.consumer_repo_id:
+                grouped[(bump.dep_repo_id, bump.consumer_repo_id)].append(bump)
+        declared = {(row.dep_repo_id, row.consumer_repo_id) for row in dependencies
+                    if row.dep_repo_id != row.consumer_repo_id}
+        edges = declared | set(grouped)
+        session.query(Impact).delete(synchronize_session=False)
+        now = datetime.now(UTC)
+        output = []
+        rank_groups: dict[int, list[dict]] = defaultdict(list)
+        for source, target in edges:
+            history = grouped.get((source, target), [])
+            last_bump = max((x.bumped_at for x in history if x.bumped_at), default=None)
+            lags = sorted(x.adoption_seconds for x in history if x.adoption_seconds is not None)
+            median = lags[len(lags) // 2] / 86400.0 if lags else None
+            is_declared = (source, target) in declared
+            bump_count = len(history)
+            recency = 0.2 if last_bump and last_bump > now - timedelta(days=90) else (
+                0.1 if last_bump and last_bump > now - timedelta(days=365) else 0.0)
+            score = min(1.0, (0.5 if is_declared else 0.2) + min(0.3, bump_count * 0.02) + recency)
+            row = {"source_repo_id": source, "target_repo_id": target, "score": score,
+                   "is_declared": is_declared, "has_bump_history": bump_count > 0,
+                   "bump_count": bump_count, "median_adoption_days": median,
+                   "features": {"scored_by": "declared", "bump_count": bump_count,
+                                "last_bump": str(last_bump) if last_bump else None}}
+            rank_groups[source].append(row)
+        for _source, rows in rank_groups.items():
+            rows.sort(key=lambda x: x["score"], reverse=True)
+            for rank, row in enumerate(rows, 1):
+                row["rank_in_source"] = rank
+                output.append(Impact(**row))
+        session.add_all(output)
+        session.flush()
+        stats.rows_written = len(output)
+        stats.sources = len(rank_groups)
+        stats.declared_edges = sum(x.is_declared for x in output)
+        stats.bumped_edges = sum(x.has_bump_history for x in output)
+        set_watermark("predict_inputs", fingerprint, session)
         stats.duration_s = time.monotonic() - started
-        log.info("impact: %d edges over %d repositories in %.1fs",
-                 stats.rows_written, stats.sources, stats.duration_s)
         return stats
 
     if conn is not None:
-        return _run(conn)
-    with connection() as own:
-        return _run(own)
+        return run(conn)
+    with connection() as session:
+        return run(session)
 
 
-def impact_for(
-    repo_id: int,
-    limit: int = 20,
-    declared_only: bool = False,
-    min_score: float = 0.0,
-) -> list[dict]:
-    """What else to look at when changing ``repo_id``, ranked."""
-    from git_synapse.db.engine import query
+def _impact_rows(repo_id: int, *, upstream: bool = False, limit: int = 20,
+                 declared_only: bool = False, min_score: float = 0.0) -> list[dict]:
+    Impact, Repo = models().RepoImpact, models().Repo
+    side = Impact.target_repo_id if upstream else Impact.source_repo_id
+    other = Impact.source_repo_id if upstream else Impact.target_repo_id
+    with connection() as session:
+        impacts = session.query(Impact).filter(side == repo_id, Impact.score >= min_score).order_by(
+            Impact.is_declared.desc(), Impact.score.desc()).limit(max(limit, 1)).all()
+        repos = {r.id: r for r in session.query(Repo).filter(
+            Repo.id.in_([getattr(x, other.key) for x in impacts])
+        ).all()}
+        output = []
+        for impact in impacts:
+            if declared_only and not impact.is_declared:
+                continue
+            row = _as_dict(impact)
+            target = repos.get(getattr(impact, other.key))
+            if target:
+                row.update(name=target.name, full_name=target.full_name,
+                           primary_language=target.primary_language, description=target.description,
+                           commit_count=target.commit_count)
+            output.append(row)
+        return output
 
-    clauses = ["i.source_repo_id = %(repo_id)s", "i.score >= %(min_score)s"]
-    if declared_only:
-        clauses.append("i.is_declared")
-    return query(
-        f"""
-        SELECT i.*, r.name, r.full_name, r.primary_language, r.description,
-               r.commit_count
-        FROM repo_impact i
-        JOIN repo r ON r.id = i.target_repo_id
-        WHERE {' AND '.join(clauses)}
-        ORDER BY (i.is_declared OR i.has_bump_history) DESC, i.score DESC
-        LIMIT %(limit)s
-        """,
-        {"repo_id": repo_id, "limit": limit, "min_score": min_score},
-    )
+
+def impact_for(repo_id: int, limit: int = 20, declared_only: bool = False, min_score: float = 0.0) -> list[dict]:
+    return _impact_rows(repo_id, limit=limit, declared_only=declared_only, min_score=min_score)
 
 
 def upstream_of(repo_id: int, limit: int = 20) -> list[dict]:
-    """Repositories whose changes tend to *precede* changes here.
-
-    The reverse direction, and the one that answers the question behind the
-    motivating case: the fix you are about to make in this repo may actually
-    belong upstream.
-    """
-    from git_synapse.db.engine import query
-
-    return query(
-        """
-        SELECT i.*, r.name, r.full_name, r.primary_language, r.description
-        FROM repo_impact i
-        JOIN repo r ON r.id = i.source_repo_id
-        WHERE i.target_repo_id = %(repo_id)s
-        ORDER BY (i.is_declared OR i.has_bump_history) DESC, i.score DESC
-        LIMIT %(limit)s
-        """,
-        {"repo_id": repo_id, "limit": limit},
-    )
+    return _impact_rows(repo_id, upstream=True, limit=limit)
 
 
-def impact_chains(
-    repo_id: int,
-    max_depth: int = 3,
-    min_score: float = 0.5,
-    limit: int = 40,
-) -> list[dict]:
-    """Transitive impact paths over the prediction graph.
+def _chains(repo_id: int, reverse: bool, max_depth: int, min_score: float, limit: int) -> list[dict]:
+    Impact, Repo = models().RepoImpact, models().Repo
+    with connection() as session:
+        rows = session.query(Impact).filter(Impact.score >= min_score).order_by(Impact.score.desc()).all()
+        names = {r.id: r.name for r in session.query(Repo).all()}
+    adjacency: dict[int, list[object]] = defaultdict(list)
+    for row in rows:
+        if not reverse or row.is_declared or row.has_bump_history:
+            adjacency[row.target_repo_id if reverse else row.source_repo_id].append(row)
+    results = []
 
-    Composes per-hop scores multiplicatively, so a weak hop can only weaken a
-    path. Unlike :func:`git_synapse.analysis.query.repo_chains`, which walks raw
-    conditional probabilities, this walks the ensemble score.
+    def walk(path: list[int], score: float, hops: list[float], current: int) -> None:
+        if len(path) - 1 >= max_depth:
+            return
+        for edge in adjacency.get(current, []):
+            nxt = edge.source_repo_id if reverse else edge.target_repo_id
+            if nxt in path:
+                continue
+            new_path, new_score = [*path, nxt], score * edge.score
+            new_hops = [*hops, round(edge.score, 4)]
+            if len(new_path) >= 3:
+                results.append({"depth": len(new_path) - 1, "path_score": new_score,
+                                "path": new_path, "hops": new_hops,
+                                "declared": [], "lags": [],
+                                "repo_names": [names.get(x, str(x)) for x in new_path]})
+            walk(new_path, new_score, new_hops, nxt)
 
-    Args:
-        repo_id: repository to walk out from.
-        max_depth: maximum hops; 2 gives A -> B -> C.
-        min_score: per-hop floor.
-        limit: maximum paths returned.
-
-    Every hop carries evidence: ``rebuild`` writes an edge only from a declared
-    dependency or an observed version bump, so there is no unvalidated tier to
-    exclude. The statistical discovery path was removed after it scored AUC 0.63
-    on which way the arrow points -- chaining through it produced paths like
-    ``signer -> runtime -> teams``, where the second hop is activity confounding
-    rather than coupling.
-    """
-    from git_synapse.db.engine import query
-
-    return query(
-        """
-        WITH RECURSIVE walk AS (
-            SELECT i.source_repo_id AS src, i.target_repo_id AS dst, 1 AS depth,
-                   i.score AS path_score,
-                   ARRAY[i.source_repo_id, i.target_repo_id] AS path,
-                   ARRAY[round(i.score::numeric, 4)] AS hops,
-                   ARRAY[i.is_declared] AS declared,
-                   ARRAY[i.median_adoption_days] AS lags
-            FROM repo_impact i
-            WHERE i.source_repo_id = %(repo_id)s
-              AND i.score >= %(min_score)s
-
-            UNION ALL
-
-            SELECT w.src, i.target_repo_id, w.depth + 1,
-                   w.path_score * i.score,
-                   w.path || i.target_repo_id,
-                   w.hops || round(i.score::numeric, 4),
-                   w.declared || i.is_declared,
-                   w.lags || i.median_adoption_days
-            FROM walk w
-            JOIN repo_impact i ON i.source_repo_id = w.dst
-            WHERE w.depth < %(depth)s
-              AND i.score >= %(min_score)s
-              AND NOT i.target_repo_id = ANY(w.path)
-        )
-        SELECT w.depth, w.path_score, w.path, w.hops, w.declared, w.lags,
-               (SELECT array_agg(r.name ORDER BY ord)
-                  FROM unnest(w.path) WITH ORDINALITY AS u(id, ord)
-                  JOIN repo r ON r.id = u.id) AS repo_names
-        FROM walk w
-        WHERE w.depth >= 2
-        ORDER BY w.path_score DESC
-        LIMIT %(limit)s
-        """,
-        {"repo_id": repo_id, "depth": max(1, min(max_depth, 5)),
-         "min_score": min_score, "limit": limit},
-    )
+    walk([repo_id], 1.0, [], repo_id)
+    results.sort(key=lambda x: x["path_score"], reverse=True)
+    return results[:max(limit, 1)]
 
 
-def upstream_chains(
-    repo_id: int, max_depth: int = 3, min_score: float = 0.5, limit: int = 25
-) -> list[dict]:
-    """Chains flowing *into* a repository: where a change here may originate.
+def impact_chains(repo_id: int, max_depth: int = 3, min_score: float = 0.5, limit: int = 40) -> list[dict]:
+    return _chains(repo_id, False, max(1, min(max_depth, 5)), min_score, limit)
 
-    The inverse traversal of :func:`impact_chains`, and the one that answers the
-    motivating question -- "I am editing runtime; the real fix may be two hops
-    upstream in signer".
-    """
-    from git_synapse.db.engine import query
 
-    return query(
-        """
-        WITH RECURSIVE walk AS (
-            SELECT i.target_repo_id AS sink, i.source_repo_id AS cur, 1 AS depth,
-                   i.score AS path_score,
-                   ARRAY[i.target_repo_id, i.source_repo_id] AS path,
-                   ARRAY[round(i.score::numeric, 4)] AS hops
-            FROM repo_impact i
-            WHERE i.target_repo_id = %(repo_id)s
-              AND i.score >= %(min_score)s
-              AND (i.is_declared OR i.has_bump_history)
-
-            UNION ALL
-
-            SELECT w.sink, i.source_repo_id, w.depth + 1,
-                   w.path_score * i.score,
-                   w.path || i.source_repo_id,
-                   w.hops || round(i.score::numeric, 4)
-            FROM walk w
-            JOIN repo_impact i ON i.target_repo_id = w.cur
-            WHERE w.depth < %(depth)s
-              AND i.score >= %(min_score)s
-              AND NOT i.source_repo_id = ANY(w.path)
-              AND (i.is_declared OR i.has_bump_history)
-        )
-        SELECT w.depth, w.path_score, w.path, w.hops,
-               (SELECT array_agg(r.name ORDER BY ord)
-                  FROM unnest(w.path) WITH ORDINALITY AS u(id, ord)
-                  JOIN repo r ON r.id = u.id) AS repo_names
-        FROM walk w
-        WHERE w.depth >= 2
-        ORDER BY w.path_score DESC
-        LIMIT %(limit)s
-        """,
-        {"repo_id": repo_id, "depth": max(1, min(max_depth, 5)),
-         "min_score": min_score, "limit": limit},
-    )
+def upstream_chains(repo_id: int, max_depth: int = 3, min_score: float = 0.5, limit: int = 25) -> list[dict]:
+    return _chains(repo_id, True, max(1, min(max_depth, 5)), min_score, limit)

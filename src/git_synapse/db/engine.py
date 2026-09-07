@@ -1,192 +1,52 @@
-"""Low-level PostgreSQL infrastructure for schema and bulk analytical work.
-
-Normal application CRUD belongs in :mod:`git_synapse.db.orm`. This module keeps
-the psycopg pool for schema bootstrap, COPY, and the set-based aggregate paths
-where a database-native bulk operation is materially faster than row-oriented
-ORM persistence.
-"""
+"""SQLAlchemy-only database lifecycle helpers."""
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import time
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterator
 from contextlib import contextmanager
-from importlib import resources
+from datetime import UTC, datetime
 from typing import Any
 
-import psycopg
-from psycopg import sql
-from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from git_synapse.config import get_config
+from git_synapse.db.orm import get_engine, models, session_scope
 
 log = logging.getLogger(__name__)
 
-_pool: ConnectionPool | None = None
-
-
-def get_pool() -> ConnectionPool:
-    """Return the process-wide connection pool, creating it on first use."""
-    global _pool
-    if _pool is None:
-        cfg = get_config().db
-        _pool = ConnectionPool(
-            conninfo=cfg.dsn,
-            min_size=1,
-            max_size=cfg.pool_size + cfg.pool_max_overflow,
-            open=True,
-            timeout=30.0,
-            # Rotate connections so a long-lived one cannot hold a prepared
-            # statement whose plan predates a schema change. Bounds the window
-            # in which STALE_PLAN_SQLSTATES can occur at all; the retry below
-            # handles the window itself.
-            max_lifetime=1800.0,
-            kwargs={"autocommit": False},
-        )
-        log.debug("opened connection pool to %s:%s/%s", cfg.host, cfg.port, cfg.database)
-    return _pool
+SCHEMA_VERSION = 34
+SCHEMA_RETRIES = 5
 
 
 def close_pool() -> None:
-    """Close the pool. Called on process shutdown."""
-    global _pool
-    if _pool is not None:
-        _pool.close()
-        _pool = None
-    # The ORM engine is a separate pool. Dispose it with the legacy bulk
-    # connection pool so tests and process restarts never retain connections
-    # or reflected table metadata for the previous database.
-    from git_synapse.db.orm import close as close_orm
+    """Dispose the process-wide SQLAlchemy engine."""
+    from git_synapse.db.orm import close
 
-    close_orm()
+    close()
 
 
 @contextmanager
-def connection() -> Iterator[psycopg.Connection]:
-    """Check out a connection; commit on clean exit, roll back on exception."""
-    with get_pool().connection() as conn:
-        # Session-level advisory locks survive a transaction and therefore
-        # survive returning a connection to the pool. The application uses
-        # transaction-scoped locks; clear any legacy/test lock before reuse so
-        # a dead pooled session cannot make the next run look live forever.
-        with contextlib.suppress(Exception):
-            previous_autocommit = conn.autocommit
-            try:
-                conn.autocommit = True
-                conn.execute("SELECT pg_advisory_unlock_all()")
-            finally:
-                conn.autocommit = previous_autocommit
-        yield conn
+def connection() -> Iterator[Any]:
+    """Compatibility-free transitional alias for an ORM session."""
+    with session_scope() as session:
+        yield session
 
 
-@contextmanager
-def cursor(row_factory: Any = dict_row) -> Iterator[psycopg.Cursor]:
-    """Check out a cursor returning dict rows by default."""
-    with connection() as conn, conn.cursor(row_factory=row_factory) as cur:
-        yield cur
-
-
-#: SQLSTATEs raised when a cached prepared-statement plan no longer matches the
-#: schema. psycopg auto-prepares a statement after a few executions, so an
-#: ALTER TABLE while the pool holds idle connections makes those connections
-#: fail with "cached plan must not change result type" until they are recycled.
-#:
-#: This is not hypothetical: adding `file.xrepo_change_count` for the cross-repo
-#: feature broke `GET /api/files/{id}` on a running API. Retrying on a fresh
-#: connection is the fix, because the error is a property of the connection, not
-#: of the query.
-STALE_PLAN_SQLSTATES = frozenset({"0A000", "26000"})
-
-
-def _is_stale_plan(exc: BaseException) -> bool:
-    """True if an exception is a stale prepared-statement plan."""
-    sqlstate = getattr(exc, "sqlstate", None)
-    if sqlstate in STALE_PLAN_SQLSTATES:
-        return True
-    text = str(exc).lower()
-    return "cached plan must not change result type" in text
-
-
-def _read(sql_text: str, params, mode: str, default=None):
-    """Run a read, retrying once on a fresh connection if the plan went stale.
-
-    Args:
-        sql_text: the SQL to run.
-        params: bound parameters.
-        mode: ``all``, ``one`` or ``scalar``.
-        default: value returned by ``scalar`` mode when there is no row.
-    """
-    for attempt in (1, 2):
-        conn_ctx = get_pool().connection()
-        conn = conn_ctx.__enter__()
-        try:
-            factory = dict_row if mode != "scalar" else None
-            with conn.cursor(row_factory=factory) if factory else conn.cursor() as cur:
-                cur.execute(sql_text, params)
-                if mode == "all":
-                    result: Any = cur.fetchall()
-                else:
-                    row = cur.fetchone()
-                    result = row if mode == "one" else (default if row is None else row[0])
-        except Exception as exc:
-            if attempt == 1 and _is_stale_plan(exc):
-                log.warning("stale cached plan; discarding connection and retrying")
-                # Closing it makes the pool drop rather than reuse it, so the
-                # retry lands on a connection with no stale prepared statements.
-                # The connection is being discarded because it is broken, so
-                # a failure to close it changes nothing.
-                with contextlib.suppress(Exception):
-                    conn.close()
-                conn_ctx.__exit__(None, None, None)
-                continue
-            conn_ctx.__exit__(type(exc), exc, exc.__traceback__)
-            raise
-        # Returning from inside the try would skip this and leave the connection
-        # to be released whenever the context object is collected.
-        conn_ctx.__exit__(None, None, None)
-        return result
-    raise RuntimeError("unreachable: read retry exhausted")  # pragma: no cover
-
-
-def query(sql_text: str, params: Sequence[Any] | dict[str, Any] | None = None) -> list[dict]:
-    """Run a SELECT and return every row as a dict."""
-    return _read(sql_text, params, "all")
-
-
-def query_one(
-    sql_text: str, params: Sequence[Any] | dict[str, Any] | None = None
-) -> dict | None:
-    """Run a SELECT and return the first row, or None."""
-    return _read(sql_text, params, "one")
-
-
-def scalar(
-    sql_text: str, params: Sequence[Any] | dict[str, Any] | None = None, default: Any = None
-) -> Any:
-    """Run a SELECT and return the first column of the first row."""
-    return _read(sql_text, params, "scalar", default)
-
-
-def execute(sql_text: str, params: Sequence[Any] | dict[str, Any] | None = None) -> int:
-    """Run a statement and return the affected row count."""
-    with connection() as conn, conn.cursor() as cur:
-        cur.execute(sql_text, params)
-        return cur.rowcount
+def _is_schema_retryable(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, (OperationalError, DBAPIError)):
+            message = str(current).lower()
+            if any(word in message for word in ("deadlock", "lock timeout", "could not obtain lock")):
+                return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def wait_for_database(timeout_s: float = 120.0, interval_s: float = 1.0) -> None:
-    """Block until Postgres accepts connections.
-
-    Compose starts the API and the database together, and a healthcheck alone
-    does not guarantee the database is ready to serve, so every entrypoint waits
-    here first.
-
-    Raises:
-        RuntimeError: if the database is still unreachable after ``timeout_s``.
-    """
+    """Block until the configured database accepts an ORM session."""
     cfg = get_config().db
     deadline = time.monotonic() + timeout_s
     last_error: Exception | None = None
@@ -194,11 +54,14 @@ def wait_for_database(timeout_s: float = 120.0, interval_s: float = 1.0) -> None
     while time.monotonic() < deadline:
         attempt += 1
         try:
-            with psycopg.connect(cfg.dsn, connect_timeout=5) as conn:
-                conn.execute("SELECT 1")
+            with session_scope() as session:
+                # Opening an ORM session/connection is enough to verify that
+                # PostgreSQL accepts connections. Schema queries belong to
+                # apply_schema(), which runs immediately after this probe.
+                session.connection()
             log.info("database reachable after %d attempt(s)", attempt)
             return
-        except Exception as exc:  # noqa: BLE001 - any driver error means "not ready"
+        except Exception as exc:  # noqa: BLE001
             last_error = exc
             time.sleep(interval_s)
     raise RuntimeError(
@@ -206,237 +69,96 @@ def wait_for_database(timeout_s: float = 120.0, interval_s: float = 1.0) -> None
     )
 
 
-#: Bumped whenever ``schema.sql`` changes in a way that needs re-applying.
-SCHEMA_VERSION = 33
-
-#: How long a DDL statement waits for a lock before giving up. Short on purpose:
-#: DDL queues ahead of ordinary queries in Postgres, so a schema apply that
-#: blocks behind a long ingest would stall every subsequent reader too.
-SCHEMA_LOCK_TIMEOUT_MS = 5000
-SCHEMA_RETRIES = 5
-
-
 def recorded_schema_version() -> int | None:
-    """The version the database has been migrated to, or None if unknowable."""
+    """Return the recorded schema version, or ``None`` before bootstrap."""
+    Meta = models().Meta
     try:
-        with psycopg.connect(get_config().db.dsn, connect_timeout=5) as conn:
-            row = conn.execute(
-                "SELECT value FROM meta WHERE key = 'schema_version'"
-            ).fetchone()
-    except psycopg.errors.UndefinedTable:
+        with session_scope() as session:
+            row = session.query(Meta).filter_by(key="schema_version").one_or_none()
+            value = row.value if row is not None else None
+        return int(value) if value is not None else None
+    except Exception:  # noqa: BLE001
         return None
-    except Exception:  # noqa: BLE001 - treat any probe failure as "unknown"
-        return None
-    return int(row[0]) if row else None
 
 
 def schema_drift() -> int:
-    """How many versions the database is *ahead* of this process. 0 if not.
-
-    Non-zero means this container is running older code than the database was
-    migrated to, which is the state a partial rebuild leaves behind: one
-    service applies the new DDL and the others keep running the old SQL against
-    it. That fails in the least helpful way available -- a migration that drops
-    a constraint makes every `ON CONFLICT` naming it raise, so an entire run
-    fails one repository at a time with a Postgres error nobody reads as
-    "rebuild your containers".
-
-    It cannot be inferred from `schema_is_current`, which answers "may I skip
-    the DDL": ahead is skippable, and therefore silent.
-    """
+    """Return how many versions the database is ahead of this process."""
     recorded = recorded_schema_version()
-    if recorded is None:
-        return 0
-    return max(0, recorded - SCHEMA_VERSION)
+    return max(0, recorded - SCHEMA_VERSION) if recorded is not None else 0
 
 
 def schema_is_current() -> bool:
-    """True if the schema has already been applied at the current version.
-
-    Read-only and cheap, so it can gate the DDL on every service boot. Returns
-    False when the ``meta`` table does not exist yet, which is the first-run case.
-    """
+    """Return whether this process's schema version is already recorded."""
     recorded = recorded_schema_version()
     return recorded is not None and recorded >= SCHEMA_VERSION
 
 
 def apply_schema(force: bool = False) -> None:
-    """Create every table and index if it does not already exist.
-
-    ``schema.sql`` is idempotent, so re-running it is harmless -- but not free:
-    the DDL takes locks that can deadlock against a running ingest, and because
-    Postgres queues DDL ahead of ordinary queries, a blocked schema apply stalls
-    readers behind it. Two mitigations:
-
-    * A cheap read of ``meta.schema_version`` short-circuits the whole thing on
-      every boot after the first, so the common case takes no DDL locks at all.
-    * When the DDL does run, ``lock_timeout`` makes it fail fast rather than
-      block, and deadlock or timeout is retried with backoff.
-
-    Args:
-        force: apply the DDL even if the recorded version is already current.
-    """
-    # One probe, answering both questions: is this process behind the database
-    # (which is silent breakage), and may the DDL be skipped (which is the
-    # common case on every boot after the first).
+    """Create the canonical ORM metadata and record its version."""
     recorded = recorded_schema_version()
     if recorded is not None and recorded > SCHEMA_VERSION:
-        # Loud, because the alternative is discovering it from a Postgres error
-        # repeated once per repository.
         log.error(
-            "This process expects schema version %d but the database is at %d. "
-            "It is running older code than the database was migrated to, which "
-            "happens when only some services were rebuilt. Run `make up` to "
-            "rebuild them all.",
-            SCHEMA_VERSION, recorded,
+            "process expects schema version %d but database is at %d; rebuild all services",
+            SCHEMA_VERSION,
+            recorded,
         )
     if not force and recorded is not None and recorded >= SCHEMA_VERSION:
-        log.debug("schema already at version %d; skipping DDL", SCHEMA_VERSION)
         return
 
-    ddl = resources.files("git_synapse.db").joinpath("schema.sql").read_text(encoding="utf-8")
+    from git_synapse.db.schema import metadata
+
     last: Exception | None = None
     for attempt in range(1, SCHEMA_RETRIES + 1):
         try:
-            with psycopg.connect(get_config().db.dsn, connect_timeout=10) as conn:
-                conn.execute(f"SET lock_timeout = '{SCHEMA_LOCK_TIMEOUT_MS}ms'")
-                conn.execute(ddl)
-                conn.commit()
+            metadata.create_all(get_engine(), checkfirst=True)
+            Meta = models().Meta
+            with session_scope() as session:
+                row = session.get(Meta, "schema_version")
+                if row is None:
+                    session.add(Meta(key="schema_version", value=SCHEMA_VERSION))
+                else:
+                    row.value = SCHEMA_VERSION
+                    row.updated_at = datetime.now(UTC)
             log.info("schema applied (version %d)", SCHEMA_VERSION)
             return
-        except (psycopg.errors.DeadlockDetected, psycopg.errors.LockNotAvailable) as exc:
+        except Exception as exc:
+            if not _is_schema_retryable(exc):
+                raise
             last = exc
             wait = min(2**attempt, 15)
             log.warning(
                 "schema apply blocked by concurrent work (attempt %d/%d); retry in %ds",
-                attempt, SCHEMA_RETRIES, wait,
+                attempt,
+                SCHEMA_RETRIES,
+                wait,
             )
             time.sleep(wait)
-        except psycopg.errors.QueryCanceled as exc:
-            last = exc
-            time.sleep(min(2**attempt, 15))
-
     raise RuntimeError(f"could not apply schema after {SCHEMA_RETRIES} attempts: {last}")
 
 
 def get_watermark(key: str) -> str | None:
-    """Read a derived-stage watermark from the ``meta`` table.
-
-    Used by the globally-scoped derived stages -- lagged coupling, impact
-    prediction -- which have no per-repository row to hang a timestamp on. Each
-    records a fingerprint of its inputs, and skips entirely when that
-    fingerprint has not moved.
-    """
-    from sqlalchemy import select
-
-    from git_synapse.db.orm import models, session_scope
-
+    """Read a derived-stage watermark through the ORM."""
+    Meta = models().Meta
     with session_scope() as session:
-        Meta = models().Meta
-        value = session.scalar(select(Meta.value).where(Meta.key == f"watermark:{key}"))
+        row = session.query(Meta).filter_by(key=f"watermark:{key}").one_or_none()
+        value = row.value if row is not None else None
     return str(value) if value is not None else None
 
 
-def set_watermark(key: str, value: str, conn: Any = None) -> None:
-    """Record a derived-stage watermark.
+def set_watermark(key: str, value: str, session: Any = None) -> None:
+    """Write a watermark in the caller's transaction when a session is given."""
+    Meta = models().Meta
 
-    Pass ``conn`` when the watermark describes work in an open transaction. On
-    its own pooled connection it commits independently, so a rebuild that later
-    rolled back left the watermark advanced and the next run skipped it -- the
-    table stayed a generation behind while the system reported it current.
-    """
-    if conn is not None:
-        # Existing bulk/derived transactions use the psycopg connection and
-        # must keep the watermark in that same transaction.  New ORM callers
-        # should omit ``conn`` and use the session path below.
-        conn.execute(
-            """
-            INSERT INTO meta (key, value, updated_at)
-            VALUES (%s, %s::jsonb, now())
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
-            """,
-            (f"watermark:{key}", __import__("json").dumps(value)),
-        )
+    def write(target: Any) -> None:
+        row = target.get(Meta, f"watermark:{key}")
+        if row is None:
+            target.add(Meta(key=f"watermark:{key}", value=value))
+        else:
+            row.value = value
+            row.updated_at = datetime.now(UTC)
+
+    if session is not None:
+        write(session)
     else:
-        from sqlalchemy.dialects.postgresql import insert as pg_insert
-
-        from git_synapse.db.orm import models, session_scope
-
-        with session_scope() as session:
-            Meta = models().Meta
-            statement = pg_insert(Meta).values(key=f"watermark:{key}", value=value)
-            session.execute(statement.on_conflict_do_update(
-                index_elements=[Meta.key],
-                set_={"value": statement.excluded.value},
-            ))
-
-
-def copy_rows(
-    table: str,
-    columns: Sequence[str],
-    rows: Iterable[Sequence[Any]],
-    conn: psycopg.Connection | None = None,
-) -> int:
-    """Bulk-load rows with COPY, the fastest ingest path psycopg offers.
-
-    Args:
-        table: destination table name.
-        columns: column names, matching the order of values in each row.
-        rows: an iterable of row tuples. Consumed lazily, so a generator
-            streaming millions of rows never has to be materialised.
-        conn: reuse an existing connection/transaction; a new one is checked out
-            when omitted.
-
-    Returns:
-        Number of rows written.
-    """
-
-    def _run(c: psycopg.Connection) -> int:
-        stmt = sql.SQL("COPY {} ({}) FROM STDIN").format(
-            sql.Identifier(table),
-            sql.SQL(", ").join(sql.Identifier(col) for col in columns),
-        )
-        written = 0
-        with c.cursor() as cur, cur.copy(stmt) as copy:
-            for row in rows:
-                copy.write_row(row)
-                written += 1
-        return written
-
-    if conn is not None:
-        return _run(conn)
-    with connection() as own:
-        return _run(own)
-
-
-def copy_into_temp(
-    conn: psycopg.Connection,
-    temp_table: str,
-    column_defs: Sequence[tuple[str, str]],
-    rows: Iterable[Sequence[Any]],
-) -> int:
-    """Create an unlogged temp table and COPY rows into it.
-
-    This is the staging half of the standard "COPY then MERGE" pattern: bulk
-    load into a scratch table, then a single set-based INSERT ... ON CONFLICT
-    merges it into the real table. Far faster than row-by-row upserts, and it
-    keeps the merge atomic.
-
-    Args:
-        conn: an open connection; the temp table lives for its session.
-        temp_table: name for the scratch table.
-        column_defs: ``(name, sql_type)`` pairs.
-        rows: row tuples to load.
-
-    Returns:
-        Number of rows staged.
-    """
-    cols_ddl = sql.SQL(", ").join(
-        sql.SQL("{} {}").format(sql.Identifier(name), sql.SQL(typ)) for name, typ in column_defs
-    )
-    conn.execute(
-        sql.SQL("CREATE TEMP TABLE {} ({}) ON COMMIT DROP").format(
-            sql.Identifier(temp_table), cols_ddl
-        )
-    )
-    return copy_rows(temp_table, [name for name, _ in column_defs], rows, conn=conn)
+        with session_scope() as target:
+            write(target)

@@ -12,13 +12,12 @@ def test_stage_versions_propagate_staleness():
 def test_derived_stages_rebuild_once_in_dependency_order(scratch_db, monkeypatch):
     from git_synapse.analysis import derived
     from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
     calls: list[str] = []
     with connection() as conn:
-        conn.execute(
-            "INSERT INTO repo (owner, name, full_name, pair_count) "
-            "VALUES ('test', 'derived', 'test/derived', 1)"
-        )
+        conn.query(models().Repo).filter_by(full_name="test/derived").delete(synchronize_session=False)
+        conn.add(models().Repo(owner="test", name="derived", full_name="test/derived", pair_count=1))
     monkeypatch.setattr(derived.aggregate, "rebuild_repo",
                         lambda repo_id, conn: calls.append("aggregate"))
     monkeypatch.setattr(derived.score, "score_all",
@@ -37,7 +36,7 @@ def test_derived_stages_rebuild_once_in_dependency_order(scratch_db, monkeypatch
                         lambda **kwargs: calls.append("mining"))
 
     with connection() as conn:
-        conn.execute("DELETE FROM meta WHERE key LIKE 'watermark:derived:%'")
+        conn.query(models().Meta).filter(models().Meta.key.like("watermark:derived:%")).delete(synchronize_session=False)
         first = derived.ensure_current(conn)
     ordered = [name for name in calls if name != "aggregate"]
     expected = ["score", "depbump", "declared", "modules", "predict", "mining"]
@@ -45,7 +44,7 @@ def test_derived_stages_rebuild_once_in_dependency_order(scratch_db, monkeypatch
     assert positions == sorted(positions)
     calls.clear()
     with connection() as conn:
-        conn.execute("DELETE FROM meta WHERE key LIKE 'watermark:derived:%'")
+        conn.query(models().Meta).filter(models().Meta.key.like("watermark:derived:%")).delete(synchronize_session=False)
     isolated = derived.ensure_current()
     calls.clear()
     second = derived.ensure_current()

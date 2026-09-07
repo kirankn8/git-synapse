@@ -19,10 +19,11 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 import numpy as np
-import psycopg
+from sqlalchemy.orm import aliased
 
 from git_synapse.config import get_config
-from git_synapse.db.engine import connection, copy_rows
+from git_synapse.db.engine import connection
+from git_synapse.db.orm import models
 from git_synapse.stats.contingency import Contingency
 from git_synapse.stats.registry import ALL_KEYS, BY_KEY
 
@@ -43,10 +44,10 @@ class ScoreStats:
     duration_s: float = 0.0
 
 
-def score_repo(repo_id: int, conn: psycopg.Connection | None = None) -> ScoreStats:
+def score_repo(repo_id: int, conn: object | None = None) -> ScoreStats:
     """Recompute and persist every measure for one repository's pairs."""
 
-    def _run(c: psycopg.Connection) -> ScoreStats:
+    def _run(c: object) -> ScoreStats:
         started = time.monotonic()
         stats = ScoreStats(repo_id=repo_id)
         stats.file_pairs = _score_level(c, repo_id, level="file")
@@ -77,26 +78,31 @@ def _level_sql(level: str) -> tuple[str, str, str, str, str]:
     raise ValueError(f"unknown level {level!r}; expected 'file' or 'dir'")
 
 
-def _score_level(conn: psycopg.Connection, repo_id: int, level: str) -> int:
+def _score_level(conn: object, repo_id: int, level: str) -> int:
     """Score every pair at one granularity level, batching through numpy."""
-    _pair_table, metric_table, _entity_table, col_a, col_b = _level_sql(level)
+    _pair_table, _metric_table, _entity_table, col_a, col_b = _level_sql(level)
 
-    population = conn.execute(
-        "SELECT pair_population FROM repo WHERE id = %s", (repo_id,)
-    ).fetchone()
-    n_total = int(population[0]) if population and population[0] else 0
+    Repo = models().Repo
+    population = conn.get(Repo, repo_id)
+    n_total = int(population.pair_population or 0) if population else 0
     if n_total <= 0:
         log.debug("repo %s has no pair-eligible commits; nothing to score", repo_id)
-        conn.execute(f"DELETE FROM {metric_table} WHERE repo_id = %s", (repo_id,))
+        conn.query(getattr(models(), "FilePairMetric" if level == "file" else "DirPairMetric")).filter_by(
+            repo_id=repo_id
+        ).delete(synchronize_session=False)
         return 0
 
-    conn.execute(f"DELETE FROM {metric_table} WHERE repo_id = %s", (repo_id,))
+    Metric = getattr(models(), "FilePairMetric" if level == "file" else "DirPairMetric")
+    conn.query(Metric).filter_by(repo_id=repo_id).delete(synchronize_session=False)
 
     columns = ["repo_id", col_a, col_b, *_CELL_COLUMNS, *ALL_KEYS]
     written = 0
     for batch in _iter_pair_batches(conn, repo_id, level, n_total):
         rows = _score_batch(repo_id, batch)
-        written += copy_rows(metric_table, columns, rows, conn=conn)
+        mappings = [dict(zip(columns, row, strict=True)) for row in rows]
+        if mappings:
+            conn.bulk_insert_mappings(Metric, mappings)
+        written += len(mappings)
 
     return written
 
@@ -114,44 +120,41 @@ class _Batch:
 
 
 def _iter_pair_batches(
-    conn: psycopg.Connection, repo_id: int, level: str, n_total: int
+    conn: object, repo_id: int, level: str, n_total: int
 ) -> Iterator[_Batch]:
     """Stream pairs joined to their marginals, in fixed-size batches.
 
     A named (server-side) cursor is used so a repository with tens of millions
     of pairs never materialises its full result set in the client.
     """
-    pair_table, _, entity_table, col_a, col_b = _level_sql(level)
+    _pair_table, _, _entity_table, col_a, col_b = _level_sql(level)
     batch_size = max(get_config().analysis.score_batch_size, 1000)
-
-    sql = f"""
-        SELECT p.{col_a}, p.{col_b}, p.n_ab, ea.pair_change_count, eb.pair_change_count
-        FROM {pair_table} p
-        JOIN {entity_table} ea ON ea.id = p.{col_a}
-        JOIN {entity_table} eb ON eb.id = p.{col_b}
-        WHERE p.repo_id = %s
-    """
-
-    with conn.cursor(name=f"score_{level}_{repo_id}") as cur:
-        cur.itersize = batch_size
-        cur.execute(sql, (repo_id,))
-        while True:
-            rows = cur.fetchmany(batch_size)
-            if not rows:
-                break
-            arr = np.array(rows, dtype=np.int64)
-            yield _Batch(
-                a_ids=arr[:, 0],
-                b_ids=arr[:, 1],
-                n_ab=arr[:, 2],
-                n_a=arr[:, 3],
-                n_b=arr[:, 4],
-                n_total=n_total,
-            )
+    Pair = getattr(models(), "FilePair" if level == "file" else "DirPair")
+    Entity = getattr(models(), "File" if level == "file" else "Directory")
+    EntityA, EntityB = aliased(Entity), aliased(Entity)
+    rows = conn.query(
+        getattr(Pair, col_a), getattr(Pair, col_b), Pair.n_ab,
+        EntityA.pair_change_count.label("n_a"), EntityB.pair_change_count.label("n_b")
+    ).join(EntityA, EntityA.id == getattr(Pair, col_a)).join(
+        EntityB, EntityB.id == getattr(Pair, col_b)
+    ).filter(Pair.repo_id == repo_id).yield_per(batch_size)
+    chunk: list[tuple] = []
+    for row in rows:
+        chunk.append(row)
+        if len(chunk) < batch_size:
+            continue
+        arr = np.array(chunk, dtype=np.int64)
+        yield _Batch(a_ids=arr[:, 0], b_ids=arr[:, 1], n_ab=arr[:, 2],
+                     n_a=arr[:, 3], n_b=arr[:, 4], n_total=n_total)
+        chunk = []
+    if chunk:
+        arr = np.array(chunk, dtype=np.int64)
+        yield _Batch(a_ids=arr[:, 0], b_ids=arr[:, 1], n_ab=arr[:, 2],
+                     n_a=arr[:, 3], n_b=arr[:, 4], n_total=n_total)
 
 
 def _score_batch(repo_id: int, batch: _Batch) -> list[tuple]:
-    """Evaluate every registered measure over a batch and build COPY rows.
+    """Evaluate every registered measure over a batch and build ORM rows.
 
     The cells written are the ones the measures were computed from, not the raw
     aggregates. ``Contingency.from_counts`` clamps input to the feasible region
@@ -183,13 +186,13 @@ def _score_batch(repo_id: int, batch: _Batch) -> list[tuple]:
             "feasible table before scoring; an aggregate is likely stale",
             repo_id, adjusted)
 
-    # Transpose column-wise arrays into row tuples for COPY. zip over the
+    # Transpose column-wise arrays into row tuples. zip over the
     # arrays is materially faster than indexing each array per row.
     return [
         (repo_id, int(a), int(b), int(ab), int(na), int(nb), batch.n_total, *values)
         # strict: zip stops at the shortest input, so a measure returning
         # fewer values than there are pairs would silently drop rows from the
-        # COPY -- pairs missing from the metric table, with nothing raised.
+        # metric table, with nothing raised.
         for a, b, ab, na, nb, values in zip(
             batch.a_ids,
             batch.b_ids,
@@ -203,12 +206,13 @@ def _score_batch(repo_id: int, batch: _Batch) -> list[tuple]:
     ]
 
 
-def score_all(conn: psycopg.Connection | None = None) -> list[ScoreStats]:
+def score_all(conn: object | None = None) -> list[ScoreStats]:
     """Score every enabled repository. Used by the full-rebuild command."""
 
-    def _run(c: psycopg.Connection) -> list[ScoreStats]:
-        rows = c.execute("SELECT id FROM repo WHERE is_enabled ORDER BY id").fetchall()
-        return [score_repo(int(r[0]), c) for r in rows]
+    def _run(c: object) -> list[ScoreStats]:
+        Repo = models().Repo
+        rows = c.query(Repo).filter_by(is_enabled=True).order_by(Repo.id).all()
+        return [score_repo(int(repo.id), c) for repo in rows]
 
     if conn is not None:
         return _run(conn)

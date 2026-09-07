@@ -17,13 +17,11 @@ import json
 import logging
 import os
 import queue
+import statistics
 import threading
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
-
-from sqlalchemy import Numeric, cast, delete, desc, func, literal, select
-from sqlalchemy.dialects.postgresql import INTERVAL
 
 from git_synapse.db.orm import models, session_scope
 
@@ -208,11 +206,12 @@ def prune() -> int:
     with session_scope() as session:
         CallLog = models().CallLog
         cutoff = datetime.now(UTC) - timedelta(days=KEEP_DAYS)
-        oldest_kept = select((func.max(CallLog.id) - KEEP_ROWS).label("oldest")).scalar_subquery()
-        result = session.execute(delete(CallLog).where(
-            (CallLog.at < cutoff) | (CallLog.id <= oldest_kept),
-        ))
-        return int(result.rowcount or 0)
+        rows = session.query(CallLog).order_by(CallLog.id.desc()).all()
+        keep_ids = {row.id for row in rows[:KEEP_ROWS]}
+        doomed = [row for row in rows if row.at < cutoff or row.id not in keep_ids]
+        for row in doomed:
+            session.delete(row)
+        return len(doomed)
 
 
 # --------------------------------------------------------------------- reads
@@ -232,17 +231,16 @@ def summary(hours: int = 24, surface: str | None = None) -> dict:
         conditions = [CallLog.at > datetime.now(UTC) - timedelta(hours=hours)]
         if surface:
             conditions.append(CallLog.surface == surface)
-        row = session.execute(select(
-            func.count().label("calls"),
-            func.count().filter(CallLog.surface == "mcp").label("mcp_calls"),
-            func.count().filter(CallLog.surface == "http").label("http_calls"),
-            func.count().filter(CallLog.status == "error").label("errors"),
-            func.count(func.distinct(CallLog.client)).label("clients"),
-            func.round(cast(func.percentile_cont(0.5).within_group(CallLog.duration_ms), Numeric), 1).label("p50_ms"),
-            func.round(cast(func.percentile_cont(0.95).within_group(CallLog.duration_ms), Numeric), 1).label("p95_ms"),
-            func.max(CallLog.at).label("last_call"),
-        ).where(*conditions)).mappings().one()
-    return {**dict(row), "hours": hours, "surface": surface, "dropped": dropped()}
+        rows = session.query(CallLog).filter(*conditions).all()
+    durations = sorted(row.duration_ms for row in rows if row.duration_ms is not None)
+    return {"calls": len(rows), "mcp_calls": sum(row.surface == "mcp" for row in rows),
+            "http_calls": sum(row.surface == "http" for row in rows),
+            "errors": sum(row.status == "error" for row in rows),
+            "clients": len({row.client for row in rows if row.client is not None}),
+            "p50_ms": round(statistics.quantiles(durations, n=100, method="inclusive")[49], 1) if len(durations) > 1 else (durations[0] if durations else None),
+            "p95_ms": round(statistics.quantiles(durations, n=100, method="inclusive")[94], 1) if len(durations) > 1 else (durations[0] if durations else None),
+            "last_call": max((row.at for row in rows), default=None),
+            "hours": hours, "surface": surface, "dropped": dropped()}
 
 
 def by_name(surface: str | None = None, hours: int = 24, limit: int = 50,
@@ -255,16 +253,22 @@ def by_name(surface: str | None = None, hours: int = 24, limit: int = 50,
             conditions.append(CallLog.surface == surface)
         if status:
             conditions.append(CallLog.status == status)
-        rows = [dict(row) for row in session.execute(select(
-            CallLog.surface, CallLog.name,
-            func.count().label("calls"),
-            func.count().filter(CallLog.status == "error").label("errors"),
-            func.round(cast(func.avg(CallLog.duration_ms), Numeric), 1).label("avg_ms"),
-            func.max(CallLog.duration_ms).label("max_ms"),
-            func.round(cast(func.avg(CallLog.result_rows), Numeric), 1).label("avg_rows"),
-            func.max(CallLog.at).label("last_call"),
-        ).where(*conditions).group_by(CallLog.surface, CallLog.name)
-          .order_by(desc("calls")).limit(limit)).mappings()]
+        calls = session.query(CallLog).filter(*conditions).all()
+        grouped: dict[tuple[str, str], list[Any]] = {}
+        for call in calls:
+            grouped.setdefault((call.surface, call.name), []).append(call)
+        rows = []
+        for (call_surface, call_name), group in grouped.items():
+            durations = [row.duration_ms for row in group if row.duration_ms is not None]
+            result_rows = [row.result_rows for row in group if row.result_rows is not None]
+            rows.append({"surface": call_surface, "name": call_name, "calls": len(group),
+                         "errors": sum(row.status == "error" for row in group),
+                         "avg_ms": round(sum(durations) / len(durations), 1) if durations else None,
+                         "max_ms": max(durations, default=None),
+                         "avg_rows": round(sum(result_rows) / len(result_rows), 1) if result_rows else None,
+                         "last_call": max((row.at for row in group), default=None)})
+        rows.sort(key=lambda row: row["calls"], reverse=True)
+        rows = rows[:limit]
     if surface == "http" or status:
         return rows
 
@@ -290,19 +294,18 @@ def timeline(hours: int = 24) -> list[dict]:
     with session_scope() as session:
         CallLog = models().CallLog
         count = max(1, min(hours, 168))
-        buckets = select(func.generate_series(
-            func.date_trunc("hour", func.now()) - cast(literal(f"{count - 1} hours"), INTERVAL),
-            func.date_trunc("hour", func.now()), cast(literal("1 hour"), INTERVAL),
-        ).label("hour")).subquery("buckets")
-        rows = session.execute(select(
-            buckets.c.hour,
-            func.count(CallLog.id).label("calls"),
-            func.count(CallLog.id).filter(CallLog.surface == "mcp").label("mcp"),
-            func.count(CallLog.id).filter(CallLog.surface == "http").label("http"),
-            func.count(CallLog.id).filter(CallLog.status == "error").label("errors"),
-        ).outerjoin(CallLog, func.date_trunc("hour", CallLog.at) == buckets.c.hour)
-          .group_by(buckets.c.hour).order_by(buckets.c.hour)).mappings().all()
-        return [dict(row) for row in rows]
+        now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        start = now - timedelta(hours=count - 1)
+        rows = session.query(CallLog).filter(CallLog.at >= start).all()
+        result = []
+        for offset in range(count):
+            bucket = start + timedelta(hours=offset)
+            group = [row for row in rows if row.at.replace(minute=0, second=0, microsecond=0) == bucket]
+            result.append({"hour": bucket, "calls": len(group),
+                           "mcp": sum(row.surface == "mcp" for row in group),
+                           "http": sum(row.surface == "http" for row in group),
+                           "errors": sum(row.status == "error" for row in group)})
+        return result
 
 
 def recent(
@@ -322,11 +325,12 @@ def recent(
                               (CallLog.status, status)):
             if value:
                 conditions.append(column == value)
-        return [dict(row) for row in session.execute(select(
-            CallLog.id, CallLog.at, CallLog.surface, CallLog.name, CallLog.method,
-            CallLog.status, CallLog.duration_ms, CallLog.result_rows,
-            CallLog.result_bytes, CallLog.error, CallLog.client,
-        ).where(*conditions).order_by(CallLog.at.desc(), CallLog.id.desc()).limit(limit)).mappings()]
+        rows = session.query(CallLog).filter(*conditions).order_by(
+            CallLog.at.desc(), CallLog.id.desc()).limit(limit).all()
+        return [{"id": row.id, "at": row.at, "surface": row.surface, "name": row.name,
+                 "method": row.method, "status": row.status, "duration_ms": row.duration_ms,
+                 "result_rows": row.result_rows, "result_bytes": row.result_bytes,
+                 "error": row.error, "client": row.client} for row in rows]
 
 
 def detail(call_id: int) -> dict | None:

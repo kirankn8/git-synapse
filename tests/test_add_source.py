@@ -274,7 +274,7 @@ def test_a_source_on_another_host_is_a_different_source(db, fake, clean):
 
 def test_a_token_given_while_adding_is_stored_encrypted(db, fake, clean, monkeypatch):
     from git_synapse import vault
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
     monkeypatch.setenv(vault.ENV_KEY, "a-passphrase")
     fake(_Fake())
@@ -282,7 +282,9 @@ def test_a_token_given_while_adding_is_stored_encrypted(db, fake, clean, monkeyp
                                 token="ghp_supersecrettokenvalue")
     assert row["has_credential"] is True
     assert "supersecret" not in str(row), "the plaintext must not come back out"
-    raw = query_one("SELECT credential FROM account WHERE id = %s", (row["id"],))
+    with session_scope() as session:
+        stored = session.get(models().Account, row["id"])
+        raw = {"credential": stored.credential}
     assert "supersecret" not in raw["credential"]
     assert accounts.credential_for(raw) == "ghp_supersecrettokenvalue"
 

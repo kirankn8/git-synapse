@@ -107,16 +107,17 @@ def test_flushing_an_empty_queue_writes_nothing(db):
 
 def test_the_log_is_pruned_by_age(db):
     """It grows with traffic, while everything else here grows with history."""
-    from git_synapse.db.engine import execute, query_one
+    from datetime import UTC, datetime, timedelta
 
-    execute(
-        "INSERT INTO call_log (at, surface, name, status, duration_ms)"
-        " VALUES (now() - make_interval(days => %s), 'http', 'ancient', 'ok', 1)",
-        (calls.KEEP_DAYS + 5,),
-    )
-    assert query_one("SELECT count(*) AS n FROM call_log WHERE name='ancient'")["n"] == 1
+    from git_synapse.db.orm import models, session_scope
+    with session_scope() as session:
+        session.add(models().CallLog(at=datetime.now(UTC) - timedelta(days=calls.KEEP_DAYS + 5),
+                                     surface="http", name="ancient", status="ok", duration_ms=1))
+    with session_scope() as session:
+        assert session.query(models().CallLog).filter_by(name="ancient").count() == 1
     calls.prune()
-    assert query_one("SELECT count(*) AS n FROM call_log WHERE name='ancient'")["n"] == 0
+    with session_scope() as session:
+        assert session.query(models().CallLog).filter_by(name="ancient").count() == 0
 
 
 def test_filters_narrow_the_list(db, settled_calls):
@@ -265,12 +266,12 @@ def test_the_summary_narrows_with_the_surface_the_reader_chose(db, settled_calls
 
 def test_the_window_reaches_the_call_list(db):
     """The window chips were setting a parameter the list never read."""
-    from git_synapse.db.engine import execute
+    from datetime import UTC, datetime, timedelta
 
-    execute(
-        "INSERT INTO call_log (at, surface, name, status, duration_ms)"
-        " VALUES (now() - interval '5 hours', 'http', '/api/old', 'ok', 1)"
-    )
+    from git_synapse.db.orm import models, session_scope
+    with session_scope() as session:
+        session.add(models().CallLog(at=datetime.now(UTC) - timedelta(hours=5),
+                                     surface="http", name="/api/old", status="ok", duration_ms=1))
     assert not [r for r in calls.recent(hours=1, limit=500) if r["name"] == "/api/old"]
     assert [r for r in calls.recent(hours=24, limit=500) if r["name"] == "/api/old"]
 
@@ -278,9 +279,9 @@ def test_the_window_reaches_the_call_list(db):
 def test_an_unpublished_inventory_is_empty_rather_than_an_error(db):
     """The API reads what the MCP container published. Before it has started,
     or if it never does, the activity page must still render."""
-    from git_synapse.db.engine import execute
-
-    execute("DELETE FROM meta WHERE key = 'watermark:mcp_tools'")
+    from git_synapse.db.orm import models, session_scope
+    with session_scope() as session:
+        session.query(models().Meta).filter_by(key="watermark:mcp_tools").delete(synchronize_session=False)
     assert calls.known_mcp_tools() == []
 
 

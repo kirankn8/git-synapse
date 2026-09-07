@@ -12,9 +12,8 @@ import dataclasses
 import logging
 import re
 import time
+from datetime import UTC, datetime
 from typing import Any
-
-from sqlalchemy import delete, func, select, update
 
 from git_synapse.config import GitHubConfig, get_config
 from git_synapse.db.orm import models, session_scope
@@ -49,6 +48,25 @@ _WRITABLE = (
 
 class AccountError(ValueError):
     """A rejected account definition. Carries a message fit to show a user."""
+
+
+_PUBLIC_FIELDS = (
+    "id", "login", "kind", "provider", "host", "api_url", "enabled",
+    "credential_hint", "include_private", "include_forks", "include_archived",
+    "only_repos", "skip_repos", "last_discovered_at", "last_discover_error",
+    "repo_count", "created_at", "updated_at",
+)
+
+
+def _account_dict(account: Any, session: Any) -> dict:
+    """Serialize one mapped account without exposing its sealed credential."""
+    Repo = models().Repo
+    values = {name: getattr(account, name) for name in _PUBLIC_FIELDS}
+    values["has_credential"] = account.credential is not None
+    values["live_repo_count"] = session.query(Repo).filter_by(
+        account_id=account.id, is_enabled=True,
+    ).count()
+    return values
 
 
 def validate_login(login: str) -> str:
@@ -90,39 +108,18 @@ def _names(values: Any) -> list[str]:
 def list_accounts(enabled_only: bool = False) -> list[dict]:
     """Every configured account, newest last, with its live repository count."""
     with session_scope() as session:
-        Account, Repo = models().Account, models().Repo
-        live_count = select(func.count()).where(
-            Repo.account_id == Account.id, Repo.is_enabled.is_(True),
-        ).correlate(Account).scalar_subquery()
-        conditions = [Account.enabled.is_(True)] if enabled_only else []
-        return [dict(row) for row in session.execute(select(
-            Account.id, Account.login, Account.kind, Account.provider, Account.host,
-            Account.api_url, Account.enabled, Account.credential_hint,
-            Account.credential.is_not(None).label("has_credential"),
-            Account.include_private, Account.include_forks, Account.include_archived,
-            Account.only_repos, Account.skip_repos, Account.last_discovered_at,
-            Account.last_discover_error, Account.repo_count, Account.created_at,
-            Account.updated_at, live_count.label("live_repo_count"),
-        ).where(*conditions).order_by(Account.login)).mappings()]
+        Account = models().Account
+        query = session.query(Account)
+        if enabled_only:
+            query = query.filter_by(enabled=True)
+        return [_account_dict(row, session) for row in query.order_by(Account.login).all()]
 
 
 def get_account(account_id: int) -> dict | None:
     """One account by id, or None."""
     with session_scope() as session:
-        Account, Repo = models().Account, models().Repo
-        live_count = select(func.count()).where(
-            Repo.account_id == Account.id, Repo.is_enabled.is_(True),
-        ).correlate(Account).scalar_subquery()
-        row = session.execute(select(
-            Account.id, Account.login, Account.kind, Account.provider, Account.host,
-            Account.api_url, Account.enabled, Account.credential_hint,
-            Account.credential.is_not(None).label("has_credential"),
-            Account.include_private, Account.include_forks, Account.include_archived,
-            Account.only_repos, Account.skip_repos, Account.last_discovered_at,
-            Account.last_discover_error, Account.repo_count, Account.created_at,
-            Account.updated_at, live_count.label("live_repo_count"),
-        ).where(Account.id == account_id)).mappings().first()
-        return dict(row) if row else None
+        row = session.get(models().Account, account_id)
+        return _account_dict(row, session) if row else None
 
 
 def find_by_login(login: str, host: str | None = None) -> dict | None:
@@ -132,23 +129,14 @@ def find_by_login(login: str, host: str | None = None) -> dict | None:
     one: an internal GitLab group commonly carries the company's GitHub org
     name, and they are two different places.
     """
-    Account = models().Account
-    if host is None:
-        conditions = [func.lower(Account.login) == login.lower()]
-    else:
-        conditions = [func.lower(Account.login) == login.lower(),
-                      func.lower(Account.host) == host.lower()]
     with session_scope() as session:
-        row = session.execute(select(
-            Account.id, Account.login, Account.kind, Account.provider, Account.host,
-            Account.api_url, Account.enabled, Account.credential_hint,
-            Account.credential.is_not(None).label("has_credential"),
-            Account.include_private, Account.include_forks, Account.include_archived,
-            Account.only_repos, Account.skip_repos, Account.last_discovered_at,
-            Account.last_discover_error, Account.repo_count, Account.created_at,
-            Account.updated_at,
-        ).where(*conditions)).mappings().first()
-        return dict(row) if row else None
+        Account = models().Account
+        for row in session.query(Account).all():
+            if row.login.lower() == login.lower() and (
+                host is None or row.host.lower() == host.lower()
+            ):
+                return _account_dict(row, session)
+        return None
 
 
 def add_account(login: str, kind: str = "org", **fields: Any) -> dict:
@@ -212,10 +200,13 @@ def update_account(account_id: int, **fields: Any) -> dict:
 
     with session_scope() as session:
         Account = models().Account
-        result = session.execute(update(Account).where(Account.id == account_id).values(
-            **sets, updated_at=func.now(),
-        ))
-    if not result.rowcount:
+        account = session.get(Account, account_id)
+        if account is None:
+            raise AccountError(f"account {account_id} not found")
+        for key, value in sets.items():
+            setattr(account, key, value)
+        account.updated_at = datetime.now(UTC)
+    if account is None:
         raise AccountError(f"account {account_id} not found")
     return get_account(account_id)  # type: ignore[return-value]
 
@@ -228,11 +219,13 @@ def remove_account(account_id: int) -> bool:
     rather than cascades. Repositories simply stop being refreshed.
     """
     with session_scope() as session:
-        Account = models().Account
-        result = session.execute(delete(Account).where(Account.id == account_id))
-    if result.rowcount:
+        row = session.get(models().Account, account_id)
+        if row is None:
+            return False
+        session.delete(row)
+    if row is not None:
         log.info("account removed: %d", account_id)
-    return bool(result.rowcount)
+    return row is not None
 
 
 def record_discovery(account_id: int, repo_count: int | None = None,
@@ -244,16 +237,15 @@ def record_discovery(account_id: int, repo_count: int | None = None,
     repositories the source has -- and they certainly did not disappear.
     Writing 0 there had `google` reporting no repositories while owning 122.
     """
-    if repo_count is None:
-        values = {"last_discovered_at": func.now(), "last_discover_error": error}
-    else:
-        values = {"last_discovered_at": func.now(), "repo_count": repo_count,
-                  "last_discover_error": error}
     with session_scope() as session:
-        Account = models().Account
-        session.execute(update(Account).where(Account.id == account_id).values(
-            **values, updated_at=func.now(),
-        ))
+        row = session.get(models().Account, account_id)
+        if row is None:
+            return
+        row.last_discovered_at = datetime.now(UTC)
+        row.last_discover_error = error
+        if repo_count is not None:
+            row.repo_count = repo_count
+        row.updated_at = datetime.now(UTC)
     if repo_count is None:
         return
 
@@ -269,10 +261,11 @@ def refresh_repo_counts() -> None:
     """
     with session_scope() as session:
         Account, Repo = models().Account, models().Repo
-        count = select(func.count(Repo.id)).where(
-            Repo.account_id == Account.id, Repo.is_enabled.is_(True),
-        ).correlate(Account).scalar_subquery()
-        session.execute(update(Account).values(repo_count=count, updated_at=func.now()))
+        for account in session.query(Account).all():
+            account.repo_count = session.query(Repo).filter_by(
+                account_id=account.id, is_enabled=True,
+            ).count()
+            account.updated_at = datetime.now(UTC)
 
 
 def config_for(account: dict) -> GitHubConfig:
@@ -432,13 +425,11 @@ def set_credential(account_id: int, token: str | None) -> dict | None:
     from git_synapse import vault
 
     with session_scope() as session:
-        Account = models().Account
-        values = {
-            "credential": vault.seal(token.strip()) if token else None,
-            "credential_hint": vault.hint(token) if token else None,
-            "updated_at": func.now(),
-        }
-        session.execute(update(Account).where(Account.id == account_id).values(**values))
+        account = session.get(models().Account, account_id)
+        if account is not None:
+            account.credential = vault.seal(token.strip()) if token else None
+            account.credential_hint = vault.hint(token) if token else None
+            account.updated_at = datetime.now(UTC)
     return get_account(account_id)
 
 

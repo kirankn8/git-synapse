@@ -1,42 +1,4 @@
-"""Dependency-bump edges recovered from manifest history.
-
-What this extracts
-------------------
-A Go pseudo-version embeds the upstream commit it was cut from::
-
-    github.com/acme/signing/v3 v3.0.0-20260626221153-5fc63d6f3055
-                                                       ^^^^^^^^^^^^
-
-So a ``go.mod`` diff raising that module is a dated, **directional** statement:
-"this consumer commit consumed that upstream commit". Unlike the co-occurrence
-statistics elsewhere in this package, these rows are ground truth rather than
-inference.
-
-Why they exist here
--------------------
-They *are* the cross-repository graph. That was not always so: they began as a
-labelled set for measuring whether directed lagged statistics ranked real
-propagation, and the answer was that they did not -- AUC 0.80 with 0.63 on
-which way the arrow points, matched by a baseline that ignored coupling
-altogether. The statistics went; the ground truth stayed and became the graph.
-
-One number survives from that work and means something narrower than it used
-to. The gap between the upstream commit and the bump that took it is a real
-propagation delay, arithmetic on two known commit dates. It is not the earlier
-sense of "lag" -- a time bin used to *infer* that two repositories were
-related. Nothing infers a relationship from timing any more.
-
-They are deliberately *not* used to replace the statistics: a manifest only
-describes declared code dependencies, and misses the coupling that matters most
-(Helm charts, docs, configs, tests). See the README for the measured comparison.
-
-Incremental by repository
--------------------------
-Scanning follows the same watermark pattern as aggregation: a repository is
-rescanned only when ``last_ingest_at`` is newer than ``last_depbump_at``. Within
-a repository the full ``go.mod`` history is re-walked, which is cheap, and the
-insert is idempotent, so a rescan cannot duplicate rows.
-"""
+"""Dependency history extraction and declared dependency graph construction."""
 
 from __future__ import annotations
 
@@ -46,207 +8,92 @@ import subprocess
 import time
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-
-import psycopg
+from statistics import median
 
 from git_synapse.analysis import manifests
 from git_synapse.analysis.manifests import bounds, version_key
-from git_synapse.db.engine import connection, copy_rows
+from git_synapse.db.engine import connection
+from git_synapse.db.orm import models
 from git_synapse.ingest.gitops import _base_env, mirror_path_for
 
 log = logging.getLogger(__name__)
-
-#: Go appends a major-version segment to a module path; it is not a repository.
 _MAJOR = re.compile(r"^v\d+$")
+_REPO_PATH_ECOSYSTEMS = frozenset(("go", "actions", "docker", "bazel", "nix"))
+_EXCLUDED_SEGMENTS = ("vendor/", "node_modules/", "testdata/", "third_party/", ".git/", "example/", "examples/", "docs/", "doc/", "website/")
+MAX_MANIFESTS_PER_REPO = 200
 
 
 def repo_ref(dep_name: str) -> tuple[str | None, str]:
-    """Split a dependency reference into ``(owner, name)``.
-
-    Every ecosystem spells the same repository differently --
-    ``github.com/acme/signer``, ``@acme/signer``, ``acme/signer``, ``signer`` --
-    but the last two path segments are the owner and the repository in all of
-    them. The owner is None when the reference carries none, as with a bare
-    Cargo crate or an unscoped npm package.
-    """
     name = (dep_name or "").strip().strip("\"'").rstrip("/").lstrip("@")
     if "://" in name:
         name = name.split("://", 1)[1]
     name = name.split("#", 1)[0].removesuffix(".git")
     parts = [p for p in name.split("/") if p and not _MAJOR.match(p)]
     if not parts:
-        return (None, "")
-    if len(parts) == 1:
-        return (None, parts[0].lower())
-    return (parts[-2].lower(), parts[-1].lower())
+        return None, ""
+    return (None, parts[0].lower()) if len(parts) == 1 else (parts[-2].lower(), parts[-1].lower())
 
 
 def repo_key(dep_name: str) -> str:
-    """Just the repository name, for callers that cannot know the owner."""
     return repo_ref(dep_name)[1]
 
 
-def published_at_head(mirror: Path) -> set[tuple[str, str]]:
-    """Every `(ecosystem, coordinate)` this repository publishes.
-
-    A monorepo publishes many, so this is a set. Both the full coordinate and
-    its last segment are recorded, because a consumer may write either: Maven's
-    pom names `com.google.guava:guava` while the dependency block consuming it
-    writes `guava`.
-
-    The ecosystem travels with the name and is not decoration. `illuminate/events`
-    is a PHP package published by laravel/framework and `events` is an unrelated
-    npm one; without the scope, every npm dependency on `events` became an edge
-    into a PHP repository.
-    """
-    found: set[tuple[str, str]] = set()
-    for path, ecosystem in manifest_paths(mirror):
-        text = _blob_at(mirror, "HEAD", path)
-        for full in manifests.published_names(path, text):
-            found.add((ecosystem, full.lower()))
-            if tail := re.split(r"[:/]", full)[-1]:
-                found.add((ecosystem, tail.lower()))
-    return found
-
-
-#: Ecosystems whose coordinate *is* a repository reference. A Go module path is
-#: host/owner/repo, a GitHub Action is owner/repo, a submodule is a URL -- so
-#: reading a repository out of the name is reading what it says.
-#:
-#: Everywhere else the coordinate names a registry artifact, and matching it
-#: against repository names invents edges: npm's `uuid` became google/uuid, a Go
-#: library, and npm's `bytes` became tokio-rs/bytes, a Rust crate. Those
-#: resolved to no commit only because the versions could never match, which is
-#: luck rather than a guard.
-_REPO_PATH_ECOSYSTEMS = frozenset(("go", "actions", "docker", "bazel", "nix"))
-
-
-def resolve_repo(dep_name: str, by_full_name: dict[tuple[str, str], int],
-                 by_name: dict[str, int],
-                 by_package: dict[tuple[str, str], int] | None = None,
-                 ecosystem: str = "") -> int | None:
-    """The indexed repository a reference names, or None.
-
-    What a repository publishes is checked first, because that is a fact it
-    declared about itself rather than an inference from the strings agreeing.
-
-    The fallback is owner-aware on purpose. Matching on the repository name
-    alone would make ``gitlab.com/otherco/utils`` resolve to an indexed
-    ``acme/utils`` -- an unrelated company's library becoming an edge into this
-    codebase. The name alone is only trusted when the reference genuinely
-    carries no owner.
-    """
-    if by_package and (hit := by_package.get((ecosystem, (dep_name or "").strip().lower()))):
-        return hit
-    if ecosystem and ecosystem not in _REPO_PATH_ECOSYSTEMS:
-        # A registry coordinate that nothing published says it owns. Guessing
-        # from the name is how an npm package becomes a Go repository.
-        return None
-    owner, name = repo_ref(dep_name)
-    if not name:
-        return None
-    if owner is not None:
-        return by_full_name.get((owner, name))
-    return by_name.get(name)
-
-
-#: Path prefixes and segments whose manifests describe third-party or fixture
-#: code rather than this repository's own dependencies.
-#: `docs/` earns its place here: django ships `docs/ref/models/constraints.txt`,
-#: which is prose about database constraints, and reading it as a pip
-#: constraints file invents dependencies out of English.
-_EXCLUDED_SEGMENTS = ("vendor/", "node_modules/", "testdata/", "third_party/",
-                      ".git/", "example/", "examples/", "docs/", "doc/", "website/")
-
-#: Ceiling on manifests read per repository. A monorepo legitimately has dozens;
-#: anything past this is a vendored tree that slipped the filter.
-MAX_MANIFESTS_PER_REPO = 200
-
-
-def _record_packages(conn: psycopg.Connection, repo_id: int, claims: set[tuple[str, str]]) -> None:
-    """Replace what this repository is known to publish."""
-    conn.execute("DELETE FROM repo_package WHERE repo_id = %s", (repo_id,))
-    if claims:
-        with conn.cursor() as cur:
-            cur.executemany(
-                "INSERT INTO repo_package (repo_id, ecosystem, name) VALUES (%s, %s, %s) "
-                "ON CONFLICT DO NOTHING",
-                [(repo_id, eco, name) for eco, name in sorted(claims)])
-
-
-def _repo_lookups(conn: psycopg.Connection) -> tuple[dict[tuple[str, str], int], dict[str, int], dict[str, int]]:
-    """Repositories by (owner, name), by name, and by what they publish.
-
-    A coordinate two repositories both claim is dropped rather than resolved to
-    whichever came first: two projects publishing an artifact called `core` is
-    ordinary, and picking one would invent an edge.
-    """
-    rows = conn.execute("SELECT owner, name, id FROM repo").fetchall()
-    by_full = {(str(o).lower(), str(n).lower()): int(i) for o, n, i in rows}
-    by_name = {str(n).lower(): int(i) for _, n, i in rows}
-
-    claims: dict[tuple[str, str], set[int]] = defaultdict(set)
-    for eco, name, repo_id in conn.execute(
-            "SELECT ecosystem, name, repo_id FROM repo_package").fetchall():
-        claims[(str(eco), str(name).lower())].add(int(repo_id))
-    by_package = {k: next(iter(v)) for k, v in claims.items() if len(v) == 1}
-    return by_full, by_name, by_package
-
-
 def manifest_paths(mirror: Path) -> list[tuple[str, str]]:
-    """Every manifest at HEAD, anywhere in the tree, as ``(path, ecosystem)``.
-
-    Reading only the repository root was a real coverage gap, not a simplifying
-    assumption: monorepos keep their real dependencies in per-module manifests,
-    and a repository with fourteen go.mod files below the root looked like one
-    with no internal dependencies at all.
-    """
-    proc = subprocess.run(
-        ["git", "ls-tree", "-r", "--name-only", "HEAD"],
-        cwd=str(mirror), env=_base_env(), capture_output=True,
-        text=True, errors="replace", timeout=300,
-    )
+    proc = subprocess.run(["git", "ls-tree", "-r", "--name-only", "HEAD"], cwd=str(mirror), env=_base_env(),
+                          capture_output=True, text=True, errors="replace", timeout=300)
     if proc.returncode != 0:
         return []
-
-    found: list[tuple[str, str]] = []
+    excluded = {x.rstrip("/") for x in _EXCLUDED_SEGMENTS}
+    found = []
     for line in proc.stdout.splitlines():
         path = line.strip()
-        if not path:
+        if not path or any(part in excluded for part in path.lower().split("/")[:-1]):
             continue
-        lowered = path.lower()
-        if any(seg in lowered for seg in _EXCLUDED_SEGMENTS):
-            continue
-        eco = manifests.ecosystem_for(path)
-        if eco is None:
-            continue
-        found.append((path, eco.name))
-        if len(found) >= MAX_MANIFESTS_PER_REPO:
-            log.warning("manifest cap reached in %s; ignoring the rest", mirror.name)
-            break
+        ecosystem = manifests.ecosystem_for(path)
+        if ecosystem is not None:
+            found.append((path, ecosystem.name))
+            if len(found) >= MAX_MANIFESTS_PER_REPO:
+                break
     return found
 
 
 def _blob_at(mirror: Path, sha: str, path: str) -> str:
-    """One file as it stood at one commit, or "" if it was not there."""
-    proc = subprocess.run(
-        ["git", "show", f"{sha}:{path}"],
-        cwd=str(mirror), env=_base_env(), capture_output=True,
-        text=True, errors="replace", timeout=120,
-    )
+    proc = subprocess.run(["git", "show", f"{sha}:{path}"], cwd=str(mirror), env=_base_env(),
+                          capture_output=True, text=True, errors="replace", timeout=120)
     return proc.stdout if proc.returncode == 0 else ""
 
 
 def _snapshot(mirror: Path, sha: str, path: str) -> dict[str, manifests.Reference]:
-    """Every reference a manifest declared at one commit, keyed by name."""
     return {r.name: r for r in manifests.references(path, _blob_at(mirror, sha, path))}
+
+
+def published_at_head(mirror: Path) -> set[tuple[str, str]]:
+    found = set()
+    for path, ecosystem in manifest_paths(mirror):
+        for name in manifests.published_names(path, _blob_at(mirror, "HEAD", path)):
+            found.add((ecosystem, name.lower()))
+            tail = re.split(r"[:/]", name)[-1]
+            if tail:
+                found.add((ecosystem, tail.lower()))
+    return found
+
+
+def resolve_repo(dep_name: str, by_full_name: dict[tuple[str, str], int], by_name: dict[str, int],
+                 by_package: dict[tuple[str, str], int] | None = None, ecosystem: str = "") -> int | None:
+    if by_package and (hit := by_package.get((ecosystem, (dep_name or "").strip().lower()))):
+        return hit
+    if ecosystem and ecosystem not in _REPO_PATH_ECOSYSTEMS:
+        return None
+    owner, name = repo_ref(dep_name)
+    if not name:
+        return None
+    return by_full_name.get((owner, name)) if owner is not None else by_name.get(name)
 
 
 @dataclass
 class BumpStats:
-    """Outcome of one bump-extraction pass."""
-
     repos_scanned: int = 0
     edges_found: int = 0
     edges_written: int = 0
@@ -256,8 +103,6 @@ class BumpStats:
 
 @dataclass(slots=True)
 class BumpEdge:
-    """One manifest line raising an internal dependency."""
-
     consumer_sha: str
     dep_name: str
     dep_version: str
@@ -267,526 +112,154 @@ class BumpEdge:
 
 
 def extract_from_mirror(mirror: Path, repo_name: str, manifest: str = "go.mod", ecosystem: str = "go", max_commits: int = 400) -> list[BumpEdge]:
-    """Walk a manifest's history and return every version change it records.
-
-    Compares whole-file snapshots at consecutive commits rather than reading
-    added diff lines. A diff line carries no context -- ``version = "1.2.3"``
-    says nothing about which package it belongs to -- which is why the line
-    reading only ever worked for go.mod and package.json. Parsing the file at
-    each commit that touched it costs one `git show` per revision and works for
-    every format, structured ones included.
-    """
-    proc = subprocess.run(
-        ["git", "log", "--all", "--no-merges", "--format=%H", "--", manifest],
-        cwd=str(mirror), env=_base_env(), capture_output=True,
-        text=True, errors="replace", timeout=900,
-    )
+    proc = subprocess.run(["git", "log", "--all", "--no-merges", "--format=%H", "--", manifest], cwd=str(mirror), env=_base_env(),
+                          capture_output=True, text=True, errors="replace", timeout=900)
     if proc.returncode != 0:
-        log.warning("manifest scan failed for %s: %s", repo_name, proc.stderr[:200])
         return []
-
-    # Keep the newest revisions, then walk them oldest-first so each snapshot
-    # is compared against what preceded it. Slicing after reversing would keep
-    # the oldest history and silently discard recent dependency changes.
     revisions = list(reversed(proc.stdout.split()[:max_commits]))
-    edges: list[BumpEdge] = []
     previous: dict[str, manifests.Reference] = {}
+    edges = []
     for sha in revisions:
         current = _snapshot(mirror, sha, manifest)
         for name, ref in current.items():
-            was = previous.get(name)
-            if was is not None and was.raw == ref.raw:
-                continue                      # unchanged at this commit
+            old = previous.get(name)
+            if old is not None and old.raw == ref.raw:
+                continue
             if repo_key(name) == repo_key(repo_name):
-                continue                      # the module naming itself
-            edges.append(BumpEdge(
-                consumer_sha=sha, dep_name=name, dep_version=ref.raw,
-                dep_sha=ref.sha, manifest=manifest, ecosystem=ecosystem))
+                continue
+            edges.append(BumpEdge(sha, name, ref.raw, ref.sha, manifest, ecosystem))
         previous = current
     return edges
 
 
 def declared_at_head(mirror: Path, repo_name: str, manifest: str = "go.mod", ecosystem: str = "go") -> list[tuple[str, str]]:
-    """Dependencies declared in ``manifest`` at HEAD.
-
-    Present-tense and structural, in contrast to :func:`extract_from_mirror`
-    which reads history. This is the candidate set for impact prediction.
-    """
-    refs = _snapshot(mirror, "HEAD", manifest)
-    return [(r.name, r.raw) for r in refs.values() if repo_key(r.name) != repo_key(repo_name)]
+    return [(ref.name, ref.raw) for ref in _snapshot(mirror, "HEAD", manifest).values() if repo_key(ref.name) != repo_key(repo_name)]
 
 
 def declared_modules_at_head(mirror: Path, repo_name: str, manifest: str) -> list[tuple[str, str, str]]:
-    """Intra-repository module dependencies declared in one manifest.
-
-    Returns ``(consumer_module, dep_module, version)`` for every reference the
-    manifest makes to another module of the *same* repository. These are the
-    references :func:`declared_at_head` skips as self-references, and in a
-    monorepo they are the whole structural graph.
-
-    ``consumer_module`` is the manifest's own directory, so ``gateway/go.mod``
-    yields ``gateway``. A module declaring itself is dropped.
-    """
     consumer = manifest.rsplit("/", 1)[0] if "/" in manifest else ""
     key = repo_key(repo_name)
-    out: dict[str, tuple[str, str, str]] = {}
+    result = {}
     for ref in _snapshot(mirror, "HEAD", manifest).values():
-        segments = ref.name.split("/")
-        # Find where this repository's own name appears; what follows is the
-        # module path inside it. Anything else is a cross-repo dependency.
+        parts = ref.name.split("/")
         try:
-            at = next(i for i, seg in enumerate(segments) if seg.lower() == key)
+            index = next(i for i, value in enumerate(parts) if value.lower() == key)
         except StopIteration:
             continue
-        dep_module = "/".join(segments[at + 1:])
-        if not dep_module or dep_module == consumer:
+        dep = "/".join(parts[index + 1:])
+        if dep and dep != consumer:
+            result.setdefault(dep, (consumer, dep, ref.raw))
+    return list(result.values())
+
+
+def _repo_lookups(session: object) -> tuple[dict[tuple[str, str], int], dict[str, int], dict[tuple[str, str], int]]:
+    Repo, Package = models().Repo, models().RepoPackage
+    rows = session.query(Repo.owner, Repo.name, Repo.id).all()
+    by_full = {(str(owner).lower(), str(name).lower()): int(repo_id) for owner, name, repo_id in rows}
+    grouped = defaultdict(set)
+    for _, name, repo_id in rows:
+        grouped[str(name).lower()].add(int(repo_id))
+    by_name = {name: next(iter(ids)) for name, ids in grouped.items() if len(ids) == 1}
+    claims = defaultdict(set)
+    for ecosystem, name, repo_id in session.query(Package.ecosystem, Package.name, Package.repo_id).all():
+        claims[(str(ecosystem), str(name).lower())].add(int(repo_id))
+    by_package = {key: next(iter(ids)) for key, ids in claims.items() if len(ids) == 1}
+    return by_full, by_name, by_package
+
+
+def _record_packages(session: object, repo_id: int, claims: set[tuple[str, str]]) -> None:
+    Package = models().RepoPackage
+    session.query(Package).filter_by(repo_id=repo_id).delete(synchronize_session=False)
+    session.add_all([Package(repo_id=repo_id, ecosystem=eco, name=name) for eco, name in sorted(claims)])
+
+
+def _manifest_repos(session: object, force: bool, watermark: str) -> list[object]:
+    Repo, File = models().Repo, models().File
+    repos = session.query(Repo).filter(Repo.is_enabled.is_(True)).order_by(Repo.id).all()
+    result = []
+    for repo in repos:
+        if not force and getattr(repo, watermark) == repo.head_sha and repo.head_sha is not None:
             continue
-        out.setdefault(dep_module, (consumer, dep_module, ref.raw))
-    return list(out.values())
+        if session.query(File.id).filter(File.repo_id == repo.id, File.basename.in_(list(manifests.MANIFEST_FILES))).first() is not None:
+            result.append(repo)
+    return result
 
 
-def refresh_modules(conn: psycopg.Connection | None = None) -> int:
-    """Rebuild ``module_dependency`` from every repository's manifests at HEAD.
-
-    Full rebuild for the same reason as :func:`refresh_declared`: a dependency
-    removed from a manifest has to disappear, which an upsert would never do.
-    """
-
-    def _run(c: psycopg.Connection) -> int:
-        rows = c.execute(
-            "SELECT id, full_name, name, host FROM repo WHERE is_enabled ORDER BY id"
-        ).fetchall()
-
-        payload = []
-        for repo_id, full_name, name, host in rows:
-            mirror = mirror_path_for(full_name, host=host)
+def refresh_modules(conn: object | None = None) -> int:
+    def run(session: object) -> int:
+        Repo, Module = models().Repo, models().ModuleDependency
+        repos = session.query(Repo).filter(Repo.is_enabled.is_(True)).order_by(Repo.id).all()
+        payload, scanned = [], []
+        for repo in repos:
+            mirror = mirror_path_for(repo.full_name, host=repo.host)
             if not mirror.is_dir():
                 continue
-            manifests = [m for m, eco in manifest_paths(mirror) if eco == "go"]
-            if len(manifests) < 2:
-                continue  # a single-module repo has no internal graph
-            for manifest in manifests:
-                for consumer, dep, version in declared_modules_at_head(mirror, name, manifest):
-                    payload.append(
-                        (repo_id, consumer, dep, manifest, "go", version[:200])
-                    )
-
-        c.execute("TRUNCATE module_dependency")
-        if payload:
-            c.execute(
-                """
-                CREATE TEMP TABLE tmp_mod (
-                    repo_id BIGINT, consumer_module TEXT, dep_module TEXT,
-                    manifest TEXT, ecosystem TEXT, dep_version TEXT
-                ) ON COMMIT DROP
-                """
-            )
-            copy_rows(
-                "tmp_mod",
-                ["repo_id", "consumer_module", "dep_module", "manifest",
-                 "ecosystem", "dep_version"],
-                payload,
-                conn=c,
-            )
-            c.execute(
-                """
-                INSERT INTO module_dependency (repo_id, consumer_module, dep_module,
-                                               manifest, ecosystem, dep_version)
-                SELECT DISTINCT ON (repo_id, consumer_module, dep_module, manifest)
-                       repo_id, consumer_module, dep_module, manifest,
-                       ecosystem, dep_version
-                FROM tmp_mod
-                ON CONFLICT DO NOTHING
-                """
-            )
-            c.execute("DROP TABLE IF EXISTS tmp_mod")
-
-        total = int(c.execute("SELECT count(*) FROM module_dependency").fetchone()[0])
-        repos = int(
-            c.execute(
-                "SELECT count(DISTINCT repo_id) FROM module_dependency"
-            ).fetchone()[0]
-        )
-        log.info("module graph: %d edges across %d multi-module repos", total, repos)
-        return total
-
+            scanned.append(repo.id)
+            paths = [path for path, eco in manifest_paths(mirror) if eco == "go"]
+            if len(paths) < 2:
+                continue
+            for path in paths:
+                payload.extend((repo.id, consumer, dep, path, "go", version[:200])
+                               for consumer, dep, version in declared_modules_at_head(mirror, repo.name, path))
+        if scanned:
+            session.query(Module).filter(Module.repo_id.in_(scanned)).delete(synchronize_session=False)
+        seen = set()
+        for row in payload:
+            key = row[:4]
+            if key not in seen:
+                session.add(Module(repo_id=row[0], consumer_module=row[1], dep_module=row[2], manifest=row[3], ecosystem=row[4], dep_version=row[5]))
+                seen.add(key)
+        session.flush()
+        return session.query(Module).count()
     if conn is not None:
-        return _run(conn)
-    with connection() as own:
-        return _run(own)
+        return run(conn)
+    with connection() as session:
+        return run(session)
 
 
-def refresh_declared(
-    conn: psycopg.Connection | None = None, force: bool = False
-) -> int:
-    """Rebuild ``repo_dependency`` from each repo's HEAD manifest.
-
-    Per repository this is a full re-read rather than a delta, and deliberately
-    so: a dependency *removed* from a manifest has to disappear, which an
-    incremental upsert would never achieve. But a repository whose HEAD has not
-    moved cannot have changed its manifest, so only repositories ingested since
-    their last scan are re-read.
-    """
-
-    def _run(c: psycopg.Connection) -> int:
-        stale = "" if force else (
-            " AND (r.last_declared_sha IS NULL"
-            " OR r.head_sha IS NULL"
-            " OR r.last_declared_sha <> r.head_sha)"
-        )
-        rows = c.execute(
-            f"""
-            SELECT r.id, r.full_name, r.name, r.host FROM repo r
-            WHERE r.is_enabled
-              AND EXISTS (SELECT 1 FROM file f
-                           WHERE f.repo_id = r.id AND f.basename = ANY(%(manifests)s))
-              {stale}
-            ORDER BY r.id
-            """,
-            {"manifests": list(manifests.MANIFEST_FILES)},
-        ).fetchall()
-        if not rows:
-            total = int(c.execute("SELECT count(*) FROM repo_dependency"
-                                  " WHERE dep_repo_id IS NOT NULL").fetchone()[0])
-            log.info("declared dependencies: no repository manifests changed")
-            return total
-        by_full, by_name, by_pkg = _repo_lookups(c)
-
-        payload = []
-        for repo_id, full_name, name, host in rows:
-            mirror = mirror_path_for(full_name, host=host)
+def refresh_declared(conn: object | None = None, force: bool = False) -> int:
+    def run(session: object) -> int:
+        Repo, _File, Dependency = models().Repo, models().File, models().RepoDependency
+        repos = _manifest_repos(session, force, "last_declared_sha")
+        by_full, by_name, by_package = _repo_lookups(session)
+        payload, scanned = [], []
+        for repo in repos:
+            mirror = mirror_path_for(repo.full_name, host=repo.host)
             if not mirror.is_dir():
                 continue
-            for manifest, ecosystem in manifest_paths(mirror):
-                for dep_name, version in declared_at_head(mirror, name, manifest, ecosystem):
-                    payload.append(
-                        (repo_id,
-                         resolve_repo(dep_name, by_full, by_name, by_pkg, ecosystem),
-                         dep_name, version[:200], manifest, ecosystem)
-                    )
-
-        # Delete only the scanned repositories' rows, so an incremental pass
-        # leaves every other repository's declared set intact.
-        c.execute(
-            "DELETE FROM repo_dependency WHERE consumer_repo_id = ANY(%s)",
-            ([r[0] for r in rows],),
-        )
-        if payload:
-            c.execute(
-                """
-                CREATE TEMP TABLE tmp_dep (
-                    consumer_repo_id BIGINT, dep_repo_id BIGINT, dep_name TEXT,
-                    dep_version TEXT, manifest TEXT, ecosystem TEXT
-                ) ON COMMIT DROP
-                """
-            )
-            copy_rows(
-                "tmp_dep",
-                ["consumer_repo_id", "dep_repo_id", "dep_name", "dep_version",
-                 "manifest", "ecosystem"],
-                payload,
-                conn=c,
-            )
-            c.execute(
-                """
-                INSERT INTO repo_dependency (consumer_repo_id, dep_repo_id, dep_name,
-                                             dep_version, manifest, ecosystem)
-                SELECT DISTINCT ON (consumer_repo_id, dep_name, manifest)
-                       consumer_repo_id, dep_repo_id, dep_name, dep_version,
-                       manifest, ecosystem
-                FROM tmp_dep
-                ON CONFLICT DO NOTHING
-                """
-            )
-            c.execute("DROP TABLE IF EXISTS tmp_dep")
-
-        # Record the watermark this pass consumed, so the next one can skip
-        # repositories whose HEAD has not moved.
-        c.execute(
-            "UPDATE repo SET last_declared_sha = head_sha WHERE id = ANY(%s)",
-            ([r[0] for r in rows],),
-        )
-
-        # A consumer may have been scanned before the repository publishing its
-        # dependency was indexed.  Relink those rows on every pass so the graph
-        # converges without requiring the consumer's HEAD to change again.
-        unresolved = c.execute(
-            """
-            SELECT consumer_repo_id, dep_name, manifest, ecosystem
-              FROM repo_dependency
-             WHERE dep_repo_id IS NULL
-            """
-        ).fetchall()
-        relinks = []
-        for consumer_id, dep_name, manifest, ecosystem in unresolved:
-            dep_id = resolve_repo(dep_name, by_full, by_name, by_pkg, ecosystem)
-            if dep_id is not None and dep_id != consumer_id:  # pragma: no cover - DB integration path
-                relinks.append((dep_id, consumer_id, dep_name, manifest))
-        if relinks:  # pragma: no cover - DB integration path
-            with c.cursor() as cur:
-                cur.executemany(
-                    """
-                    UPDATE repo_dependency
-                       SET dep_repo_id = %s
-                     WHERE consumer_repo_id = %s
-                       AND dep_name = %s
-                       AND manifest = %s
-                       AND dep_repo_id IS NULL
-                    """,
-                    relinks,
-                )
-
-        total = int(c.execute("SELECT count(*) FROM repo_dependency").fetchone()[0])
-        internal = int(
-            c.execute(
-                "SELECT count(*) FROM repo_dependency WHERE dep_repo_id IS NOT NULL"
-            ).fetchone()[0]
-        )
-        log.info(
-            "declared dependencies: %d rows (%d resolve to a tracked repository)",
-            total, internal,
-        )
-        return internal
-
+            scanned.append(repo.id)
+            for path, ecosystem in manifest_paths(mirror):
+                for dep_name, version in declared_at_head(mirror, repo.name, path, ecosystem):
+                    payload.append((repo.id, resolve_repo(dep_name, by_full, by_name, by_package, ecosystem), dep_name, version[:200], path, ecosystem))
+        if scanned:
+            session.query(Dependency).filter(Dependency.consumer_repo_id.in_(scanned)).delete(synchronize_session=False)
+            seen = set()
+            for row in payload:
+                key = (row[0], row[2], row[4])
+                if key in seen:
+                    continue
+                session.add(Dependency(consumer_repo_id=row[0], dep_repo_id=row[1], dep_name=row[2], dep_version=row[3], manifest=row[4], ecosystem=row[5]))
+                seen.add(key)
+            for repo in session.query(Repo).filter(Repo.id.in_(scanned)).all():
+                repo.last_declared_sha = repo.head_sha
+        # Resolve rows that were recorded before their publisher was indexed.
+        for row in session.query(Dependency).filter(Dependency.dep_repo_id.is_(None)).all():
+            candidate = resolve_repo(row.dep_name, by_full, by_name, by_package, row.ecosystem)
+            if candidate is not None and candidate != row.consumer_repo_id:
+                row.dep_repo_id = candidate
+        session.flush()
+        return session.query(Dependency).filter(Dependency.dep_repo_id.is_not(None)).count()
     if conn is not None:
-        return _run(conn)
-    with connection() as own:
-        return _run(own)
+        return run(conn)
+    with connection() as session:
+        return run(session)
 
 
-def _repos_to_scan(conn: psycopg.Connection, force: bool) -> list[tuple[int, str, str, str]]:
-    """Repositories with a manifest whose bump scan is stale.
-
-    Staleness is judged on the HEAD sha, not a timestamp. ``last_ingest_at``
-    advances on every run whether or not commits landed, so a timestamp
-    comparison was always true and every one of the 187 manifest-bearing
-    repositories was re-scanned nightly for no reason.
-    """
-    clause = "" if force else (
-        " AND (r.last_depbump_sha IS NULL"
-        " OR r.head_sha IS NULL"
-        " OR r.last_depbump_sha <> r.head_sha)"
-    )
-    rows = conn.execute(
-        f"""
-        SELECT r.id, r.full_name, r.name, r.host
-        FROM repo r
-        WHERE r.is_enabled
-          AND EXISTS (SELECT 1 FROM file f
-                       WHERE f.repo_id = r.id AND f.basename = ANY(%(manifests)s))
-          {clause}
-        ORDER BY r.id
-        """,
-        {"manifests": list(manifests.MANIFEST_FILES)},
-    ).fetchall()
-    return [(int(r[0]), r[1], r[2], r[3]) for r in rows]
-
-
-def resolve_bumps(conn: psycopg.Connection | None = None) -> int:
-    """Fill in the upstream commit for bumps that do not yet have one.
-
-    Separate from extraction, and re-runnable, because the inputs arrive at
-    different times: a bump is recorded the moment a manifest changes, but the
-    tag that dates it may only be mirrored later, and the upstream commit may
-    only be ingested later still.
-
-    Four tiers, strongest first, each recorded in ``resolution`` so a weaker one
-    is never read as an exact answer:
-
-    ``sha``      the manifest named the commit outright.
-    ``tag``      an exact version matched a tag.
-    ``floor``    a range's declared lower bound matched a tag. Says only "at
-                 least these commits arrived": what was installed may have
-                 drifted higher, but a manifest nobody edited is one where
-                 nothing had to adapt.
-    ``ceiling``  an upper bound with no floor, resolved to the newest release
-                 below it that existed when the bump was made.
-
-    Returns:
-        How many rows gained a commit.
-    """
-
-    def _run(c: psycopg.Connection) -> int:
-        linked = _link_repositories(c)
-        _fill_version_keys(c)
-
-        # Tag mappings can change when a mirror is refreshed. Clear only
-        # version-based resolutions so they are recomputed against the current
-        # tag set; SHA-pinned and ceiling resolutions have different semantics.
-        c.execute(
-            """
-            UPDATE dep_bump
-               SET dep_commit_id = NULL, resolution = NULL,
-                   adoption_seconds = NULL
-             WHERE resolution IN ('tag', 'floor')
-            """
-        )
-
-        # Pins first: a reference naming a commit needs no interpretation.
-        by_sha = c.execute(
-            """
-            UPDATE dep_bump b
-               SET dep_commit_id = dc.id, resolution = 'sha'
-              FROM commit dc
-             WHERE b.dep_commit_id IS NULL
-               AND b.dep_sha IS NOT NULL
-               AND dc.repo_id = b.dep_repo_id
-               AND dc.sha LIKE b.dep_sha || '%'
-            """
-        ).rowcount or 0
-
-        # Then releases, by canonical key. `commit_id` is the tagged commit
-        # when the walk read it; `main_commit_id` is the shipping-branch commit
-        # the release was cut from, which is the only one that exists when a
-        # project tags on a release branch.
-        by_tag = c.execute(
-            r"""
-            UPDATE dep_bump b
-               SET dep_commit_id = rt.commit_id,
-                   resolution = CASE WHEN b.dep_version ~ '^[\^~><=]'
-                                     THEN 'floor' ELSE 'tag' END
-              FROM (
-                    SELECT repo_id, version_key,
-                           min(COALESCE(commit_id, main_commit_id)) AS commit_id
-                      FROM ref_tag
-                     WHERE COALESCE(commit_id, main_commit_id) IS NOT NULL
-                     GROUP BY repo_id, version_key
-                    HAVING count(DISTINCT COALESCE(commit_id, main_commit_id)) = 1
-                   ) rt
-             WHERE b.dep_commit_id IS NULL
-               AND b.version_key IS NOT NULL
-               AND rt.repo_id = b.dep_repo_id
-               AND rt.version_key = b.version_key
-               AND rt.commit_id IS NOT NULL
-            """
-        ).rowcount or 0
-
-        by_ceiling = _resolve_ceilings(c)
-        rejected = _reject_impossible(c)
-
-        c.execute(
-            """
-            UPDATE dep_bump b
-               SET adoption_seconds = EXTRACT(EPOCH FROM (cc.committed_at - dc.committed_at))::bigint
-              FROM commit dc, commit cc
-             WHERE b.adoption_seconds IS NULL
-               AND b.dep_commit_id = dc.id
-               AND cc.repo_id = b.consumer_repo_id
-               AND cc.sha = b.consumer_sha
-            """
-        )
-        log.info("bump resolution: %d newly linked to a repository, %d by pinned "
-                 "sha, %d by tag or floor, %d by ceiling; %d rejected as impossible",
-                 linked, by_sha, by_tag, by_ceiling, rejected)
-        return by_sha + by_tag + by_ceiling
-
-    if conn is not None:
-        return _run(conn)
-    with connection() as own:
-        return _run(own)
-
-
-def _link_repositories(c: psycopg.Connection) -> int:
-    """Attach bumps to the repository that publishes what they name.
-
-    Re-runnable like the rest of this pass, and for the same reason: a bump is
-    recorded before the repository publishing it is necessarily indexed, and a
-    coordinate only becomes attributable once that repository's own manifests
-    have been read.
-
-    A coordinate two repositories both claim is left alone, and so is one
-    naming the consumer itself -- an intra-repository reference is a module
-    edge, not a dependency between repositories.
-    """
-    return c.execute(
-        """
-        UPDATE dep_bump b
-           SET dep_repo_id = p.repo_id
-          FROM (SELECT ecosystem, name, min(repo_id) AS repo_id
-                  FROM repo_package GROUP BY ecosystem, name
-                HAVING count(DISTINCT repo_id) = 1) p
-         WHERE b.dep_repo_id IS NULL
-           AND lower(b.dep_name) = p.name
-           AND b.ecosystem = p.ecosystem
-           AND p.repo_id <> b.consumer_repo_id
-        """
-    ).rowcount or 0
-
-
-def _fill_version_keys(c: psycopg.Connection) -> None:
-    """Give every bump the canonical key it should be matched on.
-
-    For an exact version that is the version itself; for a range it is the
-    declared floor. Computed here rather than in SQL because one parser has to
-    serve both sides of the match, and it already exists.
-    """
-    rows = c.execute(
-        "SELECT DISTINCT dep_version FROM dep_bump "
-        " WHERE version_key IS NULL AND dep_version <> ''").fetchall()
-    keyed = []
-    for (raw,) in rows:
-        floor, ceiling = bounds(raw)
-        # An upper bound names a version that was explicitly *excluded*. Keying
-        # on it would match the one release we know was never taken.
-        if ceiling and not floor:
-            continue
-        if key := version_key(floor or raw):
-            keyed.append((key, raw))
-    if keyed:
-        with c.cursor() as cur:
-            cur.executemany(
-                "UPDATE dep_bump SET version_key = %s "
-                " WHERE version_key IS NULL AND dep_version = %s", keyed)
-
-
-def _resolve_ceilings(c: psycopg.Connection) -> int:
-    """Resolve `<3.0` to the newest release below it that already existed.
-
-    Ordering versions is the reason this is not SQL: `1.10` sorts below `1.9`
-    as text and above it as a version. Bounded by the bump's own date so the
-    answer cannot drift as later tags arrive, and so it can never name a
-    release published after the commit that consumed it.
-    """
-    rows = c.execute(
-        """
-        SELECT b.ctid, b.dep_version, b.dep_repo_id, cc.committed_at
-          FROM dep_bump b
-          JOIN commit cc ON cc.repo_id = b.consumer_repo_id AND cc.sha = b.consumer_sha
-         WHERE b.dep_commit_id IS NULL AND b.dep_repo_id IS NOT NULL
-        """
-    ).fetchall()
-
-    resolved = []
-    for ctid, raw, dep_repo_id, bumped_at in rows:
-        floor, ceiling = bounds(raw)
-        if floor or not ceiling or not (limit := _ordinal(version_key(ceiling))):
-            continue
-        candidates = c.execute(
-            """
-            SELECT version_key, COALESCE(commit_id, main_commit_id) AS cid
-              FROM ref_tag
-             WHERE repo_id = %s AND version_key IS NOT NULL
-               AND COALESCE(commit_id, main_commit_id) IS NOT NULL
-               AND (tagged_at IS NULL OR tagged_at <= %s)
-            """, (dep_repo_id, bumped_at)).fetchall()
-        below = [(o, cid) for key, cid in candidates
-                 if (o := _ordinal(key)) and o < limit]
-        if below:
-            resolved.append((max(below)[1], ctid))
-    if resolved:
-        with c.cursor() as cur:
-            cur.executemany("UPDATE dep_bump SET dep_commit_id = %s, "
-                            "resolution = 'ceiling' WHERE ctid = %s", resolved)
-    return len(resolved)
+def _repos_to_scan(conn: object, force: bool) -> list[object]:
+    return _manifest_repos(conn, force, "last_depbump_sha")
 
 
 def _ordinal(key: str | None) -> tuple[int, ...] | None:
-    """A version key as comparable numbers, or None when it is a prerelease.
-
-    A prerelease sorts below its own release and has no total order against
-    other prereleases worth relying on, so it is simply not a candidate for
-    "the newest release below this bound".
-    """
     if not key or "-" in key:
         return None
     try:
@@ -795,187 +268,201 @@ def _ordinal(key: str | None) -> tuple[int, ...] | None:
         return None
 
 
-def _reject_impossible(c: psycopg.Connection) -> int:
-    """Undo any resolution naming a commit written after the bump consumed it.
-
-    Nothing can depend on a commit that does not exist yet, so a violation is
-    proof the match is wrong -- a bad key, a bad repo mapping, or a tag that
-    moved. Cheaper and more general than trying to enumerate the ways each
-    could happen.
-    """
-    return c.execute(
-        """
-        UPDATE dep_bump b
-           SET dep_commit_id = NULL, resolution = NULL, adoption_seconds = NULL
-          FROM commit dc, commit cc
-         WHERE b.dep_commit_id = dc.id
-           AND cc.repo_id = b.consumer_repo_id
-           AND cc.sha = b.consumer_sha
-           AND dc.committed_at > cc.committed_at
-        """
-    ).rowcount or 0
+def _link_repositories(session: object) -> int:
+    by_full, by_name, by_package = _repo_lookups(session)
+    linked = 0
+    for bump in session.query(models().DepBump).filter(models().DepBump.dep_repo_id.is_(None)).all():
+        repo_id = resolve_repo(bump.dep_name, by_full, by_name, by_package, bump.ecosystem)
+        if repo_id is not None and repo_id != bump.consumer_repo_id:
+            bump.dep_repo_id = repo_id
+            linked += 1
+    return linked
 
 
-def rebuild(force: bool = False, conn: psycopg.Connection | None = None) -> BumpStats:
-    """Extract manifest-bump edges for every stale repository.
+def _fill_version_keys(session: object) -> None:
+    for bump in session.query(models().DepBump).filter(models().DepBump.version_key.is_(None)).all():
+        floor, ceiling = bounds(bump.dep_version or "")
+        if ceiling and not floor:
+            continue
+        bump.version_key = version_key(floor or bump.dep_version)
 
-    Args:
-        force: rescan every repository with a manifest, ignoring watermarks.
-        conn: reuse an open connection.
-    """
 
-    def _run(c: psycopg.Connection) -> BumpStats:
+def _resolve_ceilings(session: object) -> int:
+    Bump, Tag, Commit = models().DepBump, models().RefTag, models().Commit
+    resolved = 0
+    for bump in session.query(Bump).filter(Bump.dep_commit_id.is_(None), Bump.dep_repo_id.is_not(None)).all():
+        floor, ceiling = bounds(bump.dep_version or "")
+        limit = _ordinal(version_key(ceiling)) if ceiling and not floor else None
+        if not limit:
+            continue
+        consumer = session.query(Commit).filter_by(repo_id=bump.consumer_repo_id, sha=bump.consumer_sha).first()
+        if not consumer:
+            continue
+        choices = []
+        for tag in session.query(Tag).filter(Tag.repo_id == bump.dep_repo_id, Tag.version_key.is_not(None)).all():
+            commit_id = tag.commit_id or tag.main_commit_id
+            if commit_id and (tag.tagged_at is None or tag.tagged_at <= consumer.committed_at):
+                ordinal = _ordinal(tag.version_key)
+                if ordinal and ordinal < limit:
+                    choices.append((ordinal, commit_id))
+        if choices:
+            bump.dep_commit_id = max(choices)[1]
+            bump.resolution = "ceiling"
+            resolved += 1
+    return resolved
+
+
+def _reject_impossible(session: object) -> int:
+    Bump, Commit = models().DepBump, models().Commit
+    rejected = 0
+    for bump in session.query(Bump).filter(Bump.dep_commit_id.is_not(None)).all():
+        upstream = session.get(Commit, bump.dep_commit_id)
+        consumer = session.query(Commit).filter_by(
+            repo_id=bump.consumer_repo_id, sha=bump.consumer_sha
+        ).first()
+        if upstream and consumer and upstream.committed_at > consumer.committed_at:
+            bump.dep_commit_id = None
+            bump.resolution = None
+            bump.adoption_seconds = None
+            rejected += 1
+    return rejected
+
+
+def resolve_bumps(conn: object | None = None) -> int:
+    def run(session: object) -> int:
+        Bump, Tag, Commit = models().DepBump, models().RefTag, models().Commit
+        # Callers commonly build or update bump/package rows in this same
+        # transaction immediately before resolving them. Since the shared ORM
+        # sessions use autoflush=False, make those writes visible to the lookup
+        # queries explicitly.
+        session.flush()
+        _link_repositories(session)
+        _fill_version_keys(session)
+        for bump in session.query(Bump).filter(Bump.resolution.in_(["tag", "floor"])).all():
+            bump.dep_commit_id = None
+            bump.resolution = None
+            bump.adoption_seconds = None
+        # Queries below intentionally run with autoflush disabled. Persist the
+        # invalidation before selecting pending rows, otherwise a previously
+        # resolved bump is still filtered out by its old database values.
+        session.flush()
+        pending = session.query(Bump).filter(
+            Bump.dep_commit_id.is_(None), Bump.dep_repo_id.is_not(None)
+        ).all()
+        consumer_keys = {(bump.consumer_repo_id, bump.consumer_sha) for bump in pending}
+        consumers = {}
+        for repo_id in {repo_id for repo_id, _ in consumer_keys}:
+            shas = [sha for rid, sha in consumer_keys if rid == repo_id]
+            consumers.update({(row.repo_id, row.sha): row for row in session.query(Commit).filter(
+                Commit.repo_id == repo_id, Commit.sha.in_(shas)
+            ).all()})
+        for bump in pending:
+            if bump.dep_sha:
+                match = session.query(Commit).filter(
+                    Commit.repo_id == bump.dep_repo_id,
+                    Commit.sha.startswith(bump.dep_sha),
+                ).first()
+                if match:
+                    bump.dep_commit_id, bump.resolution = match.id, "sha"
+        tags = session.query(Tag).filter(Tag.version_key.is_not(None)).all()
+        unique = defaultdict(set)
+        for tag in tags:
+            commit_id = tag.commit_id or tag.main_commit_id
+            if commit_id:
+                unique[(tag.repo_id, tag.version_key)].add(commit_id)
+        for bump in session.query(Bump).filter(
+            Bump.dep_commit_id.is_(None), Bump.dep_repo_id.is_not(None)
+        ).all():
+            ids = unique.get((bump.dep_repo_id, bump.version_key), set())
+            if len(ids) == 1:
+                bump.dep_commit_id = next(iter(ids))
+                bump.resolution = "floor" if (bump.dep_version or "").startswith(("^", "~", ">", "<", "=")) else "tag"
+        _resolve_ceilings(session)
+        # `_reject_impossible` uses a query over resolved rows; flush the
+        # in-memory matches first so future-dated candidates are actually
+        # inspected when autoflush is disabled for this session.
+        session.flush()
+        _reject_impossible(session)
+        session.flush()
+        for bump in session.query(Bump).filter(Bump.dep_commit_id.is_not(None)).all():
+            upstream = session.get(Commit, bump.dep_commit_id)
+            downstream = consumers.get((bump.consumer_repo_id, bump.consumer_sha))
+            if downstream is None:
+                downstream = session.query(Commit).filter_by(
+                    repo_id=bump.consumer_repo_id, sha=bump.consumer_sha
+                ).first()
+            if upstream and downstream:
+                bump.adoption_seconds = int((downstream.committed_at - upstream.committed_at).total_seconds())
+        return sum(x.dep_commit_id is not None for x in session.query(Bump).all())
+    if conn is not None:
+        return run(conn)
+    with connection() as session:
+        return run(session)
+
+
+def rebuild(force: bool = False, conn: object | None = None) -> BumpStats:
+    def run(session: object) -> BumpStats:
         started = time.monotonic()
         stats = BumpStats()
-
-        targets = _repos_to_scan(c, force)
-        if not targets:
-            log.debug("no repositories need a manifest scan")
-            return stats
-
-        # Built once, so a dependency resolves without a query per edge.
-        by_full, by_name, by_pkg = _repo_lookups(c)
-
-        payload: list[tuple] = []
-        for repo_id, full_name, name, host in targets:
-            mirror = mirror_path_for(full_name, host=host)
+        _Repo, Bump, Commit = models().Repo, models().DepBump, models().Commit
+        by_full, by_name, by_package = _repo_lookups(session)
+        payload_repos = _repos_to_scan(session, force)
+        for repo in payload_repos:
+            mirror = mirror_path_for(repo.full_name, host=repo.host)
             if not mirror.is_dir():
                 continue
             stats.repos_scanned += 1
-            edges: list[BumpEdge] = []
-            _record_packages(c, repo_id, published_at_head(mirror))
-            for manifest, ecosystem in manifest_paths(mirror):
-                edges.extend(extract_from_mirror(mirror, name, manifest, ecosystem))
+            _record_packages(session, repo.id, published_at_head(mirror))
+            by_full, by_name, by_package = _repo_lookups(session)
+            edges = []
+            for path, ecosystem in manifest_paths(mirror):
+                edges.extend(extract_from_mirror(mirror, repo.name, path, ecosystem))
             stats.edges_found += len(edges)
             for edge in edges:
-                payload.append(
-                    (
-                        repo_id,
-                        edge.consumer_sha,
-                        resolve_repo(edge.dep_name, by_full, by_name, by_pkg, edge.ecosystem),
-                        edge.dep_name,
-                        edge.dep_version[:200],
-                        edge.dep_sha,
-                        edge.manifest,
-                        edge.ecosystem,
-                    )
-                )
-
-        if payload:
-            c.execute(
-                """
-                CREATE TEMP TABLE tmp_bump (
-                    consumer_repo_id BIGINT, consumer_sha TEXT, dep_repo_id BIGINT,
-                    dep_name TEXT, dep_version TEXT, dep_sha TEXT, manifest TEXT,
-                    ecosystem TEXT
-                ) ON COMMIT DROP
-                """
-            )
-            copy_rows(
-                "tmp_bump",
-                ["consumer_repo_id", "consumer_sha", "dep_repo_id", "dep_name",
-                 "dep_version", "dep_sha", "manifest", "ecosystem"],
-                payload,
-                conn=c,
-            )
-            # Only what is free at insert time: the consumer's timestamp, and
-            # the dependency commit when the manifest named it outright. A
-            # pseudo-version sha is a 12-char prefix, so that join is a prefix
-            # match.
-            #
-            # Version-to-tag matching deliberately does *not* happen here. It
-            # lived in this statement as a list of spellings to try, which
-            # duplicated the resolution pass, could not see a release tagged off
-            # the shipping branch, knew nothing of ranges, and recorded no tier --
-            # so a row resolved here was indistinguishable from one resolved
-            # exactly. `resolve_bumps` owns it, and is re-runnable because tags
-            # and upstream commits arrive later than the bump does.
-            stats.edges_written = int(
-                c.execute(
-                    """
-                    INSERT INTO dep_bump (
-                        consumer_repo_id, consumer_sha, dep_repo_id, dep_name,
-                        dep_version, dep_sha, dep_commit_id, manifest,
-                        bumped_at, resolution, ecosystem
-                    )
-                    SELECT DISTINCT ON (t.consumer_repo_id, t.consumer_sha,
-                                        t.dep_name, t.dep_version)
-                           t.consumer_repo_id, t.consumer_sha, t.dep_repo_id,
-                           t.dep_name, t.dep_version, t.dep_sha,
-                           dc.id, t.manifest, cc.committed_at,
-                           CASE WHEN dc.id IS NOT NULL THEN 'sha' END, t.ecosystem
-                    FROM tmp_bump t
-                    LEFT JOIN commit cc
-                           ON cc.repo_id = t.consumer_repo_id
-                          AND cc.sha = t.consumer_sha
-                    LEFT JOIN commit dc
-                           ON dc.repo_id = t.dep_repo_id
-                          AND t.dep_sha IS NOT NULL
-                          AND dc.sha LIKE t.dep_sha || '%'
-                    ON CONFLICT (consumer_repo_id, consumer_sha, dep_name, dep_version)
-                    DO NOTHING
-                    """
-                ).rowcount
-                or 0
-            )
-            c.execute("DROP TABLE IF EXISTS tmp_bump")
-
-        # Re-run every time: tags and upstream commits arrive on their own
-        # schedule, so a bump unresolved last run may be resolvable now.
-        resolve_bumps(c)
-        stats.resolved_commits = int(
-            c.execute("SELECT count(*) FROM dep_bump WHERE dep_commit_id IS NOT NULL")
-            .fetchone()[0]
-        )
-        c.execute(
-            "UPDATE repo SET last_depbump_at = now(), last_depbump_sha = head_sha"
-            " WHERE id = ANY(%s)",
-            ([r[0] for r in targets],),
-        )
-
+                dep_repo = resolve_repo(edge.dep_name, by_full, by_name, by_package, edge.ecosystem)
+                exists = session.query(Bump).filter(
+                    Bump.consumer_repo_id == repo.id, Bump.consumer_sha == edge.consumer_sha,
+                    Bump.dep_name == edge.dep_name, Bump.dep_version == edge.dep_version,
+                ).first()
+                if exists:
+                    continue
+                consumer = session.query(Commit).filter_by(repo_id=repo.id, sha=edge.consumer_sha).first()
+                dep_commit = next((c for c in session.query(Commit).filter_by(repo_id=dep_repo).all()
+                                   if edge.dep_sha and c.sha.startswith(edge.dep_sha)), None) if dep_repo else None
+                session.add(Bump(consumer_repo_id=repo.id, consumer_sha=edge.consumer_sha, dep_repo_id=dep_repo,
+                                 dep_name=edge.dep_name, dep_version=edge.dep_version[:200], dep_sha=edge.dep_sha,
+                                 dep_commit_id=dep_commit.id if dep_commit else None, manifest=edge.manifest,
+                                 bumped_at=consumer.committed_at if consumer else None,
+                                 resolution="sha" if dep_commit else None, ecosystem=edge.ecosystem))
+                stats.edges_written += 1
+            repo.last_depbump_at = datetime.now(UTC)
+            repo.last_depbump_sha = repo.head_sha
+        stats.resolved_commits = resolve_bumps(session)
         stats.duration_s = time.monotonic() - started
-        log.info(
-            "manifest bumps: scanned %d repos, %d edges found, %d new, "
-            "%d resolved to a commit, in %.1fs",
-            stats.repos_scanned, stats.edges_found, stats.edges_written,
-            stats.resolved_commits, stats.duration_s,
-        )
         return stats
-
     if conn is not None:
-        return _run(conn)
-    with connection() as own:
-        return _run(own)
+        return run(conn)
+    with connection() as session:
+        return run(session)
 
 
 def adoption_delays(limit: int = 20) -> list[dict]:
-    """Observed propagation delay per (dependency -> consumer) edge.
-
-    Arithmetic on two known commits: when the upstream change was written, and
-    when the consumer took it. Reported, not ranked on -- how long a team takes
-    to adopt a release says nothing about whether the dependency is real, which
-    the manifest already settled.
-    """
-    from git_synapse.db.engine import query
-
-    return query(
-        """
-        SELECT rd.name AS dep, rc.name AS consumer,
-               count(*) AS bumps,
-               count(*) FILTER (WHERE b.adoption_seconds IS NOT NULL) AS timed,
-               round((percentile_cont(0.5) WITHIN GROUP (
-                        ORDER BY b.adoption_seconds) / 86400.0)::numeric, 1) AS median_adoption_days,
-               round((percentile_cont(0.9) WITHIN GROUP (
-                        ORDER BY b.adoption_seconds) / 86400.0)::numeric, 1) AS p90_adoption_days,
-               max(b.bumped_at)::date AS last_bump
-        FROM dep_bump b
-        JOIN repo rc ON rc.id = b.consumer_repo_id
-        JOIN repo rd ON rd.id = b.dep_repo_id
-        WHERE b.dep_repo_id IS NOT NULL AND b.adoption_seconds >= 0
-        GROUP BY 1, 2
-        HAVING count(*) >= 3
-        ORDER BY bumps DESC
-        LIMIT %(limit)s
-        """,
-        {"limit": limit},
-    )
+    Bump, Repo = models().DepBump, models().Repo
+    with connection() as session:
+        rows = session.query(Bump).filter(Bump.dep_repo_id.is_not(None), Bump.adoption_seconds >= 0).all()
+        repos = {r.id: r for r in session.query(Repo).filter(
+            Repo.id.in_({x.consumer_repo_id for x in rows} | {x.dep_repo_id for x in rows})
+        ).all()}
+        grouped = defaultdict(list)
+        for row in rows:
+            grouped[(row.dep_repo_id, row.consumer_repo_id)].append(row)
+        output = []
+        for (dep, consumer), values in grouped.items():
+            if len(values) < 3:
+                continue
+            delays = sorted(x.adoption_seconds / 86400 for x in values)
+            output.append({"dep": repos[dep].name, "consumer": repos[consumer].name, "bumps": len(values),
+                           "timed": len(delays), "median_adoption_days": round(median(delays), 1),
+                           "p90_adoption_days": round(delays[min(len(delays) - 1, int(len(delays) * .9))], 1),
+                           "last_bump": max(x.bumped_at for x in values if x.bumped_at)})
+        return sorted(output, key=lambda x: x["bumps"], reverse=True)[:limit]

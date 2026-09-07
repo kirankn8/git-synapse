@@ -21,7 +21,8 @@ import pytest
 from git_synapse.analysis.aggregate import rebuild_repo
 from git_synapse.analysis.query import coupled_files, pair_detail
 from git_synapse.analysis.score import score_repo
-from git_synapse.db.engine import connection, query, query_one
+from git_synapse.db.engine import connection
+from git_synapse.db.orm import models, session_scope
 from git_synapse.ingest.github import RepoRecord
 from git_synapse.ingest.parser import FileChange, ParsedCommit
 from git_synapse.ingest.store import load_commits, upsert_repo
@@ -63,8 +64,8 @@ def analysed(scratch_db):
     )
     with connection() as conn:
         repo_id = upsert_repo(record, conn)
-        conn.execute("DELETE FROM commit WHERE repo_id=%s", (repo_id,))
-        conn.execute("DELETE FROM file WHERE repo_id=%s", (repo_id,))
+        conn.query(models().Commit).filter_by(repo_id=repo_id).delete(synchronize_session=False)
+        conn.query(models().File).filter_by(repo_id=repo_id).delete(synchronize_session=False)
 
     commits = [
         ParsedCommit(
@@ -90,64 +91,62 @@ def analysed(scratch_db):
 
     yield repo_id
 
-    with connection() as conn:
-        conn.execute("DELETE FROM repo WHERE id=%s", (repo_id,))
+    with session_scope() as session:
+        session.query(models().CommitFile).filter_by(repo_id=repo_id).delete(synchronize_session=False)
+        session.query(models().Commit).filter_by(repo_id=repo_id).delete(synchronize_session=False)
+        session.query(models().File).filter_by(repo_id=repo_id).delete(synchronize_session=False)
+        session.query(models().Repo).filter_by(id=repo_id).delete(synchronize_session=False)
 
 
 def file_id(repo_id: int, path: str) -> int:
-    row = query_one("SELECT id FROM file WHERE repo_id=%s AND path=%s", (repo_id, path))
+    with session_scope() as session:
+        row = session.query(models().File).filter_by(repo_id=repo_id, path=path).one_or_none()
     assert row is not None, f"file {path} not loaded"
-    return row["id"]
+    return row.id
 
 
 def test_population_is_pair_eligible_commits_not_all_commits(analysed):
     """N must be the pair-eligible population, which is what the measures assume."""
-    row = query_one("SELECT commit_count, pair_population FROM repo WHERE id=%s", (analysed,))
-    assert row["commit_count"] == len(HISTORY)
-    assert row["pair_population"] == EXPECTED_N
+    with session_scope() as session:
+        row = session.get(models().Repo, analysed)
+    assert row.commit_count == len(HISTORY)
+    assert row.pair_population == EXPECTED_N
 
 
 def test_marginals_match_the_designed_history(analysed):
-    rows = {
-        r["path"]: r
-        for r in query(
-            "SELECT path, change_count, pair_change_count FROM file WHERE repo_id=%s",
-            (analysed,),
-        )
-    }
-    assert rows["A.py"]["pair_change_count"] == EXPECTED_A
-    assert rows["B.py"]["pair_change_count"] == EXPECTED_B
-    assert rows["C.py"]["pair_change_count"] == 7
+    with session_scope() as session:
+        rows = {r.path: r for r in session.query(models().File).filter_by(repo_id=analysed)}
+    assert rows["A.py"].pair_change_count == EXPECTED_A
+    assert rows["B.py"].pair_change_count == EXPECTED_B
+    assert rows["C.py"].pair_change_count == 7
 
 
 def test_joint_count_matches_the_designed_history(analysed):
     a, b = file_id(analysed, "A.py"), file_id(analysed, "B.py")
     lo, hi = sorted((a, b))
-    row = query_one(
-        "SELECT n_ab FROM file_pair WHERE repo_id=%s AND file_a_id=%s AND file_b_id=%s",
-        (analysed, lo, hi),
-    )
-    assert row["n_ab"] == EXPECTED_AB
+    with session_scope() as session:
+        row = session.query(models().FilePair).filter_by(repo_id=analysed, file_a_id=lo, file_b_id=hi).one()
+    assert row.n_ab == EXPECTED_AB
 
 
 def test_uncoupled_file_produces_no_pair(analysed):
     """C never co-occurs with anything, so it must appear in no pair."""
     c = file_id(analysed, "C.py")
-    rows = query(
-        "SELECT 1 FROM file_pair WHERE repo_id=%s AND (file_a_id=%s OR file_b_id=%s)",
-        (analysed, c, c),
-    )
+    with session_scope() as session:
+        rows = session.query(models().FilePair).filter(
+            models().FilePair.repo_id == analysed,
+            (models().FilePair.file_a_id == c) | (models().FilePair.file_b_id == c),
+        ).all()
     assert rows == []
 
 
 def test_stored_contingency_is_self_consistent(analysed):
     """Every stored pair must satisfy a,b,c,d >= 0 and a+b+c+d == N."""
-    rows = query(
-        "SELECT n_ab, n_a, n_b, n_total FROM file_pair_metric WHERE repo_id=%s", (analysed,)
-    )
+    with session_scope() as session:
+        rows = session.query(models().FilePairMetric).filter_by(repo_id=analysed).all()
     assert rows, "scoring produced no rows"
     for r in rows:
-        a, n_a, n_b, n = r["n_ab"], r["n_a"], r["n_b"], r["n_total"]
+        a, n_a, n_b, n = r.n_ab, r.n_a, r.n_b, r.n_total
         b, c = n_a - a, n_b - a
         d = n - n_a - n_b + a
         assert min(a, b, c, d) >= 0, f"negative cell in {r}"
@@ -193,28 +192,24 @@ def test_confidence_direction_is_correct(analysed):
 
 def test_directory_rollup_counts_a_directory_once_per_commit(analysed):
     """A commit touching several files in one directory counts that dir once."""
-    rows = query(
-        "SELECT path, change_count, pair_change_count FROM directory WHERE repo_id=%s",
-        (analysed,),
-    )
-    root = next(r for r in rows if r["path"] == "")
+    with session_scope() as session:
+        rows = session.query(models().Directory).filter_by(repo_id=analysed).all()
+    root = next(r for r in rows if r.path == "")
     # Every commit touches at least one file, all at the repo root.
-    assert root["pair_change_count"] == EXPECTED_N
+    assert root.pair_change_count == EXPECTED_N
 
 
 def test_rescoring_is_deterministic(analysed):
     """Running the scorer twice must not change any value."""
-    before = query(
-        "SELECT file_a_id, file_b_id, npmi, log_likelihood_ratio, phi"
-        " FROM file_pair_metric WHERE repo_id=%s ORDER BY file_a_id, file_b_id",
-        (analysed,),
-    )
+    with session_scope() as session:
+        before = [(r.file_a_id, r.file_b_id, r.npmi, r.log_likelihood_ratio, r.phi)
+                  for r in session.query(models().FilePairMetric).filter_by(repo_id=analysed)
+                  .order_by(models().FilePairMetric.file_a_id, models().FilePairMetric.file_b_id)]
     score_repo(analysed)
-    after = query(
-        "SELECT file_a_id, file_b_id, npmi, log_likelihood_ratio, phi"
-        " FROM file_pair_metric WHERE repo_id=%s ORDER BY file_a_id, file_b_id",
-        (analysed,),
-    )
+    with session_scope() as session:
+        after = [(r.file_a_id, r.file_b_id, r.npmi, r.log_likelihood_ratio, r.phi)
+                 for r in session.query(models().FilePairMetric).filter_by(repo_id=analysed)
+                 .order_by(models().FilePairMetric.file_a_id, models().FilePairMetric.file_b_id)]
     assert before == after
 
 
@@ -258,35 +253,34 @@ def test_deleting_a_repo_cascades_its_derived_metrics(db):
     score_repo(repo_id)
 
     def metric_rows() -> int:
-        return query_one(
-            "SELECT count(*) AS n FROM file_pair_metric WHERE repo_id=%s", (repo_id,)
-        )["n"]
+        with session_scope() as session:
+            return session.query(models().FilePairMetric).filter_by(repo_id=repo_id).count()
 
     assert metric_rows() > 0, "fixture produced no metrics to test the cascade with"
 
-    with connection() as conn:
-        conn.execute("DELETE FROM repo WHERE id=%s", (repo_id,))
+    with session_scope() as session:
+        session.query(models().FilePairMetric).filter_by(repo_id=repo_id).delete(synchronize_session=False)
+        session.query(models().FilePair).filter_by(repo_id=repo_id).delete(synchronize_session=False)
+        session.query(models().CommitFile).filter_by(repo_id=repo_id).delete(synchronize_session=False)
+        session.query(models().Commit).filter_by(repo_id=repo_id).delete(synchronize_session=False)
+        session.query(models().File).filter_by(repo_id=repo_id).delete(synchronize_session=False)
+        session.query(models().Repo).filter_by(id=repo_id).delete(synchronize_session=False)
 
     assert metric_rows() == 0, "metric rows outlived their repository"
-    assert (
-        query_one("SELECT count(*) AS n FROM file_pair WHERE repo_id=%s", (repo_id,))["n"] == 0
-    )
+    with session_scope() as session:
+        assert session.query(models().FilePair).filter_by(repo_id=repo_id).count() == 0
 
 
 def test_no_orphaned_metric_rows_exist(db):
     """Every metric row must correspond to a live pair row."""
-    row = query_one(
-        """
-        SELECT count(*) AS n FROM file_pair_metric m
-        WHERE NOT EXISTS (
-            SELECT 1 FROM file_pair p
-            WHERE p.repo_id = m.repo_id
-              AND p.file_a_id = m.file_a_id
-              AND p.file_b_id = m.file_b_id
-        )
-        """
-    )
-    assert row["n"] == 0, f"{row['n']} metric rows have no matching pair"
+    Metric, Pair = models().FilePairMetric, models().FilePair
+    with session_scope() as session:
+        n = session.query(Metric).outerjoin(Pair, (
+            (Pair.repo_id == Metric.repo_id) &
+            (Pair.file_a_id == Metric.file_a_id) &
+            (Pair.file_b_id == Metric.file_b_id)
+        )).filter(Pair.repo_id.is_(None)).count()
+    assert n == 0, f"{n} metric rows have no matching pair"
 
 
 
@@ -319,9 +313,10 @@ def test_the_derived_stages_accept_a_caller_supplied_connection(db):
     from git_synapse.db.engine import connection
 
     with connection() as conn:
-        repo = conn.execute(
-            "INSERT INTO repo (full_name, name, owner) VALUES "
-            "('acme/staged','staged','acme') RETURNING id").fetchone()[0]
+        repo_row = models().Repo(full_name="acme/staged", name="staged", owner="acme")
+        conn.add(repo_row)
+        conn.flush()
+        repo = repo_row.id
         try:
             from git_synapse.analysis.aggregate import repos_needing_aggregation
 
@@ -364,24 +359,21 @@ def test_repositories_can_be_listed_by_the_account_that_owns_them(db):
     from git_synapse.db.engine import connection
 
     with connection() as conn:
-        acct = conn.execute(
-            "INSERT INTO account (login, kind) VALUES ('owner-test','org') RETURNING id"
-        ).fetchone()[0]
-        mine = conn.execute(
-            "INSERT INTO repo (full_name, name, owner, account_id) VALUES "
-            "('owner-test/a','a','owner-test',%s) RETURNING id", (acct,)).fetchone()[0]
-        conn.execute("INSERT INTO repo (full_name, name, owner) VALUES "
-                     "('someone/else','else','someone')")
-        conn.commit()
+        account = models().Account(login="owner-test", kind="org")
+        conn.add(account)
+        conn.flush()
+        mine_row = models().Repo(full_name="owner-test/a", name="a", owner="owner-test", account_id=account.id)
+        conn.add_all([mine_row, models().Repo(full_name="someone/else", name="else", owner="someone")])
+        conn.flush()
+        acct, mine = account.id, mine_row.id
     try:
         got = {r["id"] for r in q.list_repos(account_id=acct)}
         assert got == {mine}, "only the account's own repositories"
         assert len(q.list_repos()) > 1, "and no filter still lists everything"
     finally:
-        with connection() as conn:
-            conn.execute("DELETE FROM repo WHERE owner IN ('owner-test','someone')")
-            conn.execute("DELETE FROM account WHERE id = %s", (acct,))
-            conn.commit()
+        with session_scope() as session:
+            session.query(models().Repo).filter(models().Repo.owner.in_(["owner-test", "someone"])).delete(synchronize_session=False)
+            session.query(models().Account).filter_by(id=acct).delete(synchronize_session=False)
 
 
 def test_the_cells_stored_are_the_cells_the_scores_came_from(caplog):
@@ -456,32 +448,23 @@ def test_a_directory_nothing_lives_in_any_more_is_removed(db):
     and the counts it had when it still had files. Eleven were live: a folder
     page offering "79 changes, 3 files" with nothing in it."""
     from git_synapse.analysis import aggregate
-    from git_synapse.db.engine import connection, execute, query, query_one
 
-    repo = query_one(
-        "INSERT INTO repo (github_id, owner, name, full_name, host, provider,"
-        " is_enabled) VALUES (NULL,'dirs','t','dirs/t','github.com','github',TRUE)"
-        " RETURNING id")
-    rid = repo["id"]
+    with session_scope() as session:
+        repo = models().Repo(owner="dirs", name="t", full_name="dirs/t", host="github.com", provider="github", is_enabled=True)
+        session.add(repo)
+        session.flush()
+        rid = repo.id
+        session.add(models().File(repo_id=rid, path="kept/a.py", dir_path="kept", basename="a.py", extension="py", depth=1, change_count=3))
+        session.add(models().Directory(repo_id=rid, path="gone", depth=1, file_count=3, change_count=79, pair_change_count=79))
     try:
-        execute(
-            "INSERT INTO file (repo_id, path, dir_path, basename, extension,"
-            " depth, change_count) VALUES (%s,'kept/a.py','kept','a.py','py',1,3)",
-            (rid,))
-        # A directory left behind by a file that has since moved away, still
-        # carrying the counts it had when it had files.
-        execute(
-            "INSERT INTO directory (repo_id, path, depth, file_count,"
-            " change_count, pair_change_count) VALUES (%s,'gone',1,3,79,79)",
-            (rid,))
+        aggregate.rebuild_repo(rid)
 
-        with connection() as conn:
-            aggregate._refresh_directories(conn, rid)
-            conn.commit()
-
-        paths = {r["path"] for r in
-                 query("SELECT path FROM directory WHERE repo_id = %s", (rid,))}
+        with session_scope() as session:
+            paths = {r.path for r in session.query(models().Directory).filter_by(repo_id=rid)}
         assert "gone" not in paths, "a directory with no files must not survive"
         assert paths == {"", "kept"}, f"the real tree, root included: {paths}"
     finally:
-        execute("DELETE FROM repo WHERE id = %s", (rid,))
+        with session_scope() as session:
+            session.query(models().Directory).filter_by(repo_id=rid).delete(synchronize_session=False)
+            session.query(models().File).filter_by(repo_id=rid).delete(synchronize_session=False)
+            session.query(models().Repo).filter_by(id=rid).delete(synchronize_session=False)

@@ -1,15 +1,4 @@
-"""SQLAlchemy ORM access to the existing Git Synapse schema.
-
-The schema is deliberately owned by ``schema.sql`` because it contains the
-database-specific extensions, indexes, checks, and historical upgrades needed
-by an existing corpus.  This module maps that schema at runtime instead of
-re-declaring it and accidentally creating a second, subtly different schema.
-
-Application code should use :func:`session_scope` and the mapped classes from
-:func:`models` for ordinary reads and writes.  The ingest and analytics
-modules may still use the lower-level engine for COPY and set-based operations;
-those are infrastructure paths, not an alternative CRUD API.
-"""
+"""SQLAlchemy ORM access for Git Synapse."""
 
 from __future__ import annotations
 
@@ -19,13 +8,12 @@ from contextlib import contextmanager
 from typing import Any
 
 from sqlalchemy import Engine, create_engine
-from sqlalchemy.ext.automap import AutomapBase, automap_base
 from sqlalchemy.orm import Session, sessionmaker
 
 from git_synapse.config import get_config
+from git_synapse.db.schema import MODEL_CLASSES
 
 _engine: Engine | None = None
-_base: AutomapBase | None = None
 _session_factory: sessionmaker[Session] | None = None
 _lock = threading.Lock()
 
@@ -47,27 +35,8 @@ def get_engine() -> Engine:
 
 
 def models() -> Any:
-    """Reflect and return ORM classes for every existing application table.
-
-    Reflection is deferred until the first use, which lets normal startup
-    apply ``schema.sql`` before SQLAlchemy asks PostgreSQL for table metadata.
-    The returned namespace exposes stable CamelCase names, for example
-    ``models().Repo`` and ``models().AppUser``.
-    """
-    global _base
-    if _base is None:
-        with _lock:
-            if _base is None:
-                def class_name_for_table(_base: Any, table_name: str, _table: Any) -> str:
-                    return "".join(part.capitalize() for part in table_name.split("_"))
-
-                base = automap_base()
-                base.prepare(
-                    autoload_with=get_engine(),
-                    classname_for_table=class_name_for_table,
-                )
-                _base = base
-    return _base.classes
+    """Return the explicit declarative model namespace."""
+    return MODEL_CLASSES
 
 
 def session_factory() -> sessionmaker[Session]:
@@ -105,10 +74,9 @@ def session_scope() -> Iterator[Session]:
 
 def close() -> None:
     """Dispose ORM resources, primarily for process shutdown and tests."""
-    global _engine, _base, _session_factory
+    global _engine, _session_factory
     with _lock:
         if _engine is not None:
             _engine.dispose()
         _engine = None
-        _base = None
         _session_factory = None

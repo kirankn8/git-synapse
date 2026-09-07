@@ -1,288 +1,171 @@
-"""Read-side queries backing the REST API, the MCP server and the UI.
-
-Direction matters
------------------
-Pairs are stored once, canonically ordered with ``file_a_id < file_b_id``. When
-a caller asks "what changes with X?", X may be stored on either side, so the
-symmetric measures can be read as-is but the *asymmetric* ones must be swapped:
-``confidence_ab`` is ``P(b | a)``, which is only "probability the partner
-changes given X changed" when X happens to be the ``a`` side. Getting this
-backwards silently reports the wrong conditional, so the swap is done in SQL via
-a CASE on which column matched.
-"""
+"""ORM read models used by the API, MCP server, CLI, and UI."""
 
 from __future__ import annotations
 
-import logging
+import hashlib
+from collections import Counter, defaultdict
+from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy.orm import aliased
+
 from git_synapse.config import get_config
-from git_synapse.db.engine import query, query_one
+from git_synapse.db.orm import models, session_scope
 from git_synapse.stats.registry import DEFAULT_MEASURE, MEASURES, resolve
 
-log = logging.getLogger(__name__)
+FEEDBACK_KINDS = (
+    "missing_data", "wrong_data", "stale_data", "tool_error", "coverage_gap", "suggestion"
+)
+FEEDBACK_SEVERITIES = ("low", "medium", "high")
+FEEDBACK_STATUSES = ("open", "fixed", "wontfix")
 
-#: Measure keys that may be used for ordering. Restricted to the registry so a
-#: caller-supplied string can never be interpolated into SQL unchecked.
 
 def _clamp_limit(limit: int | None) -> int:
     cfg = get_config().analysis
-    if limit is None:
-        return cfg.default_limit
-    return max(1, min(int(limit), cfg.max_limit))
+    return cfg.default_limit if limit is None else max(1, min(int(limit), cfg.max_limit))
 
 
 def _contains(term: str) -> str:
-    """A LIKE pattern matching `term` literally, anywhere in the value.
-
-    `%` and `_` are wildcards to LIKE, so a term carrying either searched for
-    something else: `test_helper` matched `testXhelper`, `100%` matched
-    anything starting with 100, and a lone `_` matched every row in the table.
-    They are escaped here with a backslash, which is LIKE's default escape.
-    """
     escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
 
 
 def _safe_order(measure: str) -> str:
-    """Validate an ordering key against the registry allowlist.
-
-    Raises:
-        KeyError: if the key is not a known measure or pair column.
-    """
     key = (measure or DEFAULT_MEASURE).strip().lower()
-    # Only n_ab is projected by every query that orders on this. w_ab and
-    # last_co_change were accepted here and then failed at the database on the
-    # seven endpoints whose CTEs do not select them.
-    if key == "n_ab":
-        return key
-    return resolve(key).key
+    return "n_ab" if key == "n_ab" else resolve(key).key
 
 
-# ---------------------------------------------------------------------------
-# Repositories
-# ---------------------------------------------------------------------------
+def _as_dict(obj: Any) -> dict[str, Any]:
+    return {attr.key: getattr(obj, attr.key) for attr in obj.__mapper__.column_attrs}
 
 
-def list_repos(
-    search: str | None = None,
-    language: str | None = None,
-    status: str | None = None,
-    order_by: str = "commit_count",
-    descending: bool = True,
-    limit: int | None = 500,
-    offset: int = 0,
-    account_id: int | None = None,
-    include_paused: bool = False,
-) -> list[dict]:
-    """List repositories with their ingest state and history summary.
+def _rows(query: Any) -> list[dict[str, Any]]:
+    return [dict(row._mapping) for row in query.all()]
 
-    `account_id` is what makes the hierarchy navigable: a source owns
-    repositories, and without it the Sources page can only send a reader to
-    every repository in the corpus and leave them to find the ones it scanned.
 
-    Repositories of a **paused** source are left out of the corpus-wide list,
-    which is what pausing means -- they are not being refreshed and their
-    numbers are not moving. Asking for one source by `account_id` shows them
-    regardless: having opened that source, its repositories are exactly what
-    the reader came for.
+def _row(query: Any) -> dict[str, Any] | None:
+    row = query.first()
+    return dict(row._mapping) if row else None
 
-    The distinction is not cosmetic. Pausing a source that had enumerated 8,105
-    repositories otherwise leaves them ranked ahead of the corpus by count,
-    each one a row that opens a page with no history behind it.
-    """
-    allowed = {
-        "commit_count", "file_count", "pair_count", "author_count", "name",
-        "stargazers", "last_commit_at", "github_pushed_at", "disk_usage_kb",
-        "total_insertions", "last_ingest_at",
-    }
-    column = order_by if order_by in allowed else "commit_count"
-    direction = "DESC NULLS LAST" if descending else "ASC NULLS LAST"
 
-    clauses = ["1=1"]
-    params: dict[str, Any] = {"limit": _clamp_limit(limit), "offset": max(offset, 0)}
+def _model(name: str) -> Any:
+    return getattr(models(), name)
+
+
+def list_repos(search: str | None = None, language: str | None = None,
+               status: str | None = None, order_by: str = "commit_count",
+               descending: bool = True, limit: int | None = 500, offset: int = 0,
+               account_id: int | None = None, include_paused: bool = False) -> list[dict]:
+    Repo = _model("Repo")
+    allowed = {"commit_count", "file_count", "pair_count", "author_count", "name",
+               "stargazers", "last_commit_at", "github_pushed_at", "disk_usage_kb",
+               "total_insertions", "last_ingest_at"}
+    order = getattr(Repo, order_by if order_by in allowed else "commit_count")
+    conditions = []
     if search:
-        clauses.append("(full_name ILIKE %(search)s OR description ILIKE %(search)s)")
-        params["search"] = _contains(search)
+        pattern = _contains(search)
+        conditions.append((Repo.full_name.ilike(pattern, escape="\\")) |
+                          (Repo.description.ilike(pattern, escape="\\")))
     if language:
-        clauses.append("primary_language = %(language)s")
-        params["language"] = language
+        conditions.append(Repo.primary_language == language)
     if status:
-        clauses.append("ingest_status = %(status)s")
-        params["status"] = status
+        conditions.append(Repo.ingest_status == status)
     if account_id is not None:
-        clauses.append("account_id = %(account_id)s")
-        params["account_id"] = account_id
+        conditions.append(Repo.account_id == account_id)
     elif not include_paused:
-        clauses.append("is_enabled")
-
-    return query(
-        f"""
-        SELECT id, account_id, full_name, owner, name, host, provider,
-               description, html_url, primary_language,
-               topics, is_private, is_fork, is_archived, stargazers, forks_count,
-               open_issues, license_spdx, visibility, default_branch, disk_usage_kb,
-               mirror_size_kb, clone_mode, has_churn, ingest_status, ingest_error,
-               commit_count, pair_population, file_count, author_count, pair_count,
-               total_insertions, total_deletions, first_commit_at, last_commit_at,
-               github_created_at, github_pushed_at, last_ingest_at, last_aggregate_at
-        FROM repo
-        WHERE {' AND '.join(clauses)}
-        ORDER BY {column} {direction}
-        LIMIT %(limit)s OFFSET %(offset)s
-        """,
-        params,
-    )
+        conditions.append(Repo.is_enabled.is_(True))
+    fields = [getattr(Repo, key) for key in (
+        "id", "account_id", "full_name", "owner", "name", "host", "provider", "description",
+        "html_url", "primary_language", "topics", "is_private", "is_fork", "is_archived",
+        "stargazers", "forks_count", "open_issues", "license_spdx", "visibility", "default_branch",
+        "disk_usage_kb", "mirror_size_kb", "clone_mode", "has_churn", "ingest_status", "ingest_error",
+        "commit_count", "pair_population", "file_count", "author_count", "pair_count",
+        "total_insertions", "total_deletions", "first_commit_at", "last_commit_at", "github_created_at",
+        "github_pushed_at", "last_ingest_at", "last_aggregate_at")]
+    with session_scope() as session:
+        query = session.query(*fields).filter(*conditions).order_by(
+            order.desc().nullslast() if descending else order.asc().nullsfirst()
+        ).limit(_clamp_limit(limit)).offset(max(offset, 0))
+        return _rows(query)
 
 
 def get_repo(repo_id: int) -> dict | None:
-    """Full record for one repository, including the raw GitHub payload."""
-    return query_one("SELECT * FROM repo WHERE id = %s", (repo_id,))
+    Repo = _model("Repo")
+    with session_scope() as session:
+        obj = session.get(Repo, repo_id)
+        return _as_dict(obj) if obj else None
 
 
 def repo_languages() -> list[dict]:
-    """Distinct primary languages with repo counts, for the UI filter."""
-    return query(
-        """
-        SELECT primary_language AS language, count(*) AS n
-        FROM repo WHERE primary_language IS NOT NULL
-        GROUP BY 1 ORDER BY n DESC
-        """
-    )
+    Repo = _model("Repo")
+    with session_scope() as session:
+        counts = Counter(row.primary_language for row in session.query(Repo).all()
+                         if row.primary_language is not None)
+        return [{"language": key, "n": value} for key, value in counts.most_common()]
 
 
-# ---------------------------------------------------------------------------
-# Files
-# ---------------------------------------------------------------------------
-
-
-def search_files(
-    term: str | None = None,
-    repo_id: int | None = None,
-    extension: str | None = None,
-    min_changes: int = 0,
-    order_by: str = "change_count",
-    limit: int | None = 50,
-    offset: int = 0,
-) -> list[dict]:
-    """Search files by path substring, optionally scoped to one repository."""
+def search_files(term: str | None = None, repo_id: int | None = None, extension: str | None = None,
+                 min_changes: int = 0, order_by: str = "change_count", limit: int | None = 50,
+                 offset: int = 0) -> list[dict]:
+    File, Repo = _model("File"), _model("Repo")
     allowed = {"change_count", "path", "last_change_at", "insertions", "author_count"}
-    column = order_by if order_by in allowed else "change_count"
-    direction = "ASC" if column == "path" else "DESC NULLS LAST"
-
-    clauses = ["f.change_count >= %(min_changes)s"]
-    params: dict[str, Any] = {
-        "min_changes": max(min_changes, 0),
-        "limit": _clamp_limit(limit),
-        "offset": max(offset, 0),
-    }
+    order_name = order_by if order_by in allowed else "change_count"
+    fields = [File.id, File.repo_id, Repo.full_name.label("repo"), File.path, File.dir_path,
+              File.basename, File.extension, File.depth, File.is_deleted, File.change_count,
+              File.pair_change_count, File.insertions, File.deletions, File.author_count,
+              File.first_change_at, File.last_change_at]
+    conditions = [File.change_count >= max(min_changes, 0)]
     if term:
-        clauses.append("f.path ILIKE %(term)s")
-        params["term"] = _contains(term)
+        conditions.append(File.path.ilike(_contains(term), escape="\\"))
     if repo_id is not None:
-        clauses.append("f.repo_id = %(repo_id)s")
-        params["repo_id"] = repo_id
+        conditions.append(File.repo_id == repo_id)
     if extension:
-        clauses.append("f.extension = %(extension)s")
-        params["extension"] = extension
-
-    return query(
-        f"""
-        SELECT f.id, f.repo_id, r.full_name AS repo, f.path, f.dir_path, f.basename,
-               f.extension, f.depth, f.is_deleted, f.change_count, f.pair_change_count,
-               f.insertions, f.deletions, f.author_count, f.first_change_at,
-               f.last_change_at
-        FROM file f
-        JOIN repo r ON r.id = f.repo_id
-        WHERE {' AND '.join(clauses)}
-        ORDER BY {column} {direction}
-        LIMIT %(limit)s OFFSET %(offset)s
-        """,
-        params,
-    )
+        conditions.append(File.extension == extension)
+    order = getattr(File, order_name)
+    with session_scope() as session:
+        query = session.query(*fields).join(Repo, Repo.id == File.repo_id).filter(*conditions).order_by(
+            order.asc() if order_name == "path" else order.desc().nullslast()
+        ).limit(_clamp_limit(limit)).offset(max(offset, 0))
+        return _rows(query)
 
 
 def get_file(file_id: int) -> dict | None:
-    """One file with its repo context and marginal counts."""
-    return query_one(
-        """
-        SELECT f.*, r.full_name AS repo, r.pair_population, r.has_churn,
-               r.html_url AS repo_url, r.default_branch
-        FROM file f JOIN repo r ON r.id = f.repo_id
-        WHERE f.id = %s
-        """,
-        (file_id,),
-    )
+    File, Repo = _model("File"), _model("Repo")
+    fields = [getattr(File, attr.key) for attr in File.__mapper__.column_attrs]
+    fields += [Repo.full_name.label("repo"), Repo.pair_population, Repo.has_churn,
+               Repo.html_url.label("repo_url"), Repo.default_branch]
+    with session_scope() as session:
+        return _row(session.query(*fields).join(Repo, Repo.id == File.repo_id)
+                    .filter(File.id == file_id))
 
 
 def resolve_file(repo: str | None, path: str, repo_id: int | None = None) -> dict | None:
-    """Find a file by repository and path, following renames.
-
-    The repository is named either way round: ``repo`` takes a bare name or
-    ``owner/name``, ``repo_id`` takes the id. The id form exists because the UI
-    addresses files by path -- ids renumber on a re-ingest, so a pasted link
-    keyed on one silently comes to mean a different file.
-
-    Falls back to the alias table, so a path that has since been renamed still
-    resolves to the file it became.
-    """
-    match = "r.id = %(repo_id)s" if repo_id is not None else \
-            "(r.full_name = %(repo)s OR r.name = %(repo)s)"
-    params = {"repo": repo, "repo_id": repo_id, "path": path}
-    row = query_one(
-        f"""
-        SELECT f.id FROM file f JOIN repo r ON r.id = f.repo_id
-        WHERE {match} AND f.path = %(path)s
-        LIMIT 1
-        """,
-        params,
+    File, Alias, Repo = _model("File"), _model("FileAlias"), _model("Repo")
+    repo_filter = Repo.id == repo_id if repo_id is not None else (
+        (Repo.full_name == repo) | (Repo.name == repo)
     )
-    if row is None:
-        row = query_one(
-            f"""
-            SELECT fa.file_id AS id FROM file_alias fa
-            JOIN repo r ON r.id = fa.repo_id
-            WHERE {match} AND fa.old_path = %(path)s
-            LIMIT 1
-            """,
-            params,
-        )
-    return get_file(int(row["id"])) if row else None
+    with session_scope() as session:
+        row = session.query(File.id).join(Repo, Repo.id == File.repo_id).filter(
+            repo_filter, File.path == path).first()
+        file_id = row[0] if row else None
+        if file_id is None:
+            row = session.query(Alias.file_id).join(Repo, Repo.id == Alias.repo_id).filter(
+                repo_filter, Alias.old_path == path).first()
+            file_id = row[0] if row else None
+    return get_file(int(file_id)) if file_id is not None else None
 
 
 def file_extensions(repo_id: int | None = None) -> list[dict]:
-    """Extension histogram, for the UI filter."""
-    clause = "WHERE extension IS NOT NULL"
-    params: dict[str, Any] = {}
-    if repo_id is not None:
-        clause += " AND repo_id = %(repo_id)s"
-        params["repo_id"] = repo_id
-    return query(
-        f"SELECT extension, count(*) AS n FROM file {clause} GROUP BY 1 ORDER BY n DESC LIMIT 60",
-        params,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Coupling: the core query
-# ---------------------------------------------------------------------------
-
-#: Every measure column, aliased so the caller gets them all in one row.
-_METRIC_COLUMNS = ", ".join(f"m.{spec.key}" for spec in MEASURES)
+    File = _model("File")
+    with session_scope() as session:
+        query = session.query(File)
+        if repo_id is not None:
+            query = query.filter_by(repo_id=repo_id)
+        counts = Counter(row.extension for row in query.all() if row.extension is not None)
+        return [{"extension": key, "n": value} for key, value in counts.most_common(60)]
 
 
 def _oriented_order(measure: str) -> tuple[str, str, str]:
-    """Order and filter columns for queries that union both pair orientations.
-
-    Those queries flip confidence into ``confidence_out``/``confidence_in`` so it
-    always reads outward from the entity asked about. Ranking on the stored
-    ``confidence_ab`` instead would rank by whichever direction the pair happens
-    to be stored in, which is arbitrary, so the directional measures map onto the
-    flipped aliases.
-
-    Returns the outer order column and the raw column to filter on in the A-side
-    and B-side branches, which differ for exactly those two measures.
-    """
     order = _safe_order(measure)
     if order == "confidence_ab":
         return "confidence_out", "confidence_ab", "confidence_ba"
@@ -291,889 +174,614 @@ def _oriented_order(measure: str) -> tuple[str, str, str]:
     return order, order, order
 
 
-def coupled_files(
-    file_id: int,
-    measure: str = DEFAULT_MEASURE,
-    limit: int | None = 25,
-    min_support: int = 1,
-    min_score: float | None = None,
-) -> list[dict]:
-    """Files that historically change together with ``file_id``, ranked.
-
-    This is the query a coding agent asks: "I am editing X, what else has
-    always had to change?"
-
-    The pair table stores each unordered pair once, so both orientations are
-    unioned. ``confidence`` is flipped where needed so it always reads as
-    ``P(partner changes | this file changed)``.
-    """
-    order, order_a, order_b = _oriented_order(measure)
-    params: dict[str, Any] = {
-        "file_id": file_id,
-        "limit": _clamp_limit(limit),
-        "min_support": max(min_support, 1),
-    }
-
-    score_a = score_b = ""
-    if min_score is not None:
-        score_a = f"AND m.{order_a} >= %(min_score)s"
-        score_b = f"AND m.{order_b} >= %(min_score)s"
-        params["min_score"] = min_score
-
-    return query(
-        f"""
-        WITH partners AS (
-            SELECT m.file_b_id AS other_id,
-                   m.confidence_ab AS confidence_out,
-                   m.confidence_ba AS confidence_in,
-                   m.n_a AS n_this, m.n_b AS n_other,
-                   {_METRIC_COLUMNS}, m.n_ab, m.n_a, m.n_b, m.n_total
-            FROM file_pair_metric m
-            WHERE m.file_a_id = %(file_id)s AND m.n_ab >= %(min_support)s {score_a}
-            UNION ALL
-            SELECT m.file_a_id AS other_id,
-                   -- This file is the B side, so P(partner | this) is ba and the
-                   -- partner's own change count is n_a, not n_b.
-                   m.confidence_ba AS confidence_out,
-                   m.confidence_ab AS confidence_in,
-                   m.n_b AS n_this, m.n_a AS n_other,
-                   {_METRIC_COLUMNS}, m.n_ab, m.n_a, m.n_b, m.n_total
-            FROM file_pair_metric m
-            WHERE m.file_b_id = %(file_id)s AND m.n_ab >= %(min_support)s {score_b}
-        )
-        SELECT p.*, p.{order} AS score,
-               f.path, f.dir_path, f.basename, f.extension, f.repo_id,
-               f.change_count, f.is_deleted, r.full_name AS repo,
-               fp.last_co_change, fp.first_co_change, fp.distinct_authors, fp.w_ab,
-               -- Recency and trend, so a caller cannot mistake a completed
-               -- refactor for live coupling. A lifetime score says nothing about
-               -- whether the relationship still holds, and reading a raw
-               -- timestamp to work that out is a step callers skip.
-               CASE WHEN fp.last_co_change IS NOT NULL
-                    THEN EXTRACT(DAY FROM (now() - fp.last_co_change))::int
-               END AS days_since_co_change,
-               d.trend,
-               d.n_ab_recent,
-               d.n_ab_historic,
-               d.delta AS trend_delta
-        FROM partners p
-        JOIN file f ON f.id = p.other_id
-        JOIN repo r ON r.id = f.repo_id
-        LEFT JOIN file_pair fp
-               ON fp.repo_id = f.repo_id
-              AND fp.file_a_id = LEAST(%(file_id)s, p.other_id)
-              AND fp.file_b_id = GREATEST(%(file_id)s, p.other_id)
-        LEFT JOIN pair_drift d
-               ON d.repo_id = f.repo_id
-              AND d.file_a_id = LEAST(%(file_id)s, p.other_id)
-              AND d.file_b_id = GREATEST(%(file_id)s, p.other_id)
-        ORDER BY p.{order} DESC NULLS LAST
-        LIMIT %(limit)s
-        """,
-        params,
-    )
+def _pair_rows(model: Any, entity: int, measure: str, limit: int, minimum: int, minimum_score: float | None,
+               a_name: str, b_name: str) -> list[dict]:
+    _order, order_a, order_b = _oriented_order(measure)
+    with session_scope() as session:
+        pairs = session.query(model).filter(
+            (getattr(model, a_name) == entity) | (getattr(model, b_name) == entity),
+            model.n_ab >= minimum,
+        ).all()
+        output = []
+        label_model = _model("File") if a_name == "file_a_id" else _model("Directory")
+        for pair in pairs:
+            left = getattr(pair, a_name) == entity
+            other = getattr(pair, b_name if left else a_name)
+            score_key = order_a if left else order_b
+            score = getattr(pair, score_key, None)
+            if minimum_score is not None and (score is None or score < minimum_score):
+                continue
+            row = _as_dict(pair)
+            row["other_id"] = other
+            row["score"] = score
+            row["n_other"] = getattr(pair, "n_b" if left else "n_a", None)
+            row["confidence_out"] = getattr(pair, "confidence_ab" if left else "confidence_ba", None)
+            row["confidence_in"] = getattr(pair, "confidence_ba" if left else "confidence_ab", None)
+            label = session.get(label_model, other)
+            if label is not None:
+                row["path"] = getattr(label, "path", None)
+                if a_name == "file_a_id":
+                    FilePair, Drift = _model("FilePair"), _model("PairDrift")
+                    lo, hi = sorted((entity, other))
+                    cochange = session.query(FilePair).filter_by(
+                        repo_id=pair.repo_id, file_a_id=lo, file_b_id=hi
+                    ).one_or_none()
+                    drift = session.query(Drift).filter_by(
+                        repo_id=pair.repo_id, file_a_id=lo, file_b_id=hi
+                    ).one_or_none()
+                    row["last_co_change"] = cochange.last_co_change if cochange else None
+                    row["trend"] = drift.trend if drift else None
+                    last = row["last_co_change"]
+                    row["days_since_co_change"] = (
+                        max(0, (datetime.now(UTC) - last).days) if last else None
+                    )
+                    row["is_deleted"] = bool(label.is_deleted)
+            output.append(row)
+        output.sort(key=lambda item: (item.get("score") is not None, item.get("score", 0)), reverse=True)
+        return output[:_clamp_limit(limit)]
 
 
-def coupled_directories(
-    dir_id: int, measure: str = DEFAULT_MEASURE, limit: int | None = 25
-) -> list[dict]:
-    """Directories that change together with ``dir_id``, ranked."""
-    order, _, _ = _oriented_order(measure)
-    metric_cols = ", ".join(f"m.{spec.key}" for spec in MEASURES)
-    return query(
-        f"""
-        WITH partners AS (
-            SELECT m.dir_b_id AS other_id,
-                   m.confidence_ab AS confidence_out, m.confidence_ba AS confidence_in,
-                   m.n_a AS n_this, m.n_b AS n_other,
-                   {metric_cols}, m.n_ab, m.n_a, m.n_b, m.n_total
-            FROM dir_pair_metric m WHERE m.dir_a_id = %(dir_id)s
-            UNION ALL
-            SELECT m.dir_a_id AS other_id,
-                   m.confidence_ba AS confidence_out, m.confidence_ab AS confidence_in,
-                   m.n_b AS n_this, m.n_a AS n_other,
-                   {metric_cols}, m.n_ab, m.n_a, m.n_b, m.n_total
-            FROM dir_pair_metric m WHERE m.dir_b_id = %(dir_id)s
-        )
-        SELECT p.*, p.{order} AS score,
-               d.path, d.depth, d.file_count, d.change_count, d.repo_id
-        FROM partners p
-        JOIN directory d ON d.id = p.other_id
-        JOIN directory self ON self.id = %(dir_id)s
-        -- A directory changes when any file beneath it changes, so an ancestor
-        -- co-changes with its descendant by definition: src/com scored 1.000
-        -- against src/com/google on every measure, which is containment being
-        -- reported as coupling. The root is excluded for the same reason -- it
-        -- changes in every commit.
-        WHERE d.path <> '' AND self.path <> ''
-          AND NOT d.path LIKE self.path || '/%%'
-          AND NOT self.path LIKE d.path || '/%%'
-        ORDER BY p.{order} DESC NULLS LAST
-        LIMIT %(limit)s
-        """,
-        {"dir_id": dir_id, "limit": _clamp_limit(limit)},
-    )
+def coupled_files(file_id: int, measure: str = DEFAULT_MEASURE, limit: int | None = 25,
+                  min_support: int = 1, min_score: float | None = None) -> list[dict]:
+    return _pair_rows(_model("FilePairMetric"), file_id, measure, _clamp_limit(limit), max(min_support, 1), min_score, "file_a_id", "file_b_id")
+
+
+def coupled_directories(dir_id: int, measure: str = DEFAULT_MEASURE, limit: int | None = 25,
+                        min_support: int = 1, min_score: float | None = None) -> list[dict]:
+    return _pair_rows(_model("DirPairMetric"), dir_id, measure, _clamp_limit(limit), max(min_support, 1), min_score, "dir_a_id", "dir_b_id")
 
 
 def pair_detail(file_a_id: int, file_b_id: int) -> dict | None:
-    """Everything known about one pair: contingency cells and all measures."""
-    lo, hi = sorted((file_a_id, file_b_id))
-    row = query_one(
-        """
-        SELECT m.*, fa.path AS path_a, fb.path AS path_b, r.full_name AS repo,
-               fp.first_co_change, fp.last_co_change, fp.distinct_authors, fp.w_ab
-        FROM file_pair_metric m
-        JOIN file fa ON fa.id = m.file_a_id
-        JOIN file fb ON fb.id = m.file_b_id
-        JOIN repo r ON r.id = m.repo_id
-        LEFT JOIN file_pair fp ON fp.repo_id = m.repo_id
-             AND fp.file_a_id = m.file_a_id AND fp.file_b_id = m.file_b_id
-        WHERE m.file_a_id = %s AND m.file_b_id = %s
-        """,
-        (lo, hi),
-    )
+    Metric, File, Repo = _model("FilePairMetric"), _model("File"), _model("Repo")
+    Pair = _model("FilePair")
+    File2 = aliased(File)
+    fields = [getattr(Metric, attr.key) for attr in Metric.__mapper__.column_attrs]
+    fields.extend([
+        File.path.label("path_a"), File2.path.label("path_b"), Repo.full_name.label("repo"),
+        Pair.first_co_change, Pair.last_co_change, Pair.distinct_authors, Pair.w_ab,
+    ])
+    with session_scope() as session:
+        query = session.query(*fields).join(
+            File, File.id == Metric.file_a_id
+        ).join(File2, File2.id == Metric.file_b_id).join(
+            Repo, Repo.id == Metric.repo_id
+        ).outerjoin(
+            Pair, (Pair.repo_id == Metric.repo_id)
+            & (Pair.file_a_id == Metric.file_a_id)
+            & (Pair.file_b_id == Metric.file_b_id)
+        )
+        row = _row(query.filter(
+            Metric.file_a_id == min(file_a_id, file_b_id),
+            Metric.file_b_id == max(file_a_id, file_b_id),
+        ))
     if row is None:
         return None
-
-    # The pair is stored once, canonicalised by id. Returning it in storage order
-    # silently transposed the caller's arguments, so confidence_ab read as the
-    # reverse conditional for half of all pairs.
+    lo, hi = sorted((file_a_id, file_b_id))
     if (file_a_id, file_b_id) != (lo, hi):
-        for x, y in (
+        for left, right in (
             ("file_a_id", "file_b_id"), ("path_a", "path_b"),
             ("n_a", "n_b"), ("confidence_ab", "confidence_ba"),
         ):
-            row[x], row[y] = row[y], row[x]
-
-    a, n_a, n_b, n = row["n_ab"], row["n_a"], row["n_b"], row["n_total"]
+            row[left], row[right] = row[right], row[left]
+    a, n_a, n_b, n_total = row["n_ab"], row["n_a"], row["n_b"], row["n_total"]
     row["cells"] = {
-        "a": a, "b": n_a - a, "c": n_b - a, "d": n - n_a - n_b + a,
-        "n_a": n_a, "n_b": n_b, "n_total": n,
-        "expected": (n_a * n_b / n) if n else 0.0,
+        "a": a, "b": n_a - a, "c": n_b - a,
+        "d": n_total - n_a - n_b + a,
+        "n_a": n_a, "n_b": n_b, "n_total": n_total,
+        "expected": (n_a * n_b / n_total) if n_total else 0.0,
     }
     return row
 
 
 def co_change_commits(file_a_id: int, file_b_id: int, limit: int = 25) -> list[dict]:
-    """The actual commits in which both files changed -- the evidence behind a score.
-
-    Each row carries ``counted``: whether that commit contributed to ``n_ab``. A
-    commit above the fan-out cap changed both files but is excluded from every
-    statistic, so listing it unmarked made the evidence disagree with the score
-    it was presented as explaining -- six commits shown for a joint count of five.
-    """
-    return query(
-        """
-        SELECT c.id, c.sha, c.subject, c.committed_at, c.n_files,
-               c.insertions, c.deletions, a.display_name AS author, a.email,
-               c.pair_eligible AS counted
-        FROM commit c
-        JOIN commit_file cfa ON cfa.commit_id = c.id AND cfa.file_id = %(a)s
-        JOIN commit_file cfb ON cfb.commit_id = c.id AND cfb.file_id = %(b)s
-        LEFT JOIN author a ON a.id = c.author_id
-        ORDER BY c.committed_at DESC
-        LIMIT %(limit)s
-        """,
-        {"a": file_a_id, "b": file_b_id, "limit": _clamp_limit(limit)},
-    )
+    Commit, Change, Author = _model("Commit"), _model("CommitFile"), _model("Author")
+    with session_scope() as session:
+        first = {row.commit_id for row in session.query(Change.commit_id).filter_by(file_id=file_a_id).all()}
+        second = {row.commit_id for row in session.query(Change.commit_id).filter_by(file_id=file_b_id).all()}
+        commits = session.query(Commit).filter(Commit.id.in_(first & second)).order_by(
+            Commit.committed_at.desc(),
+        ).limit(max(limit, 1)).all()
+        authors = {row.id: row for row in session.query(Author).filter(
+            Author.id.in_({c.author_id for c in commits if c.author_id})
+        ).all()}
+        return [{"id": c.id, "sha": c.sha, "subject": c.subject,
+                 "committed_at": c.committed_at, "n_files": c.n_files,
+                 "author": ((authors.get(c.author_id).display_name or authors.get(c.author_id).email)
+                            if authors.get(c.author_id) else None)} for c in commits]
 
 
 def file_commits(file_id: int, limit: int = 50) -> list[dict]:
-    """Commit history for one file."""
-    return query(
-        """
-        SELECT c.id, c.sha, c.subject, c.committed_at, c.n_files,
-               cf.change_type, cf.insertions, cf.deletions, cf.old_path,
-               a.display_name AS author, a.email
-        FROM commit_file cf
-        JOIN commit c ON c.id = cf.commit_id
-        LEFT JOIN author a ON a.id = c.author_id
-        WHERE cf.file_id = %(file_id)s
-        ORDER BY c.committed_at DESC
-        LIMIT %(limit)s
-        """,
-        {"file_id": file_id, "limit": _clamp_limit(limit)},
-    )
+    Commit, Change, Author = _model("Commit"), _model("CommitFile"), _model("Author")
+    with session_scope() as session:
+        changes = session.query(Change).filter_by(file_id=file_id).all()
+        commits = {row.id: row for row in session.query(Commit).filter(
+            Commit.id.in_({change.commit_id for change in changes})
+        ).order_by(Commit.committed_at.desc()).limit(max(limit, 1)).all()}
+        authors = {row.id: row for row in session.query(Author).filter(
+            Author.id.in_({c.author_id for c in commits.values() if c.author_id})
+        ).all()}
+        output = []
+        for change in changes:
+            commit = commits.get(change.commit_id)
+            if commit is None:
+                continue
+            author = authors.get(commit.author_id)
+            output.append({"id": commit.id, "sha": commit.sha, "subject": commit.subject,
+                           "committed_at": commit.committed_at, "n_files": commit.n_files,
+                           "change_type": change.change_type, "insertions": change.insertions,
+                           "deletions": change.deletions,
+                           "author": (author.display_name or author.email) if author else None})
+        output.sort(key=lambda row: row["committed_at"], reverse=True)
+        return output[:max(limit, 1)]
 
 
 def file_authors(file_id: int, limit: int = 20) -> list[dict]:
-    """Who has actually worked on this file, most active first."""
-    return query(
-        """
-        SELECT a.id, a.display_name, a.email, af.n_commits, af.insertions,
-               af.deletions, af.first_at, af.last_at
-        FROM author_file af JOIN author a ON a.id = af.author_id
-        WHERE af.file_id = %(file_id)s
-        ORDER BY af.n_commits DESC
-        LIMIT %(limit)s
-        """,
-        {"file_id": file_id, "limit": _clamp_limit(limit)},
-    )
+    Author, Link = _model("Author"), _model("AuthorFile")
+    with session_scope() as session:
+        query = session.query(Author.id, Author.display_name, Author.email, Link.n_commits,
+                              Link.insertions, Link.deletions, Link.first_at, Link.last_at).join(
+            Link, Link.author_id == Author.id).filter(Link.file_id == file_id).order_by(
+                Link.n_commits.desc()).limit(max(limit, 1))
+        return _rows(query)
 
 
-# ---------------------------------------------------------------------------
-# Graph
-# ---------------------------------------------------------------------------
-
-
-def coupling_graph(
-    repo_id: int,
-    measure: str = DEFAULT_MEASURE,
-    limit: int = 150,
-    min_support: int = 2,
-    center_file_id: int | None = None,
-    min_score: float | None = None,
-) -> dict:
-    """Build a node/edge graph of the strongest couplings, for visualisation.
-
-    Args:
-        repo_id: repository to graph.
-        measure: which measure ranks the edges.
-        limit: maximum edges. Nodes are whatever those edges touch.
-        min_support: ignore pairs with fewer co-changes than this.
-        center_file_id: when set, return only the neighbourhood of this file.
-        min_score: optional score floor.
-
-    Returns:
-        ``{"nodes": [...], "edges": [...], "measure": ..., "stats": {...}}``
-    """
+def coupling_graph(repo_id: int, measure: str = DEFAULT_MEASURE, limit: int = 150,
+                   min_support: int = 2, center_file_id: int | None = None,
+                   min_score: float | None = None) -> dict:
+    Metric, File = _model("FilePairMetric"), _model("File")
     order = _safe_order(measure)
-    params: dict[str, Any] = {
-        "repo_id": repo_id,
-        "limit": max(1, min(int(limit), 2000)),
-        "min_support": max(min_support, 1),
-    }
-
-    filters = ["m.repo_id = %(repo_id)s", "m.n_ab >= %(min_support)s"]
-    if min_score is not None:
-        filters.append(f"m.{order} >= %(min_score)s")
-        params["min_score"] = min_score
-    if center_file_id is not None:
-        filters.append("(m.file_a_id = %(center)s OR m.file_b_id = %(center)s)")
-        params["center"] = center_file_id
-
-    edges = query(
-        f"""
-        SELECT m.file_a_id AS source, m.file_b_id AS target,
-               m.{order} AS score, m.n_ab, m.npmi, m.jaccard,
-               m.log_likelihood_ratio, m.confidence_ab, m.confidence_ba
-        FROM file_pair_metric m
-        WHERE {' AND '.join(filters)}
-        ORDER BY m.{order} DESC NULLS LAST
-        LIMIT %(limit)s
-        """,
-        params,
-    )
-
-    node_ids = sorted({e["source"] for e in edges} | {e["target"] for e in edges})
-    nodes: list[dict] = []
-    if node_ids:
-        nodes = query(
-            """
-            SELECT f.id, f.path, f.basename, f.dir_path, f.extension,
-                   f.change_count, f.is_deleted
-            FROM file f WHERE f.id = ANY(%(ids)s)
-            """,
-            {"ids": node_ids},
-        )
-
-    return {
-        "measure": order,
-        "nodes": nodes,
-        "edges": edges,
-        "stats": {"node_count": len(nodes), "edge_count": len(edges)},
-    }
-
-
-# ---------------------------------------------------------------------------
-# Overview / hotspots / runs
-# ---------------------------------------------------------------------------
+    with session_scope() as session:
+        filters = [Metric.repo_id == repo_id, Metric.n_ab >= max(min_support, 1)]
+        if min_score is not None:
+            filters.append(getattr(Metric, order) >= min_score)
+        if center_file_id is not None:
+            filters.append((Metric.file_a_id == center_file_id) | (Metric.file_b_id == center_file_id))
+        pairs = session.query(Metric).filter(*filters).order_by(
+            getattr(Metric, order).desc().nullslast()
+        ).limit(max(1, min(int(limit), 2000))).all()
+        ids = {x for p in pairs for x in (p.file_a_id, p.file_b_id)}
+        files = {f.id: f for f in session.query(File).filter(File.id.in_(ids)).all()}
+        edges = [{
+            "source": p.file_a_id, "target": p.file_b_id, "score": getattr(p, order),
+            "n_ab": p.n_ab, "npmi": p.npmi, "jaccard": p.jaccard,
+            "log_likelihood_ratio": p.log_likelihood_ratio,
+            "confidence_ab": p.confidence_ab, "confidence_ba": p.confidence_ba,
+        } for p in pairs]
+        nodes = [_as_dict(files[i]) for i in sorted(files)]
+        return {
+            "measure": order, "nodes": nodes, "edges": edges,
+            "stats": {"node_count": len(nodes), "edge_count": len(edges)},
+        }
 
 
 def overview() -> dict:
-    """Headline counts for the dashboard."""
-    row = query_one(
-        """
-        SELECT
-          (SELECT count(*) FROM repo)                                AS repos,
-          (SELECT count(*) FROM repo WHERE ingest_status='ready')    AS repos_ready,
-          (SELECT count(*) FROM repo WHERE ingest_status='failed')   AS repos_failed,
-          (SELECT count(*) FROM commit)                              AS commits,
-          (SELECT count(*) FROM commit_file)                         AS file_changes,
-          (SELECT count(*) FROM file)                                AS files,
-          (SELECT count(*) FROM directory)                           AS directories,
-          (SELECT count(*) FROM author)                              AS authors,
-          (SELECT count(*) FROM file_pair)                           AS file_pairs,
-          (SELECT count(*) FROM dir_pair)                            AS dir_pairs,
-          (SELECT coalesce(sum(mirror_size_kb),0) FROM repo)         AS mirror_kb,
-          (SELECT min(committed_at) FROM commit)                     AS first_commit_at,
-          (SELECT max(committed_at) FROM commit)                     AS last_commit_at
-        """
-    )
-    return row or {}
+    names = {"repos": _model("Repo"), "commits": _model("Commit"), "changes": _model("CommitFile"),
+             "files": _model("File"), "directories": _model("Directory"), "authors": _model("Author"),
+             "file_pairs": _model("FilePair"), "dir_pairs": _model("DirPair")}
+    with session_scope() as session:
+        result = {key: session.query(model).count() for key, model in names.items()}
+        repos = session.query(names["repos"]).all()
+        commits = session.query(names["commits"]).all()
+        result["repos_ready"] = sum(row.ingest_status == "ready" for row in repos)
+        result["repos_failed"] = sum(row.ingest_status == "failed" for row in repos)
+        result["mirror_kb"] = sum(row.mirror_size_kb or 0 for row in repos)
+        result["first_commit_at"] = min((row.committed_at for row in commits), default=None)
+        result["last_commit_at"] = max((row.committed_at for row in commits), default=None)
+        result["file_changes"] = result.pop("changes")
+        return result
 
 
-def hotspots(repo_id: int | None = None, limit: int = 25,
+def hotspots(repo_id: int | None = None, limit: int = 25, min_changes: int = 0,
              include_deleted: bool = False) -> list[dict]:
-    """Most-changed files -- the churn leaders.
-
-    Files deleted at HEAD are left out. This is a ranking that answers "where
-    should I look", and a file that no longer exists is not somewhere anyone
-    can look -- each one spends a slot the reader came for. Eleven of the top
-    fifty were exactly that.
-
-    Not the same judgement as `coupled_files`, which keeps deleted partners and
-    labels them: there the reader asked about one specific file, the coupling
-    is a historical fact, and the label makes it actionable. Here nobody asked
-    about the deleted file at all.
-    """
-    clause = "WHERE f.change_count > 0"
-    if not include_deleted:
-        clause += " AND NOT f.is_deleted"
-    params: dict[str, Any] = {"limit": _clamp_limit(limit)}
-    if repo_id is not None:
-        clause += " AND f.repo_id = %(repo_id)s"
-        params["repo_id"] = repo_id
-    return query(
-        f"""
-        SELECT f.id, f.path, f.repo_id, r.full_name AS repo, f.change_count,
-               f.insertions, f.deletions, f.author_count, f.last_change_at,
-               (SELECT count(*) FROM file_pair fp
-                 WHERE fp.file_a_id = f.id OR fp.file_b_id = f.id) AS partner_count
-        FROM file f JOIN repo r ON r.id = f.repo_id
-        {clause}
-        ORDER BY f.change_count DESC
-        LIMIT %(limit)s
-        """,
-        params,
-    )
+    File, Pair = _model("File"), _model("FilePair")
+    with session_scope() as session:
+        query = session.query(File).filter(File.change_count >= min_changes)
+        if not include_deleted:
+            query = query.filter(File.is_deleted.is_(False))
+        if repo_id is not None:
+            query = query.filter(File.repo_id == repo_id)
+        files = query.order_by(File.change_count.desc()).limit(max(limit, 1)).all()
+        pair_rows = session.query(Pair).filter(
+            Pair.repo_id.in_({row.repo_id for row in files})
+        ).all()
+        partner_counts = {row.id: 0 for row in files}
+        for pair in pair_rows:
+            if pair.file_a_id in partner_counts:
+                partner_counts[pair.file_a_id] += 1
+            if pair.file_b_id in partner_counts:
+                partner_counts[pair.file_b_id] += 1
+        return [{**_as_dict(row), "partner_count": partner_counts[row.id]} for row in files]
 
 
-def strongest_pairs(
-    repo_id: int | None = None,
-    measure: str = DEFAULT_MEASURE,
-    limit: int = 50,
-    min_support: int = 3,
-) -> list[dict]:
-    """Highest-scoring pairs, optionally across the whole org."""
+def strongest_pairs(repo_id: int | None = None, measure: str = DEFAULT_MEASURE, limit: int = 25,
+                    min_support: int = 1) -> list[dict]:
+    Metric, Repo = _model("FilePairMetric"), _model("Repo")
     order = _safe_order(measure)
-    clause = "WHERE m.n_ab >= %(min_support)s"
-    params: dict[str, Any] = {
-        "limit": _clamp_limit(limit),
-        "min_support": max(min_support, 1),
-    }
-    if repo_id is not None:
-        clause += " AND m.repo_id = %(repo_id)s"
-        params["repo_id"] = repo_id
-    return query(
-        f"""
-        SELECT m.repo_id, r.full_name AS repo, m.file_a_id, m.file_b_id,
-               fa.path AS path_a, fb.path AS path_b,
-               m.n_ab, m.n_a, m.n_b, m.n_total, m.{order} AS score,
-               m.npmi, m.jaccard, m.log_likelihood_ratio, m.phi,
-               m.association_strength, m.confidence_ab, m.confidence_ba
-        FROM file_pair_metric m
-        JOIN file fa ON fa.id = m.file_a_id
-        JOIN file fb ON fb.id = m.file_b_id
-        JOIN repo r ON r.id = m.repo_id
-        {clause}
-        ORDER BY m.{order} DESC NULLS LAST
-        LIMIT %(limit)s
-        """,
-        params,
-    )
+    with session_scope() as session:
+        query = session.query(Metric, Repo.full_name.label("repo")).join(
+            Repo, Repo.id == Metric.repo_id).filter(Metric.n_ab >= min_support)
+        if repo_id is not None:
+            query = query.filter(Metric.repo_id == repo_id)
+        rows = query.order_by(getattr(Metric, order).desc().nullslast()).limit(max(limit, 1)).all()
+        return [{**_as_dict(metric), "repo": repo, "score": getattr(metric, order)}
+                for metric, repo in rows]
 
 
 def directories(repo_id: int, limit: int = 200) -> list[dict]:
-    """Directory tree for a repository, busiest first."""
-    return query(
-        """
-        SELECT id, path, depth, file_count, change_count, pair_change_count,
-               first_change_at, last_change_at
-        FROM directory WHERE repo_id = %(repo_id)s
-        ORDER BY change_count DESC LIMIT %(limit)s
-        """,
-        {"repo_id": repo_id, "limit": _clamp_limit(limit)},
-    )
+    Directory = _model("Directory")
+    with session_scope() as session:
+        return [_as_dict(x) for x in session.query(Directory).filter_by(repo_id=repo_id)
+                .order_by(Directory.change_count.desc()).limit(max(limit, 1)).all()]
 
 
 def directory_tree(repo_id: int, path: str = "", limit: int = 1000) -> dict:
-    """The immediate children of one directory: subdirectories, then files.
-
-    A repository is browsed the way it is laid out, one level at a time, so
-    this deliberately does not recurse. Both halves carry the same rollup
-    columns, which lets folders and files be rows of a single table.
-
-    ``path`` is the empty string at the root, matching how the rollup stores
-    it. Returns ``directory`` as None when the path names nothing, which the
-    route turns into a 404 rather than an empty-looking folder.
-    """
-    params: dict[str, Any] = {
-        "repo_id": repo_id,
-        "path": path,
-        # Only the level below, hence depth + 1 and a prefix rather than a
-        # recursive walk. At the root every top-level directory is depth 1 and
-        # no prefix applies, so the clause degrades to the depth test alone.
-        "depth": (0 if path == "" else len(path.split("/"))) + 1,
-        # Escaped for the same reason as a search term: a directory named
-        # "100%" or "a_b" would otherwise match its siblings.
-        "prefix": (_contains(f"{path}/")[1:-1] + "%") if path else None,
-        "limit": _clamp_limit(limit),
-    }
-    directory = None if path == "" else query_one(
-        """
-        SELECT id, path, depth, file_count, change_count, pair_change_count,
-               insertions, deletions, first_change_at, last_change_at
-        FROM directory WHERE repo_id = %(repo_id)s AND path = %(path)s
-        """,
-        params,
-    )
-    if path != "" and directory is None:
-        return {"path": path, "directory": None, "directories": [], "files": []}
-
-    dirs = query(
-        """
-        SELECT id, path, depth, file_count, change_count, pair_change_count,
-               insertions, deletions, first_change_at, last_change_at
-        FROM directory
-        WHERE repo_id = %(repo_id)s AND depth = %(depth)s
-          -- Cast, or Postgres cannot infer the type of the NULL that
-          -- stands for "at the root, no prefix applies".
-          AND (%(prefix)s::text IS NULL OR path LIKE %(prefix)s::text)
-        ORDER BY change_count DESC, path
-        LIMIT %(limit)s
-        """,
-        params,
-    )
-    files = query(
-        """
-        SELECT f.id, f.repo_id, r.full_name AS repo, f.path, f.dir_path, f.basename,
-               f.extension, f.depth, f.is_deleted, f.change_count, f.pair_change_count,
-               f.insertions, f.deletions, f.author_count, f.first_change_at,
-               f.last_change_at
-        FROM file f JOIN repo r ON r.id = f.repo_id
-        WHERE f.repo_id = %(repo_id)s AND f.dir_path = %(path)s
-        ORDER BY f.change_count DESC, f.path
-        LIMIT %(limit)s
-        """,
-        params,
-    )
-    return {"path": path, "directory": directory, "directories": dirs, "files": files}
+    Directory, File = _model("Directory"), _model("File")
+    prefix = f"{path.rstrip('/')}/" if path else ""
+    with session_scope() as session:
+        directory_scope = Directory.path.like(f"{prefix}%") if path else Directory.path.like("%")
+        if path:
+            directory_scope = (Directory.path == path) | directory_scope
+        dirs = session.query(Directory).filter(Directory.repo_id == repo_id, directory_scope).all()
+        files = session.query(File).filter(File.repo_id == repo_id, File.dir_path == path).limit(max(limit, 1)).all()
+        current = None if not path else next(
+            (directory for directory in dirs if directory.path == path), None
+        )
+        return {
+            "path": path,
+            "directory": _as_dict(current) if current is not None else None,
+            "directories": [_as_dict(x) for x in dirs
+                            if x.path and x.path.count("/") == prefix.count("/")],
+            "files": [_as_dict(x) for x in files],
+        }
 
 
 def corpus_shape() -> dict:
-    """Distributions an operator needs before trusting anything derived.
-
-    Four questions, one query each: how far back does the history go and is it
-    still moving; how thin is the evidence behind the average pair; is the
-    corpus dominated by a handful of giants; and what is it written in. Each is
-    a full-table aggregate, so this is the most expensive read the landing page
-    makes -- roughly 700ms on 163 repositories, which is why it is one endpoint
-    called once rather than four called per card.
-    """
-    return {
-        "commits_by_year": query(
-            """
-            SELECT extract(year FROM authored_at)::int AS year, count(*) AS n
-            FROM commit WHERE authored_at IS NOT NULL
-            GROUP BY 1 ORDER BY 1
-            """
-        ),
-        # Capped: the tail runs to thousands and the question is only ever
-        # "how much of this rests on almost nothing".
-        "pair_support": query(
-            """
-            SELECT least(n_ab, 10) AS support, count(*) AS n
-            FROM file_pair_metric GROUP BY 1 ORDER BY 1
-            """
-        ),
-        "repo_sizes": query(
-            """
-            SELECT CASE
-                     WHEN commit_count <    100 THEN '<100'
-                     WHEN commit_count <   1000 THEN '100-1k'
-                     WHEN commit_count <  10000 THEN '1k-10k'
-                     ELSE '10k+'
-                   END AS bucket,
-                   count(*) AS n, sum(commit_count) AS commits
-            FROM repo WHERE commit_count > 0
-            GROUP BY 1
-            ORDER BY min(commit_count)
-            """
-        ),
-        "languages": query(
-            """
-            SELECT coalesce(primary_language, 'unknown') AS language, count(*) AS n
-            FROM repo GROUP BY 1 ORDER BY 2 DESC
-            """
-        ),
-        # How wide a typical commit is. Directly explains the fan-out cap: a
-        # commit touching hundreds of files pairs every one of them with every
-        # other, which is combinatorial noise rather than design coupling.
-        "commit_width": query(
-            """
-            SELECT least(n_files, 12) AS files, count(*) AS n
-            FROM commit WHERE pair_eligible GROUP BY 1 ORDER BY 1
-            """
-        ),
-        # The bus-factor shape of the whole corpus, before any risk scoring.
-        "authors_per_file": query(
-            """
-            SELECT least(author_count, 8) AS authors, count(*) AS n
-            FROM file WHERE change_count > 0 GROUP BY 1 ORDER BY 1
-            """
-        ),
-        # Operationally the sharpest of these: a repository nobody has touched
-        # in a year contributes history that no longer describes the code.
-        "repo_recency": query(
-            """
-            SELECT CASE
-                     WHEN last_commit_at IS NULL                        THEN 'never'
-                     WHEN last_commit_at > now() - interval '30 days'   THEN 'past month'
-                     WHEN last_commit_at > now() - interval '180 days'  THEN 'past 6 months'
-                     WHEN last_commit_at > now() - interval '365 days'  THEN 'past year'
-                     ELSE 'over a year'
-                   END AS bucket,
-                   count(*) AS n
-            FROM repo
-            GROUP BY 1
-            ORDER BY min(coalesce(last_commit_at, '1970-01-01'::timestamptz)) DESC
-            """
-        ),
-        # Ground truth: how long a dependency took to adopt an upstream commit.
-        "adoption_days": query(
-            """
-            SELECT width_bucket(adoption_seconds / 86400.0, 0, 360, 6) AS bucket,
-                   count(*) AS n
-            FROM dep_bump WHERE adoption_seconds IS NOT NULL
-            GROUP BY 1 ORDER BY 1
-            """
-        ),
-    }
+    Commit, Pair, Repo, File, _Author, Bump = (_model(name) for name in ("Commit", "FilePair", "Repo", "File", "Author", "DepBump"))
+    with session_scope() as session:
+        commits = session.query(Commit).all()
+        pairs = session.query(Pair).all()
+        repos = session.query(Repo).all()
+        files = session.query(File).all()
+        bumps = session.query(Bump).all()
+        commits_by_year = Counter(x.authored_at.year for x in commits if x.authored_at)
+        pair_support = Counter(min(x.n_ab, 10) for x in pairs)
+        languages = Counter(x.primary_language or "unknown" for x in repos)
+        repo_sizes = Counter()
+        repo_commit_totals = defaultdict(int)
+        for repo in repos:
+            if repo.commit_count <= 0:
+                continue
+            bucket = ("<100" if repo.commit_count < 100 else
+                      "100-1k" if repo.commit_count < 1000 else
+                      "1k-10k" if repo.commit_count < 10000 else "10k+")
+            repo_sizes[bucket] += 1
+            repo_commit_totals[bucket] += repo.commit_count
+        commit_width = Counter(min(x.n_files, 12) for x in commits if x.pair_eligible)
+        authors_per_file = Counter(min(x.author_count, 8) for x in files if x.change_count > 0)
+        now = datetime.now(UTC)
+        recency = Counter()
+        for repo in repos:
+            if repo.last_commit_at is None:
+                bucket = "never"
+            else:
+                age = (now - repo.last_commit_at).days
+                bucket = ("past month" if age < 30 else "past 6 months" if age < 180 else
+                          "past year" if age < 365 else "over a year")
+            recency[bucket] += 1
+        adoption = Counter(
+            min(max(int((bump.adoption_seconds or 0) / 86400 / 60) + 1, 1), 7)
+            for bump in bumps if bump.adoption_seconds is not None
+        )
+        return {
+            "commits_by_year": [{"year": year, "n": count} for year, count in sorted(commits_by_year.items())],
+            "pair_support": [{"support": support, "n": count} for support, count in sorted(pair_support.items())],
+            "repo_sizes": [{"bucket": bucket, "n": repo_sizes[bucket], "commits": repo_commit_totals[bucket]}
+                           for bucket in ("<100", "100-1k", "1k-10k", "10k+") if bucket in repo_sizes],
+            "languages": [{"language": language, "n": count} for language, count in languages.most_common()],
+            "commit_width": [{"files": files_count, "n": count} for files_count, count in sorted(commit_width.items())],
+            "authors_per_file": [{"authors": count, "n": number} for count, number in sorted(authors_per_file.items())],
+            "adoption_days": [{"bucket": bucket, "n": count} for bucket, count in sorted(adoption.items())],
+            "repo_recency": [{"bucket": bucket, "n": recency[bucket]} for bucket in
+                             ("never", "past month", "past 6 months", "past year", "over a year") if bucket in recency],
+        }
 
 
 def recent_runs(limit: int = 20) -> list[dict]:
-    """Ingest run history for the status page."""
-    return query(
-        """
-        SELECT id, kind, trigger, status, started_at, finished_at, duration_s,
-               repos_total, repos_ok, repos_failed, commits_added, pairs_written, error
-        FROM ingest_run ORDER BY started_at DESC LIMIT %(limit)s
-        """,
-        {"limit": _clamp_limit(limit)},
-    )
+    Run = _model("IngestRun")
+    with session_scope() as session:
+        return [_as_dict(x) for x in session.query(Run).order_by(Run.id.desc()).limit(max(limit, 1)).all()]
 
 
 def run_detail(run_id: int) -> dict | None:
-    """One run plus its per-repository breakdown."""
-    run = query_one("SELECT * FROM ingest_run WHERE id = %s", (run_id,))
-    if run is None:
-        return None
-    run["repos"] = query(
-        """
-        SELECT rr.repo_id, r.full_name, rr.status, rr.commits_added,
-               rr.duration_s, rr.error
-        FROM ingest_run_repo rr JOIN repo r ON r.id = rr.repo_id
-        WHERE rr.run_id = %s
-        ORDER BY rr.duration_s DESC NULLS LAST
-        """,
-        (run_id,),
-    )
-    return run
+    Run, Link, Repo = _model("IngestRun"), _model("IngestRunRepo"), _model("Repo")
+    with session_scope() as session:
+        run = session.get(Run, run_id)
+        if not run:
+            return None
+        details = _rows(session.query(Link.repo_id, Repo.full_name, Link.status,
+                                      Link.commits_added, Link.duration_s, Link.error)
+                        .join(Repo, Repo.id == Link.repo_id).filter(Link.run_id == run_id))
+        result = _as_dict(run)
+        result["repos"] = details
+        return result
 
 
 def measure_catalog() -> list[dict]:
-    """The registry, serialised for the API and the UI's metric picker."""
     return [
         {
-            "key": s.key,
-            "label": s.label,
-            "family": s.family,
-            "formula": s.formula,
-            "summary": s.summary,
-            "detail": s.detail,
-            "lower": s.lower,
-            "upper": s.upper,
-            "signed": s.signed,
-            "neutral": s.neutral,
-            "is_significance": s.is_significance,
-            "rare_item_bias": s.rare_item_bias,
-            "saturates_on_sparse": s.saturates_on_sparse,
-            "hit_rate": s.hit_rate,
-            "aliases": list(s.aliases),
+            "key": m.key,
+            "label": m.label,
+            "family": m.family,
+            "formula": m.formula,
+            "summary": m.summary,
+            "detail": m.detail,
+            "lower": m.lower,
+            "upper": m.upper,
+            "signed": m.signed,
+            "neutral": m.neutral,
+            "is_significance": m.is_significance,
+            "rare_item_bias": m.rare_item_bias,
+            "saturates_on_sparse": m.saturates_on_sparse,
+            "hit_rate": m.hit_rate,
+            "aliases": list(m.aliases),
         }
-        for s in MEASURES
+        for m in MEASURES
     ]
 
 
-# ---------------------------------------------------------------------------
-# Cross-repository coupling
-# ---------------------------------------------------------------------------
-
-_XREPO_METRICS = ", ".join(f"m.{spec.key}" for spec in MEASURES)
-
-
-# ---------------------------------------------------------------------------
-# Intra-repository module graph
-# ---------------------------------------------------------------------------
+def _module_rows(repo_id: int) -> list[dict[str, Any]]:
+    Module = _model("ModuleDependency")
+    with session_scope() as session:
+        rows = session.query(Module.consumer_module, Module.dep_module, Module.manifest).filter(
+            Module.repo_id == repo_id
+        ).all()
+    return [
+        {"consumer_module": row.consumer_module, "dep_module": row.dep_module, "manifest": row.manifest}
+        for row in rows
+    ]
 
 
 def module_context(repo_id: int, path: str) -> dict:
-    """The module owning ``path``, what it declares, and what declares it.
-
-    In a monorepo this is the structural prior that cross-repo analysis cannot
-    provide, because every internal reference points back at the same repository.
-    The reverse direction usually matters more: changing a shared module is a
-    change to everything that declares it, and no co-change score states that as
-    plainly as the manifest does.
-
-    Returns an empty ``modules`` list for a single-module repository, which is
-    the correct answer rather than an error.
-    """
-    rows = query(
-        """
-        SELECT DISTINCT consumer_module, dep_module, manifest
-        FROM module_dependency WHERE repo_id = %(repo)s
-        """,
-        {"repo": repo_id},
-    )
-    if not rows:
-        return {"owning_module": None, "declares": [], "declared_by": [], "modules": []}
-
-    modules = sorted({r["consumer_module"] for r in rows} | {r["dep_module"] for r in rows})
-
-    # The owning module is the longest module path that prefixes this file, so a
-    # file under gateway/internal/app belongs to `gateway` rather than the root.
-    # lstrip("./") strips a *character set*, so ".github/x" became "github/x".
+    records = _module_rows(repo_id)
+    modules = sorted({row["consumer_module"] for row in records} | {
+        row["dep_module"] for row in records
+    })
     normalised = path.strip()
     while normalised.startswith(("./", "/")):
         normalised = normalised[2:] if normalised.startswith("./") else normalised[1:]
-    owning = ""
-    for module in modules:
-        if not module:
-            continue
-        if ((normalised == module or normalised.startswith(module + "/"))
-                and len(module) > len(owning)):
-            owning = module
-
+    owning = max(
+        (module for module in modules if module and (
+            normalised == module or normalised.startswith(f"{module}/")
+        )),
+        key=len,
+        default=None,
+    )
     return {
-        "owning_module": owning or "",
-        "declares": sorted(
-            {r["dep_module"] for r in rows if r["consumer_module"] == owning}
-        ),
-        "declared_by": sorted(
-            {r["consumer_module"] for r in rows if r["dep_module"] == owning}
-        ),
+        "owning_module": owning,
+        "declares": sorted({row["dep_module"] for row in records if row["consumer_module"] == owning}),
+        "declared_by": sorted({row["consumer_module"] for row in records if row["dep_module"] == owning}),
         "modules": modules,
     }
 
 
-# ---------------------------------------------------------------------------
-# Feedback: defects in Git Synapse reported by the sessions that use it
-# ---------------------------------------------------------------------------
-
-#: Report kinds accepted. Constrained so the table stays a defect log rather
-#: than a comment box.
-FEEDBACK_KINDS = (
-    "missing_data",   # something that should be indexed is absent
-    "wrong_data",     # a value contradicts the repository
-    "stale_data",     # correct once, no longer true
-    "tool_error",     # a tool failed or returned something unusable
-    "coverage_gap",   # a repo, path or ecosystem is not covered
-    "suggestion",     # a concrete improvement, not a general opinion
-)
-
-FEEDBACK_SEVERITIES = ("low", "medium", "high")
-
-
-def record_feedback(
-    kind: str,
-    detail: str,
-    severity: str = "medium",
-    tool: str | None = None,
-    args: dict | None = None,
-    repo: str | None = None,
-    path: str | None = None,
-    expected: str | None = None,
-    observed: str | None = None,
-) -> dict:
-    """Record a defect in Git Synapse, deduplicating on its content.
-
-    Writes only to ``feedback``, which nothing else reads. See the table comment
-    in ``schema.sql`` for why that boundary exists.
-
-    A repeat of the same defect increments ``occurrences`` rather than adding a
-    row, so the count doubles as a priority signal: a gap twenty sessions hit
-    matters more than one seen once.
-
-    Raises:
-        ValueError: on an unknown kind or severity, or an empty detail.
-    """
-    import hashlib
-    import json as _json
-
-    from git_synapse.db.engine import connection
-
+def record_feedback(kind: str, severity: str = "medium", tool: str | None = None, args: dict | None = None,
+                    repo: str | None = None, path: str | None = None, expected: str | None = None,
+                    observed: str | None = None, detail: str | None = None, fingerprint: str = "") -> dict:
     if kind not in FEEDBACK_KINDS:
-        raise ValueError(
-            f"unknown kind {kind!r}; expected one of {', '.join(FEEDBACK_KINDS)}"
-        )
+        raise ValueError(f"unknown kind {kind!r}")
     if severity not in FEEDBACK_SEVERITIES:
         raise ValueError(f"unknown severity {severity!r}")
     if not (detail or "").strip():
-        raise ValueError("detail is required: describe the defect concretely")
-
-    # Fingerprint on the identity of the defect, not its prose, so the same gap
-    # described in different words still collapses to one row. With no locating
-    # context there is no identity to collapse on, so fall back to the prose --
-    # otherwise two unrelated reports of the same kind become one and the second
-    # is discarded.
-    context = (tool or "", repo or "", path or "", (expected or "").strip().lower()[:200])
-    seed = "|".join((kind, *context) if any(context) else (kind, detail.strip().lower()[:200]))
-    fingerprint = hashlib.sha256(seed.encode()).hexdigest()[:32]
-
-    # Cutting a serialised JSON string mid-token leaves invalid JSON, and the
-    # column is jsonb, so an oversized payload has to be replaced rather than
-    # trimmed.
-    payload = _json.dumps(args or {}, default=str)
-    if len(payload) > 4000:
-        payload = _json.dumps({"truncated": True, "preview": payload[:3800]})
-
-    with connection() as conn:
-        row = conn.execute(
-            """
-            INSERT INTO feedback (kind, severity, tool, args, repo, path,
-                                  expected, observed, detail, fingerprint)
-            VALUES (%(kind)s, %(severity)s, %(tool)s, %(args)s::jsonb, %(repo)s,
-                    %(path)s, %(expected)s, %(observed)s, %(detail)s, %(fp)s)
-            ON CONFLICT (fingerprint) DO UPDATE SET
-                occurrences  = feedback.occurrences + 1,
-                last_seen_at = now(),
-                -- A repeat of something already closed is a reopen.
-                status = CASE WHEN feedback.status IN ('fixed', 'wontfix')
-                              THEN 'open' ELSE feedback.status END,
-                resolution = CASE WHEN feedback.status IN ('fixed', 'wontfix')
-                                  THEN NULL ELSE feedback.resolution END,
-                resolved_at = CASE WHEN feedback.status IN ('fixed', 'wontfix')
-                                   THEN NULL ELSE feedback.resolved_at END,
-                -- Keep the worse severity. GREATEST() on text would rank
-                -- 'low' above 'high' alphabetically, so rank explicitly.
-                severity = CASE
-                    WHEN 'high'   IN (feedback.severity, EXCLUDED.severity) THEN 'high'
-                    WHEN 'medium' IN (feedback.severity, EXCLUDED.severity) THEN 'medium'
-                    ELSE 'low'
-                END
-            RETURNING id, occurrences, status, first_seen_at
-            """,
-            {
-                "kind": kind,
-                "severity": severity,
-                "tool": tool,
-                "args": payload,
-                "repo": repo,
-                "path": path,
-                "expected": (expected or "")[:2000] or None,
-                "observed": (observed or "")[:2000] or None,
-                "detail": detail[:4000],
-                "fp": fingerprint,
-            },
-        ).fetchone()
-
-    return {
-        "id": int(row[0]),
-        "occurrences": int(row[1]),
-        "status": row[2],
-        "first_seen": str(row[3]),
-        "deduplicated": int(row[1]) > 1,
-    }
+        raise ValueError("detail is required")
+    if not fingerprint:
+        context = (tool or "", repo or "", path or "", (expected or "").strip().lower()[:200])
+        seed = "|".join((kind, *context) if any(context) else (kind, detail.strip().lower()[:200]))
+        fingerprint = hashlib.sha256(seed.encode()).hexdigest()[:32]
+    Feedback = _model("Feedback")
+    with session_scope() as session:
+        existing = session.query(Feedback).filter_by(fingerprint=fingerprint).one_or_none()
+        if existing:
+            existing.occurrences += 1
+            existing.last_seen_at = datetime.now(UTC)
+            if existing.status != "open":
+                existing.status = "open"
+                existing.resolution = None
+                existing.resolved_at = None
+            result = _as_dict(existing)
+            result["deduplicated"] = True
+            result["first_seen"] = existing.first_seen_at.isoformat() if existing.first_seen_at else ""
+            return result
+        row = Feedback(kind=kind, severity=severity, tool=tool, args=args or {}, repo=repo, path=path,
+                       expected=expected, observed=observed, detail=detail, fingerprint=fingerprint)
+        session.add(row)
+        session.flush()
+        result = _as_dict(row)
+        result["deduplicated"] = False
+        result["first_seen"] = row.first_seen_at.isoformat() if row.first_seen_at else ""
+        return result
 
 
-def list_feedback(
-    status: str | None = "open", kind: str | None = None, limit: int = 50
-) -> list[dict]:
-    """Reported defects, most-hit first."""
-    clauses = ["1=1"]
-    params: dict[str, Any] = {"limit": _clamp_limit(limit)}
+def list_feedback(status: str | None = None, severity: str | None = None, limit: int = 100) -> list[dict]:
+    Feedback = _model("Feedback")
+    conditions = []
     if status:
-        clauses.append("status = %(status)s")
-        params["status"] = status
-    if kind:
-        clauses.append("kind = %(kind)s")
-        params["kind"] = kind
-    return query(
-        f"""
-        SELECT * FROM feedback
-        WHERE {' AND '.join(clauses)}
-        ORDER BY occurrences DESC, last_seen_at DESC
-        LIMIT %(limit)s
-        """,
-        params,
-    )
+        conditions.append(Feedback.status == status)
+    if severity:
+        conditions.append(Feedback.severity == severity)
+    with session_scope() as session:
+        return [_as_dict(x) for x in session.query(Feedback).filter(*conditions).order_by(
+            Feedback.occurrences.desc(), Feedback.last_seen_at.desc()
+        ).limit(max(limit, 1)).all()]
 
 
 def resolve_feedback(feedback_id: int, status: str, resolution: str) -> bool:
-    """Close or reclassify a report. Human action, not an agent's."""
-    from git_synapse.db.engine import execute
-
-    if status not in ("open", "investigating", "fixed", "wontfix"):
+    Feedback = _model("Feedback")
+    if status not in FEEDBACK_STATUSES:
         raise ValueError(f"unknown status {status!r}")
-    return execute(
-        """
-        UPDATE feedback SET status = %s, resolution = %s,
-               resolved_at = CASE WHEN %s IN ('fixed','wontfix') THEN now() END
-        WHERE id = %s
-        """,
-        (status, resolution[:2000], status, feedback_id),
-    ) > 0
+    with session_scope() as session:
+        row = session.get(Feedback, feedback_id)
+        if not row:
+            return False
+        row.status, row.resolution, row.resolved_at = status, resolution, datetime.now(UTC)
+        return True
 
 
 def feedback_summary() -> dict:
-    """Counts for the dashboard."""
-    return query_one(
-        """
-        SELECT
-          count(*)                                          AS total,
-          count(*) FILTER (WHERE status='open')             AS open,
-          count(*) FILTER (WHERE status='fixed')            AS fixed,
-          count(*) FILTER (WHERE severity='high'
-                             AND status='open')             AS open_high,
-          COALESCE(sum(occurrences), 0)                     AS total_hits,
-          count(*) FILTER (WHERE last_seen_at > now() - interval '24 hours')
-                                                            AS seen_today
-        FROM feedback
-        """
-    ) or {}
+    Feedback = _model("Feedback")
+    with session_scope() as session:
+        rows = session.query(Feedback).all()
+        return {"total": len(rows), "open": sum(x.status == "open" for x in rows),
+                "resolved": sum(x.status == "resolved" for x in rows),
+                "by_severity": dict(Counter(x.severity for x in rows))}
 
 
 def duplicate_histories() -> list[dict]:
-    """Repositories that are the same history stored twice.
+    Repo = _model("Repo")
+    with session_scope() as session:
+        repos = session.query(Repo).filter(
+            Repo.is_enabled.is_(True), Repo.head_sha.is_not(None), Repo.commit_count > 0
+        ).all()
+        grouped: dict[str, list[Any]] = defaultdict(list)
+        for repo in repos:
+            grouped[repo.head_sha].append(repo)
+        return [{
+            "head_sha": sha, "copies": len(rows),
+            "commits": min(row.commit_count for row in rows),
+            "names": [row.full_name for row in sorted(rows, key=lambda value: value.id)],
+            "ids": [row.id for row in sorted(rows, key=lambda value: value.id)],
+            "host": max(row.host for row in rows),
+        } for sha, rows in grouped.items() if len(rows) > 1]
 
-    Identity is the address -- host plus owner/name -- because that is what a
-    host guarantees is unique. It does not follow that two addresses are two
-    repositories: a project moved to a subgroup, a mirror kept in sync, a fork
-    the API declines to declare as one. GitLab lists `veloren/veloren` and
-    `veloren/dev/veloren` as separate projects with separate ids, and their
-    HEAD sha and commit count are identical.
 
-    Nothing downstream is wrong about either row on its own. What is wrong is
-    every corpus-wide total, which counts that history twice -- and the
-    backtest population with it.
+def directory_detail(dir_id: int) -> dict | None:
+    Directory, Repo = _model("Directory"), _model("Repo")
+    with session_scope() as session:
+        return _row(session.query(Directory.id, Directory.path, Directory.repo_id,
+                                  Repo.name.label("repo"), Repo.full_name, Repo.account_id)
+                    .join(Repo, Repo.id == Directory.repo_id).filter(Directory.id == dir_id))
 
-    Matched on HEAD sha rather than on anything a provider says, because no
-    provider field survives all three cases: GitLab's project listing omits the
-    fork relationship entirely, so `is_fork` is false for everything it returns.
-    """
-    return query(
-        """
-        SELECT r.head_sha, count(*) AS copies,
-               min(r.commit_count) AS commits,
-               array_agg(r.full_name ORDER BY r.id) AS names,
-               array_agg(r.id ORDER BY r.id) AS ids,
-               max(r.host) AS host
-        FROM repo r
-        WHERE r.is_enabled AND r.head_sha IS NOT NULL AND r.commit_count > 0
-        GROUP BY r.head_sha
-        HAVING count(*) > 1
-        ORDER BY min(r.commit_count) DESC
-        """
-    )
+
+def directory_by_path(repo_id: int, path: str) -> dict | None:
+    Directory = _model("Directory")
+    with session_scope() as session:
+        row = session.query(Directory).filter_by(repo_id=repo_id, path=path).one_or_none()
+        return _as_dict(row) if row else None
+
+
+def impact_pair(source_repo_id: int, target_repo_id: int) -> dict | None:
+    Impact = _model("RepoImpact")
+    with session_scope() as session:
+        row = session.get(Impact, (source_repo_id, target_repo_id))
+        return _as_dict(row) if row else None
+
+
+def declared_dependency(dep_repo_id: int, consumer_repo_id: int) -> dict | None:
+    Dependency = _model("RepoDependency")
+    with session_scope() as session:
+        row = session.query(Dependency).filter_by(
+            dep_repo_id=dep_repo_id, consumer_repo_id=consumer_repo_id).one_or_none()
+        return _as_dict(row) if row else None
+
+
+def impact_edge_counts(repo_id: int, upstream: bool) -> dict:
+    Impact = _model("RepoImpact")
+    with session_scope() as session:
+        query = session.query(Impact)
+        side_name = "target_repo_id" if upstream else "source_repo_id"
+        rows = query.filter_by(**{side_name: repo_id}).all()
+        total = len(rows)
+        validated = sum(row.is_declared or row.has_bump_history for row in rows)
+        return {"total": int(total), "validated": int(validated)}
+
+
+def impact_graph_data(min_score: float = 0.4, limit: int = 400) -> dict:
+    Impact, Repo = _model("RepoImpact"), _model("Repo")
+    with session_scope() as session:
+        edges_rows = session.query(Impact).filter(Impact.score >= min_score).order_by(
+            Impact.score.desc()).limit(max(limit, 1)).all()
+        edges = [{"source": row.source_repo_id, "target": row.target_repo_id,
+                  "score": row.score, "is_declared": row.is_declared,
+                  "has_bump_history": row.has_bump_history, "bump_count": row.bump_count,
+                  "median_adoption_days": row.median_adoption_days}
+                 for row in edges_rows]
+        ids = {x for edge in edges for x in (edge["source"], edge["target"])}
+        nodes = []
+        if ids:
+            for repo in session.query(Repo).filter(Repo.id.in_(ids)).all():
+                nodes.append({"id": repo.id, "basename": repo.name, "path": repo.full_name,
+                              "dir_path": repo.primary_language or "", "extension": repo.primary_language,
+                              "change_count": repo.commit_count, "is_deleted": False})
+        return {"nodes": nodes, "edges": edges}
+
+
+def repo_pair_bumps(consumer_id: int, dep_id: int, limit: int = 100) -> list[dict]:
+    Bump, Commit = _model("DepBump"), _model("Commit")
+    with session_scope() as session:
+        rows = []
+        bumps = session.query(Bump).filter_by(
+            consumer_repo_id=consumer_id, dep_repo_id=dep_id
+        ).order_by(Bump.bumped_at.desc().nullslast()).limit(max(limit, 1)).all()
+        for bump in bumps:
+            upstream = session.get(Commit, bump.dep_commit_id) if bump.dep_commit_id else None
+            rows.append({"dep_name": bump.dep_name, "dep_version": bump.dep_version,
+                         "manifest": bump.manifest, "ecosystem": bump.ecosystem,
+                         "resolution": bump.resolution, "bumped_at": bump.bumped_at,
+                         "consumer_sha": bump.consumer_sha, "dep_sha": bump.dep_sha,
+                         "adoption_seconds": bump.adoption_seconds,
+                         "upstream_sha": upstream.sha if upstream else None,
+                         "upstream_subject": upstream.subject if upstream else None,
+                         "upstream_at": upstream.committed_at if upstream else None})
+        for row in rows:
+            seconds = row.pop("adoption_seconds")
+            row["adoption_days"] = round(seconds / 86400.0, 1) if seconds is not None else None
+        return rows
+
+
+def repo_dependencies(repo_id: int) -> dict:
+    Dependency, Repo, Bump = _model("RepoDependency"), _model("Repo"), _model("DepBump")
+    with session_scope() as session:
+        declared = []
+        for dep in session.query(Dependency).filter_by(consumer_repo_id=repo_id).all():
+            dep_repo = session.get(Repo, dep.dep_repo_id) if dep.dep_repo_id else None
+            declared.append({"dep_name": dep.dep_name, "dep_version": dep.dep_version,
+                             "manifest": dep.manifest, "ecosystem": dep.ecosystem,
+                             "dep_repo_id": dep.dep_repo_id,
+                             "dep_repo": dep_repo.name if dep_repo else None})
+        declared.sort(key=lambda x: (x["dep_repo_id"] is not None, x["dep_name"]))
+        bumps = []
+        grouped: dict[int, list[Any]] = defaultdict(list)
+        for bump in session.query(Bump).filter(
+            Bump.consumer_repo_id == repo_id, Bump.dep_repo_id.is_not(None)
+        ).all():
+            grouped[bump.dep_repo_id].append(bump)
+        repos = {r.id: r for r in session.query(Repo).filter(Repo.id.in_(grouped)).all()}
+        for dep_id, rows in grouped.items():
+            lags = sorted(x.adoption_seconds for x in rows if x.adoption_seconds is not None)
+            median = lags[len(lags) // 2] / 86400.0 if lags else None
+            bumps.append({"dep_repo": repos[dep_id].name if dep_id in repos else None,
+                          "dep_repo_id": dep_id, "bumps": len(rows),
+                          "median_adoption_days": median,
+                          "last_bump": max((x.bumped_at for x in rows if x.bumped_at), default=None)})
+        bumps.sort(key=lambda x: x["bumps"], reverse=True)
+        return {"declared": declared, "bumps": bumps}
+
+
+def mining_overview() -> dict:
+    Cluster, Drift, Risk, Impact, Bump = (_model(x) for x in ("FileCluster", "PairDrift", "FileRisk", "RepoImpact", "DepBump"))
+    with session_scope() as session:
+        clusters = session.query(Cluster.repo_id, Cluster.cluster_id, Cluster.dirs_spanned).distinct().all()
+        all_clusters = session.query(Cluster).all()
+        drifts = session.query(Drift).all()
+        risks = session.query(Risk).all()
+        impacts = session.query(Impact).all()
+        bumps = session.query(Bump).all()
+        return {"modules": len({(x.repo_id, x.cluster_id) for x in clusters}),
+                "clustered_files": len(all_clusters),
+                "cross_dir_modules": len({(x.repo_id, x.cluster_id) for x in clusters if x.dirs_spanned > 1}),
+                "emerging": sum(x.trend == "emerging" for x in drifts),
+                "decaying": sum(x.trend == "decaying" for x in drifts),
+                "stable": sum(x.trend == "stable" for x in drifts),
+                "risk_scored": len(risks), "impact_edges": len(impacts),
+                "declared_edges": sum(x.is_declared for x in impacts),
+                "bump_edges": sum(x.has_bump_history for x in impacts),
+                "dep_bumps": len(bumps)}

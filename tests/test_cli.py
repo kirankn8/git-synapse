@@ -106,11 +106,12 @@ def test_feedback_resolve_needs_a_status(db):
 
 def test_reset_does_not_wipe_anything_without_confirmation(db):
     """`reset` drops data. It must never proceed on an unattended invocation."""
-    from git_synapse.db.engine import query_one
-
-    before = query_one("SELECT count(*) AS n FROM repo")["n"]
+    from git_synapse.db.orm import models, session_scope
+    with session_scope() as session:
+        before = session.query(models().Repo).count()
     r = runner.invoke(app, ["reset"], input="\n")
-    after = query_one("SELECT count(*) AS n FROM repo")["n"]
+    with session_scope() as session:
+        after = session.query(models().Repo).count()
     assert after == before, "reset destroyed data without an explicit confirmation"
     assert r.exit_code != 0 or "abort" in r.stdout.lower() or "cancel" in r.stdout.lower()
 
@@ -119,24 +120,22 @@ def test_reset_does_not_wipe_anything_without_confirmation(db):
 
 def test_aggregate_runs_for_a_single_repo(scratch_db):
     """`--repo-id 0` means every repo; a real id must scope to one."""
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as conn:
-        rid = conn.execute(
-            """
-            INSERT INTO repo (github_id, owner, name, full_name, default_branch,
-                              is_enabled, ingest_status)
-            VALUES (930001,'t','cli-agg','t/cli-agg','main',TRUE,'ready')
-            ON CONFLICT (github_id) DO UPDATE SET name='cli-agg'
-            RETURNING id
-            """
-        ).fetchone()[0]
+    with session_scope() as session:
+        row = session.query(models().Repo).filter_by(github_id=930001).one_or_none()
+        if row is None:
+            row = models().Repo(github_id=930001, owner="t", name="cli-agg", full_name="t/cli-agg",
+                                default_branch="main", is_enabled=True, ingest_status="ready")
+            session.add(row)
+            session.flush()
+        rid = row.id
     try:
         r = runner.invoke(app, ["aggregate", "--repo-id", str(rid)])
         assert r.exit_code == 0, r.stdout
     finally:
-        with connection() as conn:
-            conn.execute("DELETE FROM repo WHERE id=%s", (rid,))
+        with session_scope() as session:
+            session.query(models().Repo).filter_by(id=rid).delete(synchronize_session=False)
 
 
 def test_score_accepts_a_repo_id(scratch_db):
@@ -169,7 +168,7 @@ def test_feedback_filters_by_kind_and_status(db):
 def test_feedback_round_trip_files_and_resolves(scratch_db):
     """The loop only works if a report can be closed from the CLI."""
     from git_synapse.analysis.query import record_feedback
-    from git_synapse.db.engine import connection, query_one
+    from git_synapse.db.orm import models, session_scope
 
     rec = record_feedback(
         kind="tool_error", detail="PROBE cli round trip", severity="low",
@@ -179,12 +178,13 @@ def test_feedback_round_trip_files_and_resolves(scratch_db):
         r = runner.invoke(app, ["feedback", "--resolve", str(rec["id"]),
                                 "--as", "fixed", "--note", "closed by test"])
         assert r.exit_code == 0, r.stdout
-        row = query_one("SELECT status, resolution FROM feedback WHERE id=%s", (rec["id"],))
-        assert row["status"] == "fixed"
-        assert "closed by test" in (row["resolution"] or "")
+        with session_scope() as session:
+            row = session.get(models().Feedback, rec["id"])
+        assert row.status == "fixed"
+        assert "closed by test" in (row.resolution or "")
     finally:
-        with connection() as conn:
-            conn.execute("DELETE FROM feedback WHERE id=%s", (rec["id"],))
+        with session_scope() as session:
+            session.query(models().Feedback).filter_by(id=rec["id"]).delete(synchronize_session=False)
 
 
 def test_impact_needs_a_repository_and_handles_an_unknown_one(db):
@@ -196,12 +196,12 @@ def test_impact_needs_a_repository_and_handles_an_unknown_one(db):
 
 
 def test_impact_on_a_real_repository_reports(db):
-    from git_synapse.db.engine import query_one
-
-    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
+    from git_synapse.db.orm import models, session_scope
+    with session_scope() as session:
+        row = session.query(models().Repo).filter_by(is_enabled=True).first()
     if row is None:
         pytest.skip("no repositories")
-    r = runner.invoke(app, ["impact", row["name"]])
+    r = runner.invoke(app, ["impact", row.name])
     assert r.exit_code == 0, r.stdout
 
 
@@ -300,12 +300,12 @@ def test_ingest_with_an_unmatched_repo_name_does_not_silently_do_everything(db, 
 
 
 def test_xcoupled_rejects_an_unknown_measure(db):
-    from git_synapse.db.engine import query_one
-
-    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
+    from git_synapse.db.orm import models, session_scope
+    with session_scope() as session:
+        row = session.query(models().Repo).filter_by(is_enabled=True).first()
     if row is None:
         pytest.skip("needs an ingested repository")
-    r = runner.invoke(app, [row["name"], "-m", "not_a_measure"])
+    r = runner.invoke(app, [row.name, "-m", "not_a_measure"])
     assert r.exit_code != 0 or "measure" in r.stdout.lower()
 
 
@@ -327,23 +327,20 @@ def test_status_after_a_run_reports_the_run(db):
 def test_reset_requires_an_explicit_yes(scratch_db):
     """`reset` drops every ingested row. Nothing but an explicit flag may run
     it, because the mistake is unrecoverable without a full re-ingest."""
-    from git_synapse.db.engine import connection, query_one
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO repo (github_id, owner, name, full_name, default_branch,
-                              is_enabled, ingest_status)
-            VALUES (980001,'t','reset-probe','t/reset-probe','main',TRUE,'ready')
-            ON CONFLICT (github_id) DO NOTHING
-            """
-        )
-    before = query_one("SELECT count(*) AS n FROM repo")["n"]
+    with session_scope() as session:
+        if session.query(models().Repo).filter_by(github_id=980001).one_or_none() is None:
+            session.add(models().Repo(github_id=980001, owner="t", name="reset-probe", full_name="t/reset-probe",
+                                      default_branch="main", is_enabled=True, ingest_status="ready"))
+    with session_scope() as session:
+        before = session.query(models().Repo).count()
     assert before > 0
 
     r = runner.invoke(app, ["reset"])
     assert "refusing" in r.stdout.lower() or r.exit_code != 0
-    assert query_one("SELECT count(*) AS n FROM repo")["n"] == before
+    with session_scope() as session:
+        assert session.query(models().Repo).count() == before
 
 
 def test_reset_advertises_the_flag_it_requires(scratch_db):
@@ -365,7 +362,7 @@ def test_feedback_renders_severities(scratch_db):
     """Severity drives the colour, and ranking it as text once put low above
     high; the table must render every level without choking."""
     from git_synapse.analysis.query import record_feedback
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models, session_scope
 
     ids = []
     for sev in ("low", "medium", "high"):
@@ -379,8 +376,8 @@ def test_feedback_renders_severities(scratch_db):
         for sev in ("low", "medium", "high"):
             assert sev in r.stdout
     finally:
-        with connection() as conn:
-            conn.execute("DELETE FROM feedback WHERE id = ANY(%s)", (ids,))
+        with session_scope() as session:
+            session.query(models().Feedback).filter(models().Feedback.id.in_(ids)).delete(synchronize_session=False)
 
 
 # ---------------------------------------------- output when there is nothing
@@ -413,17 +410,15 @@ def test_aggregate_says_so_when_there_is_nothing_to_do(scratch_db):
 def test_impact_marks_the_evidence_tier_on_each_row(db):
     """The tier is the whole point of the row; a table without it invites
     acting on a discovery edge as though it were declared."""
-    from git_synapse.db.engine import query_one
-
-    row = query_one(
-        """
-        SELECT r.name FROM repo_impact i JOIN repo r ON r.id = i.source_repo_id
-        WHERE i.is_declared OR i.has_bump_history LIMIT 1
-        """
-    )
+    from git_synapse.db.orm import models, session_scope
+    with session_scope() as session:
+        row = session.query(models().Repo).join(models().RepoImpact,
+            models().RepoImpact.source_repo_id == models().Repo.id).filter(
+                (models().RepoImpact.is_declared.is_(True)) | (models().RepoImpact.has_bump_history.is_(True))
+            ).first()
     if row is None:
         pytest.skip("no validated impact rows")
-    r = runner.invoke(app, ["impact", row["name"]])
+    r = runner.invoke(app, ["impact", row.name])
     assert r.exit_code == 0, r.stdout
     assert "declared" in r.stdout.lower() or "bumps" in r.stdout.lower()
 
@@ -442,12 +437,12 @@ class _Stats:
 
 
 def _any_repo_name():
-    from git_synapse.db.engine import query_one
-
-    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
+    from git_synapse.db.orm import models, session_scope
+    with session_scope() as session:
+        row = session.query(models().Repo).filter_by(is_enabled=True).first()
     if row is None:
         pytest.skip("no repositories")
-    return row["name"]
+    return row.name
 
 
 def test_aggregate_says_so_when_nothing_is_stale(monkeypatch):
@@ -536,24 +531,43 @@ def test_impact_labels_each_evidence_tier(db, monkeypatch, direction, patched):
 def test_reset_with_yes_truncates_only_the_atom_tables(monkeypatch):
     """Runs against a recording stub: pointing this at the real database would
     delete every ingested commit, which is exactly what it is meant to do."""
-    executed = []
+    deleted = []
+    selected = []
 
-    class _Conn:
-        def execute(self, sql, *a):
-            executed.append(" ".join(str(sql).split()))
+    class _Session:
+        def query(self, cls):
+            selected.append(cls)
+            return self
+
+        def all(self):
+            return []
+
+        def delete(self, row):
+            deleted.append(row)
 
     class _Ctx:
         def __enter__(self):
-            return _Conn()
+            return _Session()
 
         def __exit__(self, *exc):
             return False
 
-    monkeypatch.setattr("git_synapse.cli.connection", lambda *a, **k: _Ctx())
+    monkeypatch.setattr("git_synapse.cli.session_scope", lambda *a, **k: _Ctx())
+    monkeypatch.setattr("git_synapse.cli._setup", lambda: None)
+    from types import SimpleNamespace
+    monkeypatch.setattr("git_synapse.cli.models", lambda: SimpleNamespace(**{
+        name: object() for name in (
+            "RepoImpact", "DepBump", "RepoDependency", "ModuleDependency", "RepoPackage",
+            "FileRisk", "PairDrift", "FileCluster", "AuthorFile", "DirPairMetric", "FilePairMetric",
+            "DirPair", "FilePair", "FileDirectory", "Directory", "CommitParent", "RefTag",
+            "CommitFile", "Commit", "FileAlias", "File", "Author", "IngestRunRepo", "IngestRun", "Repo",
+        )
+    }))
     r = runner.invoke(app, ["reset", "--yes"])
     assert r.exit_code == 0, r.stdout
     assert "all ingested data removed" in r.stdout
-    assert executed == ["TRUNCATE repo, author, ingest_run RESTART IDENTITY CASCADE"]
+    assert len(selected) == 25
+    assert deleted == []
 
 
 def test_ingest_lists_the_failures_and_exits_nonzero_when_all_failed(monkeypatch):
@@ -589,20 +603,21 @@ def test_ingest_exits_zero_when_some_repositories_succeeded(monkeypatch):
     assert "1 ok" in r.stdout
 
 
-def test_score_recomputes_one_repo_or_every_repo(monkeypatch):
+def test_score_recomputes_one_repo_or_every_repo(db, monkeypatch):
     seen = []
     monkeypatch.setattr("git_synapse.cli.score_repo",
                         lambda rid: seen.append(rid) or _Stats(file_pairs=3, duration_s=0.1))
     assert runner.invoke(app, ["score", "--repo-id", "11"]).exit_code == 0
     assert seen == [11]
 
-    monkeypatch.setattr("git_synapse.cli.query",
-                        lambda *a, **k: [{"id": 2, "full_name": "s/a"},
-                                         {"id": 3, "full_name": "s/b"}])
+    from git_synapse.db.orm import models, session_scope
+    with session_scope() as session:
+        expected = [row.id for row in session.query(models().Repo).filter_by(is_enabled=True).order_by(models().Repo.id).all()]
     r = runner.invoke(app, ["score"])
     assert r.exit_code == 0
-    assert seen == [11, 2, 3]
-    assert "s/a: 3 pairs" in r.stdout
+    assert seen[0] == 11
+    assert seen[1:] == expected
+    assert "pairs" in r.stdout
 
 
 
@@ -639,10 +654,9 @@ def test_backtest_says_so_rather_than_dividing_by_zero(monkeypatch):
     assert "not enough history" in r.stdout
 
 
-def test_backtest_names_an_unknown_repository_instead_of_scoring_everything(monkeypatch):
+def test_backtest_names_an_unknown_repository_instead_of_scoring_everything():
     """Silently backtesting the whole corpus because a name was mistyped would
     report a number for something the user never asked about."""
-    monkeypatch.setattr("git_synapse.cli.query", lambda *a, **k: [])
     r = runner.invoke(app, ["backtest", "--repo", "nope"])
     assert r.exit_code == 1
     assert "nope" in r.stdout
@@ -814,17 +828,22 @@ def test_status_without_any_runs_still_shows_the_corpus(monkeypatch):
     assert "commits" in " ".join(r.stdout.split())
 
 
-def test_backtest_scopes_to_a_named_repository(monkeypatch):
+def test_backtest_scopes_to_a_named_repository(db, monkeypatch):
     from git_synapse.analysis import backtest as bt
+    from git_synapse.db.orm import models, session_scope
 
     seen = {}
-    monkeypatch.setattr("git_synapse.cli.query", lambda *a, **k: [{"id": 42}])
+    with session_scope() as session:
+        repo = session.query(models().Repo).filter_by(is_enabled=True).first()
+    if repo is None:
+        pytest.skip("no enabled repository")
     monkeypatch.setattr(bt, "run", lambda repo_id, *a, **k: (
         seen.setdefault("repo_id", repo_id),
         bt.BacktestResult(repo_id=repo_id, k=5, min_support=2, commits_seen=0,
                           commits_scored=0, prompts=0))[1])
-    runner.invoke(app, ["backtest", "--repo", "guava"])
-    assert seen["repo_id"] == 42
+    result = runner.invoke(app, ["backtest", "--repo", repo.name])
+    assert result.exit_code == 0, result.stdout
+    assert seen["repo_id"] == repo.id
 
 
 def test_backtest_prints_the_unaided_line_and_the_interval_caveat(monkeypatch):

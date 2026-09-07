@@ -10,9 +10,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-import psycopg
-from sqlalchemy import select
-
 from git_synapse.analysis import aggregate, depbump, mining, predict, score
 from git_synapse.db.engine import connection, set_watermark
 from git_synapse.db.orm import models, session_scope
@@ -40,26 +37,19 @@ STAGES: tuple[Stage, ...] = (
 )
 
 
-def _stored_versions(conn: psycopg.Connection) -> dict[str, str]:
-    rows = conn.execute(
-        """
-        SELECT replace(key, 'watermark:derived:', ''), value #>> '{}'
-          FROM meta
-         WHERE key LIKE 'watermark:derived:%'
-        """
-    ).fetchall()
-    return {str(name): str(version) for name, version in rows}
-
-
-def _stored_versions_orm() -> dict[str, str]:
+def _stored_versions_orm(conn: object | None = None) -> dict[str, str]:
     """Read stage watermarks through the ORM for the session-based path."""
-    with session_scope() as session:
+    def read(session: object) -> dict[str, str]:
         Meta = models().Meta
-        rows = session.execute(select(Meta.key, Meta.value).where(
-            Meta.key.like("watermark:derived:%"),
-        )).all()
+        rows = session.query(Meta.key, Meta.value).filter(
+            Meta.key.like("watermark:derived:%")
+        ).all()
         return {str(key).removeprefix("watermark:derived:"): str(value)
                 for key, value in rows}
+    if conn is not None:
+        return read(conn)
+    with session_scope() as session:
+        return read(session)
 
 
 def stale_stages(stored: dict[str, str]) -> set[str]:
@@ -73,12 +63,13 @@ def stale_stages(stored: dict[str, str]) -> set[str]:
     return stale
 
 
-def _run_stage(stage: Stage, conn: psycopg.Connection) -> None:
+def _run_stage(stage: Stage, conn: object) -> None:
+    Repo = models().Repo
     if stage.name == "aggregate":
-        repo_ids = conn.execute(
-            "SELECT id FROM repo WHERE is_enabled ORDER BY id"
-        ).fetchall()
-        for (repo_id,) in repo_ids:
+        repo_ids = [row.id for row in conn.query(Repo.id).filter(
+            Repo.is_enabled.is_(True)
+        ).order_by(Repo.id).all()]
+        for repo_id in repo_ids:
             aggregate.rebuild_repo(int(repo_id), conn)
     elif stage.name == "score":
         score.score_all(conn)
@@ -95,11 +86,11 @@ def _run_stage(stage: Stage, conn: psycopg.Connection) -> None:
         raise ValueError(f"unknown derived stage {stage.name!r}")
 
 
-def ensure_current(conn: psycopg.Connection | None = None) -> list[str]:
+def ensure_current(conn: object | None = None) -> list[str]:
     """Rebuild stale derived stages once and return the stages rebuilt."""
 
-    def _run(c: psycopg.Connection) -> list[str]:
-        stale = stale_stages(_stored_versions(c))
+    def _run(c: object) -> list[str]:
+        stale = stale_stages(_stored_versions_orm(c))
         rebuilt: list[str] = []
         for stage in STAGES:
             if stage.name not in stale:
@@ -132,27 +123,27 @@ def ensure_current(conn: psycopg.Connection | None = None) -> list[str]:
         if stage.name == "aggregate":
             with session_scope() as session:
                 Repo = models().Repo
-                repo_ids = list(session.scalars(select(Repo.id).where(
+                repo_ids = [row.id for row in session.query(Repo.id).filter(
                     Repo.is_enabled.is_(True),
-                ).order_by(Repo.id)))
+                ).order_by(Repo.id).all()]
             for repo_id in repo_ids:
                 with connection() as c:
                     aggregate.rebuild_repo(repo_id, c)
         elif stage.name == "score":
             with session_scope() as session:
                 Repo = models().Repo
-                repo_ids = list(session.scalars(select(Repo.id).where(
+                repo_ids = [row.id for row in session.query(Repo.id).filter(
                     Repo.is_enabled.is_(True),
-                ).order_by(Repo.id)))
+                ).order_by(Repo.id).all()]
             for repo_id in repo_ids:
                 with connection() as c:
                     score.score_repo(repo_id, c)
         elif stage.name == "mining":
             with session_scope() as session:
                 Repo = models().Repo
-                repo_ids = list(session.scalars(select(Repo.id).where(
+                repo_ids = [row.id for row in session.query(Repo.id).filter(
                     Repo.is_enabled.is_(True), Repo.pair_count > 0,
-                ).order_by(Repo.id)))
+                ).order_by(Repo.id).all()]
             for repo_id in repo_ids:
                 with connection() as c:
                     mining.rebuild(repo_id=repo_id, conn=c, force=True)

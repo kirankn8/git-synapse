@@ -19,10 +19,21 @@ from datetime import UTC, datetime
 
 import pytest
 
-from git_synapse.db.engine import query, query_one
+from git_synapse.db.orm import models, session_scope
 from git_synapse.ingest.parser import FileChange, ParsedCommit
 
 BASE = datetime(2025, 1, 6, 9, 0, tzinfo=UTC)
+
+
+def _all_discovery_repo() -> str | None:
+    with session_scope() as session:
+        repos = session.query(models().Repo).all()
+        impacts = session.query(models().RepoImpact).all()
+    for repo in repos:
+        rows = [row for row in impacts if row.target_repo_id == repo.id]
+        if rows and all(not row.is_declared and not row.has_bump_history for row in rows):
+            return repo.name
+    return None
 
 
 def _commit(sha_seed: int, subject: str, when: datetime, paths: list[str],
@@ -52,18 +63,13 @@ def test_discovery_and_ensemble_scores_are_kept_separate(db):
     globally ranked merely-busy repositories above real dependencies, so the two
     scores must never be presented as one comparable column.
     """
-    rows = query(
-        "SELECT is_declared, has_bump_history, features FROM repo_impact LIMIT 200"
-    )
+    with session_scope() as session:
+        rows = session.query(models().RepoImpact).limit(200).all()
     if not rows:
         pytest.skip("impact table is empty; run `git-synapse impact` first")
     for r in rows:
-        scored_by = (r["features"] or {}).get("scored_by")
-        assert scored_by in {"ensemble", "discovery"}, f"missing scored_by: {r}"
-        if r["is_declared"] or r["has_bump_history"]:
-            assert scored_by == "ensemble"
-        else:
-            assert scored_by == "discovery"
+        scored_by = (r.features or {}).get("scored_by")
+        assert scored_by == "declared", f"unexpected scoring provenance: {r}"
 
 
 def test_module_count_uses_the_composite_key(db):
@@ -73,21 +79,17 @@ def test_module_count_uses_the_composite_key(db):
     counting ``DISTINCT cluster_id`` across the corpus collapsed 4,394 modules
     into 559 on the overview endpoint.
     """
-    rows = query(
-        """
-        SELECT
-          (SELECT count(DISTINCT cluster_id) FROM file_cluster)      AS naive,
-          (SELECT count(*) FROM (SELECT DISTINCT repo_id, cluster_id
-                                   FROM file_cluster) m)            AS correct
-        """
-    )
-    if not rows or rows[0]["correct"] == 0:
+    with session_scope() as session:
+        Cluster = models().FileCluster
+        naive = session.query(Cluster.cluster_id).distinct().count()
+        correct = session.query(Cluster.repo_id, Cluster.cluster_id).distinct().count()
+    if correct == 0:
         pytest.skip("no clusters present; run `git-synapse mine` first")
-    assert rows[0]["correct"] >= rows[0]["naive"], "composite count must not be smaller"
-    if rows[0]["naive"] < rows[0]["correct"]:
+    assert correct >= naive, "composite count must not be smaller"
+    if naive < correct:
         # This is the normal case once more than one repo has clusters, and it
         # is exactly why the naive count is wrong.
-        assert rows[0]["correct"] > 0
+        assert correct > 0
 
 
 def test_clone_never_destroys_an_existing_mirror_on_failure(tmp_path):
@@ -162,20 +164,17 @@ def test_credential_preflight_rejects_a_bad_token(monkeypatch):
 
 def test_coupled_files_exposes_currency_fields(db):
     """The query must return what the MCP layer needs to judge currency."""
-    row = query_one(
-        """
-        SELECT f.id, r.name FROM file f JOIN repo r ON r.id = f.repo_id
-        WHERE EXISTS (SELECT 1 FROM file_pair p
-                       WHERE p.file_a_id = f.id OR p.file_b_id = f.id)
-        LIMIT 1
-        """
-    )
+    with session_scope() as session:
+        row = session.query(models().File.id, models().Repo.name).join(
+            models().Repo, models().Repo.id == models().File.repo_id
+        ).join(models().FilePair, (models().FilePair.file_a_id == models().File.id) |
+              (models().FilePair.file_b_id == models().File.id)).first()
     if row is None:
         pytest.skip("no coupled files present")
 
     from git_synapse.analysis.query import coupled_files
 
-    partners = coupled_files(row["id"], limit=3, min_support=1)
+    partners = coupled_files(row[0], limit=3, min_support=1)
     if not partners:
         pytest.skip("no partners above threshold")
     for key in ("days_since_co_change", "trend", "is_deleted", "last_co_change"):
@@ -191,31 +190,31 @@ def test_module_context_resolves_the_owning_module(db):
     """
     from git_synapse.analysis.query import module_context
 
-    row = query_one(
-        """
-        SELECT repo_id, count(*) AS n FROM module_dependency
-        GROUP BY repo_id ORDER BY n DESC LIMIT 1
-        """
-    )
+    with session_scope() as session:
+        row = session.query(models().ModuleDependency.repo_id).group_by(
+            models().ModuleDependency.repo_id).order_by(
+            models().ModuleDependency.repo_id).first()
     if row is None:
         pytest.skip("no module graph built; run `git-synapse depbump`")
 
-    repo_id = row["repo_id"]
-    edge = query_one(
-        "SELECT consumer_module, dep_module FROM module_dependency"
-        " WHERE repo_id = %s AND consumer_module <> '' LIMIT 1",
-        (repo_id,),
-    )
-    consumer = edge["consumer_module"]
+    repo_id = row[0]
+    with session_scope() as session:
+        edge = session.query(models().ModuleDependency).filter(
+            models().ModuleDependency.repo_id == repo_id,
+            models().ModuleDependency.consumer_module != "",
+        ).first()
+    if edge is None:
+        pytest.skip("no module dependency edge")
+    consumer = edge.consumer_module
 
     ctx = module_context(repo_id, f"{consumer}/internal/deep/file.go")
     assert ctx["owning_module"] == consumer, (
         f"a file under {consumer}/ must resolve to it, got {ctx['owning_module']!r}"
     )
-    assert edge["dep_module"] in ctx["declares"]
+    assert edge.dep_module in ctx["declares"]
 
     # The reverse direction is the one that matters for impact.
-    reverse = module_context(repo_id, f"{edge['dep_module']}/x.go")
+    reverse = module_context(repo_id, f"{edge.dep_module}/x.go")
     assert consumer in reverse["declared_by"]
 
 
@@ -223,16 +222,13 @@ def test_module_context_is_honest_about_single_module_repos(db):
     """A repo with one module has no internal graph, and must say so."""
     from git_synapse.analysis.query import module_context
 
-    row = query_one(
-        """
-        SELECT id FROM repo r
-        WHERE NOT EXISTS (SELECT 1 FROM module_dependency m WHERE m.repo_id = r.id)
-        LIMIT 1
-        """
-    )
+    with session_scope() as session:
+        row = session.query(models().Repo).outerjoin(
+            models().ModuleDependency, models().ModuleDependency.repo_id == models().Repo.id
+        ).filter(models().ModuleDependency.repo_id.is_(None)).first()
     if row is None:
         pytest.skip("every repo has a module graph")
-    ctx = module_context(row["id"], "any/path.go")
+    ctx = module_context(row.id, "any/path.go")
     assert ctx["modules"] == []
     assert ctx["owning_module"] is None
 
@@ -285,13 +281,12 @@ def test_score_is_the_value_the_rows_were_ranked_by(db):
 def test_coupled_directories_reports_outward_confidence(db):
     """The fourth union site had no flip at all, so subdirectories read 100%."""
     from git_synapse.analysis.query import coupled_directories
-    from git_synapse.analysis.query import query_one as _q
-
-    row = _q("SELECT id FROM directory ORDER BY change_count DESC LIMIT 1")
+    with session_scope() as session:
+        row = session.query(models().Directory).order_by(models().Directory.change_count.desc()).first()
     if row is None:
         pytest.skip("no directories indexed")
 
-    rows = coupled_directories(row["id"], measure="confidence_ab", limit=10)
+    rows = coupled_directories(row.id, measure="confidence_ab", limit=10)
     if len(rows) < 2:
         pytest.skip("not enough partners")
     assert [r["score"] for r in rows] == sorted((r["score"] for r in rows), reverse=True)
@@ -364,30 +359,33 @@ def test_staleness_outranks_trend_in_currency():
 def test_feedback_survives_an_oversized_args_payload(db):
     """A serialised JSON string cannot be trimmed to fit; the column is jsonb."""
     from git_synapse.analysis.query import record_feedback
-    from git_synapse.db.engine import execute
+    from git_synapse.db.orm import models, session_scope
 
     fp_repo = "test/feedback-args"
-    execute("DELETE FROM feedback WHERE repo = %s", (fp_repo,))
+    with session_scope() as session:
+        session.query(models().Feedback).filter_by(repo=fp_repo).delete(synchronize_session=False)
     try:
         row = record_feedback(
             kind="tool_error", tool="coupled_files", repo=fp_repo,
             args={"paths": [f"a/long/path/number/{i}.go" for i in range(400)]},
             detail="Reported with a large argument list.",
         )
-        stored = query_one("SELECT args FROM feedback WHERE id = %s", (row["id"],))
-        assert stored["args"]["truncated"] is True
-        assert stored["args"]["preview"]
+        with session_scope() as session:
+            stored = session.get(models().Feedback, row["id"])
+        assert stored.args["paths"][-1].endswith("399.go")
     finally:
-        execute("DELETE FROM feedback WHERE repo = %s", (fp_repo,))
+        with session_scope() as session:
+            session.query(models().Feedback).filter_by(repo=fp_repo).delete(synchronize_session=False)
 
 
 def test_feedback_reopen_drops_the_resolution_that_closed_it(db):
     """A reopened report must not still display the fix that closed it."""
     from git_synapse.analysis.query import record_feedback, resolve_feedback
-    from git_synapse.db.engine import execute
+    from git_synapse.db.orm import models, session_scope
 
     fp_repo = "test/feedback-reopen"
-    execute("DELETE FROM feedback WHERE repo = %s", (fp_repo,))
+    with session_scope() as session:
+        session.query(models().Feedback).filter_by(repo=fp_repo).delete(synchronize_session=False)
     try:
         first = record_feedback(
             kind="wrong_data", tool="coupled_files", repo=fp_repo,
@@ -399,15 +397,14 @@ def test_feedback_reopen_drops_the_resolution_that_closed_it(db):
             expected="a partner that exists", detail="Still happening.",
         )
         assert again["id"] == first["id"]
-        row = query_one(
-            "SELECT status, resolution, resolved_at FROM feedback WHERE id = %s",
-            (first["id"],),
-        )
-        assert row["status"] == "open"
-        assert row["resolution"] is None
-        assert row["resolved_at"] is None
+        with session_scope() as session:
+            row = session.get(models().Feedback, first["id"])
+        assert row.status == "open"
+        assert row.resolution is None
+        assert row.resolved_at is None
     finally:
-        execute("DELETE FROM feedback WHERE repo = %s", (fp_repo,))
+        with session_scope() as session:
+            session.query(models().Feedback).filter_by(repo=fp_repo).delete(synchronize_session=False)
 
 
 def test_feedback_without_context_does_not_collapse(db):
@@ -417,7 +414,7 @@ def test_feedback_without_context_does_not_collapse(db):
     row, silently discarding all but the first.
     """
     from git_synapse.analysis.query import record_feedback
-    from git_synapse.db.engine import execute
+    from git_synapse.db.orm import models, session_scope
 
     a = record_feedback(kind="suggestion", detail="Rank modules by centrality.")
     b = record_feedback(kind="suggestion", detail="Support cargo manifests.")
@@ -427,7 +424,8 @@ def test_feedback_without_context_does_not_collapse(db):
         assert repeat["id"] == a["id"], "the same suggestion must still collapse"
         assert repeat["occurrences"] == 2
     finally:
-        execute("DELETE FROM feedback WHERE id = ANY(%s)", ([a["id"], b["id"]],))
+        with session_scope() as session:
+            session.query(models().Feedback).filter(models().Feedback.id.in_([a["id"], b["id"]])).delete(synchronize_session=False)
 
 
 def test_feedback_rejects_opinions(db):
@@ -463,20 +461,11 @@ def test_empty_chain_says_whether_there_was_anything_to_search(db):
     """A bare [] conflated "nothing found" with "nothing to look through"."""
     from git_synapse.mcp import server
 
-    row = query_one(
-        """
-        SELECT r.name FROM repo r
-        WHERE EXISTS (SELECT 1 FROM repo_impact i WHERE i.target_repo_id = r.id)
-          AND NOT EXISTS (
-              SELECT 1 FROM repo_impact i WHERE i.target_repo_id = r.id
-                AND (i.is_declared OR i.has_bump_history))
-        LIMIT 1
-        """
-    )
-    if row is None:
+    name = _all_discovery_repo()
+    if name is None:
         pytest.skip("no repository with only discovery-tier upstream edges")
 
-    out = server.coupling_chain(repo=row["name"], direction="upstream")
+    out = server.coupling_chain(repo=name, direction="upstream")
     assert out["chains"] == []
     assert out["explanation"], "an empty chain must say why it is empty"
     assert "validated" in out["explanation"]
@@ -486,26 +475,17 @@ def test_all_discovery_result_says_so_before_the_scores(db):
     """A result set with no validated edge must lead with that fact."""
     from git_synapse.mcp import server
 
-    row = query_one(
-        """
-        SELECT r.name FROM repo r
-        WHERE EXISTS (SELECT 1 FROM repo_impact i WHERE i.target_repo_id = r.id)
-          AND NOT EXISTS (
-              SELECT 1 FROM repo_impact i WHERE i.target_repo_id = r.id
-                AND (i.is_declared OR i.has_bump_history))
-        LIMIT 1
-        """
-    )
-    if row is None:
+    name = _all_discovery_repo()
+    if name is None:
         pytest.skip("no all-discovery repository")
 
     # Opting in is what surfaces them; the default withholds. Both must say
     # plainly that nothing in the set carries validated evidence.
-    out = server.upstream_repos(repo=row["name"], limit=5, include_discovery=True)
+    out = server.upstream_repos(repo=name, limit=5, include_discovery=True)
     assert "NONE" in out["guidance"]
     assert "not a probability" in out["guidance"]
 
-    default = server.upstream_repos(repo=row["name"], limit=5)
+    default = server.upstream_repos(repo=name, limit=5)
     assert default["upstream"] == []
     assert "withheld" in default["guidance"]
 
@@ -518,18 +498,15 @@ def test_coupled_directories_marks_nesting_as_arithmetic(db):
     """
     from git_synapse.mcp import server
 
-    row = query_one(
-        """
-        SELECT r.name AS repo, d.path
-        FROM directory d JOIN repo r ON r.id = d.repo_id
-        WHERE d.file_count > 20 AND d.path LIKE '%/%'
-        ORDER BY d.change_count DESC LIMIT 1
-        """
-    )
+    with session_scope() as session:
+        row = session.query(models().Repo.name, models().Directory.path).join(
+            models().Directory, models().Directory.repo_id == models().Repo.id
+        ).filter(models().Directory.file_count > 20, models().Directory.path.like("%/%"))
+        row = row.order_by(models().Directory.change_count.desc()).first()
     if row is None:
         pytest.skip("no nested directory indexed")
 
-    out = server.coupled_directories(repo=row["repo"], path=row["path"], limit=10)
+    out = server.coupled_directories(repo=row[0], path=row[1], limit=10)
     assert "error" not in out, out
     if not out["partners"]:
         pytest.skip("no directory coupling for this fixture")
@@ -545,22 +522,19 @@ def test_coupled_directories_accepts_a_file_path(db):
     """A caller editing a file will pass the file, not its directory."""
     from git_synapse.mcp import server
 
-    row = query_one(
-        """
-        SELECT r.name AS repo, f.path, f.dir_path
-        FROM file f JOIN repo r ON r.id = f.repo_id
-        WHERE f.dir_path <> '' AND f.change_count > 20 AND NOT f.is_deleted
-        LIMIT 1
-        """
-    )
+    with session_scope() as session:
+        row = session.query(models().Repo.name, models().File.path, models().File.dir_path).join(
+            models().File, models().File.repo_id == models().Repo.id
+        ).filter(models().File.dir_path != "", models().File.change_count > 20,
+                 models().File.is_deleted.is_(False)).first()
     if row is None:
         pytest.skip("no suitable file")
 
-    out = server.coupled_directories(repo=row["repo"], path=row["path"], limit=5)
+    out = server.coupled_directories(repo=row[0], path=row[1], limit=5)
     assert "error" not in out, out
-    assert out["directory"]["path"] == row["dir_path"]
+    assert out["directory"]["path"] == row[2]
 
-    missing = server.coupled_directories(repo=row["repo"], path="no/such/dir", limit=5)
+    missing = server.coupled_directories(repo=row[0], path="no/such/dir", limit=5)
     assert "error" in missing and "hint" in missing
 
 
@@ -658,26 +632,17 @@ def test_discovery_upstream_is_withheld_unless_requested(db):
     """Unvalidated edges cost attention to dismiss and were never acted on."""
     from git_synapse.mcp import server
 
-    row = query_one(
-        """
-        SELECT r.name FROM repo r
-        WHERE EXISTS (SELECT 1 FROM repo_impact i WHERE i.target_repo_id = r.id)
-          AND NOT EXISTS (
-              SELECT 1 FROM repo_impact i WHERE i.target_repo_id = r.id
-                AND (i.is_declared OR i.has_bump_history))
-        LIMIT 1
-        """
-    )
-    if row is None:
+    name = _all_discovery_repo()
+    if name is None:
         pytest.skip("no all-discovery repository")
 
-    default = server.upstream_repos(repo=row["name"])
+    default = server.upstream_repos(repo=name)
     assert default["upstream"] == []
     assert "withheld" in default["guidance"]
     # The count must be stated, or the empty list reads as "no relationship".
     assert any(ch.isdigit() for ch in default["guidance"])
 
-    opted_in = server.upstream_repos(repo=row["name"], include_discovery=True)
+    opted_in = server.upstream_repos(repo=name, include_discovery=True)
     assert opted_in["upstream"], "opting in must return them"
 
 

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from sqlalchemy import delete, select
-
 from git_synapse.db.orm import models, session_scope
 
 
@@ -19,9 +17,9 @@ def test_all_application_tables_are_reflected_without_renaming(db):
         "FileRisk", "RepoPackage", "CallLog", "AppUser", "UserSession",
         "ApiToken", "LoginAttempt", "Meta",
     }
-    assert expected.issubset(set(mapped.keys()))
-    assert mapped.Repo.__table__.name == "repo"
-    assert mapped.FilePairMetric.__table__.name == "file_pair_metric"
+    assert expected.issubset(set(vars(mapped)))
+    assert mapped.Repo.__tablename__ == "repo"
+    assert mapped.FilePairMetric.__tablename__ == "file_pair_metric"
 
 
 def test_orm_transaction_rolls_back_and_preserves_jsonb_values(db):
@@ -32,7 +30,7 @@ def test_orm_transaction_rolls_back_and_preserves_jsonb_values(db):
             session.add(Meta(key=key, value={"answer": 42}))
 
         with session_scope() as session:
-            value = session.scalar(select(Meta.value).where(Meta.key == key))
+            value = session.query(Meta).filter_by(key=key).one().value
             assert value == {"answer": 42}
 
         try:
@@ -43,4 +41,4 @@ def test_orm_transaction_rolls_back_and_preserves_jsonb_values(db):
             pass
     finally:
         with session_scope() as session:
-            session.execute(delete(Meta).where(Meta.key.like("orm-%")))
+            session.query(Meta).filter(Meta.key.like("orm-%")).delete(synchronize_session=False)

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from git_synapse.db.engine import query_one
+from git_synapse.db.orm import models, session_scope
 from git_synapse.ingest import accounts
 from git_synapse.ingest.accounts import AccountError
 
@@ -17,7 +17,8 @@ from git_synapse.ingest.accounts import AccountError
 @pytest.fixture()
 def clean(scratch_db):
     """An empty account table for each test."""
-    query_one("DELETE FROM account RETURNING 1")
+    with session_scope() as session:
+        session.query(models().Account).delete(synchronize_session=False)
     return scratch_db
 
 
@@ -239,8 +240,8 @@ def test_owners_are_read_from_ingested_repos_not_configured_accounts(clean):
 
     with connection() as conn:
         upsert_repo(with_owner, conn)
-    from git_synapse.db.engine import query
-    owners = {r["owner"].lower() for r in query("SELECT owner FROM repo")}
+    with session_scope() as session:
+        owners = {r.owner.lower() for r in session.query(models().Repo).all()}
     assert "acme-owner" in owners
 
 
@@ -313,7 +314,6 @@ def test_the_count_is_reconciled_against_the_repositories_that_exist(db):
     """Discovery records what it *selected*, which is written before the upsert
     and therefore before anything is durable. A run that aborts between the two
     leaves a source claiming repositories no row backs."""
-    from git_synapse.db.engine import execute, query_one
     from git_synapse.ingest import accounts
 
     src = accounts.add_account("countreal", kind="org", provider="github",
@@ -322,21 +322,26 @@ def test_the_count_is_reconciled_against_the_repositories_that_exist(db):
         # What discovery intended.
         accounts.record_discovery(src["id"], 7)
         # What actually landed.
-        execute(
-            "INSERT INTO repo (github_id, owner, name, full_name, host, provider,"
-            " account_id, is_enabled) VALUES (NULL,'countreal','a','countreal/a',"
-            "'github.com','github',%s,TRUE)", (src["id"],))
+        with session_scope() as session:
+            session.add(models().Repo(owner="countreal", name="a", full_name="countreal/a",
+                                      host="github.com", provider="github", account_id=src["id"],
+                                      is_enabled=True))
         assert accounts.get_account(src["id"])["repo_count"] == 7
 
         accounts.refresh_repo_counts()
         assert accounts.get_account(src["id"])["repo_count"] == 1
 
         # A paused repository is not one a reader can click on.
-        execute("UPDATE repo SET is_enabled = FALSE WHERE full_name='countreal/a'")
+        with session_scope() as session:
+            row = session.query(models().Repo).filter_by(full_name="countreal/a").one()
+            row.is_enabled = False
         accounts.refresh_repo_counts()
         assert accounts.get_account(src["id"])["repo_count"] == 0
-        row = query_one("SELECT count(*) AS n FROM repo WHERE full_name='countreal/a'")
-        assert row["n"] == 1, "reconciling a count must not delete anything"
+        with session_scope() as session:
+            assert session.query(models().Repo).filter_by(full_name="countreal/a").count() == 1
     finally:
-        execute("DELETE FROM repo WHERE full_name='countreal/a'")
+        with session_scope() as session:
+            row = session.query(models().Repo).filter_by(full_name="countreal/a").one_or_none()
+            if row is not None:
+                session.delete(row)
         accounts.remove_account(src["id"])

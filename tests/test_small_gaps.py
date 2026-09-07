@@ -71,10 +71,10 @@ def test_an_absent_list_setting_uses_its_default(monkeypatch):
     assert _env_list("PROBE_LIST", ("x",)) == ("x",)
 
 
-def test_the_sqlalchemy_url_names_the_psycopg_driver():
+def test_the_sqlalchemy_url_names_the_pg8000_driver():
     from git_synapse.config import get_config
 
-    assert get_config().db.url.startswith("postgresql+psycopg://")
+    assert get_config().db.url.startswith("postgresql+pg8000://")
 
 
 # --------------------------------------------------------------- validate

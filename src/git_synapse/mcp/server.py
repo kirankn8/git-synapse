@@ -601,15 +601,7 @@ def coupling_chain(
     # nothing to search", not "I searched and found nothing".
     explanation = None
     if not rows:
-        side = "target_repo_id" if upstream else "source_repo_id"
-        counts = q.query_one(
-            f"""
-            SELECT count(*) AS total,
-                   count(*) FILTER (WHERE is_declared OR has_bump_history) AS validated
-            FROM repo_impact WHERE {side} = %s
-            """,
-            (target["id"],),
-        ) or {"total": 0, "validated": 0}
+        counts = q.impact_edge_counts(target["id"], upstream)
         if counts["validated"] == 0 and counts["total"] > 0:
             explanation = (
                 f"No chains, because none of this repository's {counts['total']} "
@@ -657,35 +649,14 @@ def coupling_chain(
 )
 def explain_repo_pair(repo_a: str, repo_b: str) -> dict:
     """Assemble every piece of evidence for one repository pair."""
-    from git_synapse.db.engine import query, query_one
-
     a, b = _resolve_repo(repo_a), _resolve_repo(repo_b)
     if a is None or b is None:
         return {"error": f"unknown repository: {repo_a if a is None else repo_b}"}
 
-    impact = query_one(
-        "SELECT * FROM repo_impact WHERE source_repo_id=%s AND target_repo_id=%s",
-        (a["id"], b["id"]),
-    )
-    reverse = query_one(
-        "SELECT * FROM repo_impact WHERE source_repo_id=%s AND target_repo_id=%s",
-        (b["id"], a["id"]),
-    )
-    bumps = query(
-        """
-        SELECT consumer_sha, dep_version, dep_sha, bumped_at,
-               round(adoption_seconds / 86400.0, 2) AS adoption_days
-        FROM dep_bump
-        WHERE dep_repo_id=%s AND consumer_repo_id=%s
-        ORDER BY bumped_at DESC NULLS LAST LIMIT 8
-        """,
-        (a["id"], b["id"]),
-    )
-    declared = query_one(
-        "SELECT dep_name, dep_version, manifest FROM repo_dependency"
-        " WHERE dep_repo_id=%s AND consumer_repo_id=%s",
-        (a["id"], b["id"]),
-    )
+    impact = q.impact_pair(a["id"], b["id"])
+    reverse = q.impact_pair(b["id"], a["id"])
+    bumps = q.repo_pair_bumps(b["id"], a["id"], 8)
+    declared = q.declared_dependency(a["id"], b["id"])
 
     return {
         "repo_a": a["full_name"],
@@ -823,21 +794,13 @@ def coupled_directories(
         return {"error": f"no repository matching {repo!r}"}
 
     cleaned = (path or "").strip().strip("/")
-    row = q.query_one(
-        "SELECT id, path, file_count, change_count FROM directory"
-        " WHERE repo_id = %s AND path = %s",
-        (target["id"], cleaned),
-    )
+    row = q.directory_by_path(target["id"], cleaned)
     if row is None:
         # Accept a file path and use its directory, which is what a caller
         # editing a file will naturally pass.
         f = q.resolve_file(target["full_name"], path)
         if f is not None:
-            row = q.query_one(
-                "SELECT id, path, file_count, change_count FROM directory"
-                " WHERE repo_id = %s AND path = %s",
-                (target["id"], f["dir_path"]),
-            )
+            row = q.directory_by_path(target["id"], f["dir_path"])
     if row is None:
         return {
             "error": f"no directory {path!r} in repository {target['full_name']!r}",
@@ -854,12 +817,16 @@ def coupled_directories(
     # back is only directories that could have moved independently and did not.
     partners = q.coupled_directories(row["id"], spec.key, limit)
     shaped = []
+    own_path = row["path"] or ""
     for pr in partners:
         other = pr["path"] or ""
+        nested = bool(other and own_path and (
+            other.startswith(f"{own_path}/") or own_path.startswith(f"{other}/")
+        ))
         shaped.append({
             "path": other,
-            "relation": "sibling-or-unrelated",
-            "informative": True,
+            "relation": "nested-arithmetic" if nested else "sibling-or-unrelated",
+            "informative": not nested,
             "score": _round(pr.get("score")),
             "co_changes": pr["n_ab"],
             "probability_also_changes": _round(pr.get("confidence_out"), 3),

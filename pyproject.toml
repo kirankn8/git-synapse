@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.26",
     "scipy>=1.11",
-    "psycopg[binary,pool]>=3.1",
+    "pg8000>=1.30",
     "SQLAlchemy>=2.0,<3",
     "httpx>=0.27",
     "fastapi>=0.110",
@@ -29,9 +29,6 @@ git-synapse = "git_synapse.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-git_synapse = ["db/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

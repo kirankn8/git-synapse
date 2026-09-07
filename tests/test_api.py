@@ -6,6 +6,8 @@ status, the shape, and that bad input is refused rather than answered.
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 pytest.importorskip("fastapi")
@@ -263,9 +265,10 @@ def test_file_detail_endpoints_agree_with_each_other(corpus, client):
 
 
 def test_pair_detail_and_its_evidence_are_consistent(client):
-    from git_synapse.analysis.query import query_one
-
-    row = query_one("SELECT file_a_id a, file_b_id b FROM file_pair_metric WHERE n_ab > 3 LIMIT 1")
+    from git_synapse.db.orm import models, session_scope
+    with session_scope() as session:
+        metric = session.query(models().FilePairMetric).filter(models().FilePairMetric.n_ab > 3).first()
+    row = {"a": metric.file_a_id, "b": metric.file_b_id} if metric else None
     if row is None:
         pytest.skip("no supported pair")
 
@@ -286,12 +289,12 @@ def test_pair_detail_and_its_evidence_are_consistent(client):
 
 
 def test_repo_sub_resources_answer(client):
-    from git_synapse.analysis.query import query_one
-
-    row = query_one("SELECT id FROM repo WHERE is_enabled ORDER BY commit_count DESC LIMIT 1")
-    if row is None:
+    from git_synapse.db.orm import models, session_scope
+    with session_scope() as session:
+        repo = session.query(models().Repo).filter_by(is_enabled=True).order_by(models().Repo.commit_count.desc()).first()
+    if repo is None:
         pytest.skip("no repositories")
-    rid = row["id"]
+    rid = repo.id
     for suffix in ("", "/files", "/directories", "/extensions", "/hotspots",
                    "/pairs", "/graph"):
         r = client.get(f"/api/repos/{rid}{suffix}", params={"limit": 3})
@@ -311,52 +314,56 @@ def test_min_score_never_500s(client, min_score):
 
 def test_refresh_endpoint_refuses_while_a_run_is_active(client):
     """It must not start a second ingest over the top of a live one."""
-    from git_synapse.db.engine import connection
-    from git_synapse.ingest.pipeline import INGEST_LOCK_KEY
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as holder:
-        holder.execute("SELECT pg_advisory_lock(%s)", (INGEST_LOCK_KEY,))
+    with session_scope() as session:
+        run = models().IngestRun(kind="sync", trigger="test", status="running")
+        session.add(run)
+        session.flush()
+        run_id = run.id
+    holder = session_scope()
+    locked = holder.__enter__()
+    lock_row = locked.get(models().Meta, "lock:ingest")
+    if lock_row is None:
+        lock_row = models().Meta(key="lock:ingest", value={"owner": "test"})
+        locked.add(lock_row)
+        locked.flush()
+    else:
+        locked.refresh(lock_row, with_for_update=True)
+    try:
         try:
-            with connection() as conn:
-                rid = conn.execute(
-                    "INSERT INTO ingest_run (kind, trigger, status, started_at)"
-                    " VALUES ('sync','test','running',now()) RETURNING id"
-                ).fetchone()[0]
-            try:
-                r = client.post("/api/ingest/refresh")
-                assert r.status_code in (409, 202, 200)
-            finally:
-                with connection() as conn:
-                    conn.execute("DELETE FROM ingest_run WHERE id=%s", (rid,))
+            r = client.post("/api/ingest/refresh")
+            assert r.status_code in (409, 202, 200)
         finally:
-            holder.execute("SELECT pg_advisory_unlock(%s)", (INGEST_LOCK_KEY,))
+            with session_scope() as session:
+                session.query(models().IngestRun).filter_by(id=run_id).delete(synchronize_session=False)
+    finally:
+        holder.__exit__(None, None, None)
 
 
 # --------------------------------------------------- every route, discovered
 
 def _real_ids():
     """Ids that actually exist, so a sweep exercises the query rather than a 404."""
-    from git_synapse.analysis.query import query_one
+    from git_synapse.db.orm import models, session_scope
 
     ids = {}
-    row = query_one("SELECT id FROM repo WHERE is_enabled ORDER BY commit_count DESC LIMIT 1")
-    if row:
-        ids["repo_id"] = ids["repo_a_id"] = row["id"]
-    row = query_one(
-        "SELECT id FROM repo WHERE is_enabled ORDER BY commit_count DESC OFFSET 1 LIMIT 1"
-    )
-    if row:
-        ids["repo_b_id"] = row["id"]
-    row = query_one("SELECT file_a_id a, file_b_id b FROM file_pair_metric LIMIT 1")
-    if row:
-        ids["file_id"] = ids["file_a_id"] = row["a"]
-        ids["file_b_id"] = row["b"]
-    row = query_one("SELECT id FROM directory ORDER BY change_count DESC LIMIT 1")
-    if row:
-        ids["dir_id"] = row["id"]
-    row = query_one("SELECT id FROM ingest_run ORDER BY id DESC LIMIT 1")
-    if row:
-        ids["run_id"] = row["id"]
+    with session_scope() as session:
+        repos = session.query(models().Repo).filter_by(is_enabled=True).order_by(models().Repo.commit_count.desc()).all()
+        if repos:
+            ids["repo_id"] = ids["repo_a_id"] = repos[0].id
+        if len(repos) > 1:
+            ids["repo_b_id"] = repos[1].id
+        pair = session.query(models().FilePairMetric).first()
+        if pair:
+            ids["file_id"] = ids["file_a_id"] = pair.file_a_id
+            ids["file_b_id"] = pair.file_b_id
+        directory = session.query(models().Directory).order_by(models().Directory.change_count.desc()).first()
+        if directory:
+            ids["dir_id"] = directory.id
+        run = session.query(models().IngestRun).order_by(models().IngestRun.id.desc()).first()
+        if run:
+            ids["run_id"] = run.id
     return ids
 
 
@@ -370,13 +377,12 @@ REQUIRED_QUERY: dict[str, dict | None] = {
 
 def _a_real_file() -> dict | None:
     """A `(repo, path)` pair that exists, for the resolve endpoint."""
-    from git_synapse.analysis.query import query_one
-
-    row = query_one(
-        "SELECT r.full_name AS repo, f.path FROM file f"
-        " JOIN repo r ON r.id = f.repo_id LIMIT 1"
-    )
-    return {"repo": row["repo"], "path": row["path"]} if row else None
+    from git_synapse.db.orm import models, session_scope
+    with session_scope() as session:
+        row = session.query(models().Repo.full_name, models().File.path).join(
+            models().File, models().File.repo_id == models().Repo.id
+        ).first()
+    return {"repo": row[0], "path": row[1]} if row else None
 
 
 def test_every_get_route_answers_with_real_arguments(corpus, admin_client):
@@ -451,10 +457,14 @@ def test_every_route_refuses_a_nonexistent_id_rather_than_500ing(client, db):
 
 def test_health_reports_degraded_rather_than_raising(client, monkeypatch):
     """A health endpoint that 500s tells a load balancer nothing it can act on."""
-    from git_synapse.api import routes
+    from contextlib import contextmanager
 
-    monkeypatch.setattr(routes, "scalar",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("no db")))
+    from git_synapse.api import routes
+    @contextmanager
+    def broken_session():
+        raise OSError("no db")
+        yield
+    monkeypatch.setattr(routes, "session_scope", broken_session)
     r = client.get("/api/health")
     assert r.status_code == 200
     body = r.json()
@@ -464,12 +474,12 @@ def test_health_reports_degraded_rather_than_raising(client, monkeypatch):
 
 
 def test_looking_up_a_file_that_does_not_exist_is_a_404(client, db):
-    from git_synapse.db.engine import query_one
-
-    row = query_one("SELECT name FROM repo WHERE is_enabled LIMIT 1")
-    if row is None:
+    from git_synapse.db.orm import models, session_scope
+    with session_scope() as session:
+        repo = session.query(models().Repo).filter_by(is_enabled=True).first()
+    if repo is None:
         pytest.skip("no repositories")
-    r = client.get("/api/files/resolve", params={"repo": row["name"],
+    r = client.get("/api/files/resolve", params={"repo": repo.name,
                                                  "path": "no/such/file.go"})
     assert r.status_code == 404
 
@@ -576,16 +586,18 @@ def no_accounts(client):
     need somebody to attribute them to -- which means these tests need an admin
     even on a deployment whose reads are open.
     """
-    from git_synapse.db.engine import execute
+    from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest import accounts as _accounts
 
-    execute("DELETE FROM account")
+    with session_scope() as session:
+        session.query(models().Account).delete(synchronize_session=False)
     admin = _sign_in_admin(client)
     try:
         yield client
     finally:
         client.cookies.clear()
-        execute("DELETE FROM account")
+        with session_scope() as session:
+            session.query(models().Account).delete(synchronize_session=False)
         _cleanup_admin(admin)
         del _accounts
 
@@ -799,7 +811,8 @@ def test_deleting_a_missing_account_is_404(no_accounts):
 
 def test_a_deleted_account_keeps_its_repositories(no_accounts):
     """The mined statistics are the expensive part; they must survive."""
-    from git_synapse.db.engine import connection, execute, query_one
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.store import upsert_repo
 
@@ -813,15 +826,17 @@ def test_a_deleted_account_keeps_its_repositories(no_accounts):
 
     try:
         no_accounts.delete(f"/api/accounts/{made['id']}")
-        still = query_one("SELECT account_id FROM repo WHERE id = %s", (repo_id,))
-        assert still is not None, "deleting an account must not delete its repositories"
-        assert still["account_id"] is None, "the link clears rather than cascading"
+        with session_scope() as session:
+            still = session.get(models().Repo, repo_id)
+            assert still is not None, "deleting an account must not delete its repositories"
+            assert still.account_id is None, "the link clears rather than cascading"
     finally:
         # This fixture runs against the shared corpus database, so a synthetic
         # repository left behind is picked up by every later test that reads
         # `repo` -- one of which dereferences clone_url and fails on the None
         # this record has.
-        execute("DELETE FROM repo WHERE id = %s", (repo_id,))
+        with session_scope() as session:
+            session.query(models().Repo).filter_by(id=repo_id).delete(synchronize_session=False)
 
 
 def test_updating_an_account_to_a_taken_login_is_a_conflict(signed_in):
@@ -846,45 +861,46 @@ def test_a_run_that_does_not_exist_is_a_404(client):
 
 
 def test_a_run_that_exists_is_returned(client):
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as conn:
-        run_id = conn.execute(
-            "INSERT INTO ingest_run (kind, trigger, status) "
-            "VALUES ('fast','manual','success') RETURNING id").fetchone()[0]
-        conn.commit()
+    with session_scope() as session:
+        run = models().IngestRun(kind="fast", trigger="manual", status="success")
+        session.add(run)
+        session.flush()
+        run_id = run.id
     try:
         r = client.get(f"/api/runs/{run_id}")
         assert r.status_code == 200
         assert r.json()["id"] == run_id
     finally:
-        with connection() as conn:
-            conn.execute("DELETE FROM ingest_run WHERE id = %s", (run_id,))
-            conn.commit()
+        with session_scope() as session:
+            session.query(models().IngestRun).filter_by(id=run_id).delete(synchronize_session=False)
 
 
 def test_a_repository_pair_lists_every_bump_not_just_a_count(client, db):
     """"13 bumps, median lag 41.8 days" is a summary of something the page never
     showed. This is the something: which version, on what date, and the upstream
     commit it consumed."""
-    from git_synapse.db.engine import connection
+    from datetime import UTC, datetime
 
-    with connection() as conn:
-        a = conn.execute("INSERT INTO repo (full_name, name, owner) VALUES "
-                         "('acme/app','app','acme') RETURNING id").fetchone()[0]
-        b = conn.execute("INSERT INTO repo (full_name, name, owner) VALUES "
-                         "('acme/lib','lib','acme') RETURNING id").fetchone()[0]
-        up = conn.execute(
-            "INSERT INTO commit (repo_id, sha, authored_at, committed_at, subject) "
-            "VALUES (%s, %s, '2024-01-01', '2024-01-01', 'upstream work') RETURNING id",
-            (b, "c" * 40)).fetchone()[0]
+    from git_synapse.db.orm import models, session_scope
+
+    with session_scope() as session:
+        app = models().Repo(full_name="acme/app", name="app", owner="acme")
+        lib = models().Repo(full_name="acme/lib", name="lib", owner="acme")
+        session.add_all([app, lib])
+        session.flush()
+        a, b = app.id, lib.id
+        upstream = models().Commit(repo_id=b, sha="c" * 40, authored_at=datetime(2024, 1, 1, tzinfo=UTC),
+                                   committed_at=datetime(2024, 1, 1, tzinfo=UTC), subject="upstream work")
+        session.add(upstream)
+        session.flush()
+        up = upstream.id
         for version, at in (("1.0.0", "2024-02-01"), ("1.1.0", "2024-03-01")):
-            conn.execute(
-                "INSERT INTO dep_bump (consumer_repo_id, consumer_sha, dep_repo_id, "
-                "dep_name, dep_version, manifest, bumped_at, dep_commit_id, resolution, "
-                "adoption_seconds) VALUES (%s,%s,%s,'lib',%s,'pom.xml',%s,%s,'tag',86400)",
-                (a, version.replace(".", "") + "a" * 34, b, version, at, up))
-        conn.commit()
+            session.add(models().DepBump(consumer_repo_id=a, consumer_sha=version.replace(".", "") + "a" * 34,
+                                         dep_repo_id=b, dep_name="lib", dep_version=version, manifest="pom.xml",
+                                         bumped_at=datetime.fromisoformat(at).replace(tzinfo=UTC), dep_commit_id=up,
+                                         resolution="tag", adoption_seconds=86400))
     try:
         r = client.get(f"/api/repos/{a}/bumps/{b}")
         assert r.status_code == 200
@@ -896,9 +912,10 @@ def test_a_repository_pair_lists_every_bump_not_just_a_count(client, db):
         assert newest["adoption_days"] == 1.0
         assert newest["resolution"] == "tag"
     finally:
-        with connection() as conn:
-            conn.execute("DELETE FROM repo WHERE id IN (%s, %s)", (a, b))
-            conn.commit()
+        with session_scope() as session:
+            session.query(models().DepBump).filter(models().DepBump.consumer_repo_id.in_([a, b])).delete(synchronize_session=False)
+            session.query(models().Commit).filter_by(repo_id=b).delete(synchronize_session=False)
+            session.query(models().Repo).filter(models().Repo.id.in_([a, b])).delete(synchronize_session=False)
 
 
 def test_a_pair_with_no_bumps_returns_an_empty_list_not_an_error(client, db):
@@ -912,19 +929,19 @@ def test_lag_is_a_number_in_json_not_a_string(client, db):
     """Postgres NUMERIC becomes a Decimal, which serialises as a string -- so a
     field that looks numeric raises a TypeError the moment anyone does
     arithmetic on it."""
-    from git_synapse.db.engine import connection
+    from datetime import UTC, datetime
 
-    with connection() as conn:
-        a = conn.execute("INSERT INTO repo (full_name, name, owner) VALUES "
-                         "('acme/n1','n1','acme') RETURNING id").fetchone()[0]
-        b = conn.execute("INSERT INTO repo (full_name, name, owner) VALUES "
-                         "('acme/n2','n2','acme') RETURNING id").fetchone()[0]
-        conn.execute(
-            "INSERT INTO dep_bump (consumer_repo_id, consumer_sha, dep_repo_id, "
-            "dep_name, dep_version, manifest, bumped_at, adoption_seconds) "
-            "VALUES (%s,%s,%s,'n2','1.0.0','pom.xml','2024-01-01',172800)",
-            (a, "e" * 40, b))
-        conn.commit()
+    from git_synapse.db.orm import models, session_scope
+
+    with session_scope() as session:
+        app = models().Repo(full_name="acme/n1", name="n1", owner="acme")
+        lib = models().Repo(full_name="acme/n2", name="n2", owner="acme")
+        session.add_all([app, lib])
+        session.flush()
+        a, b = app.id, lib.id
+        session.add(models().DepBump(consumer_repo_id=a, consumer_sha="e" * 40, dep_repo_id=b,
+                                     dep_name="n2", dep_version="1.0.0", manifest="pom.xml",
+                                     bumped_at=datetime(2024, 1, 1, tzinfo=UTC), adoption_seconds=172800))
     try:
         lag = client.get(f"/api/repos/{a}/bumps/{b}").json()["bumps"][0]["adoption_days"]
         assert isinstance(lag, (int, float)) and lag == 2.0
@@ -932,9 +949,9 @@ def test_lag_is_a_number_in_json_not_a_string(client, db):
         median = client.get(f"/api/repos/{a}/dependencies").json()["bumps"][0]["median_adoption_days"]
         assert isinstance(median, (int, float))
     finally:
-        with connection() as conn:
-            conn.execute("DELETE FROM repo WHERE id IN (%s, %s)", (a, b))
-            conn.commit()
+        with session_scope() as session:
+            session.query(models().DepBump).filter_by(consumer_repo_id=a).delete(synchronize_session=False)
+            session.query(models().Repo).filter(models().Repo.id.in_([a, b])).delete(synchronize_session=False)
 
 
 def test_the_server_serves_the_shell_for_every_route_the_spa_claims():
@@ -1187,7 +1204,9 @@ def test_setup_refuses_a_caller_who_does_not_hold_the_token(client):
         assert client.post("/api/auth/setup", json=body).status_code == 422
         assert auth.count_users() == 0
     finally:
-        auth.execute("DELETE FROM login_attempt WHERE email = %s", ("setup",))
+        from git_synapse.db.orm import models, session_scope
+        with session_scope() as session:
+            session.query(models().LoginAttempt).filter_by(email="setup").delete(synchronize_session=False)
         auth.clear_setup_token()
 
 
@@ -1216,7 +1235,9 @@ def test_guessing_the_setup_token_is_rate_limited(client):
         assert codes == {403, 429}, f"expected refusals then a lockout, got {codes}"
         assert auth.count_users() == 0
     finally:
-        auth.execute("DELETE FROM login_attempt WHERE email = %s", ("setup",))
+        from git_synapse.db.orm import models, session_scope
+        with session_scope() as session:
+            session.query(models().LoginAttempt).filter_by(email="setup").delete(synchronize_session=False)
         auth.clear_setup_token()
 
 
@@ -1278,8 +1299,9 @@ def test_an_environment_supplied_token_is_used_verbatim(client, monkeypatch):
         assert auth.setup_token_is_minted() is False
         assert client.get("/api/auth/me").json()["setup_token_minted"] is False
         # Nothing was written: there is nothing to leak and nothing to clear.
-        from git_synapse.db.engine import query_one
-        assert query_one("SELECT value FROM meta WHERE key = %s", ("setup:token",)) is None
+        from git_synapse.db.orm import models, session_scope
+        with session_scope() as session:
+            assert session.get(models().Meta, "setup:token") is None
     finally:
         monkeypatch.delenv("ADMIN_SETUP_TOKEN", raising=False)
         config.get_config.cache_clear()
@@ -1510,9 +1532,9 @@ def test_repeated_wrong_passwords_answer_429_not_401(client):
             "email": "pytest-rate@example.com", "password": "wrong"})
         assert blocked.status_code == 429 and "try again" in blocked.json()["detail"]
     finally:
-        from git_synapse.db.engine import execute
-
-        execute("DELETE FROM login_attempt")
+        from git_synapse.db.orm import models, session_scope
+        with session_scope() as session:
+            session.query(models().LoginAttempt).delete(synchronize_session=False)
         auth.delete_user(user["id"])
         client.cookies.clear()
 
@@ -1524,7 +1546,9 @@ def test_a_minted_token_never_reaches_the_call_log(signed_in, db, settled_calls)
     log recorded every reply verbatim, and `/api/calls/{id}` handed it back --
     so two requests turned any signed-in member into whoever last minted a
     token. Four live secrets were sitting in the log when this was found."""
-    from git_synapse.db.engine import execute, query
+    from datetime import UTC, datetime, timedelta
+
+    from git_synapse.db.orm import models, session_scope
 
     client = signed_in
     made = client.post("/api/auth/tokens", json={"name": "log-probe", "days": 1})
@@ -1535,23 +1559,33 @@ def test_a_minted_token_never_reaches_the_call_log(signed_in, db, settled_calls)
     # Absence cannot be waited for, so a later request that IS logged acts as
     # the barrier: once its row has landed, anything queued before it has too.
     client.get("/api/overview")
-    settled_calls(lambda: query(
-        "SELECT id FROM call_log WHERE name = '/api/overview'"
-        " AND at > now() - interval '1 minute'"))
+    cutoff = datetime.now(UTC) - timedelta(minutes=1)
+    settled_calls(lambda: _recent_call_logs(cutoff, "/api/overview"))
 
-    rows = query("SELECT result_preview::text AS body FROM call_log"
-                 " WHERE result_preview::text LIKE %s", (f"%{secret}%",))
-    assert rows == [], "the secret reached the call log"
+    with session_scope() as session:
+        rows = session.query(models().CallLog).filter(models().CallLog.at >= cutoff).all()
+    assert all(secret not in str(row.result_preview) for row in rows), "the secret reached the call log"
 
     # And no auth reply at all is recorded, so this cannot regress by another
     # route -- a future endpoint under /api/auth is covered by construction.
-    auth_rows = query("SELECT count(*) AS n FROM call_log WHERE name LIKE '/api/auth/%%'"
-                      " AND at > now() - interval '1 minute'")
-    assert auth_rows[0]["n"] == 0
+    with session_scope() as session:
+        auth_rows = session.query(models().CallLog).filter(
+            models().CallLog.name.like("/api/auth/%"), models().CallLog.at >= cutoff
+        ).count()
+    assert auth_rows == 0
 
     token_id = made.json()["detail"]["id"]
     client.delete(f"/api/auth/tokens/{token_id}")
-    execute("DELETE FROM call_log WHERE at > now() - interval '5 minutes'")
+    with session_scope() as session:
+        session.query(models().CallLog).filter(models().CallLog.at >= datetime.now(UTC) - timedelta(minutes=5)).delete(synchronize_session=False)
+
+
+def _recent_call_logs(cutoff: datetime, name: str) -> list[object]:
+    from git_synapse.db.orm import models, session_scope
+    with session_scope() as session:
+        return session.query(models().CallLog).filter(
+            models().CallLog.name == name, models().CallLog.at >= cutoff
+        ).all()
 
 
 def test_managing_a_source_needs_an_administrator(client, db):

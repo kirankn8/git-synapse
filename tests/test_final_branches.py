@@ -144,21 +144,24 @@ def test_a_commit_with_an_empty_tree_is_kept_with_no_files(tmp_path):
 
 def test_impact_chains_respect_max_depth(db):
     from git_synapse.analysis import predict
-    from git_synapse.db.engine import query
+    from git_synapse.db.orm import models, session_scope
 
-    for row in query("SELECT DISTINCT source_repo_id s FROM repo_impact LIMIT 5"):
-        for chain in predict.impact_chains(row["s"], max_depth=2, limit=5):
+    with session_scope() as session:
+        source_ids = [row[0] for row in session.query(models().RepoImpact.source_repo_id).distinct().limit(5).all()]
+    for source_id in source_ids:
+        for chain in predict.impact_chains(source_id, max_depth=2, limit=5):
             assert chain["depth"] <= 2
 
 
 def test_chains_are_ranked_by_path_confidence(db):
     from git_synapse.analysis import predict
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.orm import models, session_scope
 
-    row = query_one("SELECT DISTINCT target_repo_id t FROM repo_impact LIMIT 1")
+    with session_scope() as session:
+        row = session.query(models().RepoImpact.target_repo_id).distinct().first()
     if row is None:
         pytest.skip("no impact rows")
-    chains = predict.upstream_chains(row["t"], limit=10)
+    chains = predict.upstream_chains(row[0], limit=10)
     scores = [float(c["path_score"]) for c in chains]
     assert scores == sorted(scores, reverse=True)
 
@@ -181,20 +184,22 @@ def test_the_input_fingerprint_changes_only_when_the_inputs_do(db):
 
 
 def test_the_input_fingerprint_sees_in_place_dependency_changes(scratch_db):
+    from uuid import uuid4
+
     from git_synapse.analysis.predict import _input_fingerprint
     from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
     with connection() as conn:
         first = _input_fingerprint(conn)
-        repo_id = conn.execute(
-            "INSERT INTO repo (github_id, owner, name, full_name, clone_url,"
-            " default_branch) VALUES (900001, 'acme', 'fingerprint',"
-            " 'acme/fingerprint', '', 'main') RETURNING id"
-        ).fetchone()[0]
-        conn.execute(
-            "INSERT INTO repo_dependency (consumer_repo_id, dep_name, manifest, ecosystem)"
-            " VALUES (%s, 'changed', 'go.mod', 'go')", (repo_id,)
-        )
+        suffix = uuid4().hex[:10]
+        repo = models().Repo(github_id=900001 + int(suffix[:6], 16), owner="acme",
+                             name=f"fingerprint-{suffix}", full_name=f"acme/fingerprint-{suffix}", clone_url="",
+                             default_branch="main")
+        conn.add(repo)
+        conn.flush()
+        conn.add(models().RepoDependency(consumer_repo_id=repo.id, dep_name="changed",
+                                         manifest="go.mod", ecosystem="go"))
         second = _input_fingerprint(conn)
     assert first != second
 

@@ -32,17 +32,13 @@ database table and the decisions that materially change the numbers.
 
 ## Database access
 
-Application CRUD and operational state use the SQLAlchemy ORM in
-`src/git_synapse/db/orm.py`. It reflects the existing PostgreSQL schema after
-the normal schema bootstrap, so table names, keys, JSONB columns, arrays,
-foreign keys, and existing data remain unchanged. `session_scope()` owns one
-transaction and always commits or rolls back as a unit.
-
-The lower-level psycopg engine remains intentionally narrow: schema bootstrap,
-PostgreSQL `COPY`, temporary staging tables, and set-based metric rebuilds use
-database-native operations because they process large analytical fact sets.
-Those paths are infrastructure boundaries rather than the general-purpose
-application database API. New ordinary reads and writes should use the ORM.
+All application persistence uses the declarative SQLAlchemy ORM in
+`src/git_synapse/db/schema.py` and the session lifecycle in
+`src/git_synapse/db/orm.py`. Schema creation uses the same mapped metadata;
+there is no parallel SQL schema file or driver-specific persistence layer.
+`session_scope()` owns one transaction and always commits or rolls back as a
+unit. Large analytical reads still use ORM queries with batching, while metric
+arithmetic remains in Python/NumPy.
 
 ## Every table at a glance
 
@@ -489,10 +485,11 @@ erDiagram
   second is real -- arithmetic on two known commit dates, reported and never
   ranked on -- and is now called **adoption delay**, in the column
   (`dep_bump.adoption_seconds`), the API (`adoption_days`) and the UI
-  ("Adopted after"). A renamed column has no migration in `schema.sql`:
+  ("Adopted after"). A renamed column is represented directly in the
+  declarative model; this pre-production project uses a clean ORM bootstrap
+  as the migration boundary:
   Postgres has no `IF EXISTS` for `RENAME COLUMN`, so on a fresh database it
-  fails and takes the whole DDL batch with it, leaving no schema at all. An
-  existing database is renamed once by hand.
+  the old schema is not maintained as a compatibility layer.
 - **Merges** are skipped, and not by choice: a merge has two parents, so *which*
   files it changed depends on which parent you compare against. Git declines to
   pick and reports no files at all, so a merge would be a commit row with nothing
@@ -779,7 +776,7 @@ the database make it incremental.
 
 1. Add a vectorised function to `src/git_synapse/stats/measures.py`.
 2. Add a `MeasureSpec` to `src/git_synapse/stats/registry.py`.
-3. Add the column to `file_pair_metric` and `dir_pair_metric` in `schema.sql`.
+3. Add the column to the mapped metric classes in `src/git_synapse/db/schema.py`.
 4. `docker compose run --rm cli score`.
 
 The API, MCP server, CLI and UI all enumerate from the registry, so nothing else changes.
@@ -1316,7 +1313,7 @@ grows a rung at each step.
 ```
 src/git_synapse/
   stats/       contingency tables + the 31 measures + registry   (pure, no I/O)
-  db/          schema.sql, ORM mappings, connection pool, COPY helpers
+  db/          declarative schema, ORM mappings, connection/session lifecycle
   ingest/      discovery, git mirroring, log parser, loader, pipeline
                sources.py    what a pasted URL means
                providers.py  GitHub, GitLab, Bitbucket, and plain git

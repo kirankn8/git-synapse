@@ -68,19 +68,12 @@ class DatabaseConfig:
 
     @property
     def url(self) -> str:
-        """SQLAlchemy URL using the psycopg (v3) driver."""
+        """SQLAlchemy URL using the pure-Python pg8000 driver."""
         return (
-            f"postgresql+psycopg://{self.user}:{self.password}"
+            f"postgresql+pg8000://{self.user}:{self.password}"
             f"@{self.host}:{self.port}/{self.database}"
         )
 
-    @property
-    def dsn(self) -> str:
-        """Plain libpq DSN, for psycopg's fast COPY path."""
-        return (
-            f"host={self.host} port={self.port} user={self.user} "
-            f"password={self.password} dbname={self.database}"
-        )
 
 
 #: GitHub credential prefixes. Used to reject a partially written token file
@@ -164,8 +157,6 @@ class IngestConfig:
     #: Pairs seen fewer times than this are not persisted. The long tail of
     #: one-off pairs is both enormous and statistically meaningless.
     min_pair_support: int = field(default_factory=lambda: _env_int("MIN_PAIR_SUPPORT", 2))
-    #: Rows per batch when streaming commits into Postgres.
-    copy_batch_size: int = field(default_factory=lambda: _env_int("COPY_BATCH_SIZE", 20000))
     #: Similarity threshold for git's rename detection, as a percentage. Only
     #: applies to fully-cloned repos: inexact rename detection has to read file
     #: contents, so blobless mirrors are forced to 100 (exact renames only,

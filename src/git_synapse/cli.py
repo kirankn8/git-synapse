@@ -19,7 +19,8 @@ from git_synapse.analysis import query as q
 from git_synapse.analysis.aggregate import rebuild_repo, repos_needing_aggregation
 from git_synapse.analysis.score import score_repo
 from git_synapse.config import get_config
-from git_synapse.db.engine import apply_schema, connection, query, wait_for_database
+from git_synapse.db.engine import apply_schema, wait_for_database
+from git_synapse.db.orm import models, session_scope
 from git_synapse.ingest import accounts, pipeline
 from git_synapse.stats.registry import DEFAULT_MEASURE, families
 
@@ -171,7 +172,10 @@ def score(repo_id: int = typer.Option(0, "--repo-id", help="0 means every repo."
     if repo_id:
         console.print(score_repo(repo_id))
         return
-    rows = query("SELECT id, full_name FROM repo WHERE is_enabled ORDER BY id")
+    with session_scope() as session:
+        rows = [{"id": row.id, "full_name": row.full_name}
+                for row in session.query(models().Repo).filter_by(is_enabled=True)
+                .order_by(models().Repo.id).all()]
     for row in rows:
         stats = score_repo(row["id"])
         console.print(f"{row['full_name']}: {stats.file_pairs} pairs in {stats.duration_s:.1f}s")
@@ -289,11 +293,14 @@ def backtest_cmd(
 
     repo_id = None
     if repo:
-        row = query("SELECT id FROM repo WHERE full_name = %s OR name = %s", (repo, repo))
+        with session_scope() as session:
+            row = session.query(models().Repo).filter(
+                (models().Repo.full_name == repo) | (models().Repo.name == repo)
+            ).first()
         if not row:
             console.print(f"[red]no repository {repo!r}[/red]")
             raise typer.Exit(1)
-        repo_id = row[0]["id"]
+        repo_id = row.id
 
     # No opinion about which others are worth running: name them and they run.
     keys = tuple(m.strip() for m in measure.split(",") if m.strip()) or (DEFAULT_MEASURE,)
@@ -487,10 +494,16 @@ def reset(
         console.print("[red]refusing without --yes[/red]")
         raise typer.Exit(1)
     _setup()
-    with connection() as conn:
-        conn.execute(
-            "TRUNCATE repo, author, ingest_run RESTART IDENTITY CASCADE"
-        )
+    with session_scope() as session:
+        classes = [getattr(models(), name) for name in (
+            "RepoImpact", "DepBump", "RepoDependency", "ModuleDependency", "RepoPackage",
+            "FileRisk", "PairDrift", "FileCluster", "AuthorFile", "DirPairMetric", "FilePairMetric",
+            "DirPair", "FilePair", "FileDirectory", "Directory", "CommitParent", "RefTag",
+            "CommitFile", "Commit", "FileAlias", "File", "Author", "IngestRunRepo", "IngestRun", "Repo",
+        )]
+        for cls in classes:
+            for row in session.query(cls).all():
+                session.delete(row)
     console.print("[green]all ingested data removed[/green]")
 
 

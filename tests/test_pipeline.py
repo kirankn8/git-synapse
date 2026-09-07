@@ -76,7 +76,10 @@ def test_a_commit_reachable_only_from_a_tag_is_not_unreachable(tmp_path, db):
     and did it silently -- the run reports what the loader wrote, not what
     survived. It is self-triggering too: the new commits push the stored count
     above the branch count, which is the condition that runs the sweep."""
+    from datetime import UTC, datetime
+
     from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
     env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e",
@@ -102,33 +105,37 @@ def test_a_commit_reachable_only_from_a_tag_is_not_unreachable(tmp_path, db):
     subprocess.run(["git", "clone", "--quiet", "--bare", str(work), str(bare)], check=True)
 
     with connection() as conn:
-        repo_id = conn.execute(
-            "INSERT INTO repo (full_name, name, owner) VALUES "
-            "('acme/tagged','tagged','acme') RETURNING id").fetchone()[0]
+        repo = models().Repo(full_name="acme/tagged", name="tagged", owner="acme")
+        conn.add(repo)
+        conn.flush()
+        repo_id = repo.id
         for sha in (on_branch, tagged_only):
-            conn.execute(
-                "INSERT INTO commit (repo_id, sha, authored_at, committed_at) "
-                "VALUES (%s, %s, now(), now())", (repo_id, sha))
-        conn.commit()
+            conn.add(models().Commit(
+                repo_id=repo_id, sha=sha,
+                authored_at=datetime.now(UTC), committed_at=datetime.now(UTC),
+            ))
+        conn.flush()
         try:
             assert _drop_unreachable_commits(repo_id, bare) == 0
-            survived = {r[0] for r in conn.execute(
-                "SELECT sha FROM commit WHERE repo_id = %s", (repo_id,)).fetchall()}
+            survived = {
+                row.sha for row in conn.query(models().Commit).filter_by(repo_id=repo_id).all()
+            }
             assert tagged_only in survived, "a release commit is not unreachable"
         finally:
-            conn.execute("DELETE FROM repo WHERE id = %s", (repo_id,))
-            conn.commit()
+            conn.delete(conn.get(models().Repo, repo_id))
 
 
 # ------------------------------------------------------------ discovery guard
 
-def test_discovery_refuses_a_collapsed_listing(db, monkeypatch):
+def test_discovery_refuses_a_collapsed_listing(two_accounts, db, monkeypatch):
     """An unauthenticated request returns HTTP 200 and only public repositories
     -- 59 of 272 here -- and discovery accepted it silently."""
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
     from git_synapse.ingest.pipeline import AuthError
 
-    known = query_one("SELECT count(*) AS n FROM repo WHERE is_enabled")["n"]
+    with connection() as session:
+        known = session.query(models().Repo).filter_by(is_enabled=True).count()
     if known < 10:
         pytest.skip("needs a populated corpus")
 
@@ -149,30 +156,33 @@ def test_discovery_refuses_a_collapsed_listing(db, monkeypatch):
         pipeline.discover()
 
 
-def test_discovery_accepts_a_listing_that_is_merely_smaller(db, monkeypatch):
+def test_discovery_accepts_a_listing_that_is_merely_smaller(two_accounts, db, monkeypatch):
     """Repositories do get archived; only a collapse is suspicious."""
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
-    known = query_one("SELECT count(*) AS n FROM repo WHERE is_enabled")["n"]
+    with connection() as session:
+        known = session.query(models().Repo).filter_by(is_enabled=True).count()
     if known < 10:
         pytest.skip("needs a populated corpus")
 
     keep = int(known * DISCOVERY_SHRINK_FLOOR) + 1
-    fake = [object()] * keep
+    fake = [_record(f"smaller/r{i}") for i in range(keep)]
 
     class _Client:
         def __enter__(self): return self
         def __exit__(self, *a): return False
         def supports_listing(self): return True
-        def list_repos(self, login): return fake
+        def list_repos(self, login): return fake if login == "alpha" else []
         def list_page(self, login, page=1):
             from git_synapse.ingest.providers import Page
-            return Page(fake, has_more=False, total=len(fake))
+            rows = fake if login == "alpha" else []
+            return Page(rows, has_more=False, total=len(rows))
 
     monkeypatch.setattr(pipeline.providers, "for_source",
                         lambda src, patient=True, token="": _Client())
-    monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: fake)
-    monkeypatch.setattr(pipeline, "upsert_repo", lambda record, conn: None)
+    monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: list(records))
+    monkeypatch.setattr(pipeline, "upsert_repo", lambda record, conn, **kwargs: None)
 
     assert len(pipeline.discover()) == keep
 
@@ -197,20 +207,21 @@ def test_load_repo_records_returns_usable_records(db):
     that every column survives the round trip, which needs a row whose columns
     are known.
     """
-    from git_synapse.db.engine import execute, query_one
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
-    row = query_one(
-        """
-        INSERT INTO repo (github_id, owner, name, full_name, host, provider,
-                          clone_url, default_branch, primary_language, topics,
-                          visibility, is_private, is_fork, is_archived,
-                          stargazers, disk_usage_kb, is_enabled)
-        VALUES (4242, 'roundtrip', 'thing', 'roundtrip/thing', 'github.com',
-                'github', 'https://github.com/roundtrip/thing.git', 'main',
-                'Rust', ARRAY['cli','tool'], 'public', FALSE, TRUE, FALSE,
-                77, 512, TRUE)
-        RETURNING id
-        """)
+    with connection() as session:
+        row = models().Repo(
+            github_id=4242, owner="roundtrip", name="thing",
+            full_name="roundtrip/thing", host="github.com", provider="github",
+            clone_url="https://github.com/roundtrip/thing.git", default_branch="main",
+            primary_language="Rust", topics=["cli", "tool"], visibility="public",
+            is_private=False, is_fork=True, is_archived=False, stargazers=77,
+            disk_usage_kb=512, is_enabled=True,
+        )
+        session.add(row)
+        session.flush()
+        row_id = row.id
     try:
         records = {r.full_name: r for r in pipeline.load_repo_records()}
         r = records["roundtrip/thing"]
@@ -219,13 +230,14 @@ def test_load_repo_records_returns_usable_records(db):
         assert (r.primary_language, r.default_branch) == ("Rust", "main")
         assert r.topics == ["cli", "tool"]
         # Booleans and counts specifically: they are read back by name, and a
-        # column added in the middle of the SELECT list used to shift every
+        # field added in the middle of a positional projection used to shift every
         # field after it into a neighbour of compatible type.
         assert r.is_fork is True and r.is_archived is False
         assert r.stargazers == 77 and r.disk_usage_kb == 512
         assert r.github_id == 4242
     finally:
-        execute("DELETE FROM repo WHERE id = %s", (row["id"],))
+        with connection() as session:
+            session.delete(session.get(models().Repo, row_id))
 
 
 # ------------------------------------------------------ credential preflight
@@ -571,7 +583,10 @@ def test_the_derived_stages_are_skipped_when_nothing_changed(db, monkeypatch):
 @pytest.fixture()
 def swept_repo(scratch_db, tmp_path):
     """A repo row whose stored commits outnumber what its mirror still reaches."""
+    from datetime import UTC, datetime
+
     from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
     mirror = _commit_repo(tmp_path, 2)
     reachable = subprocess.run(
@@ -580,33 +595,35 @@ def swept_repo(scratch_db, tmp_path):
     ).stdout.split()
 
     with connection() as conn:
-        conn.execute("TRUNCATE repo RESTART IDENTITY CASCADE")
-        repo_id = conn.execute(
-            "INSERT INTO repo (github_id, owner, name, full_name, clone_url,"
-            " default_branch) VALUES (1,'t','w','t/w','','main') RETURNING id"
-        ).fetchone()[0]
-        author_id = conn.execute(
-            "INSERT INTO author (email, display_name) VALUES ('t@e','t')"
-            " ON CONFLICT (email) DO UPDATE SET display_name = 't' RETURNING id"
-        ).fetchone()[0]
+        for model in (models().Commit, models().Repo):
+            conn.query(model).delete(synchronize_session=False)
+        repo = models().Repo(github_id=1, owner="t", name="w", full_name="t/w",
+                             clone_url="", default_branch="main")
+        author = conn.query(models().Author).filter_by(email="t@e").one_or_none()
+        if author is None:
+            author = models().Author(email="t@e", display_name="t")
+            conn.add(author)
+        conn.add(repo)
+        conn.flush()
+        repo_id, author_id = repo.id, author.id
         # Two commits git still reaches, plus two it does not.
         for sha in [*reachable, "d" * 40, "e" * 40]:
-            conn.execute(
-                "INSERT INTO commit (repo_id, sha, author_id, committer_id,"
-                " authored_at, committed_at, subject) VALUES"
-                " (%s,%s,%s,%s,now(),now(),'x')",
-                (repo_id, sha, author_id, author_id),
-            )
+            conn.add(models().Commit(
+                repo_id=repo_id, sha=sha, author_id=author_id,
+                committer_id=author_id, authored_at=datetime.now(UTC),
+                committed_at=datetime.now(UTC), subject="x",
+            ))
     return repo_id, mirror
 
 
 def test_the_sweep_removes_only_the_commits_git_no_longer_reaches(swept_repo):
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
     repo_id, mirror = swept_repo
     assert _drop_unreachable_commits(repo_id, mirror) == 2
-    left = query_one("SELECT count(*) AS n FROM commit WHERE repo_id = %s", (repo_id,))
-    assert left["n"] == 2
+    with connection() as session:
+        assert session.query(models().Commit).filter_by(repo_id=repo_id).count() == 2
     # Idempotent: a second sweep has nothing to do and must not pay for the walk.
     assert _drop_unreachable_commits(repo_id, mirror) == 0
 
@@ -616,7 +633,8 @@ def test_a_git_failure_during_the_sweep_deletes_nothing(swept_repo, monkeypatch,
                                                         failing_call):
     """Deleting commits on the strength of a failed reachability walk would
     erase real history."""
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
     repo_id, mirror = swept_repo
     calls = {"n": 0}
@@ -630,8 +648,8 @@ def test_a_git_failure_during_the_sweep_deletes_nothing(swept_repo, monkeypatch,
 
     monkeypatch.setattr(subprocess, "run", flaky)
     assert _drop_unreachable_commits(repo_id, mirror) == 0
-    assert query_one("SELECT count(*) AS n FROM commit WHERE repo_id = %s",
-                     (repo_id,))["n"] == 4
+    with connection() as session:
+        assert session.query(models().Commit).filter_by(repo_id=repo_id).count() == 4
 
 
 def test_a_nonzero_rev_list_during_the_sweep_deletes_nothing(swept_repo, monkeypatch):
@@ -680,16 +698,21 @@ def test_an_empty_reachable_set_deletes_nothing(swept_repo, monkeypatch):
 @pytest.fixture
 def two_accounts(db):
     from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
     from git_synapse.ingest import accounts
 
     with connection() as conn:
-        conn.execute("DELETE FROM account WHERE login IN ('alpha','beta')")
-        conn.commit()
+        for login in ("alpha", "beta"):
+            row = conn.query(models().Account).filter_by(login=login).one_or_none()
+            if row is not None:
+                conn.delete(row)
     made = [accounts.add_account("alpha"), accounts.add_account("beta")]
     yield made
     with connection() as conn:
-        conn.execute("DELETE FROM account WHERE login IN ('alpha','beta')")
-        conn.commit()
+        for login in ("alpha", "beta"):
+            row = conn.query(models().Account).filter_by(login=login).one_or_none()
+            if row is not None:
+                conn.delete(row)
 
 
 def _record(full_name):
@@ -759,7 +782,8 @@ def test_every_account_failing_is_reported_as_one_error(two_accounts, db, monkey
 def test_a_discovered_repository_records_which_account_found_it(two_accounts, db, monkeypatch):
     """`repo.account_id` is what lets an account be removed without deleting the
     history mined from it."""
-    from git_synapse.db.engine import query_one
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
 
     monkeypatch.setattr(pipeline.providers, "for_source", _client_returning(
         {"alpha": [_record("alpha/one")], "beta": []}))
@@ -767,9 +791,11 @@ def test_a_discovered_repository_records_which_account_found_it(two_accounts, db
     monkeypatch.setattr(pipeline, "DISCOVERY_SHRINK_FLOOR", 0.0)
 
     pipeline.discover()
-    row = query_one("SELECT a.login FROM repo r JOIN account a ON a.id = r.account_id "
-                    " WHERE r.full_name = 'alpha/one'")
-    assert row and row["login"] == "alpha"
+    with connection() as session:
+        row = session.query(models().Account).join(
+            models().Repo, models().Repo.account_id == models().Account.id
+        ).filter(models().Repo.full_name == "alpha/one").one_or_none()
+    assert row and row.login == "alpha"
 
 
 def test_the_shrink_guard_stands_down_when_an_account_errored(two_accounts, db, monkeypatch):
@@ -785,7 +811,7 @@ def test_the_shrink_guard_stands_down_when_an_account_errored(two_accounts, db, 
 
 def test_marking_no_replays_touches_nothing(db):
     """Called for every repository, and most have none. An empty set must not
-    become an UPDATE with an empty ANY() clause."""
+    become a bulk mutation with an empty collection clause."""
     from git_synapse.db.engine import connection
     from git_synapse.ingest.pipeline import _mark_replays
 
@@ -819,21 +845,27 @@ def test_marking_a_replay_takes_it_out_of_the_statistics(db):
     """Storing it is the point -- the commit is real and belongs in the range
     between two releases -- but counting it would say those files belong
     together on evidence that is one observation repeated."""
+    from datetime import UTC, datetime
+
     from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
     from git_synapse.ingest.pipeline import _mark_replays
 
     with connection() as conn:
-        repo = conn.execute(
-            "INSERT INTO repo (full_name, name, owner) VALUES "
-            "('acme/replayed','replayed','acme') RETURNING id").fetchone()[0]
+        repo_row = models().Repo(full_name="acme/replayed", name="replayed", owner="acme")
+        conn.add(repo_row)
+        conn.flush()
+        repo = repo_row.id
         try:
             sha = "d" * 40
-            conn.execute("INSERT INTO commit (repo_id, sha, authored_at, committed_at, "
-                         "pair_eligible) VALUES (%s,%s,now(),now(),TRUE)", (repo, sha))
+            conn.add(models().Commit(repo_id=repo, sha=sha,
+                                     authored_at=datetime.now(UTC),
+                                     committed_at=datetime.now(UTC),
+                                     pair_eligible=True))
+            conn.flush()
             assert _mark_replays(repo, {sha}, conn) == 1
-            row = conn.execute("SELECT is_replay, pair_eligible FROM commit "
-                               " WHERE repo_id=%s AND sha=%s", (repo, sha)).fetchone()
-            assert row == (True, False)
+            row = conn.query(models().Commit).filter_by(repo_id=repo, sha=sha).one()
+            assert (row.is_replay, row.pair_eligible) == (True, False)
             # Re-running must not count it twice.
             assert _mark_replays(repo, {sha}, conn) == 0
         finally:
@@ -865,14 +897,14 @@ def test_a_collapsed_listing_is_refused_even_with_accounts_configured(two_accoun
     """An unauthenticated request returns HTTP 200 and only public repositories,
     and the run then quietly refreshes a fraction of the corpus."""
     from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
     from git_synapse.ingest.pipeline import AuthError
 
     with connection() as conn:
         for i in range(30):
-            conn.execute("INSERT INTO repo (full_name, name, owner, is_enabled) VALUES "
-                         "(%s,%s,'bulk',TRUE) ON CONFLICT DO NOTHING",
-                         (f"bulk/r{i}", f"r{i}"))
-        conn.commit()
+            if conn.query(models().Repo).filter_by(full_name=f"bulk/r{i}").one_or_none() is None:
+                conn.add(models().Repo(full_name=f"bulk/r{i}", name=f"r{i}",
+                                        owner="bulk", is_enabled=True))
     try:
         monkeypatch.setattr(pipeline.providers, "for_source", _client_returning(
             {"alpha": [_record("alpha/one")], "beta": []}))
@@ -881,8 +913,8 @@ def test_a_collapsed_listing_is_refused_even_with_accounts_configured(two_accoun
             pipeline.discover()
     finally:
         with connection() as conn:
-            conn.execute("DELETE FROM repo WHERE owner = 'bulk'")
-            conn.commit()
+            for row in conn.query(models().Repo).filter_by(owner="bulk").all():
+                conn.delete(row)
 
 
 def test_discovery_gives_up_on_a_rate_limit_instead_of_sleeping_through_it(

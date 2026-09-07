@@ -11,7 +11,7 @@ from git_synapse import auth, vault
 from git_synapse.analysis import calls, mining, predict, settings
 from git_synapse.analysis import query as q
 from git_synapse.config import get_config, live_cron
-from git_synapse.db.engine import query_one, scalar
+from git_synapse.db.orm import models, session_scope
 from git_synapse.ingest import accounts, pipeline
 from git_synapse.ingest.accounts import AccountError
 from git_synapse.ingest.sources import SourceError
@@ -32,7 +32,9 @@ router = APIRouter()
 def health() -> dict:
     """Liveness probe. Reports database reachability without failing the check."""
     try:
-        db_ok = scalar("SELECT 1") == 1
+        with session_scope() as session:
+            session.query(models().Meta).first()
+            db_ok = True
     except Exception as exc:  # noqa: BLE001 - health must never raise
         return {"status": "degraded", "database": False, "error": str(exc)}
     return {"status": "ok", "database": db_ok}
@@ -868,14 +870,7 @@ def coupled_dirs(
     from anywhere has no way back up to the repository or its account.
     """
 
-    row = query_one(
-        """
-        SELECT d.id, d.path, d.repo_id, r.name AS repo, r.full_name, r.account_id
-          FROM directory d JOIN repo r ON r.id = d.repo_id
-         WHERE d.id = %(dir)s
-        """,
-        {"dir": dir_id},
-    )
+    row = q.directory_detail(dir_id)
     if row is None:
         raise HTTPException(404, f"no directory {dir_id}")
     return {"measure": measure, "directory": row,
@@ -969,33 +964,8 @@ def impact_graph(
     ``repo_impact`` comes from a declared dependency or an observed version
     bump, by construction in :func:`git_synapse.analysis.predict.rebuild`.
     """
-    from git_synapse.db.engine import query as raw
-
-    edges = raw(
-        """
-        SELECT i.source_repo_id AS source, i.target_repo_id AS target,
-               i.score, i.is_declared, i.has_bump_history, i.bump_count,
-               i.median_adoption_days
-        FROM repo_impact i
-        WHERE i.score >= %(min_score)s
-        ORDER BY i.score DESC
-        LIMIT %(limit)s
-        """,
-        {"min_score": min_score, "limit": limit},
-    )
-    ids = sorted({e["source"] for e in edges} | {e["target"] for e in edges})
-    nodes = raw(
-        """
-        SELECT r.id, r.name AS basename, r.full_name AS path,
-               COALESCE(r.primary_language,'') AS dir_path,
-               r.primary_language AS extension, r.commit_count AS change_count,
-               FALSE AS is_deleted
-        FROM repo r WHERE r.id = ANY(%(ids)s)
-        """,
-        {"ids": ids},
-    ) if ids else []
-    return {"nodes": nodes, "edges": edges,
-            "stats": {"node_count": len(nodes), "edge_count": len(edges)}}
+    graph = q.impact_graph_data(min_score, limit)
+    return {**graph, "stats": {"node_count": len(graph["nodes"]), "edge_count": len(graph["edges"])} }
 
 
 @router.get("/repos/{consumer_id}/bumps/{dep_id}", tags=["impact"])
@@ -1008,23 +978,7 @@ def repo_pair_bumps(consumer_id: int, dep_id: int,
     which version, on what date, and the upstream commit it consumed where that
     could be resolved.
     """
-    from git_synapse.db.engine import query as raw
-
-    rows = raw(
-        """
-        SELECT b.dep_name, b.dep_version, b.manifest, b.ecosystem, b.resolution,
-               b.bumped_at, b.consumer_sha, b.dep_sha,
-               round(b.adoption_seconds / 86400.0, 1)::float8 AS adoption_days,
-               dc.sha AS upstream_sha, dc.subject AS upstream_subject,
-               dc.committed_at AS upstream_at
-          FROM dep_bump b
-          LEFT JOIN commit dc ON dc.id = b.dep_commit_id
-         WHERE b.consumer_repo_id = %(consumer)s AND b.dep_repo_id = %(dep)s
-      ORDER BY b.bumped_at DESC NULLS LAST
-         LIMIT %(limit)s
-        """,
-        {"consumer": consumer_id, "dep": dep_id, "limit": limit},
-    )
+    rows = q.repo_pair_bumps(consumer_id, dep_id, limit)
     return {"consumer_repo_id": consumer_id, "dep_repo_id": dep_id,
             "count": len(rows), "bumps": rows}
 
@@ -1032,33 +986,7 @@ def repo_pair_bumps(consumer_id: int, dep_id: int,
 @router.get("/repos/{repo_id}/dependencies", tags=["impact"])
 def repo_dependencies(repo_id: int) -> dict:
     """Declared dependencies and observed bumps for one repository."""
-    from git_synapse.db.engine import query as raw
-
-    declared = raw(
-        """
-        SELECT d.dep_name, d.dep_version, d.manifest, d.ecosystem, d.dep_repo_id,
-               r.name AS dep_repo
-        FROM repo_dependency d
-        LEFT JOIN repo r ON r.id = d.dep_repo_id
-        WHERE d.consumer_repo_id = %(repo)s
-        ORDER BY (d.dep_repo_id IS NULL), d.dep_name
-        """,
-        {"repo": repo_id},
-    )
-    bumps = raw(
-        """
-        SELECT rd.name AS dep_repo, b.dep_repo_id, count(*) AS bumps,
-               round((percentile_cont(0.5) WITHIN GROUP (ORDER BY b.adoption_seconds)
-                      / 86400.0)::numeric, 2)::float8 AS median_adoption_days,
-               max(b.bumped_at) AS last_bump
-        FROM dep_bump b
-        LEFT JOIN repo rd ON rd.id = b.dep_repo_id
-        WHERE b.consumer_repo_id = %(repo)s AND b.dep_repo_id IS NOT NULL
-        GROUP BY 1, 2 ORDER BY bumps DESC
-        """,
-        {"repo": repo_id},
-    )
-    return {"declared": declared, "bumps": bumps}
+    return q.repo_dependencies(repo_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1096,32 +1024,14 @@ def risk(repo_id: int | None = None, limit: int = Query(30, ge=1, le=300)) -> di
 @router.get("/mining/overview", tags=["mining"])
 def mining_overview() -> dict:
     """Counts for the mining layer."""
-    from git_synapse.db.engine import query_one as one
-
-    return one(
-        """
-        SELECT
-          -- cluster_id restarts at 0 in every repository, so a module is
-          -- identified by the (repo_id, cluster_id) pair. Counting cluster_id
-          -- alone collapsed 4,394 modules down to 559.
-          (SELECT count(*) FROM (SELECT DISTINCT repo_id, cluster_id
-                                   FROM file_cluster) m)                 AS modules,
-          (SELECT count(*) FROM file_cluster)                            AS clustered_files,
-          (SELECT count(*) FROM (SELECT DISTINCT repo_id, cluster_id
-                                   FROM file_cluster
-                                  WHERE dirs_spanned > 1) m)             AS cross_dir_modules,
-          (SELECT count(*) FROM pair_drift WHERE trend='emerging')       AS emerging,
-          (SELECT count(*) FROM pair_drift WHERE trend='decaying')       AS decaying,
-          (SELECT count(*) FROM pair_drift WHERE trend='stable')         AS stable,
-          (SELECT count(*) FROM file_risk)                               AS risk_scored,
-          (SELECT count(*) FROM repo_impact)                             AS impact_edges,
-          (SELECT count(*) FROM repo_impact WHERE is_declared)           AS declared_edges,
-          (SELECT count(*) FROM repo_impact WHERE has_bump_history)      AS bump_edges,
-          (SELECT count(*) FROM dep_bump)                                AS dep_bumps,
-          (SELECT count(*) FROM repo_dependency
-            WHERE dep_repo_id IS NOT NULL)                               AS declared_deps
-        """
-    ) or {}
+    result = q.mining_overview()
+    from git_synapse.db.orm import models, session_scope
+    Dependency = models().RepoDependency
+    with session_scope() as session:
+        result["declared_deps"] = session.query(Dependency).filter(
+            Dependency.dep_repo_id.is_not(None)
+        ).count()
+    return result
 
 # ---------------------------------------------------------------------------
 # Feedback: defects in Git Synapse reported by the sessions using it
