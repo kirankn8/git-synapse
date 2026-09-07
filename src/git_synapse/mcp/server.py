@@ -12,9 +12,9 @@ Two transports:
 * **streamable-http** -- for the containerised deployment, where the server is a
   long-lived service that several agents share.
 
-Every tool returns plain JSON-serialisable dicts with a short ``interpretation``
-string, because a model consuming raw floats does better with an explicit
-statement of what the number means than with the number alone.
+Every tool returns plain JSON-serialisable dicts. Relationship tools default to
+compact evidence cards; their full metric breakdown is opt-in with
+``detail=True``.
 """
 
 from __future__ import annotations
@@ -311,6 +311,69 @@ def _describe_confidence(confidence: float | None, n_ab: int) -> str:
     return f"changes together {pct} of the time -- occasional{hedge}"
 
 
+def _evidence_card(partner: dict, labels: list[str], informative: bool) -> dict:
+    """Summarise all available signals without making one metric canonical.
+
+    The ranking metrics answer different questions, so exposing one of them as
+    *the* score makes the MCP client choose a metric before it knows the task.
+    This card instead reports the quality of the combined evidence and leaves
+    the individual measures available through ``detail=True``.
+    """
+    support = int(partner.get("n_ab") or 0)
+    days = partner.get("days_since_co_change")
+    signals = []
+    confidence = partner.get("confidence_out")
+    if confidence is not None:
+        signals.append(bool(confidence >= 0.5))
+    npmi = partner.get("npmi")
+    jaccard = partner.get("jaccard")
+    if npmi is not None or jaccard is not None:
+        signals.append(bool((npmi or 0) >= 0.2 or (jaccard or 0) >= 0.2))
+    likelihood = partner.get("log_likelihood_ratio")
+    if likelihood is not None:
+        signals.append(bool(likelihood > 2))
+
+    positive = sum(signals)
+    available = len(signals)
+    if not informative or support < MIN_REPORTABLE_SUPPORT:
+        evidence = "weak"
+    elif support >= 10 and positive >= 2:
+        evidence = "strong"
+    elif support >= 5 and positive >= 1:
+        evidence = "moderate"
+    else:
+        evidence = "weak"
+
+    if available == 0:
+        agreement = "insufficient signals"
+    elif positive in (available, 0):
+        agreement = "signals agree"
+    else:
+        agreement = "mixed signals"
+
+    if labels:
+        summary = ", ".join(labels).replace("_", " ")
+        summary = f"Flagged as {summary}; verify before editing."
+    elif not informative:
+        summary = "Likely structural noise; verify before editing."
+    elif evidence == "strong":
+        summary = "Strong evidence that this file is meaningfully related."
+    elif evidence == "moderate":
+        summary = "Moderate evidence of a meaningful relationship."
+    else:
+        summary = "Limited evidence; treat this relationship cautiously."
+
+    return {
+        "evidence": evidence,
+        "support": support,
+        "recency_days": days,
+        "agreement": agreement,
+        "summary": summary,
+        "_rank": (0 if evidence == "weak" else 1 if evidence == "moderate" else 2,
+                   positive, support, -(days if days is not None else 10**9)),
+    }
+
+
 @server.tool(
     name="coupled_files",
     title="Find files that change together",
@@ -326,9 +389,10 @@ def _describe_confidence(confidence: float | None, n_ab: int) -> str:
 def coupled_files(
     repo: str,
     path: str,
-    measure: str = DEFAULT_MEASURE,
+    measure: str | None = None,
     limit: int = 15,
     min_support: int = 2,
+    detail: bool = False,
 ) -> dict:
     """Rank a file's historical change partners.
 
@@ -336,16 +400,13 @@ def coupled_files(
         repo: repository name, either ``name`` or ``owner/name``.
         path: file path relative to the repository root. Renamed paths resolve
             through the alias table, so an old path still works.
-        measure: which association measure ranks the results. Leave it unset
-            unless you have a reason: the default is ``confidence_ab``, the only
-            one chosen by backtest rather than by taste, and it asks exactly
-            what this tool is for -- given A changed, how often did B? The
-            symmetric measures (``npmi``, ``jaccard``, ``log_likelihood_ratio``)
-            answer "is this association surprising", which is a better question
-            for exploring a codebase and a worse one for predicting a change.
+        measure: optional metric for the explicit detail view. Compact mode is
+            metric-neutral and orders candidates by combined evidence quality.
         limit: maximum partners to return.
         min_support: ignore partners sharing fewer than this many commits. Raise
             it to suppress coincidental pairs.
+        detail: include every calculated metric and statistical interpretation.
+            The default is a compact evidence card for each partner.
 
     Returns:
         The resolved file, and a ranked list of partners with their scores,
@@ -358,12 +419,18 @@ def coupled_files(
             "hint": "call search_files to find the right path",
         }
 
-    try:
-        spec = BY_KEY[q._safe_order(measure)]
-    except KeyError as exc:
-        return {"error": str(exc)}
+    spec = None
+    if detail:
+        try:
+            spec = BY_KEY[q._safe_order(measure or DEFAULT_MEASURE)]
+        except KeyError as exc:
+            return {"error": str(exc)}
 
-    partners = q.coupled_files(target["id"], spec.key, limit, min_support)
+    # Compact mode fetches by support only before applying the metric-neutral
+    # evidence ordering. A selected metric must not decide which partners are
+    # eligible to be shown unless the caller explicitly asks for detail.
+    query_measure = spec.key if spec is not None else "n_ab"
+    partners = q.coupled_files(target["id"], query_measure, max(limit * 4, 50), min_support)
 
     shaped = []
     for pr in partners:
@@ -371,6 +438,11 @@ def coupled_files(
             pr["path"] or "", target["path"], pr["n_ab"]
         )
         shaped.append((pr, labels, informative))
+
+    cards = [(pr, labels, informative, _evidence_card(pr, labels, informative))
+             for pr, labels, informative in shaped]
+    cards.sort(key=lambda item: item[3]["_rank"], reverse=True)
+    cards = cards[:limit]
 
     mirrors = [x for x in shaped if "sibling_variant" in x[1]]
     noise = [x for x in shaped if not x[2]]
@@ -396,35 +468,44 @@ def coupled_files(
             "authors": target["author_count"],
             "last_changed": str(target["last_change_at"]) if target["last_change_at"] else None,
         },
-        "measure": {"key": spec.key, "label": spec.label, "summary": spec.summary},
+        "measure": {"key": spec.key, "label": spec.label, "summary": spec.summary}
+        if spec is not None else None,
         "population": target.get("pair_population"),
         "summary": lead,
         "partners": [
-            {
-                "path": p["path"],
-                "repo": p["repo"],
-                "labels": labels or None,
-                "informative": informative,
-                "score": _round(p.get("score")),
-                "co_changes": p["n_ab"],
-                "partner_total_changes": p["n_other"] if p["path"] else None,
-                "probability_also_changes": _round(p.get("confidence_out"), 3),
-                "probability_reverse": _round(p.get("confidence_in"), 3),
-                "log_likelihood_ratio": _round(p.get("log_likelihood_ratio"), 2),
-                "npmi": _round(p.get("npmi"), 3),
-                "jaccard": _round(p.get("jaccard"), 3),
-                "last_co_change": str(p["last_co_change"]) if p.get("last_co_change") else None,
-                "days_since_co_change": p.get("days_since_co_change"),
-                "trend": p.get("trend"),
-                "deleted": bool(p.get("is_deleted")),
-                "currency": _describe_currency(
-                    p.get("days_since_co_change"),
-                    p.get("trend"),
-                    bool(p.get("is_deleted")),
-                ),
-                "interpretation": _describe_confidence(p.get("confidence_out"), p["n_ab"]),
-            }
-            for p, labels, informative in shaped
+            (
+                {
+                    "path": p["path"],
+                    "repo": p["repo"],
+                    **{key: value for key, value in card.items() if key != "_rank"},
+                }
+                if not detail else {
+                    "path": p["path"],
+                    "repo": p["repo"],
+                    "labels": labels or None,
+                    "informative": informative,
+                    "score": _round(p.get("score")),
+                    "co_changes": p["n_ab"],
+                    "partner_total_changes": p["n_other"] if p["path"] else None,
+                    "probability_also_changes": _round(p.get("confidence_out"), 3),
+                    "probability_reverse": _round(p.get("confidence_in"), 3),
+                    "log_likelihood_ratio": _round(p.get("log_likelihood_ratio"), 2),
+                    "npmi": _round(p.get("npmi"), 3),
+                    "jaccard": _round(p.get("jaccard"), 3),
+                    "last_co_change": str(p["last_co_change"]) if p.get("last_co_change") else None,
+                    "days_since_co_change": p.get("days_since_co_change"),
+                    "trend": p.get("trend"),
+                    "deleted": bool(p.get("is_deleted")),
+                    "currency": _describe_currency(
+                        p.get("days_since_co_change"),
+                        p.get("trend"),
+                        bool(p.get("is_deleted")),
+                    ),
+                    "interpretation": _describe_confidence(p.get("confidence_out"), p["n_ab"]),
+                    **{key: value for key, value in card.items() if key != "_rank"},
+                }
+            )
+            for p, labels, informative, card in cards
         ],
     }
 
@@ -779,7 +860,11 @@ def _impact_row(row: dict, name: str) -> dict:
     ),
 )
 def coupled_directories(
-    repo: str, path: str, limit: int = 15, measure: str = DEFAULT_MEASURE
+    repo: str,
+    path: str,
+    limit: int = 15,
+    measure: str = DEFAULT_MEASURE,
+    detail: bool = False,
 ) -> dict:
     """Directories that historically change together with this one.
 
@@ -788,6 +873,8 @@ def coupled_directories(
         path: a directory path, or a file path whose directory is used.
         limit: maximum partners.
         measure: ranking measure.
+        detail: include the selected metric and per-partner scores. The default
+            returns compact evidence cards.
     """
     target = _resolve_repo(repo)
     if target is None:
@@ -815,7 +902,7 @@ def coupled_directories(
     # Ancestors and descendants are excluded by the query: a parent changes
     # whenever its child does, so it scores 1.000 by construction. What comes
     # back is only directories that could have moved independently and did not.
-    partners = q.coupled_directories(row["id"], spec.key, limit)
+    partners = q.coupled_directories(row["id"], spec.key, max(limit * 4, 50))
     shaped = []
     own_path = row["path"] or ""
     for pr in partners:
@@ -833,6 +920,12 @@ def coupled_directories(
             "its_total_changes": pr.get("n_other"),
             "files": pr.get("file_count"),
         })
+    shaped.sort(key=lambda partner: (
+        0 if not partner["informative"] else 1,
+        partner["co_changes"],
+        partner["score"] if partner["score"] is not None else 0,
+    ), reverse=True)
+    shaped = shaped[:limit]
     return {
         "directory": {
             "repo": target["full_name"],
@@ -840,13 +933,28 @@ def coupled_directories(
             "files": row["file_count"],
             "total_changes": row["change_count"],
         },
-        "measure": {"key": spec.key, "label": spec.label},
+        "measure": {"key": spec.key, "label": spec.label} if detail else None,
         "summary": (
             f"{len(shaped)} partners outside this directory's own subtree. Its "
             "parents and children are excluded: a parent changes whenever its "
             "child does, so it scores 1.000 by construction and says nothing."
         ) if shaped else "No directory coupling recorded outside its own subtree.",
-        "partners": shaped,
+        "partners": [
+            partner if detail else {
+                "path": partner["path"],
+                "informative": partner["informative"],
+                "evidence": "weak" if not partner["informative"] else (
+                    "strong" if partner["co_changes"] >= 10 else "moderate"
+                ),
+                "support": partner["co_changes"],
+                "summary": (
+                    "Nested directory relationship is arithmetic; verify manually."
+                    if not partner["informative"] else
+                    "Directory has meaningful shared change history."
+                ),
+            }
+            for partner in shaped
+        ],
     }
 
 

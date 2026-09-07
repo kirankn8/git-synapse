@@ -57,7 +57,7 @@ def test_coupled_files_shape_is_stable(db):
                  models().File.is_deleted.is_(False)).first()
     if row is None:
         pytest.skip("no busy file")
-    out = server.coupled_files(repo=row.name, path=row.path, min_support=3, limit=5)
+    out = server.coupled_files(repo=row.name, path=row.path, min_support=3, limit=5, detail=True)
     assert "error" not in out, out
     assert out["file"]["path"] == row.path
     for p in out["partners"]:
@@ -68,6 +68,24 @@ def test_coupled_files_shape_is_stable(db):
         assert 0.0 <= p["probability_also_changes"] <= 1.0
 
 
+def test_coupled_files_default_is_a_compact_evidence_card(db):
+    from git_synapse.db.orm import models, session_scope
+
+    with session_scope() as session:
+        row = session.query(models().Repo.name, models().File.path).join(
+            models().File, models().File.repo_id == models().Repo.id,
+        ).filter(models().Repo.is_enabled.is_(True), models().File.change_count > 30,
+                 models().File.is_deleted.is_(False)).first()
+    if row is None:
+        pytest.skip("no busy file")
+    out = server.coupled_files(repo=row.name, path=row.path, min_support=3, limit=5)
+    assert "error" not in out, out
+    assert out["measure"] is None
+    for partner in out["partners"]:
+        assert {"path", "evidence", "support", "recency_days", "agreement", "summary"} <= partner.keys()
+        assert "log_likelihood_ratio" not in partner
+
+
 def test_an_unknown_measure_is_refused(corpus):
     from git_synapse.db.orm import models, session_scope
 
@@ -75,7 +93,7 @@ def test_an_unknown_measure_is_refused(corpus):
         row = session.query(models().Repo.name, models().File.path).join(
             models().File, models().File.repo_id == models().Repo.id,
         ).filter(models().Repo.is_enabled.is_(True)).first()
-    out = server.coupled_files(repo=row.name, path=row.path, measure="nope")
+    out = server.coupled_files(repo=row.name, path=row.path, measure="nope", detail=True)
     assert "error" in out
 
 
