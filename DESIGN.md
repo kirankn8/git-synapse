@@ -20,6 +20,7 @@ database table and the decisions that materially change the numbers.
 | [**From a declared version to a commit**](#from-a-declared-version-to-a-commit) | the four tiers, and what each is allowed to claim |
 | [**What the backtest is measured against**](#what-the-backtest-is-measured-against) | the baselines, and why a weak one is worse than none |
 | [What is incremental](#what-is-incremental-and-what-isnt) | what a refresh actually redoes |
+| [Database access](#database-access) | ORM boundaries and bulk paths |
 | [Where repositories come from](#where-repositories-come-from) | one field, any git host, and why a repository URL costs one request |
 | [**How the UI is addressed**](#how-the-ui-is-addressed) | places nest in the path, analyses scope with a query |
 | [**Who may read this**](#who-may-read-this) | sign-in, roles, tokens, and the switch that turns it off |
@@ -28,6 +29,20 @@ database table and the decisions that materially change the numbers.
 | [Adding a measure](#adding-a-measure) | extending the registry |
 
 ---
+
+## Database access
+
+Application CRUD and operational state use the SQLAlchemy ORM in
+`src/git_synapse/db/orm.py`. It reflects the existing PostgreSQL schema after
+the normal schema bootstrap, so table names, keys, JSONB columns, arrays,
+foreign keys, and existing data remain unchanged. `session_scope()` owns one
+transaction and always commits or rolls back as a unit.
+
+The lower-level psycopg engine remains intentionally narrow: schema bootstrap,
+PostgreSQL `COPY`, temporary staging tables, and set-based metric rebuilds use
+database-native operations because they process large analytical fact sets.
+Those paths are infrastructure boundaries rather than the general-purpose
+application database API. New ordinary reads and writes should use the ORM.
 
 ## Every table at a glance
 
@@ -1301,7 +1316,7 @@ grows a rung at each step.
 ```
 src/git_synapse/
   stats/       contingency tables + the 31 measures + registry   (pure, no I/O)
-  db/          schema.sql, connection pool, COPY helpers
+  db/          schema.sql, ORM mappings, connection pool, COPY helpers
   ingest/      discovery, git mirroring, log parser, loader, pipeline
                sources.py    what a pasted URL means
                providers.py  GitHub, GitLab, Bitbucket, and plain git

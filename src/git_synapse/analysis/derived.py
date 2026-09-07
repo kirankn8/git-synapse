@@ -11,9 +11,11 @@ import logging
 from dataclasses import dataclass
 
 import psycopg
+from sqlalchemy import select
 
 from git_synapse.analysis import aggregate, depbump, mining, predict, score
 from git_synapse.db.engine import connection, set_watermark
+from git_synapse.db.orm import models, session_scope
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +49,17 @@ def _stored_versions(conn: psycopg.Connection) -> dict[str, str]:
         """
     ).fetchall()
     return {str(name): str(version) for name, version in rows}
+
+
+def _stored_versions_orm() -> dict[str, str]:
+    """Read stage watermarks through the ORM for the session-based path."""
+    with session_scope() as session:
+        Meta = models().Meta
+        rows = session.execute(select(Meta.key, Meta.value).where(
+            Meta.key.like("watermark:derived:%"),
+        )).all()
+        return {str(key).removeprefix("watermark:derived:"): str(value)
+                for key, value in rows}
 
 
 def stale_stages(stored: dict[str, str]) -> set[str]:
@@ -110,34 +123,36 @@ def ensure_current(conn: psycopg.Connection | None = None) -> list[str]:
     stored: dict[str, str] = {}
     rebuilt: list[str] = []
     for stage in STAGES:
-        with connection() as c:
-            stored = _stored_versions(c)
+        stored = _stored_versions_orm()
         if stage.name not in stale_stages(stored):  # pragma: no branch
             continue
 
         log.warning("derived stage %s is stale; rebuilding version %s",
                     stage.name, stage.version)
         if stage.name == "aggregate":
-            with connection() as c:
-                repo_ids = [int(row[0]) for row in c.execute(
-                    "SELECT id FROM repo WHERE is_enabled ORDER BY id"
-                ).fetchall()]
+            with session_scope() as session:
+                Repo = models().Repo
+                repo_ids = list(session.scalars(select(Repo.id).where(
+                    Repo.is_enabled.is_(True),
+                ).order_by(Repo.id)))
             for repo_id in repo_ids:
                 with connection() as c:
                     aggregate.rebuild_repo(repo_id, c)
         elif stage.name == "score":
-            with connection() as c:
-                repo_ids = [int(row[0]) for row in c.execute(
-                    "SELECT id FROM repo WHERE is_enabled ORDER BY id"
-                ).fetchall()]
+            with session_scope() as session:
+                Repo = models().Repo
+                repo_ids = list(session.scalars(select(Repo.id).where(
+                    Repo.is_enabled.is_(True),
+                ).order_by(Repo.id)))
             for repo_id in repo_ids:
                 with connection() as c:
                     score.score_repo(repo_id, c)
         elif stage.name == "mining":
-            with connection() as c:
-                repo_ids = [int(row[0]) for row in c.execute(
-                    "SELECT id FROM repo WHERE is_enabled AND pair_count > 0 ORDER BY id"
-                ).fetchall()]
+            with session_scope() as session:
+                Repo = models().Repo
+                repo_ids = list(session.scalars(select(Repo.id).where(
+                    Repo.is_enabled.is_(True), Repo.pair_count > 0,
+                ).order_by(Repo.id)))
             for repo_id in repo_ids:
                 with connection() as c:
                     mining.rebuild(repo_id=repo_id, conn=c, force=True)

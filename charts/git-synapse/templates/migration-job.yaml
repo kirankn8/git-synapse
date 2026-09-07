@@ -1,0 +1,41 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "git-synapse.fullname" . }}-migration
+  labels:
+    {{- include "git-synapse.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        {{- include "git-synapse.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migration
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-c"]
+          args:
+            - >-
+              from git_synapse.db.engine import wait_for_database, apply_schema;
+              wait_for_database(); apply_schema()
+          env:
+            {{- include "git-synapse.env" . | nindent 12 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "git-synapse.fullname" . }}-config
+  labels:
+    {{- include "git-synapse.labels" . | nindent 4 }}
+data:
+  SCHEDULER_ENABLED: {{ .Values.config.schedulerEnabled | quote }}
+  REFRESH_ON_START: {{ .Values.config.refreshOnStart | quote }}

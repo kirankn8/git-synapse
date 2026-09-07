@@ -47,6 +47,9 @@ only the commits that preceded it — <a href="#does-it-actually-help">how this 
 | [CLI](#cli) · [Configuration](#configuration) · [Development](#development) | operating it |
 | [**DESIGN.md**](DESIGN.md) | how it works inside: the schema, every table, the trade-offs |
 
+New to Git Synapse? Use the **[interactive setup guide](docs/setup.html)** for the short,
+beginner-friendly Docker setup with copyable commands and a progress checklist.
+
 ---
 
 ## What it does
@@ -306,6 +309,23 @@ cli backtest --top 10 --min-support 3 # 10 suggestions, stronger evidence
 
 Requires only a container runtime. No host Python, git, or Postgres.
 
+For local Docker setup, run the installer for your platform. It can offer to
+install Docker, downloads or updates the checkout, preserves an existing
+`.env`, starts the stack, waits for health, and prints the admin setup steps:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kirankn8/git-synapse/main/scripts/install.sh | bash
+```
+
+On Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/kirankn8/git-synapse/main/scripts/install.ps1 | iex
+```
+
+You can inspect either script first if preferred. The manual Docker path is
+below.
+
 ```bash
 cp .env.example .env      # add a GITHUB_TOKEN with `repo` scope
 docker compose up -d      # postgres + api + scheduler + mcp
@@ -316,11 +336,40 @@ shows a first-run screen instead of the dashboard, which asks for a one-time
 **setup token** the API printed when it started:
 
 ```bash
-docker compose logs api | grep -A3 'setup token'
+docker compose run --rm cli admin setup-token
 ```
 
 Paste it in with your email, name and a password, and you are the
 administrator. The token stops being accepted the moment the account exists.
+
+### Kubernetes
+
+For a cluster installation, use the Helm chart. It creates the API, scheduler,
+MCP server, migration job, health checks, persistent mirrors, and bundled
+Postgres. It also creates a Kubernetes Secret containing the one-time admin
+setup token:
+
+```bash
+helm upgrade --install git-synapse \
+  oci://ghcr.io/kirankn8/charts/git-synapse \
+  --namespace git-synapse --create-namespace
+```
+
+Retrieve the token without reading application logs:
+
+```bash
+kubectl -n git-synapse get secret git-synapse \
+  -o jsonpath='{.data.ADMIN_SETUP_TOKEN}' | base64 -d; echo
+```
+
+The Helm notes explain the temporary port-forward or optional Ingress URL.
+The token is stored in that Kubernetes Secret and becomes unusable after the
+first administrator is created. See [`charts/git-synapse/README.md`](charts/git-synapse/README.md)
+for external Postgres, storage, upgrade, and rollback settings.
+
+Release publishing uses Docker Hub. Configure the repository's GitHub Actions
+secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`; never commit the token or
+put it in `.env`.
 
 Now add something to scan. On the **Sources** page there is one field: paste a
 URL.

@@ -1,0 +1,26 @@
+Git Synapse {{ .Chart.AppVersion }} is installed.
+
+The first administrator setup token is stored in the Kubernetes Secret:
+  {{ include "git-synapse.secretName" . }}
+
+Retrieve it with:
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "git-synapse.secretName" . }} -o jsonpath='{.data.ADMIN_SETUP_TOKEN}' | base64 -d; echo
+
+The token is valid only until the first administrator account is created.
+After that, it is not returned by the application and should be treated as
+consumed. The Secret remains for deployment continuity, but the app refuses
+setup once an account exists.
+
+{{- if .Values.ingress.enabled }}
+Open the configured Ingress URL:
+  {{- range .Values.ingress.hosts }}
+  https://{{ .host }}
+  {{- end }}
+{{- else }}
+For a temporary local connection:
+  kubectl -n {{ .Release.Namespace }} port-forward service/{{ include "git-synapse.fullname" . }} 8080:{{ .Values.service.port }}
+Then open: http://localhost:8080
+{{- end }}
+
+Check rollout status:
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "git-synapse.fullname" . }}-api
