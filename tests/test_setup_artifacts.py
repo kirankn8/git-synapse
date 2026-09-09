@@ -41,5 +41,6 @@ def test_github_pages_publishes_docs_root() -> None:
     workflow = (ROOT / ".github/workflows/pages.yml").read_text()
     index = (ROOT / "docs/index.html").read_text()
     assert "actions/deploy-pages" in workflow
+    assert "enablement: true" not in workflow
     assert "path: docs" in workflow
     assert "setup.html" in index
