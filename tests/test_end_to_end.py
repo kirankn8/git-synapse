@@ -277,8 +277,7 @@ def test_a_rewritten_commit_is_swept_during_the_next_sync(ingested):
 
 def test_a_repository_that_fails_mid_sync_records_why_on_the_row(ingested,
                                                                  monkeypatch):
-    """`git-synapse status` reads ingest_error. Losing it means a repository that
-    silently stops updating looks identical to one that is simply quiet."""
+    """A failed repository must say why, or it looks identical to a quiet one."""
     from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest import pipeline
 
@@ -437,7 +436,7 @@ def test_scoring_every_repository_covers_every_repository(mined):
 
 
 def test_a_repository_upsert_without_a_connection_is_committed(mined):
-    """`git-synapse discover` writes repositories outside any transaction of its own."""
+    """Discovery writes repositories outside any transaction of its own."""
     from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest.store import upsert_repo
 

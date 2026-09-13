@@ -613,28 +613,6 @@ def test_repo_dependencies_names_the_repository_behind_each_declaration(impact_c
     assert "signer" in names
 
 
-def test_a_pairing_with_too_few_bumps_has_no_adoption_statistics(impact_corpus):
-    """A median over one or two observations is not a measurement, so a pairing
-    under three bumps is left out rather than reported with a wide error bar."""
-    from datetime import UTC, datetime
-
-    from git_synapse.analysis import depbump as db_mod
-    from git_synapse.db.orm import models, session_scope
-
-    with session_scope() as session:
-        session.add(models().DepBump(
-            consumer_repo_id=impact_corpus["runtime"], consumer_sha="a" * 40,
-            dep_repo_id=impact_corpus["packager"], dep_name="github.com/acme/packager",
-            dep_version="v9.9.9", manifest="go.mod",
-            bumped_at=datetime.now(UTC), adoption_seconds=3600))
-
-    rows = db_mod.adoption_delays()
-    pairs = {(r["dep"], r["consumer"]) for r in rows}
-    # packager->signer has five bumps and is reported; runtime->packager has one.
-    assert ("signer", "packager") in pairs
-    assert ("packager", "runtime") not in pairs
-
-
 def test_declared_only_hides_an_edge_that_no_manifest_states(impact_corpus):
     """A bump-only edge is real evidence but not a declaration, so a caller
     asking for declarations must not be handed one."""

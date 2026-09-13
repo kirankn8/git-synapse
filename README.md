@@ -133,7 +133,7 @@ against commits that came before it and reports Wilson 95% confidence intervals.
 Run the benchmark yourself:
 
 ```bash
-docker compose run --rm cli backtest \
+docker compose run --rm -v "$PWD:/repo" --entrypoint python cli /repo/scripts/backtest.py \
   --measure confidence_ab,confidence_ba,jaccard,npmi,log_likelihood_ratio \
   --top 5 --min-support 2 --seeding obscure
 ```
@@ -205,13 +205,14 @@ The beginner-friendly setup page is available at
 
 ## Use it
 
-Add repositories from the **Sources** page, or use the CLI:
+Add repositories from the **Sources** page, or from the CLI:
 
 ```bash
 docker compose run --rm cli account add my-org
-docker compose run --rm cli ingest --all
-docker compose run --rm cli coupled my-repo path/to/file.py
 ```
+
+The scheduler picks them up on its next refresh; **Run now** on the Jobs page
+starts one immediately.
 
 The web UI shows coupling graphs, evidence, repository impact, feedback, and
 ingestion status. GitHub, GitLab, Bitbucket, SSH remotes, and ordinary internal

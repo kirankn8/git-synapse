@@ -739,3 +739,20 @@ def test_prompts_that_defeat_both_free_rules_are_counted_separately(monkeypatch)
     assert best.unaided_hit_rate > 0.9, "but history has seen the pair 400 times"
     low, high = best.unaided_ci
     assert low <= best.unaided_hit_rate <= high
+
+
+def test_a_measure_that_clears_the_baseline_is_reported_with_its_lift():
+    def score(measure, label, rate, low, **over):
+        return bt.Score(measure=measure, label=label, prompts=bt.MIN_PROMPTS_FOR_A_VERDICT,
+                        hit_prompts=0, found=0, wanted=0, hit_rate=rate, ci_low=low,
+                        ci_high=rate, recall_at_k=0.0, precision_at_k=0.0, mrr=0.0, **over)
+
+    result = bt.BacktestResult(
+        repo_id=None, k=5, min_support=2, commits_seen=10, commits_scored=5,
+        prompts=bt.MIN_PROMPTS_FOR_A_VERDICT,
+        baselines=[score("intern", "Intern -- same directory", 0.2, 0.18)],
+        scores=[score("jaccard", "jaccard", 0.6, 0.55, lift=3.0,
+                      hard_prompts=100, hard_hit_rate=0.4)],
+    )
+    assert result.verdict == ("jaccard hits 60.0% vs 20.0% for the Intern (3.00x); "
+                              "on the 100 prompts the free rules missed, it still answers 40.0%")

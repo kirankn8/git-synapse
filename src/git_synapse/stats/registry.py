@@ -648,7 +648,7 @@ ALL_KEYS: tuple[str, ...] = tuple(spec.key for spec in MEASURES)
 #: corpus-wide, not the 1.6x-3.9x once quoted here: those figures were measured
 #: against "the repository's busiest files", which nobody has ever used to
 #: decide what to open. On a meticulously organised codebase the free rule wins
-#: outright. See `git-synapse backtest`.
+#: outright. See scripts/backtest.py.
 #:
 #: The result is principled rather than lucky: "what else must change" asks for
 #: the probability B changes given A did, which is exactly what this computes.
@@ -726,14 +726,6 @@ def resolve(key: str) -> MeasureSpec:
             f"unknown measure {key!r}; expected one of: {', '.join(sorted(BY_KEY))}"
         )
     return BY_KEY[canonical]
-
-
-def families() -> dict[str, list[MeasureSpec]]:
-    """Group the measures by family, preserving registry order within each."""
-    grouped: dict[str, list[MeasureSpec]] = {}
-    for spec in MEASURES:
-        grouped.setdefault(spec.family, []).append(spec)
-    return grouped
 
 
 def compute_all(t: Contingency, keys: tuple[str, ...] = ALL_KEYS) -> dict[str, np.ndarray]:

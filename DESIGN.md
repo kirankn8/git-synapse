@@ -281,8 +281,8 @@ erDiagram
 ```
 
 
-- Adding a 30th measure is one function plus one registry entry, then
-  `git-synapse score`. No re-clone, no re-parse.
+- Adding a 30th measure is one function plus one registry entry, then a
+  forced refresh. No re-clone, no re-parse.
 - Changing the fan-out cap or the support threshold is a re-aggregate, not a
   re-ingest.
 - The contingency cells `(n_ab, n_a, n_b, N)` sit beside every score, so any
@@ -692,12 +692,12 @@ One trap here silently defeats the gating, so the watermark avoids it:
   on that timestamp re-scans all 187 manifest-bearing repos nightly. The
   watermark is keyed on `head_sha` instead.
 
-Force a complete rebuild after changing a tuning knob:
+Force a complete rebuild after changing a tuning knob, with an API token from
+the Tokens page:
 
 ```bash
-docker compose run --rm cli ingest --force-full     # everything
-docker compose run --rm cli depbump --force         # after a manifest or dependency change
-docker compose run --rm cli mine --force            # after a mining threshold
+curl -X POST -H "Authorization: Bearer $GS_TOKEN" \
+  "http://localhost:8080/api/ingest/refresh?force_full=true"
 ```
 
 
@@ -748,7 +748,7 @@ anywhere with a container runtime:
 git clone <this repo> && cd git-synapse
 cp .env.example .env && $EDITOR .env     # add GITHUB_TOKEN
 docker compose up -d
-docker compose run --rm cli ingest --all
+docker compose run --rm cli admin setup-token
 ```
 
 Nothing is host-specific. To carry the data across instead of re-ingesting:
@@ -758,7 +758,7 @@ docker compose exec -T postgres pg_dump -U git_synapse git_synapse | gzip > git-
 gunzip -c git-synapse.sql.gz | docker compose exec -T postgres psql -U git_synapse git_synapse   # import
 ```
 
-The mirrors do not need to move — a fresh `ingest` re-clones them, and the watermarks in
+The mirrors do not need to move — a fresh refresh re-clones them, and the watermarks in
 the database make it incremental.
 
 ---
@@ -769,9 +769,9 @@ the database make it incremental.
 1. Add a vectorised function to `src/git_synapse/stats/measures.py`.
 2. Add a `MeasureSpec` to `src/git_synapse/stats/registry.py`.
 3. Add the column to the mapped metric classes in `src/git_synapse/db/schema.py`.
-4. `docker compose run --rm cli score`.
+4. Force a refresh, as above.
 
-The API, MCP server, CLI and UI all enumerate from the registry, so nothing else changes.
+The API, MCP server and UI all enumerate from the registry, so nothing else changes.
 
 ---
 

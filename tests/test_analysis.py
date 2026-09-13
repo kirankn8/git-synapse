@@ -317,14 +317,11 @@ def test_the_derived_stages_accept_a_caller_supplied_connection(db):
         conn.flush()
         repo = repo_row.id
         try:
-            from git_synapse.analysis.aggregate import repos_needing_aggregation
-
             assert rebuild_repo(repo, conn=conn) is not None
             assert score.score_repo(repo, conn=conn) is not None
             assert depbump.resolve_bumps(conn) == 0
             assert depbump.rebuild(conn=conn) is not None
             # The sweeps over *every* repository take one too.
-            assert isinstance(repos_needing_aggregation(conn), list)
             assert isinstance(score.score_all(conn), list)
             assert isinstance(depbump.refresh_modules(conn), int)
             assert isinstance(depbump.refresh_declared(conn=conn), int)

@@ -2,7 +2,7 @@
 #
 #   cp .env.example .env   # add your GITHUB_TOKEN
 #   docker compose up -d
-#   docker compose run --rm cli git-synapse ingest --all
+#   docker compose run --rm cli admin setup-token
 #
 # Portable to any machine with a container runtime: no host Python, no host git,
 # no host Postgres. Only `.env` and the two volumes are machine-specific.

@@ -193,18 +193,3 @@ def rebuild_repo(repo_id: int, conn: object | None = None) -> AggregateStats:
         return run(session)
 
 
-def repos_needing_aggregation(conn: object | None = None) -> list[int]:
-    def run(session: object) -> list[int]:
-        Repo, Pair, Metric = models().Repo, models().FilePair, models().FilePairMetric
-        repos = session.query(Repo).filter(Repo.is_enabled.is_(True)).order_by(Repo.id).all()
-        result = []
-        for repo in repos:
-            pair_count = session.query(Pair).filter_by(repo_id=repo.id).count()
-            metric_count = session.query(Metric).filter_by(repo_id=repo.id).count()
-            if repo.last_aggregate_at is None or repo.last_ingest_at is None or repo.last_aggregate_at < repo.last_ingest_at or pair_count != metric_count:
-                result.append(repo.id)
-        return result
-    if conn is not None:
-        return run(conn)
-    with session_scope() as session:
-        return run(session)

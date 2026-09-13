@@ -10,7 +10,6 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from statistics import median
 
 from git_synapse.analysis import manifests
 from git_synapse.analysis.manifests import bounds, version_key
@@ -449,23 +448,3 @@ def rebuild(force: bool = False, conn: object | None = None) -> BumpStats:
         return run(session)
 
 
-def adoption_delays(limit: int = 20) -> list[dict]:
-    Bump, Repo = models().DepBump, models().Repo
-    with session_scope() as session:
-        rows = session.query(Bump).filter(Bump.dep_repo_id.is_not(None), Bump.adoption_seconds >= 0).all()
-        repos = {r.id: r for r in session.query(Repo).filter(
-            Repo.id.in_({x.consumer_repo_id for x in rows} | {x.dep_repo_id for x in rows})
-        ).all()}
-        grouped = defaultdict(list)
-        for row in rows:
-            grouped[(row.dep_repo_id, row.consumer_repo_id)].append(row)
-        output = []
-        for (dep, consumer), values in grouped.items():
-            if len(values) < 3:
-                continue
-            delays = sorted(x.adoption_seconds / 86400 for x in values)
-            output.append({"dep": repos[dep].name, "consumer": repos[consumer].name, "bumps": len(values),
-                           "timed": len(delays), "median_adoption_days": round(median(delays), 1),
-                           "p90_adoption_days": round(delays[min(len(delays) - 1, int(len(delays) * .9))], 1),
-                           "last_bump": max(x.bumped_at for x in values if x.bumped_at)})
-        return sorted(output, key=lambda x: x["bumps"], reverse=True)[:limit]

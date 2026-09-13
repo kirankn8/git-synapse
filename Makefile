@@ -26,28 +26,9 @@ nuke:  ## Stop everything and delete the database and mirrors
 logs:  ## Tail logs from every service
 	$(COMPOSE) logs -f --tail=80
 
-.PHONY: ingest
-ingest:  ## Discover and ingest every repository
-	$(CLI) ingest --all
-
-.PHONY: refresh
-refresh:  ## Incremental refresh of already-known repositories
-	$(CLI) ingest
-
-.PHONY: score
-score:  ## Recompute the 31 measures from stored pair counts
-	$(CLI) score
-
-.PHONY: status
+.PHONY: token
 token:  ## Hand this machine's GitHub credential to the containers
 	@./scripts/refresh-token.sh
-
-status:  ## Corpus summary and recent ingest runs
-	$(CLI) status
-
-.PHONY: measures
-measures:  ## Print the measure catalogue
-	$(CLI) measures
 
 .PHONY: psql
 psql:  ## Open a psql shell

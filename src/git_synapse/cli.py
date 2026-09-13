@@ -1,8 +1,4 @@
-"""Command-line interface.
-
-Every operation the scheduler and the API can perform is also available here,
-so a deployment can be driven entirely from ``docker compose run --rm cli``.
-"""
+"""Command-line bootstrap and maintenance. The server does everything else."""
 
 from __future__ import annotations
 
@@ -14,15 +10,10 @@ from rich.console import Console
 from rich.table import Table
 
 from git_synapse import auth
-from git_synapse.analysis import depbump, mining, predict
-from git_synapse.analysis import query as q
-from git_synapse.analysis.aggregate import rebuild_repo, repos_needing_aggregation
-from git_synapse.analysis.score import score_repo
 from git_synapse.config import get_config
 from git_synapse.db.engine import apply_schema, wait_for_database
 from git_synapse.db.orm import models, session_scope
-from git_synapse.ingest import accounts, pipeline
-from git_synapse.stats.registry import DEFAULT_MEASURE, families
+from git_synapse.ingest import accounts
 
 app = typer.Typer(
     name="git-synapse",
@@ -30,16 +21,18 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
-admin_app = typer.Typer(help="First-administrator and user administration helpers.",
-                         no_args_is_help=True)
+admin_app = typer.Typer(help="First-administrator setup.", no_args_is_help=True)
 app.add_typer(admin_app, name="admin")
+account_app = typer.Typer(name="account", help="Manage the sources that get scanned.",
+                          no_args_is_help=True)
+app.add_typer(account_app)
 console = Console()
 
 
-def _setup(verbose: bool = False) -> None:
+def _setup() -> None:
     cfg = get_config()
     logging.basicConfig(
-        level=logging.DEBUG if verbose else getattr(logging, cfg.log_level.upper(), logging.INFO),
+        level=getattr(logging, cfg.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)-7s %(name)-24s %(message)s",
         stream=sys.stderr,
     )
@@ -47,442 +40,14 @@ def _setup(verbose: bool = False) -> None:
     apply_schema()
 
 
-@app.command("init")
-def init() -> None:
-    """Create the schema. Idempotent, and run automatically by every service."""
-    _setup()
-    console.print("[green]schema applied[/green]")
-
-
 @admin_app.command("setup-token")
 def admin_setup_token() -> None:
-    """Print the one-time token used to create the first administrator.
-
-    This is intentionally a CLI operation rather than a public API route: the
-    caller must already have access to the deployment's runtime/container.
-    It replaces fragile log-grepping in local and Kubernetes setup flows.
-    """
+    """Print the one-time token used to create the first administrator."""
     _setup()
     if auth.count_users() > 0:
         console.print("[yellow]The first administrator has already been created.[/yellow]")
         raise typer.Exit(1)
     console.print(auth.setup_token())
-
-
-@app.command("discover")
-def discover() -> None:
-    """Fetch the org's repository list from GitHub without cloning anything."""
-    _setup()
-    records = pipeline.discover(trigger="manual")
-    table = Table(title=f"{len(records)} repositories selected", box=None)
-    for col in ("repository", "language", "size (MB)", "mode", "visibility"):
-        table.add_column(col)
-    from git_synapse.ingest.gitops import choose_clone_mode
-
-    for rec in sorted(records, key=lambda r: -(r.disk_usage_kb or 0))[:40]:
-        blobless = choose_clone_mode(rec.disk_usage_kb)
-        table.add_row(
-            rec.full_name,
-            rec.primary_language or "-",
-            f"{(rec.disk_usage_kb or 0) / 1024:.1f}",
-            "blobless" if blobless else "full",
-            "private" if rec.is_private else "public",
-        )
-    console.print(table)
-    if len(records) > 40:
-        console.print(f"[dim]... and {len(records) - 40} more[/dim]")
-
-
-@app.command("ingest")
-def ingest(
-    all_repos: bool = typer.Option(False, "--all", help="Discover from GitHub first."),
-    repo: list[str] = typer.Option(None, "--repo", "-r", help="Limit to these repo names."),
-    force_full: bool = typer.Option(False, "--force-full", help="Ignore watermarks."),
-    concurrency: int = typer.Option(0, "--concurrency", "-j", help="Override worker count."),
-    verbose: bool = typer.Option(False, "--verbose", "-v"),
-) -> None:
-    """Mirror, parse, load, aggregate and score repositories."""
-    _setup(verbose)
-
-    records = None
-    if not all_repos:
-        records = pipeline.load_repo_records()
-        if not records:
-            console.print("[yellow]no repositories known yet; discovering[/yellow]")
-            records = None
-    if repo:
-        wanted = {r.lower() for r in repo}
-        source = records if records is not None else pipeline.discover()
-        records = [r for r in source if r.name.lower() in wanted or r.full_name.lower() in wanted]
-        if not records:
-            console.print(f"[red]no repositories matched {repo}[/red]")
-            raise typer.Exit(1)
-
-    result = pipeline.run_ingest(
-        records=records,
-        trigger="manual",
-        force_full=force_full,
-        concurrency=concurrency or None,
-    )
-
-    console.print()
-    console.print(
-        f"[bold]run {result.run_id}[/bold] {result.status} in {result.duration_s:.1f}s: "
-        f"[green]{len(result.ok)} ok[/green], [red]{len(result.failed)} failed[/red], "
-        f"{result.commits_added} commits added"
-    )
-    if result.failed:
-        table = Table(title="failures", box=None)
-        table.add_column("repository")
-        table.add_column("error", overflow="fold")
-        for r in result.failed[:20]:
-            table.add_row(r.full_name, (r.error or "")[:200])
-        console.print(table)
-        raise typer.Exit(1 if not result.ok else 0)
-
-
-@app.command("aggregate")
-def aggregate(
-    repo_id: int = typer.Option(0, "--repo-id", help="One repo; 0 means all stale ones."),
-    rescore: bool = typer.Option(True, "--rescore/--no-rescore"),
-) -> None:
-    """Rebuild the derived pair tables from the atomic facts."""
-    _setup()
-    targets = [repo_id] if repo_id else repos_needing_aggregation()
-    if not targets:
-        console.print("[dim]nothing to aggregate[/dim]")
-        return
-    for rid in targets:
-        stats = rebuild_repo(rid)
-        line = f"repo {rid}: {stats.file_pairs} file pairs, {stats.dir_pairs} dir pairs"
-        if rescore:
-            score = score_repo(rid)
-            line += f", scored {score.file_pairs}"
-        console.print(line)
-
-
-@app.command("score")
-def score(repo_id: int = typer.Option(0, "--repo-id", help="0 means every repo.")) -> None:
-    """Recompute the 31 measures from the existing pair counts.
-
-    Cheap, and the command to run after adding a new measure -- no re-clone or
-    re-parse is needed because the contingency counts are already stored.
-    """
-    _setup()
-    if repo_id:
-        console.print(score_repo(repo_id))
-        return
-    with session_scope() as session:
-        rows = [{"id": row.id, "full_name": row.full_name}
-                for row in session.query(models().Repo).filter_by(is_enabled=True)
-                .order_by(models().Repo.id).all()]
-    for row in rows:
-        stats = score_repo(row["id"])
-        console.print(f"{row['full_name']}: {stats.file_pairs} pairs in {stats.duration_s:.1f}s")
-
-
-@app.command("depbump")
-def depbump_cmd(
-    force: bool = typer.Option(False, "--force", help="Rescan every repo, ignoring watermarks."),
-) -> None:
-    """Extract dependency-bump edges from manifest history.
-
-    Go pseudo-versions embed the upstream commit they were cut from, so a go.mod
-    diff yields a dated, directional, provable propagation edge. Incremental by
-    default: only repositories ingested since their last scan are re-walked.
-    """
-    _setup()
-    stats = depbump.rebuild(force=force)
-    table = Table(box=None, show_header=False)
-    table.add_column("metric", style="dim")
-    table.add_column("value", justify="right")
-    table.add_row("repos scanned", f"{stats.repos_scanned:,}")
-    table.add_row("edges found", f"{stats.edges_found:,}")
-    table.add_row("new edges stored", f"{stats.edges_written:,}")
-    table.add_row("resolved to a commit", f"{stats.resolved_commits:,}")
-    table.add_row("duration", f"{stats.duration_s:.1f}s")
-    console.print(table)
-
-    lags = depbump.adoption_delays(limit=15)
-    if lags:
-        lt = Table(title="how long consumers took to adopt", box=None, title_style="bold")
-        for col in ("dependency", "consumer", "bumps", "median", "p90", "last"):
-            lt.add_column(col)
-        for r in lags:
-            lt.add_row(r["dep"], r["consumer"], str(r["bumps"]),
-                       f"{r['median_adoption_days']}d" if r["median_adoption_days"] is not None else "-",
-                       f"{r['p90_adoption_days']}d" if r["p90_adoption_days"] is not None else "-",
-                       str(r["last_bump"]))
-        console.print(lt)
-
-
-@app.command("mine")
-def mine(
-    repo_id: int = typer.Option(0, "--repo-id", help="One repo; 0 means all stale ones."),
-    force: bool = typer.Option(False, "--force", help="Re-mine every repo, ignoring watermarks."),
-) -> None:
-    """Rebuild the mining layer: de-facto modules, coupling drift, file risk.
-
-    Incremental by default: only repositories whose history moved since their
-    last mining pass are re-processed.
-    """
-    _setup()
-    stats = mining.rebuild(repo_id or None, force=force)
-    t = Table(box=None, show_header=False)
-    t.add_column("metric", style="dim")
-    t.add_column("value", justify="right")
-    t.add_row("de-facto modules", f"{stats.clusters:,}")
-    t.add_row("  cross-directory", f"{stats.cross_directory_clusters:,}")
-    t.add_row("clustered files", f"{stats.clustered_files:,}")
-    t.add_row("drift rows", f"{stats.drift_rows:,}")
-    t.add_row("  emerging", f"{stats.emerging:,}")
-    t.add_row("  decaying", f"{stats.decaying:,}")
-    t.add_row("risk scored", f"{stats.risk_rows:,}")
-    t.add_row("duration", f"{stats.duration_s:.1f}s")
-    console.print(t)
-
-
-@app.command("impact")
-def impact_cmd(
-    repo: str = typer.Argument(..., help="Repository name."),
-    direction: str = typer.Option("upstream", "--direction", "-d",
-                                  help="upstream (where a fix may belong) or downstream."),
-    limit: int = typer.Option(15, "--limit", "-n"),
-) -> None:
-    """What else to look at when changing a repository."""
-    _setup()
-    matches = [r for r in q.list_repos(search=repo, limit=8) if r["name"] == repo] or \
-              q.list_repos(search=repo, limit=1)
-    if not matches:
-        console.print(f"[red]no repository matching {repo!r}[/red]")
-        raise typer.Exit(1)
-    target = matches[0]
-    rows = (predict.upstream_of(target["id"], limit=limit)
-            if direction.startswith("up")
-            else predict.impact_for(target["id"], limit=limit))
-    label = "upstream of" if direction.startswith("up") else "downstream of"
-    t = Table(title=f"{label} {target['name']}", box=None, title_style="bold")
-    for c in ("score", "evidence", "bumps", "adopted after", "repository"):
-        t.add_column(c, justify="right" if c in ("score","bumps","median lag") else "left")
-    for r in rows:
-        ev = "declared" if r["is_declared"] else ("bumps" if r["has_bump_history"] else "discovery")
-        style = "green" if ev == "declared" else ("cyan" if ev == "bumps" else "dim")
-        t.add_row(f"{r['score']:.3f}", f"[{style}]{ev}[/{style}]", str(r["bump_count"]),
-                  f"{r['median_adoption_days']:.1f}d" if r["median_adoption_days"] is not None else "-",
-                  r["name"])
-    console.print(t)
-
-
-@app.command("backtest")
-def backtest_cmd(
-    repo: str = typer.Option("", "--repo", "-r", help="Restrict to one repository."),
-    measure: str = typer.Option("", "--measure", "-m", help="Comma-separated; defaults to the one the backtest ranks first."),
-    k: int = typer.Option(5, "--top", "-k", help="How many suggestions the product may offer."),
-    min_support: int = typer.Option(2, "--min-support", help="Ignore pairs seen fewer times than this."),
-    limit: int = typer.Option(0, "--limit", help="Stop after this many commits."),
-    seeding: str = typer.Option("all", "--seeding",
-        help="all: every changed file takes a turn as the seed. "
-             "obscure: one prompt per commit, seeded with its least-changed "
-             "file -- no hub to make the rest easy."),
-    grep_sample: int = typer.Option(0, "--grep-sample",
-        help="Also score a content-grep baseline on this many sampled prompts."),
-) -> None:
-    """Replay history and measure whether the suggestions would have helped."""
-    _setup()
-    from git_synapse.analysis import backtest as bt
-
-    repo_id = None
-    if repo:
-        with session_scope() as session:
-            row = session.query(models().Repo).filter(
-                (models().Repo.full_name == repo) | (models().Repo.name == repo)
-            ).first()
-        if not row:
-            console.print(f"[red]no repository {repo!r}[/red]")
-            raise typer.Exit(1)
-        repo_id = row.id
-
-    # No opinion about which others are worth running: name them and they run.
-    keys = tuple(m.strip() for m in measure.split(",") if m.strip()) or (DEFAULT_MEASURE,)
-    result = bt.run(repo_id, keys, k=k, min_support=min_support,
-                    limit=limit or None, grep_sample=grep_sample, seeding=seeding)
-
-    if not result.prompts:
-        console.print("[yellow]not enough history to replay; ingest more commits first[/yellow]")
-        return
-
-    seeded = "" if result.seeding == "all" else f", {result.seeding} seeds"
-    t = Table(title=f"backtest: {result.prompts:,} prompts over {result.commits_scored:,} commits (top-{k}{seeded})",
-              box=None, title_style="bold")
-    for c in ("measure", "hit rate", "95% CI", "lift", "unsolved", "MRR", ""):
-        t.add_column(c, justify="right" if c != "measure" else "left")
-    for s in result.baselines + result.scores:
-        base = s in result.baselines
-        t.add_row(
-            s.label if base else s.measure,
-            f"{s.hit_rate:.1%}",
-            f"{s.ci_low:.1%}-{s.ci_high:.1%}",
-            "-" if base else f"{s.lift:.2f}x",
-            "-" if base else f"{s.hard_hit_rate:.1%}",
-            "-" if base else f"{s.mrr:.3f}",
-            "rare-item bias" if s.rare_item_bias else "",
-            style="dim" if base else None,
-        )
-    console.print(t)
-    console.print(f"[bold]{result.verdict}[/bold]")
-    # The headline compares against one rung at a time. What an agent can do
-    # unaided is all of them at once, so this is the only line that says
-    # whether Git Synapse is answering anything nobody else could.
-    best = result.best
-    if best is not None and best.unaided_prompts:
-        low, high = best.unaided_ci
-        console.print(
-            f"[cyan]neither the free rules nor the New Hire solved "
-            f"{best.unaided_prompts:,} of the {result.sampled:,} sampled prompts; "
-            f"{best.measure} answered {best.unaided_hit_rate:.1%} of those "
-            f"({low:.1%}-{high:.1%})[/cyan]")
-    if not result.conclusive:
-        console.print("[dim]hit rate = share of prompts where a correct file appeared "
-                      "in the top k. Intervals assume independent prompts; those from "
-                      "one commit are not, so the true interval is wider.[/dim]")
-
-
-@app.command("measures")
-def measures() -> None:
-    """List every association measure with its formula and guidance."""
-    for family, specs in families().items():
-        table = Table(title=family, box=None, title_justify="left", title_style="bold cyan")
-        table.add_column("key", style="green")
-        table.add_column("formula", style="dim")
-        table.add_column("summary", overflow="fold")
-        table.add_column("measured", justify="right")
-        table.add_column("flags", style="yellow")
-        for spec in specs:
-            flags = []
-            if spec.rare_item_bias:
-                flags.append("rare-item bias")
-            if spec.saturates_on_sparse:
-                flags.append("saturates")
-            table.add_row(spec.key, spec.formula, spec.summary,
-                          f"{spec.hit_rate:.1%}" if spec.hit_rate is not None else "-",
-                          ", ".join(flags))
-        console.print(table)
-        console.print()
-
-
-@app.command("coupled")
-def coupled(
-    repo: str = typer.Argument(..., help="Repository name."),
-    path: str = typer.Argument(..., help="File path within the repository."),
-    measure: str = typer.Option(DEFAULT_MEASURE, "--measure", "-m"),
-    limit: int = typer.Option(15, "--limit", "-n"),
-    min_support: int = typer.Option(2, "--min-support"),
-) -> None:
-    """Show what changes together with a file. The core question, from the shell."""
-    _setup()
-    target = q.resolve_file(repo, path)
-    if target is None:
-        console.print(f"[red]no file {path!r} in {repo!r}[/red]")
-        raise typer.Exit(1)
-
-    partners = q.coupled_files(target["id"], measure, limit, min_support)
-    table = Table(
-        title=f"{target['repo']} :: {target['path']}  ({target['change_count']} changes)",
-        box=None,
-        title_style="bold",
-    )
-    table.add_column(measure, justify="right", style="cyan")
-    table.add_column("P(also|this)", justify="right")
-    table.add_column("n_ab", justify="right")
-    table.add_column("G2", justify="right", style="dim")
-    table.add_column("file")
-    for p in partners:
-        table.add_row(
-            f"{(p.get('score') or 0):.3f}",
-            f"{(p.get('confidence_out') or 0):.0%}",
-            str(p["n_ab"]),
-            f"{(p.get('log_likelihood_ratio') or 0):.1f}",
-            p["path"],
-        )
-    console.print(table)
-
-
-@app.command("feedback")
-def feedback_cmd(
-    status: str = typer.Option("open", "--status", help="open|investigating|fixed|wontfix|all"),
-    kind: str = typer.Option("", "--kind"),
-    resolve: int = typer.Option(0, "--resolve", help="Report id to close."),
-    as_status: str = typer.Option("fixed", "--as", help="Status to set when resolving."),
-    note: str = typer.Option("", "--note", help="Resolution note."),
-) -> None:
-    """Review defects that sessions reported against Git Synapse.
-
-    The occurrence count is the priority signal: a gap twenty sessions hit
-    matters more than one seen once.
-    """
-    _setup()
-    if resolve:
-        if q.resolve_feedback(resolve, as_status, note or f"marked {as_status}"):
-            console.print(f"[green]report {resolve} -> {as_status}[/green]")
-        else:
-            console.print(f"[red]no report {resolve}[/red]")
-            raise typer.Exit(1)
-        return
-
-    summary = q.feedback_summary()
-    st = Table(box=None, show_header=False)
-    st.add_column("metric", style="dim")
-    st.add_column("value", justify="right")
-    for key in ("total", "open", "open_high", "fixed", "total_hits", "seen_today"):
-        st.add_row(key.replace("_", " "), str(summary.get(key, 0)))
-    console.print(st)
-
-    rows = q.list_feedback(None if status == "all" else status, kind or None, 60)
-    if not rows:
-        console.print("[dim]no reports[/dim]")
-        return
-    t = Table(title=f"reports ({status})", box=None, title_style="bold")
-    for col in ("id", "hits", "sev", "kind", "tool", "where", "detail"):
-        t.add_column(col, justify="right" if col in ("id", "hits") else "left",
-                     overflow="fold" if col == "detail" else None)
-    for r in rows:
-        sev = r["severity"]
-        style = "red" if sev == "high" else ("yellow" if sev == "medium" else "dim")
-        where = "/".join(x for x in (r["repo"], r["path"]) if x) or "-"
-        t.add_row(str(r["id"]), str(r["occurrences"]), f"[{style}]{sev}[/{style}]",
-                  r["kind"], r["tool"] or "-", where[-38:], (r["detail"] or "")[:70])
-    console.print(t)
-
-
-@app.command("status")
-def status() -> None:
-    """Corpus summary and recent ingest runs."""
-    _setup()
-    ov = q.overview()
-    table = Table(box=None, show_header=False)
-    table.add_column("metric", style="dim")
-    table.add_column("value", justify="right")
-    for key in (
-        "repos", "repos_ready", "repos_failed", "commits", "file_changes",
-        "files", "directories", "authors", "file_pairs", "dir_pairs",
-    ):
-        table.add_row(key.replace("_", " "), f"{ov.get(key, 0):,}")
-    table.add_row("mirror size", f"{ov.get('mirror_kb', 0) / 1024 / 1024:.2f} GB")
-    console.print(table)
-
-    runs = q.recent_runs(5)
-    if runs:
-        rt = Table(title="recent runs", box=None, title_style="bold")
-        for col in ("id", "kind", "trigger", "status", "started", "duration", "commits"):
-            rt.add_column(col)
-        for r in runs:
-            rt.add_row(
-                str(r["id"]), r["kind"], r["trigger"], r["status"],
-                r["started_at"].strftime("%Y-%m-%d %H:%M") if r["started_at"] else "-",
-                f"{r['duration_s']:.0f}s" if r["duration_s"] else "-",
-                str(r["commits_added"]),
-            )
-        console.print(rt)
 
 
 @app.command("reset")
@@ -507,19 +72,13 @@ def reset(
     console.print("[green]all ingested data removed[/green]")
 
 
-account_app = typer.Typer(name="account", help="Manage the sources that get scanned.", no_args_is_help=True)
-app.add_typer(account_app)
-
-
 def _account_rows(rows: list[dict]) -> Table:
-    """Render accounts as a table, shared by add/list/remove."""
     table = Table(box=None)
     for col in ("id", "login", "kind", "enabled", "repos", "filters", "last discovered"):
         table.add_column(col)
     for r in rows:
         filters = ", ".join(
             name for name, on in (
-                ("no forks", not r["include_forks"]),
                 ("no archived", not r["include_archived"]),
                 ("no private", not r["include_private"]),
             ) if on
@@ -540,7 +99,6 @@ def _account_rows(rows: list[dict]) -> Table:
 def account_add(
     login: str = typer.Argument(..., help="GitHub org or user login."),
     kind: str = typer.Option("org", "--kind", help="org or user."),
-    no_forks: bool = typer.Option(False, "--no-forks", help="Skip forked repositories."),
     no_archived: bool = typer.Option(False, "--no-archived", help="Skip archived repositories."),
     no_private: bool = typer.Option(False, "--no-private", help="Skip private repositories."),
     only: str = typer.Option("", "--only", help="Comma-separated allowlist of repo names."),
@@ -551,7 +109,6 @@ def account_add(
     try:
         row = accounts.add_account(
             login, kind=kind,
-            include_forks=not no_forks,
             include_archived=not no_archived,
             include_private=not no_private,
             only_repos=only, skip_repos=skip,
@@ -560,7 +117,8 @@ def account_add(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
     console.print(_account_rows([row]))
-    console.print("[green]added[/green] — run `git-synapse discover` to pick up its repositories")
+    console.print("[green]added[/green] — its repositories arrive on the next refresh, "
+                  "or press Run now on the Jobs page")
 
 
 @account_app.command("list")

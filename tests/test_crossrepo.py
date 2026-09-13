@@ -66,7 +66,7 @@ def test_discovery_and_ensemble_scores_are_kept_separate(db):
     with session_scope() as session:
         rows = session.query(models().RepoImpact).limit(200).all()
     if not rows:
-        pytest.skip("impact table is empty; run `git-synapse impact` first")
+        pytest.skip("impact table is empty")
     for r in rows:
         scored_by = (r.features or {}).get("scored_by")
         assert scored_by == "declared", f"unexpected scoring provenance: {r}"
@@ -84,7 +84,7 @@ def test_module_count_uses_the_composite_key(db):
         naive = session.query(Cluster.cluster_id).distinct().count()
         correct = session.query(Cluster.repo_id, Cluster.cluster_id).distinct().count()
     if correct == 0:
-        pytest.skip("no clusters present; run `git-synapse mine` first")
+        pytest.skip("no clusters present")
     assert correct >= naive, "composite count must not be smaller"
     if naive < correct:
         # This is the normal case once more than one repo has clusters, and it
@@ -195,7 +195,7 @@ def test_module_context_resolves_the_owning_module(db):
             models().ModuleDependency.repo_id).order_by(
             models().ModuleDependency.repo_id).first()
     if row is None:
-        pytest.skip("no module graph built; run `git-synapse depbump`")
+        pytest.skip("no module graph built")
 
     repo_id = row[0]
     with session_scope() as session:
@@ -683,3 +683,22 @@ def test_feedback_feeds_no_analytical_table(db):
                   "depbump.py", "manifests.py", "backtest.py")
     offenders = [n for n in analytical if "feedback" in (src / n).read_text()]
     assert not offenders, f"analytical modules must not reference feedback: {offenders}"
+
+
+def test_feedback_can_be_listed_by_severity(db):
+    from git_synapse.analysis.query import list_feedback, record_feedback
+    from git_synapse.db.orm import models, session_scope
+
+    repo = "test/feedback-severity"
+    with session_scope() as session:
+        session.query(models().Feedback).filter_by(repo=repo).delete(synchronize_session=False)
+    try:
+        record_feedback(kind="tool_error", severity="high", repo=repo,
+                        detail="a high one", fingerprint="sev-high")
+        record_feedback(kind="tool_error", severity="low", repo=repo,
+                        detail="a low one", fingerprint="sev-low")
+        high = [f for f in list_feedback(severity="high", limit=1000) if f["repo"] == repo]
+        assert [f["severity"] for f in high] == ["high"]
+    finally:
+        with session_scope() as session:
+            session.query(models().Feedback).filter_by(repo=repo).delete(synchronize_session=False)
