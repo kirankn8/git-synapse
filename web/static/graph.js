@@ -1,17 +1,3 @@
-/* ==========================================================================
-   Force-directed coupling graph, drawn on a canvas.
-
-   Written from scratch rather than pulling in d3: the layout is a few hundred
-   lines of Verlet integration, and avoiding a bundled dependency keeps the
-   container free of a JS toolchain and the page free of external requests.
-
-   Physics per tick:
-     - repulsion between every node pair, approximated on a spatial grid so the
-       cost is roughly O(n) instead of O(n^2)
-     - spring attraction along each edge, with rest length inversely
-       proportional to coupling strength, so strongly coupled files sit closer
-     - a weak centring force and velocity damping so the layout settles
-   ========================================================================== */
 
 const REPULSION = 5200;
 const SPRING = 0.035;
@@ -29,13 +15,7 @@ function dirColor(dir) {
   return `hsl(${hue} 62% 58%)`;
 }
 
-/**
- * Render an interactive coupling graph into `container`.
- *
- * @param {HTMLElement} container
- * @param {{nodes: object[], edges: object[]}} data
- * @param {object} opts  {measureLabel, centerId, onNodeClick, onNodeFocus}
- */
+/** Render an interactive coupling graph into `container`. */
 export function renderGraph(container, data, opts = {}) {
   container.replaceChildren();
 
@@ -67,7 +47,6 @@ export function renderGraph(container, data, opts = {}) {
   let height = 0;
   let dpr = Math.min(window.devicePixelRatio || 1, 2);
 
-  /* ------------------------------------------------------------ model -- */
 
   const maxChanges = Math.max(1, ...data.nodes.map((n) => n.change_count || 0));
   const scores = data.edges.map((e) => Math.abs(Number(e.score) || 0));
@@ -75,8 +54,6 @@ export function renderGraph(container, data, opts = {}) {
   const minScore = Math.min(...scores, 0);
 
   const nodes = data.nodes.map((n, i) => {
-    // Seed on a phyllotaxis spiral: spreads nodes evenly and avoids the
-    // degenerate all-at-one-point start that random seeding can produce.
     const angle = i * 2.399963;
     const radius = 13 * Math.sqrt(i + 1);
     return {
@@ -111,7 +88,6 @@ export function renderGraph(container, data, opts = {}) {
     nodes[centerIdx].isCenter = true;
   }
 
-  /* ------------------------------------------------------- view state -- */
 
   let scale = 1;
   let offsetX = 0;
@@ -137,13 +113,10 @@ export function renderGraph(container, data, opts = {}) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
-  /* ---------------------------------------------------------- physics -- */
 
   function step() {
     if (alpha < MIN_ALPHA) return;
 
-    // Spatial hash: only nodes in neighbouring cells repel each other. Without
-    // this the all-pairs loop would dominate at a few hundred nodes.
     const grid = new Map();
     for (let i = 0; i < nodes.length; i++) {
       const n = nodes[i];
@@ -171,8 +144,6 @@ export function renderGraph(container, data, opts = {}) {
             let dy = n.y - m.y;
             let d2 = dx * dx + dy * dy;
             if (d2 < 0.01) {
-              // Coincident nodes: nudge apart deterministically by index so
-              // the layout stays reproducible across reloads.
               dx = (i - j) * 0.01 + 0.05;
               dy = 0.05;
               d2 = dx * dx + dy * dy;
@@ -231,7 +202,6 @@ export function renderGraph(container, data, opts = {}) {
     alpha *= 0.994;
   }
 
-  /* ------------------------------------------------------------- draw -- */
 
   const css = getComputedStyle(document.documentElement);
   const readVar = (name, fallback) => (css.getPropertyValue(name) || fallback).trim();
@@ -285,8 +255,6 @@ export function renderGraph(container, data, opts = {}) {
       ctx.globalAlpha = 1;
     }
 
-    // Label the biggest nodes only, and only once the view is zoomed enough
-    // that the text will not collide into noise.
     const labelled = [...nodes.keys()]
       .sort((a, b) => nodes[b].r - nodes[a].r)
       .slice(0, scale > 1.5 ? 44 : 18);
@@ -309,7 +277,6 @@ export function renderGraph(container, data, opts = {}) {
     requestAnimationFrame(frame);
   }
 
-  /* ------------------------------------------------------ interaction -- */
 
   function pick(px, py) {
     const w = toWorld(px, py);
@@ -422,7 +389,6 @@ export function renderGraph(container, data, opts = {}) {
     hovered = null;
   });
 
-  /* --------------------------------------------------------- controls -- */
 
   const button = (label, title, fn) => {
     const b = document.createElement('button');
@@ -453,7 +419,6 @@ export function renderGraph(container, data, opts = {}) {
     offsetY = -((Math.max(...ys) + Math.min(...ys)) / 2) * scale;
   }
 
-  /* -------------------------------------------------------- lifecycle -- */
 
   const onResize = () => {
     resize();
@@ -461,8 +426,6 @@ export function renderGraph(container, data, opts = {}) {
   };
   window.addEventListener('resize', onResize);
 
-  // Stop the animation loop when the graph leaves the DOM, so navigating away
-  // does not leave a requestAnimationFrame running forever.
   const observer = new MutationObserver(() => {
     if (!document.body.contains(container)) {
       running = false;
@@ -473,8 +436,6 @@ export function renderGraph(container, data, opts = {}) {
   observer.observe(document.body, { childList: true, subtree: true });
 
   resize();
-  // Let the simulation settle before the first paint so the graph does not
-  // visibly explode outward from the seed spiral.
   for (let i = 0; i < 120; i++) step();
   fit();
   frame();

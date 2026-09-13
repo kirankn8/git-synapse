@@ -8,9 +8,6 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <!-- Shown before the first view is ready and removed once it is. Inline
-       rather than built by the script, because the point is to be on screen
-       during the moment the script has not run yet. -->
   <div id="splash" role="status" aria-live="polite">
     <svg class="splash-mark" viewBox="0 0 32 32" aria-hidden="true">
       <g class="sm-arc">
@@ -29,8 +26,6 @@
   <div id="app">
     <header class="topbar">
       <a class="brand" href="/" data-nav>
-        <!-- A commit branch whose connection is a synaptic cleft. The gap is
-             the point: two things that must fire together, signal crossing. -->
         <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
           <g class="bm-arc">
             <path d="M8 24 C 8 18.5, 9.5 15.5, 12 13.6"/>
@@ -47,10 +42,6 @@
       <nav class="mainnav" id="mainnav">
         <a href="/" data-nav data-route="overview">Overview</a>
 
-        <!-- Two tabs carry the whole application, split on something the
-             reader can check: Repositories holds the things -- repositories,
-             folders, files, pairs -- and Insights holds every analysis derived
-             from them. Nothing appears under both. -->
         <a href="/sources" data-nav data-route="sources">Sources</a>
         <a href="/repos" data-nav data-route="repos">Repositories</a>
         <a href="/insights" data-nav data-route="insights">Insights</a>
@@ -76,8 +67,6 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg>
         </button>
 
-        <!-- Who is signed in, and everything that belongs to them. Built by
-             the script once it knows, so a signed-out page shows nothing. -->
         <div class="profile" id="profile" hidden></div>
       </div>
     </header>

@@ -1,16 +1,5 @@
-/* ==========================================================================
-   Git Synapse UI — design tokens and components.
 
-   Dense, data-forward layout: this is a tool for reading numbers, so the type
-   scale is small, tabular figures are used everywhere, and paths render in a
-   monospace face so they align and diff visually.
-   ========================================================================== */
-
-/* `hidden` is set from script to take an element out of the page. The browser's
-   own rule for it is display:none, which any author `display` on the same
-   element silently beats -- .measure-bar is display:flex, so hiding it did
-   nothing visible while every check on the property passed. Stated once, here,
-   so no component has to remember. */
+/* An author display rule would otherwise beat the hidden attribute. */
 [hidden] { display: none !important; }
 
 :root {
@@ -98,7 +87,6 @@ body {
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
-/* --------------------------------------------------------------- topbar -- */
 
 .topbar {
   display: flex;
@@ -124,8 +112,6 @@ a:hover { text-decoration: underline; }
   flex-shrink: 0;
 }
 .brand:hover { text-decoration: none; }
-/* The nodes are rings rather than filled discs so the mark sits on any
-   background without needing a plate behind it. */
 .brand-mark { width: 23px; height: 23px; overflow: visible; }
 .brand-mark .bm-arc { fill: none; stroke: var(--accent); stroke-width: 2.1; stroke-linecap: round; }
 .brand-mark .bm-node { fill: none; stroke: var(--accent); stroke-width: 2.4; }
@@ -236,7 +222,6 @@ a:hover { text-decoration: underline; }
 .icon-btn:hover { background: var(--bg-hover); color: var(--text); }
 .icon-btn svg { width: 15px; height: 15px; fill: currentColor; }
 
-/* --------------------------------------------------------- measure bar -- */
 
 .measure-bar {
   display: flex;
@@ -282,7 +267,6 @@ a:hover { text-decoration: underline; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
-/* ----------------------------------------------------------------- view -- */
 
 .view {
   flex: 1;
@@ -310,22 +294,13 @@ a:hover { text-decoration: underline; }
 .page-sub { margin: 5px 0 0; color: var(--text-dim); font-size: 13px; }
 .page-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
-/* ---------------------------------------------------------------- cards -- */
 
 .grid { display: grid; gap: 14px; }
 .grid > .card, .grid > .grid { margin-bottom: 0; }
-/* Four columns rather than auto-fit. Every strip on the page holds four or
-   eight tiles, and auto-fit chose seven at 1280px wide -- leaving the eighth
-   alone on a row of its own, which is the ragged look this exists to avoid. */
 .grid-stats { grid-template-columns: repeat(2, 1fr); }
 @media (min-width: 560px) {
   .grid-stats { grid-template-columns: repeat(4, 1fr); }
-  /* A strip of six divides into three, not four -- otherwise the last two sit
-     alone against two columns of nothing. Matched by "the sixth tile is also
-     the last", which needs no class from the code that builds the strip. */
   .grid-stats:has(> .stat:nth-child(6):last-child) { grid-template-columns: repeat(3, 1fr); }
-  /* Fewer than four: as many columns as there are tiles, so the row is full
-     rather than trailing off into empty cells. */
   .grid-stats:has(> .stat:nth-child(3):last-child) { grid-template-columns: repeat(3, 1fr); }
   .grid-stats:has(> .stat:nth-child(2):last-child) { grid-template-columns: repeat(2, 1fr); }
   .grid-stats:has(> .stat:only-child) { grid-template-columns: 1fr; }
@@ -333,10 +308,6 @@ a:hover { text-decoration: underline; }
 .grid-2 { grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
 .grid-3 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
 
-/* One vertical rhythm for everything a view stacks. #view is a block, so
-   adjacent margins collapse and a card after a toolbar keeps a single gap
-   rather than the sum -- but a card with no margin at all sits flush against
-   the next one, which is what made the pages look glued together. */
 .card,
 .grid,
 .graph-shell,
@@ -382,7 +353,6 @@ a:hover { text-decoration: underline; }
 }
 .stat-meta { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
 
-/* --------------------------------------------------------------- tables -- */
 
 .table-wrap { overflow-x: auto; }
 
@@ -414,8 +384,6 @@ table.data td {
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
 }
-/* Only rows that lead somewhere look like it. A pointer cursor on a row
-   that does nothing is a promise the table does not keep. */
 table.data tbody tr.is-link { cursor: pointer; }
 table.data tbody tr:hover { background: var(--bg-hover); }
 table.data tbody tr:last-child td { border-bottom: none; }
@@ -433,7 +401,6 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 .path .dir { color: var(--text-faint); }
 .path .base { color: var(--text); font-weight: 550; }
 
-/* --------------------------------------------------------------- pieces -- */
 
 .badge {
   display: inline-block;
@@ -529,7 +496,6 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 
 .loading { display: flex; align-items: center; gap: 9px; padding: 30px; color: var(--text-dim); justify-content: center; }
 
-/* ------------------------------------------------------ contingency 2x2 -- */
 
 .contingency {
   display: grid;
@@ -547,7 +513,6 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 .contingency .cell.a { background: var(--accent-bg); color: var(--accent); }
 .contingency .tot { background: var(--bg-raised); text-align: center; color: var(--text-dim); }
 
-/* --------------------------------------------------------------- graph -- */
 
 .graph-shell {
   position: relative;
@@ -606,7 +571,6 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
   backdrop-filter: blur(6px);
 }
 
-/* --------------------------------------------------------------- misc -- */
 
 .measure-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; }
 .measure-card {
@@ -688,10 +652,7 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
   .view { padding: 15px 12px 34px; }
 }
 
-/* ------------------------------------------------------ impact & chains -- */
 
-/* Evidence tiers are load-bearing: declared/bump edges are validated at
-   AUC 0.88 in sample, discovery edges are not. The UI must never let them look alike. */
 .tier { display: inline-flex; align-items: center; gap: 4px; }
 .tier-declared  { color: var(--ok); }
 .tier-bump      { color: var(--info); }
@@ -750,9 +711,6 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
   border-left: 2px solid var(--border-strong); padding-left: 9px; margin-top: 8px;
 }
 
-/* ---------------------------------------------------------- forms ------ */
-/* Stacked labels rather than inline ones, so the control gets the whole
-   column. A wide input is the point: repository allowlists are long. */
 .form { padding: 16px 18px 18px; display: flex; flex-direction: column; gap: 16px; }
 .form-row { display: grid; gap: 16px; }
 .form-row.two { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
@@ -779,8 +737,6 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 .badge.clickable:hover { filter: brightness(1.25); }
 .btn.danger-btn:hover { border-color: var(--danger); color: var(--danger); }
 
-/* A long explanation, folded away until wanted. Above the thing it explains it
-   is a wall; one line with a disclosure triangle costs the reader nothing. */
 .explainer { margin-bottom: 16px; }
 .explainer > summary {
   cursor: pointer; font-size: 12px; color: var(--text-dim);
@@ -800,8 +756,6 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 .setting-row:first-child { padding-top: 0; }
 .setting-row > * + * { margin-top: 9px; }
 
-/* A recorded request or reply, shown as it was. Scrolls in its own box so a
-   thousand-line payload cannot stretch the page. */
 .payload {
   margin: 0; max-height: 420px; overflow: auto;
   font-family: var(--mono); font-size: 11.5px; line-height: 1.5;
@@ -810,9 +764,6 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
   padding: 11px 13px; white-space: pre-wrap; word-break: break-word;
 }
 
-/* ------------------------------------------------------------- charts -- */
-/* A categorical ramp, defined once. Distinguishable in both directions of the
-   theme, and reused by every chart so the same category keeps its colour. */
 :root {
   --series-1: #2dd4bf;
   --series-2: #60a5fa;
@@ -824,8 +775,6 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 
 .chart-wrap { width: 100%; }
 
-/* Columns as elements: text is laid out by the browser at its natural size,
-   rather than scaled with the drawing and coming out squashed. */
 .cbars {
   display: flex; align-items: flex-end; gap: 4px;
   position: relative; padding-top: 2px;
@@ -846,8 +795,6 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
   flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
   align-items: center; gap: 3px; cursor: default;
 }
-/* Sized to the narrowest column that carries a value: eight buckets in a card
-   leave 35px, and "142.9k" at 10px needed 36 -- it lost its "k". */
 .cbar-value {
   font-size: 9.5px; color: var(--text-dim); font-variant-numeric: tabular-nums;
   font-weight: 550; letter-spacing: -0.03em;
@@ -858,8 +805,6 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
   width: 100%; height: var(--bar-h, 74px);
   display: flex; align-items: flex-end;
 }
-/* A bar is a solid of one hue, lit from the top: the gradient gives it a
-   surface instead of a flat block, and the ramp gives the chart a direction. */
 .cbar-fill {
   width: 100%; border-radius: 3px 3px 1px 1px;
   background: linear-gradient(
@@ -885,10 +830,6 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
   font-size: 10px; color: var(--text-faint); font-family: var(--mono);
   letter-spacing: -0.02em; white-space: nowrap; max-width: 100%;
 }
-/* The end labels of a dense chart sit outside their own column, so they are
-   allowed to reach past it rather than being cut in half. */
-/* The axis of a dense chart: its ends, on their own line, where they have the
-   width to be read. */
 .cbars-axis {
   display: flex; justify-content: space-between;
   margin-top: 5px; font-size: 10px; letter-spacing: -0.02em;
@@ -919,8 +860,6 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 .ministat-label { font-size: 12px; color: var(--text-dim); margin-top: 1px; }
 .ministat-note { font-size: 11px; color: var(--text-faint); margin-top: 2px; }
 
-/* Horizontal bars: label, bar, value on one line. Readable without a legend,
-   and the value is next to its own bar rather than matched up by colour. */
 .hbars { display: flex; flex-direction: column; gap: 7px; }
 .hbar { display: grid; grid-template-columns: 92px 1fr auto; align-items: center; gap: 10px; }
 .hbar-label {
@@ -953,25 +892,15 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 .hbar { grid-template-columns: 88px 1fr auto; gap: 9px; }
 .hbar-track { height: 8px; }
 
-/* Eight charts, and a column count that always divides them: four across, two
-   down on a wide screen, two across on a laptop, one on a phone. auto-fit was
-   choosing five and leaving a thousand pixels of gap in the second row. */
 .grid-charts { grid-template-columns: 1fr; }
 @media (min-width: 680px)  { .grid-charts { grid-template-columns: repeat(2, 1fr); } }
 @media (min-width: 1180px) { .grid-charts { grid-template-columns: repeat(4, 1fr); } }
 
-/* One height for every chart, so a grid row cannot stretch a short card to
-   match a tall one and leave a hundred pixels of nothing inside it. */
-/* Tall enough for the whole column -- value, bar and label -- plus the card's
-   own padding. It was 116px against 109px of content inside a card that clips,
-   so every chart was shaved off at the bottom. */
 .chart-body {
   height: 132px;
   display: flex; flex-direction: column; justify-content: center;
 }
 
-/* The peak and the axis type, on the chart. A log axis that does not say so
-   reads as linear, and the tail then looks far larger than it is. */
 .chart-scale {
   display: flex; align-items: center; gap: 7px;
   font-size: 10.5px; color: var(--text-faint);
@@ -979,9 +908,6 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 }
 .chart-scale .badge { font-size: 9.5px; padding: 0 5px; }
 
-/* Anything that leads somewhere says so: the cursor, a lift on hover, and on a
-   card a quiet arrow in the corner. A summary with a fuller view behind it that
-   gives no sign of it is a dead end the reader has to guess past. */
 .is-link { cursor: pointer; }
 .card.is-link:hover { border-color: var(--border-strong); background: var(--bg-hover); }
 .card.is-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -1000,11 +926,6 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 .section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .section-more { font-size: 11.5px; font-weight: 500; letter-spacing: 0; text-transform: none; }
 
-/* ------------------------------------------------------- splash & motion -- */
-/* The first view needs a database round trip, and until now the page was blank
-   while it happened. The mark draws itself once, which is about as long as the
-   wait usually is; if the wait is shorter the splash leaves before it finishes,
-   which is the right way round. */
 #splash {
   position: fixed; inset: 0; z-index: 999;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -1016,9 +937,6 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 .splash-mark { width: 84px; height: 84px; overflow: visible; }
 .sm-arc path {
   fill: none; stroke: var(--accent); stroke-width: 2.1; stroke-linecap: round;
-  /* In user units, not the normalised pathLength: CSS stroke-dasharray ignores
-     that attribute, and 1 drew the arc as a row of 1-unit dots. The arcs are
-     11.6 units long, so 13 is one dash with room to spare. */
   stroke-dasharray: 13; stroke-dashoffset: 13;
   animation: draw 1.5s cubic-bezier(.4, 0, .2, 1) infinite;
 }
@@ -1030,8 +948,6 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 }
 .sm-spark-2 { animation-delay: .2s; }
 
-/* The signal crosses the gap and fades, over and over: the mark is a synapse
-   firing, which is also what the product measures. */
 @keyframes draw {
   0%   { stroke-dashoffset: 13; opacity: .25; }
   40%  { stroke-dashoffset: 0;  opacity: 1; }
@@ -1049,8 +965,6 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
 }
 .splash-sub { font-size: 12px; color: var(--text-faint); }
 
-/* Views arrive rather than appearing: a short rise settles the eye on the new
-   page instead of leaving it to find what changed. */
 .view-enter { animation: rise .26s cubic-bezier(.22, .68, .36, 1) both; }
 @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
@@ -1067,19 +981,12 @@ table.data td.mono { font-family: var(--mono); font-size: 12px; }
   .sm-arc path, .sm-spark { animation: none; }
 }
 
-/* --------------------------------------------------------------- the door -- */
-/* Signed out, the chrome is noise: a nav that leads nowhere and a search box
-   that cannot search. The card is the only thing on the page. */
 body.gated .mainnav,
 body.gated .omnibox,
 body.gated .measure-bar,
 body.gated .footer { display: none; }
 body.gated .topbar { border-bottom-color: transparent; }
 
-/* The door is the one screen a person may meet before they know what this is,
-   so it says so: the product on the left, the way in on the right. On a narrow
-   screen the explanation goes and the form stays, because that is the part
-   they came for. */
 .gate {
   display: grid; place-items: center;
   min-height: calc(100vh - 120px); padding: 4vh 20px;
@@ -1164,7 +1071,6 @@ body.gated .topbar { border-bottom-color: transparent; }
   padding: 9px 11px; border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
 
-/* ------------------------------------------------------------- profile -- */
 .profile { position: relative; }
 .avatar {
   width: 30px; height: 30px; border-radius: 50%;
@@ -1205,10 +1111,6 @@ body.gated .topbar { border-bottom-color: transparent; }
   word-break: break-all; color: var(--text); margin-bottom: 10px;
 }
 
-/* ------------------------------------------------- searchable dropdown -- */
-/* A native select cannot be typed into, and the repository list is 164 long.
-   This keeps a select's shape -- a trigger showing the value, a list below --
-   and adds the search box that was missing. */
 .picker { position: relative; display: inline-block; }
 
 .picker-trigger {
@@ -1247,11 +1149,6 @@ body.gated .topbar { border-bottom-color: transparent; }
 .picker-option.chosen { color: var(--accent); font-weight: 550; }
 .picker-empty { padding: 12px 9px; font-size: 12.5px; color: var(--text-faint); }
 
-/* --- Adding a source ------------------------------------------------------
-   The result of resolving a URL: either one repository to confirm, or a list
-   to tick. It sits inside the add card rather than in a modal, because it is
-   the second half of one action and a dialog would hide the URL that produced
-   it. */
 .resolve-panel {
   margin-top: 16px; border-top: 1px solid var(--border); padding-top: 16px;
   display: flex; flex-direction: column; gap: 14px;
@@ -1262,10 +1159,6 @@ body.gated .topbar { border-bottom-color: transparent; }
 }
 .resolve-title { font-size: 15px; font-weight: 600; color: var(--text); }
 
-/* The panel's footer, aligned to the same two edges as its header: the
-   description on the left under the title, the action on the right under the
-   whole-owner toggle. Left-packed, they read as three unrelated fragments
-   floating in a very wide card. */
 .resolve-panel .form-actions {
   justify-content: space-between; align-items: center; margin: 0;
 }
@@ -1279,8 +1172,6 @@ body.gated .topbar { border-bottom-color: transparent; }
 }
 .pick-all:hover { border-color: var(--accent); color: var(--text); }
 
-/* Capped and scrolled: three hundred rows is a list to search, not a page to
-   grow to. */
 .pick-list {
   max-height: 340px; overflow-y: auto; border: 1px solid var(--border);
   border-radius: 8px; background: var(--bg-input);
@@ -1299,26 +1190,17 @@ body.gated .topbar { border-bottom-color: transparent; }
   display: flex; align-items: center; gap: 7px; flex-shrink: 0;
   font-size: 11px; color: var(--text-faint);
 }
-/* Input and button on one line, hint beneath both. `align-items: stretch` so
-   the button matches the input's height exactly rather than approximating it
-   with padding that drifts whenever the input's font-size changes. */
 .url-add { display: flex; flex-direction: column; gap: 6px; }
 .url-add-row { display: flex; align-items: stretch; gap: 10px; }
 .url-add-row .input { flex: 1; min-width: 0; padding: 9px 11px; font-size: 13px; }
 .url-add-row .btn { flex: 0 0 auto; padding: 0 20px; font-size: 13px; white-space: nowrap; }
 
-/* Narrow windows: the button drops under the input rather than squeezing it to
-   a width no URL is readable in. */
 @media (max-width: 560px) {
   .url-add-row { flex-direction: column; }
   .url-add-row .btn { padding: 9px 20px; }
 }
-/* When the whole-owner toggle is the only remaining choice, it stops being a
-   quiet option in the corner and becomes the control. */
 .pick-all.is-only { border-color: var(--accent); color: var(--text); }
 
-/* A quiet in-sentence control: this reveals the token field, and it belongs in
-   the hint's flow rather than as another button competing with "Look up". */
 .linkish {
   background: none; border: 0; padding: 0; font: inherit; cursor: pointer;
   color: var(--accent); text-decoration: underline; text-underline-offset: 2px;
@@ -1326,11 +1208,6 @@ body.gated .topbar { border-bottom-color: transparent; }
 .linkish:hover { color: var(--text); }
 .token-box { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
 
-/* --- Repositories, grouped by source --------------------------------------
-   One disclosure per owner rather than one flat list: a repository is *in* an
-   account, and 240 undifferentiated rows make the corpus look like a bag of
-   names. Collapsed by default because most owners hold one or two, so the shut
-   state is a readable index rather than a wall. */
 .repo-groups { display: flex; flex-direction: column; gap: 8px; }
 .repo-group {
   background: var(--bg-panel); border: 1px solid var(--border);
@@ -1342,8 +1219,6 @@ body.gated .topbar { border-bottom-color: transparent; }
   cursor: pointer; list-style: none; user-select: none;
 }
 .repo-group-head::-webkit-details-marker { display: none; }
-/* The triangle, drawn rather than inherited, so it turns with the disclosure
-   and lines up with the text baseline in both states. */
 .repo-group-head::before {
   content: ''; flex: 0 0 auto; width: 0; height: 0; margin-right: 2px;
   border-left: 5px solid var(--text-faint);

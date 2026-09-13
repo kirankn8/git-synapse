@@ -1,18 +1,6 @@
-/* ==========================================================================
-   Git Synapse UI.
-   Plain ES modules, no build step and no framework, so the container needs no
-   Node toolchain and the whole app is three files a reader can follow.
-
-   Structure:
-     - utils / API client
-     - global state (active measure, catalog)
-     - hash router; every view is a function returning a DOM node
-     - shared components: sortable tables, stat tiles, bars, breadcrumbs
-   ========================================================================== */
 
 import { renderGraph } from './graph.js';
 
-/* -------------------------------------------------------------- utils -- */
 
 /** A deliberate do-nothing, so an empty arrow never reads as an oversight. */
 const noop = () => undefined;
@@ -64,8 +52,6 @@ export const pct = (v) => {
   if (v === null || v === undefined || !Number.isFinite(Number(v))) return '—';
   const n = Number(v) * 100;
   if (n === 0) return '0%';
-  // Rounding a real probability to "0%" states it never happens. Below the
-  // rounding floor, show enough digits to keep it distinguishable from zero.
   if (n < 0.5) return n < 0.05 ? '<0.1%' : n.toFixed(1) + '%';
   return n.toFixed(0) + '%';
 };
@@ -126,7 +112,6 @@ export const toast = (msg, isError = false) => {
   setTimeout(() => node.remove(), isError ? 7000 : 3800);
 };
 
-/* ---------------------------------------------------------------- api -- */
 
 /** Turn a failed response into an Error carrying the server's `detail`. */
 async function failure(res) {
@@ -134,8 +119,6 @@ async function failure(res) {
   try {
     const body = await res.json();
     if (Array.isArray(body.detail)) {
-      // FastAPI validation errors arrive as a list of objects; String() on
-      // them renders "[object Object]", which tells the user nothing.
       detail = body.detail
         .map((e) => `${(e.loc || []).slice(1).join('.') || 'input'}: ${e.msg || 'invalid'}`)
         .join('; ');
@@ -172,22 +155,13 @@ export async function apiSend(method, path, body) {
   return res.status === 204 ? null : res.json();
 }
 
-/* A session can end between two clicks -- it expired, an administrator
-   deactivated the account, someone signed out in another tab. Marking the
-   error lets the router put up the sign-in form instead of "could not load
-   this view", which is true but useless. */
 function signedOut() {
   const err = new Error('Your session has ended. Sign in to continue.');
   err.signedOut = true;
   return err;
 }
 
-/* -------------------------------------------------------------- state -- */
 
-/* Reading localStorage throws outright in a browser told to block site data,
-   and this is read at module scope -- so the whole application failed to load,
-   blank, with the reason only in the console. A remembered measure and a
-   remembered theme are conveniences; neither is worth the page. */
 const store = {
   get(key) {
     try {
@@ -200,8 +174,6 @@ const store = {
     try {
       window.localStorage.setItem(key, value);
     } catch {
-      /* Nothing to do and nothing to report: the setting simply will not
-         survive the tab, which is what the browser was asked to enforce. */
     }
   },
 };
@@ -248,33 +220,21 @@ function paintMeasureBar() {
 
   const host = $('#measure-select');
   if (!host.firstChild) {
-    // Thirty-one measures grouped into families: worth searching, same as the
-    // repository list.
     host.appendChild(searchSelect(
       state.measures.map((m) => ({ value: m.key, label: m.label, group: m.family })),
       { selected: state.measure, placeholder: 'Search measures\u2026',
         onChange: (key) => key && setMeasure(key) },
     ));
   }
-  // The chips carry the eight quick measures; the picker shows whichever is
-  // active so the two never disagree about what is selected.
   host.firstChild.value = state.measure;
 
   const spec = state.byKey.get(state.measure);
   $('#measure-hint').textContent = spec ? spec.summary : '';
 }
 
-/* ------------------------------------------------------------- router -- */
 
 const routes = [];
-/**
- * Register a client route.
- *
- * `:name` captures one segment; `*name` captures the rest of the path, slashes
- * included, so a file can be addressed by its own path -- /repos/5/files/src/
- * main/java/Cache.java. Ids renumber on a re-ingest, so a URL keyed on one
- * quietly comes to mean a different file; a path does not.
- */
+/** Register a client route. */
 const on = (pattern, handler) => {
   const keys = [];
   const rx = new RegExp(
@@ -288,12 +248,7 @@ const on = (pattern, handler) => {
   routes.push({ rx, keys, handler });
 };
 
-/**
- * Navigate to an in-app route.
- *
- * Takes a path ("/insights") and pushes it as one, so the address bar reads
- * /insights and a copied link is an ordinary URL.
- */
+/** Navigate to an in-app route. */
 export const go = (to) => {
   const path = String(to || '/') || '/';
   if (path === currentPath()) return;
@@ -308,8 +263,6 @@ function currentPath() {
 
 /** Whether the chosen measure orders anything on the page being rendered. */
 function measureRanksSomething(path, params) {
-  // Overview lost its ranked pairs table when it became an operator page, and
-  // the bar stayed behind ordering nothing.
   if (path === '/') return false;
   if (/^\/repos\/\d+$/.test(path)) {
     return ['overview', 'pairs'].includes(params.tab || 'files');
@@ -326,18 +279,12 @@ let navToken = 0;
 async function route() {
   const raw = currentPath();
   const [rawPath, qs] = raw.split('?');
-  // "/repos/4/tree/" and "/repos/4/tree" are the same address. Normalising here
-  // means no route pattern has to tolerate it, and the address bar is tidied to
-  // match without a history entry.
   const path = rawPath.length > 1 ? rawPath.replace(/\/+$/, '') || '/' : rawPath;
   if (path !== rawPath) {
     window.history.replaceState({}, '', path + (qs ? `?${qs}` : ''));
   }
   const params = Object.fromEntries(new URLSearchParams(qs || ''));
 
-  // The measure bar ranks pairs. On a risk table, an ingest log or a list of
-  // repositories it ranks nothing, and reads as a stray control the reader has
-  // to wonder about -- so it appears only where changing it changes the page.
   const bar = document.getElementById('measure-bar');
   if (bar) bar.hidden = !measureRanksSomething(path, params);
 
@@ -352,8 +299,6 @@ async function route() {
   const view = $('#view');
   const token = ++navToken;
 
-  // The door, if this deployment has one. Rendered in place of any view, so a
-  // deep link is remembered: signing in continues to where you were going.
   if (state.needsSetup || (state.authRequired && !state.me)) {
     document.body.classList.add('gated');
     settled();
@@ -367,8 +312,6 @@ async function route() {
     const match = path.match(rx);
     if (!match) continue;
     const args = Object.fromEntries(keys.map((k, i) => [k, decodeURIComponent(match[i + 1])]));
-    // A view that arrives within a blink should not flash a spinner at the
-    // reader; one that takes longer should say something. The bar waits.
     const slow = setTimeout(() => token === navToken && progress(true), 140);
     try {
       const node = await handler(args, params);
@@ -387,9 +330,6 @@ async function route() {
       settled();
       if (token !== navToken) return;
       if (err.signedOut) {
-        // Expired, revoked, or signed out in another tab. Re-read the state and
-        // show the door rather than "could not load this view", which is true
-        // and useless.
         await loadMe();
         paintProfile();
         return route();
@@ -408,16 +348,10 @@ async function route() {
   view.replaceChildren(notFound(`No view for ${path}`));
 }
 
-/* The splash covers the first paint, when the script has not run and the first
-   query has not returned. It is removed by the first view that renders --
-   success or failure -- so a broken deployment shows its error rather than an
-   animation that never ends. */
 function settled() {
   const splash = document.getElementById('splash');
   if (!splash || splash.classList.contains('gone')) return;
   splash.classList.add('gone');
-  // Removed rather than left hidden: it is fixed and full-screen, and a stray
-  // overlay that stops swallowing clicks only because of a class is fragile.
   setTimeout(() => splash.remove(), 400);
 }
 
@@ -443,7 +377,6 @@ function progress(on) {
 const notFound = (detail) =>
   h('div', { class: 'empty' }, h('strong', {}, 'Not found'), detail);
 
-/* -------------------------------------------------- shared components -- */
 
 export const crumbs = (...items) =>
   h(
@@ -456,10 +389,6 @@ export const crumbs = (...items) =>
   );
 
 
-/* An account owns repositories; a repository owns files and directories. The
-   trail starts at whichever rung is known: without the account the reader
-   cannot climb past a flat list of every repository in the corpus. Accounts are
-   fetched once and reused -- a breadcrumb should not cost a request per page. */
 let _accountsOnce = null;
 const allAccounts = () => {
   if (!_accountsOnce) {
@@ -476,15 +405,10 @@ const repoById = (id) => {
 
 async function repoTrail(input) {
   const trail = [];
-  // A caller with only an id gets the rest looked up, so every page can build
-  // the same trail without carrying repository fields it does not otherwise need.
   const repo = input && input.id && !input.name
     ? { ...((await repoById(input.id)) || {}), ...input }
     : input;
   let accountId = repo && (repo.account_id ?? repo.accountId);
-  // Most endpoints return the repository id but not its account. Rather than
-  // widen every one of them, resolve it here -- cached, so a breadcrumb costs
-  // at most one request per repository per session.
   if (accountId == null && repo && repo.id) {
     accountId = (await repoById(repo.id))?.account_id ?? null;
   }
@@ -500,10 +424,6 @@ async function repoTrail(input) {
   return trail;
 }
 
-/* A path that names a repository the entity does not belong to is worse than no
-   path at all: it reads as authoritative and is wrong. Ids are globally unique,
-   so the view still renders the right thing -- the address is quietly corrected
-   to match, without a history entry, so Back still goes where it should. */
 function canonicalise(expectedPath) {
   const [current] = currentPath().split('?');
   if (current !== expectedPath) {
@@ -530,14 +450,7 @@ export const statTile = (label, value, meta, onclick) =>
     meta ? h('div', { class: 'stat-meta' }, meta) : null,
   );
 
-/**
- * A titled panel.
- *
- * `to` makes the whole card a way in: a summary always has a fuller view
- * behind it, and a reader who wants it should not have to find a separate
- * link. Clicking anything inside that already navigates -- a table row, a bar
- * -- wins, so the card's own target is the fallback rather than an override.
- */
+/** A titled panel. */
 export const card = (title, body, sub, headExtra, to) =>
   h(
     'div',
@@ -547,8 +460,6 @@ export const card = (title, body, sub, headExtra, to) =>
       tabindex: to ? '0' : null,
       onclick: to
         ? (e) => {
-            // The card is itself `.is-link`, so the match has to be something
-            // strictly inside it.
             const inner = e.target.closest('a,button,.is-link');
             if (!inner || inner === e.currentTarget) go(to);
           }
@@ -564,13 +475,7 @@ export const card = (title, body, sub, headExtra, to) =>
     h('div', { class: 'card-body flush' }, body),
   );
 
-/**
- * Build a sortable, clickable data table.
- *
- * @param {object[]} rows   data rows
- * @param {object[]} cols   {key, label, num, render, sort, width}
- * @param {object}   opts   {onRow, empty, initialSort, desc}
- */
+/** Build a sortable, clickable data table. */
 export function dataTable(rows, cols, opts = {}) {
   const wrap = h('div', { class: 'table-wrap' });
   if (!rows || !rows.length) {
@@ -635,9 +540,6 @@ export function dataTable(rows, cols, opts = {}) {
 
     tbody.replaceChildren(
       ...data.map((row) => {
-        // Only rows that actually go somewhere are marked as links. Every row
-        // used to carry a handler and a pointer cursor whether or not one was
-        // given, so a table that led nowhere looked exactly like one that did.
         const tr = h('tr', opts.onRow ? {
           class: 'is-link',
           onclick: (ev) => {
@@ -683,22 +585,8 @@ export function scoreCell(value, spec) {
   );
 }
 
-/* ========================================================================
-   Views
-   ======================================================================== */
 
-/* ------------------------------------------------------------ overview -- */
 
-/* Overview answers one question: is this deployment healthy, and is anything
-   using it? Everything that was a worse copy of another tab is gone -- the
-   repository list belongs to Repositories, the mining figures to Insights, the
-   run history to Jobs, and the shortcut buttons duplicated the nav one line
-   above. What is left is corpus scale, ingest health, and activity. */
-/* Every distribution defined once: how to shape the rows, how to scale them,
-   what the chart is saying, and where a bucket leads when it maps to something
-   the reader can open. Overview draws these small; /insights/shape/:metric
-   draws the same definition at full size with a table of every bucket. Two
-   copies of this would drift, and the small one would start lying. */
 const SHAPE = {
   commits_by_year: {
     title: 'Commits per year',
@@ -837,30 +725,9 @@ const SHAPE = {
 };
 
 /** One distribution, drawn at whatever size the caller has room for. */
-/**
- * `values` says whether there is room for a number above each column, which is
- * a question about width and therefore about the caller: a card gives 32px a
- * column, a half-width panel 31 to 55, and the full view 66. Guessing it from
- * the row count alone drew 21 numbers into 31px and clipped every one.
- */
-/**
- * One distribution, drawn.
- *
- * `drill` decides who owns a click on a bar. Inside a card that opens the full
- * distribution the answer is the card: a preview is a picture of a whole, and
- * clicking part of it should show the whole rather than jump sideways to a
- * filtered repository list. The languages card sat on Overview with its arrow
- * going to the distribution and its bars going to `/repos?lang=…`, so the same
- * card had two destinations depending on where in it you clicked.
- *
- * At `/insights/shape/:metric` the whole is already on screen, so there a bar
- * drills into what it counts.
- */
+/** `values` says whether there is room for a number above each column, which is a question about width and therefore about the caller: a card gives 32px a column, a half-width panel 31 to 55, and the full view 66. */
+/** One distribution, drawn. */
 function shapeChart(spec, rows, { small = true, values, drill = false } = {}) {
-  // Five horizontal rows is what a card holds: each is about 21px and the body
-  // is 124px less its padding. Six were drawn and the last was sliced in half
-  // by the card's own clipping, which is worse than aggregating it away. The
-  // full view has room for every one.
   const cap = spec.kind === 'hbar' ? 4 : spec.limit;
   const shown = small && cap && rows.length > cap
     ? [...rows.slice(0, cap), {
@@ -892,9 +759,6 @@ on('/', async () => {
   wrap.append(pageHead('Overview',
     'The state of the corpus and of the deployment serving it.'));
 
-  // Every figure opens the thing it counts, or the distribution behind it.
-  // A number with no way in is a dead end, and these are the first eight a
-  // reader sees.
   wrap.append(h('div', { class: 'section-title' }, 'Data'));
   wrap.append(h('div', { class: 'grid grid-stats' },
     statTile('Repositories', num(ov.repos), `${num(ov.repos_ready)} ready · ${num(ov.repos_failed)} failed`,
@@ -915,7 +779,6 @@ on('/', async () => {
     statTile('File changes', num(ov.file_changes), 'atomic (commit \u00d7 file) facts',
              () => go('/insights/shape/commit_width'))));
 
-  // ---- ingest health ------------------------------------------------------
   const rows = runs.runs || [];
   const last = rows[0];
   const failing = rows.filter((r) => r.status === 'failed').length;
@@ -937,11 +800,6 @@ on('/', async () => {
       h('strong', {}, 'The last ingest failed. '), last.error || 'See Jobs for the detail.'));
   }
 
-  // ---- who is calling -----------------------------------------------------
-  // ---- the shape behind the headline numbers ------------------------------
-  // Eight questions an operator has before trusting anything derived from this.
-  // Each card states its own answer and opens the full chart, where every
-  // bucket is listed with its count rather than squeezed into a card.
   wrap.append(h('div', { class: 'section-title' }, 'Shape of the data',
     h('a', { class: 'section-more', href: '/insights/shape', 'data-nav': true }, 'all eight in full \u2192')));
 
@@ -980,8 +838,6 @@ on('/', async () => {
     statTile('Median', c.p50_ms == null ? '\u2014' : `${c.p50_ms}ms`,
              c.p95_ms == null ? 'no calls recorded' : `p95 ${c.p95_ms}ms`, () => go('/activity'))));
 
-  // Capped: the full ranking runs to fifty rows and 1800 pixels, which is a
-  // page of its own, not a summary. Activity holds it.
   const ranked = (activity.by_name || []).slice()
     .sort((a, b) => (b.calls || 0) - (a.calls || 0)).slice(0, 8);
   wrap.append(card('Most-called', dataTable(ranked, [
@@ -1023,8 +879,6 @@ const reposView = async (args, params) => {
 
   const wrap = h('div');
   if (account) {
-    // An account owns repositories, so this is a rung of the hierarchy rather
-    // than a filtered list that happens to look like one.
     wrap.append(crumbs(['Sources', '/sources'], [account.login]));
     wrap.append(pageHead(`${account.login} repositories`,
       `${repos.count} of the ${account.kind === 'org' ? 'organisation' : 'user'}'s repositories are scanned`));
@@ -1032,9 +886,6 @@ const reposView = async (args, params) => {
     wrap.append(pageHead('Repositories', `${repos.count} repositories in the corpus`));
   }
 
-  // The filter runs against `full_name`, which is `owner/name` -- so typing a
-  // source name finds everything under it, and the placeholder says so rather
-  // than leaving the reader to discover it.
   const search = h('input', {
     class: 'input',
     type: 'search',
@@ -1079,15 +930,6 @@ const reposView = async (args, params) => {
     ),
   );
 
-  /* Grouped by source, never one flat list. A repository is *in* an account --
-     that is the rule the whole information architecture runs on -- and 240
-     undifferentiated rows make the corpus look like a bag of names. Two owners
-     can also share a name across hosts, so the group is (owner, host).
-
-     Collapsed by default because most owners hold one or two repositories:
-     sixty-six open cards would be worse than the flat list, while sixty-six
-     summary lines are an index you can read. Filtering opens what matches, so
-     a search never hides its own results behind a disclosure triangle. */
   const cols = [
     { key: 'name', label: 'Repository', render: (r) => h('div', {},
         h('span', { class: 'mono', style: 'font-weight:550' }, r.name),
@@ -1121,11 +963,6 @@ const reposView = async (args, params) => {
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(r);
   }
-  /* Groups are ordered by whatever the reader is sorting on, not always by
-     commits: Overview's "Files tracked" tile opens `?order_by=file_count`
-     meaning *show me the biggest*, and a group order fixed to commits answers
-     a question nobody asked. Counts sum across the group; dates take the most
-     recent, since a group is as fresh as its freshest repository. */
   const SUMMED = new Set(['commit_count', 'file_count', 'pair_count', 'author_count',
                           'stargazers', 'disk_usage_kb', 'total_insertions']);
   const LATEST = new Set(['last_commit_at', 'github_pushed_at', 'last_ingest_at']);
@@ -1148,20 +985,12 @@ const reposView = async (args, params) => {
       ? a.owner.localeCompare(b.owner)
       : b.rank - a.rank || b.rows.length - a.rows.length));
 
-  // A filter is a search: what it finds should be open, not hidden one click
-  // further in.
   const filtering = Boolean(params.q || params.lang || params.status);
-  // Arriving on an explicit ranking -- from a tile that counted something --
-  // the leader is the answer, so it is open on arrival.
   const ranking = Boolean(params.order_by);
 
   wrap.append(h('div', { class: 'section-title' },
     `${num(repos.count)} repositories across ${num(ordered.length)} sources`));
 
-  // One list, not sixty-six stacked blocks. The page rhythm is 16px between
-  // blocks; items *within* a list are tighter, and that is a real distinction
-  // rather than an exception -- so the list is one block and its own spacing is
-  // its own business.
   const list = h('div', { class: 'repo-groups' });
   wrap.append(list);
 
@@ -1184,8 +1013,6 @@ const reposView = async (args, params) => {
                      onclick: (e) => e.stopPropagation() }, 'open source \u2192')
           : null),
       body);
-    // Built on first open: sixty-six tables rendered up front is a lot of DOM
-    // for a page where most stay shut.
     const build = () => {
       if (built) return;
       built = true;
@@ -1272,8 +1099,6 @@ on('/repos/:id', async ({ id }, params) => {
     ),
   );
 
-  // Tabs are what is *in* the repository. Every analysis derived from it lives
-  // under Insights, scoped -- so no question has two homes.
   const tabs = h(
     'div',
     { class: 'tabs' },
@@ -1339,14 +1164,10 @@ async function repoImpactGraphView(params) {
   const minScore = Number(params.min || 0.4);
   const data = await api('/api/impact/graph', { min_score: minScore, limit: 600 });
 
-  // The same frame as every other Insights section, so the tab bar does not
-  // vanish when the graph switches from files to repositories.
   const wrap = await insightsShell('graph', null);
   wrap.append(
     h('div', { class: 'toolbar' },
       h('button', { class: 'btn primary' }, 'All repositories'),
-      // Zooming to files needs a repository, and Scope is where one is chosen;
-      // a link here with nothing scoped would land back on this same view.
       h('span', { class: 'card-sub' },
         'Choose a repository in Scope to zoom to its files.'),
       h('span', { class: 'spacer' }),
@@ -1429,10 +1250,6 @@ const fileTable = (rows, empty) => dataTable(
   { initialSort: 'change_count', onRow: (f) => go(`/repos/${f.repo_id}/files/${f.path}`), empty },
 );
 
-/* Links to every analysis of one repository. They are links rather than tabs
-   because the answers live under Insights: a tab that navigates elsewhere is a
-   lie about where you are, and two homes for one question is what made the
-   navigation feel scattered. */
 const analyseBar = (repoId) =>
   h('div', { class: 'toolbar' },
     h('span', { class: 'card-sub' }, 'Analyse:'),
@@ -1444,10 +1261,6 @@ const analyseBar = (repoId) =>
       ['De-facto modules', `/insights/modules?repo=${repoId}`],
     ].map(([label, href]) => h('a', { class: 'btn', href, 'data-nav': true }, label)));
 
-/* Folders and files as rows of one table, so a repository is browsed the way it
-   is laid out. Sorting by churn floats the busiest folder to the top, which is
-   how you would actually hunt; folders aggregate their subtree, so they tend to
-   sort above the files beside them without needing to be pinned there. */
 const treeTable = (repoId, tree) => dataTable(
   [
     ...tree.directories.map((d) => ({
@@ -1485,13 +1298,7 @@ const treeTable = (repoId, tree) => dataTable(
   },
 );
 
-/**
- * The contents of one directory, with a search that escapes it.
- *
- * Descending a level at a time is tedious on a deep tree -- closure-compiler
- * has paths ten segments long -- so searching switches to flat results across
- * the whole subtree rather than filtering the current level only.
- */
+/** The contents of one directory, with a search that escapes it. */
 async function treePanel(repoId, path, params) {
   const box = h('div');
   const term = params.f || '';
@@ -1523,9 +1330,6 @@ async function treePanel(repoId, path, params) {
       `${tree.directories.length} folders, ${tree.files.length} files`)));
   box.append(card(path || 'Repository root', treeTable(repoId, tree)));
 
-  // Directory-level coupling is computed independently of the file level, so it
-  // is an answer about *this* folder and belongs on its page rather than in a
-  // separate list of every directory in the repository.
   if (tree.directory) {
     const coupled = await api(`/api/directories/${tree.directory.id}/coupled`,
                               { measure: state.measure, limit: 30 });
@@ -1551,8 +1355,6 @@ async function treePanel(repoId, path, params) {
 }
 
 function metadataPanel(repo) {
-  // Facts about the repository, several of which are ways out: the fork's
-  // parent, the language, and the repository itself on GitHub.
   const rows = [
     ['Full name', repo.html_url
       ? h('a', { href: repo.html_url, target: '_blank', rel: 'noopener' }, repo.full_name)
@@ -1591,8 +1393,6 @@ function metadataPanel(repo) {
   ];
   const dl = h('dl', { class: 'kv' });
   for (const [k, v] of rows) {
-    // Elements pass through: several of these values are links, and String()
-    // turned them into "[object HTMLAnchorElement]".
     const value = v === null || v === undefined ? '—'
       : (v instanceof window.Node ? v : String(v));
     dl.append(h('dt', {}, k), h('dd', {}, value));
@@ -1600,12 +1400,7 @@ function metadataPanel(repo) {
   return h('div', { class: 'grid grid-2' }, card('Repository metadata', h('div', { class: 'card-body' }, dl)));
 }
 
-/* ---------------------------------------------------------- file detail -- */
 
-/* Addressed by path under its repository, so the URL says where the file lives
-   and survives a re-ingest. Renames resolve through the alias table, so a link
-   to a path that has since moved still lands on the file it became -- and the
-   address is then corrected to the current path. */
 on('/repos/:repo/files/*path', async ({ repo, path }, params) => {
   const tab = params.tab || 'coupled';
   const repoId = Number(repo);
@@ -1756,7 +1551,6 @@ on('/repos/:repo/files/*path', async ({ repo, path }, params) => {
   return wrap;
 });
 
-/* ---------------------------------------------------------- pair detail -- */
 
 on('/repos/:repo/pairs/:a/:b', async ({ a, b }) => {
   const [detail, commits] = await Promise.all([
@@ -1865,9 +1659,6 @@ on('/repos/:repo/pairs/:a/:b', async ({ a, b }) => {
   wrap.append(
     card(
       (() => {
-        // A commit above the fan-out cap changed both files but contributed to
-        // no statistic. Saying so is the difference between evidence and a
-        // number that quietly disagrees with the table above it.
         const shown = commits.commits.length;
         const uncounted = commits.commits.filter((c) => c.counted === false).length;
         const total = detail.n_ab || 0;
@@ -1941,11 +1732,7 @@ function measuresTable(detail) {
   );
 }
 
-/* ----------------------------------------------------- directory detail -- */
 
-/* A folder inside a repository. The path is in the URL rather than a directory
-   id because ids renumber on a re-ingest: a link keyed on one silently comes to
-   mean a different folder, which is worse than failing. */
 on('/repos/:repo/tree/*path', async ({ repo, path }, params) => {
   const repoId = Number(repo);
   const clean = path.replace(/^\/+|\/+$/g, '');
@@ -1963,8 +1750,6 @@ on('/repos/:repo/tree/*path', async ({ repo, path }, params) => {
   return wrap;
 });
 
-// The repository root is a folder too, but it already has an address: the
-// repository itself. Redirect rather than render it twice.
 on('/repos/:repo/tree', ({ repo }) => {
   go(`/repos/${repo}?tab=files`);
   return h('div');
@@ -1979,13 +1764,6 @@ const folderTrail = (repoId, path) => {
   ]);
 };
 
-/* Both graphs live here: files within one repository, and repositories across
-   the corpus. Neither owns data -- each draws couplings computed elsewhere --
-   but drawing them is a question in its own right, so it is a section rather
-   than a button hidden on a page. */
-/* Every distribution at full size. The card on Overview is a thumbnail of the
-   same definition; this is where there is room to show each bucket with its
-   count, and to say what the chart is actually claiming. */
 on('/insights/shape', async () => {
   const shape = await api('/api/overview/shape');
   const wrap = await insightsShell('shape', null, [], null, { scoped: false });
@@ -2014,10 +1792,6 @@ on('/insights/shape/:metric', async ({ metric }) => {
                       'Open the full analysis')] : []),
     { scoped: false });
 
-  // No stat strip here: buckets, total, largest and scale are all already on
-  // the chart or in the table below it, and a figure that opens nothing is a
-  // dead end. Restating them would be decoration standing between the reader
-  // and the diagram they came for.
 
   wrap.append(card(spec.title,
     h('div', { class: 'card-body' }, shapeChart(spec, rows, { small: false, drill: true })),
@@ -2044,8 +1818,6 @@ on('/insights/shape/:metric', async ({ metric }) => {
 });
 
 on('/insights/graph', async (_args, params) => {
-  // No repository chosen means the question is about the corpus, so that is
-  // what is drawn. Choosing one in Scope zooms to its files.
   if (params.mode === 'repos' || (!params.repo && params.mode !== 'files')) {
     return repoImpactGraphView(params);
   }
@@ -2134,13 +1906,7 @@ on('/insights/graph', async (_args, params) => {
   return wrap;
 });
 
-/* ------------------------------------------------------------- measures -- */
 
-/* Activity: every call this deployment served, and what it returned.
-   The drill-down the rest of the app has -- a ranking, then a list, then the
-   thing itself -- applied to traffic: Overview ranks tools, this lists their
-   calls, and one call opens the arguments it was given and the reply that went
-   back. */
 on('/activity', async (_args, params) => {
   const surface = params.surface || '';
   const status = params.status || '';
@@ -2166,8 +1932,6 @@ on('/activity', async (_args, params) => {
   wrap.append(pageHead('Activity',
     'Every call served, what it was asked, and what went back. Kept for 30 days.'));
 
-  // Each figure is a filter of the list below it, so a number leads to the
-  // calls it counts rather than being read and left.
   const filtered = (over) => () => {
     const q = new URLSearchParams(params);
     for (const [k, v] of Object.entries(over)) { if (v) q.set(k, v); else q.delete(k); }
@@ -2196,9 +1960,6 @@ on('/activity', async (_args, params) => {
     onclick: () => {
       const p = new URLSearchParams(params);
       if (value) p.set(key, value); else p.delete(key);
-      // A tool name belongs to one surface, so keeping it while switching
-      // surface asks for MCP calls to an HTTP route and returns nothing --
-      // which reads as the filter being broken rather than empty.
       if (key === 'surface') p.delete('name');
       go(`/activity${p.toString() ? '?' + p : ''}`);
     },
@@ -2360,7 +2121,6 @@ on('/measures', async () => {
   return wrap;
 });
 
-/* ----------------------------------------------------------------- jobs -- */
 
 on('/jobs', async (_args, params) => {
   const tab = params.tab || 'runs';
@@ -2396,12 +2156,6 @@ on('/jobs', async (_args, params) => {
   return wrap;
 });
 
-/* Operational settings, editable here rather than only in .env, because a
-   deployment that has to be restarted to be slowed down will not be slowed
-   down. Anything that changes what the numbers *mean* -- pair support, rename
-   similarity, the measure set -- stays in the environment on purpose: it is
-   versioned with the deployment, and must not differ between two readings of
-   the same table. Those are shown, clearly, as read-only. */
 async function settingsPanel(cfg) {
   const box = h('div');
   const { settings } = await api('/api/settings');
@@ -2454,7 +2208,6 @@ async function settingsPanel(cfg) {
   box.append(card('Schedules', h('div', { class: 'card-body' }, ...rows),
     'Stored in the database and picked up within a minute — no restart, no redeploy.'));
 
-  // --- the token ---------------------------------------------------------
   const tok = cfg.github_token || {};
   box.append(card('GitHub token',
     h('div', { class: 'card-body' },
@@ -2480,7 +2233,6 @@ async function settingsPanel(cfg) {
         'database, and would silently diverge from the value the host rotates.')),
     'Read from the environment or a host-managed file'));
 
-  // --- who may read this deployment --------------------------------------
   const admin = state.me && state.me.role === 'admin';
   const access = (await api('/api/settings').catch(() => ({}))).access || {};
   const modeRow = (surface, title, note) => {
@@ -2514,7 +2266,6 @@ async function settingsPanel(cfg) {
     'Applies to the next request — nothing restarts',
     h('a', { class: 'btn', href: '/people', 'data-nav': true }, 'People')));
 
-  // --- what is deliberately not editable ---------------------------------
   const fixed = [
     ['Max files per commit', cfg.max_files_per_commit, 'a commit touching more is not paired'],
     ['Min pair support', cfg.min_pair_support, 'co-changes before a pair is stored'],
@@ -2574,7 +2325,6 @@ on('/jobs/:id', async ({ id }) => {
   return wrap;
 });
 
-/* ------------------------------------------------------------- omnibox -- */
 
 function debounce(fn, ms) {
   let t;
@@ -2680,7 +2430,6 @@ function wireOmnibox() {
   });
 }
 
-/* ---------------------------------------------------------------- boot -- */
 
 function paintFooter(ov) {
   if (!ov) return;
@@ -2698,9 +2447,6 @@ function wireTheme() {
   });
 }
 
-// Intercept in-app links so navigation stays client-side. Anything marked
-// data-nav is an internal route; everything else (API docs, GitHub) is left to
-// the browser.
 document.addEventListener('click', (e) => {
   const link = e.target.closest('a[data-nav]');
   if (!link) return;
@@ -2711,8 +2457,6 @@ document.addEventListener('click', (e) => {
   go(href);
 });
 
-/* Everyone may see who has access -- it is a shared dashboard, and knowing who
-   else reads it is part of using it. Only an administrator may change it. */
 on('/people', async () => {
   const [data, cfg] = await Promise.all([
     api('/api/users'),
@@ -2824,9 +2568,6 @@ function peopleActions(u) {
     }, 'Remove'));
 }
 
-/* A token is a person's key: it carries their identity and role, does exactly
-   what they can do, and stops working when their account does. Anyone may make
-   one -- an agent calling the API is the person who set it up. */
 on('/tokens', async () => {
   const data = await api('/api/auth/tokens');
   const wrap = h('div');
@@ -2899,15 +2640,6 @@ const tokenTable = (tokens) => dataTable(tokens || [], [
     }, 'Revoke') },
 ], { initialSort: 'created_at', empty: 'No tokens yet.' });
 
-/* ==========================================================================
-   Who is signed in
-
-   Everything here is derived from public repositories, but the deployment is
-   not: it says which repositories an organisation tracks, where its coupling
-   is weakest, and which files one person alone understands. So there is a door
-   -- and an administrator may leave it open, because a laptop demo and a
-   shared internal dashboard are different things.
-   ========================================================================== */
 
 /** The mark, at whatever size the caller wants. Shared by splash and sign-in. */
 const brandMark = (px) => {
@@ -2938,13 +2670,7 @@ function gateField(label, attrs, hint) {
   return node;
 }
 
-/**
- * The sign-in screen, and the first-run screen that creates the first
- * administrator.
- *
- * One component for both because they differ by two fields and a verb, and two
- * near-identical forms drift.
- */
+/** The sign-in screen, and the first-run screen that creates the first administrator. */
 function gate({ setup = false, minted = true } = {}) {
   const email = gateField('Email', { type: 'email', autocomplete: 'username',
                                      placeholder: 'you@example.com', required: true });
@@ -2953,9 +2679,6 @@ function gate({ setup = false, minted = true } = {}) {
     { type: 'password', autocomplete: setup ? 'new-password' : 'current-password',
       placeholder: setup ? `at least ${12} characters` : '', required: true },
     setup ? 'You will be the administrator: only you can add other people.' : null);
-  // Nothing is signed in yet, so this screen is by necessity reachable by
-  // anyone who reaches the port. The token is what makes reaching it first
-  // insufficient.
   const token = gateField('Setup token',
     { autocomplete: 'off', spellcheck: 'false', class: 'input mono',
       placeholder: 'paste it here', required: true },
@@ -2980,8 +2703,6 @@ function gate({ setup = false, minted = true } = {}) {
             password: password.input.value, setup_token: token.input.value.trim() }
         : { email: email.input.value, password: password.input.value };
       await apiSend('POST', setup ? '/api/auth/setup' : '/api/auth/login', body);
-      // Re-read rather than trusting the reply: this is the same call every
-      // later page makes, so if it disagrees the problem shows up here.
       await loadMe();
       paintProfile();
       route();
@@ -2998,9 +2719,6 @@ function gate({ setup = false, minted = true } = {}) {
 
   setTimeout(() => email.input.focus(), 40);
 
-  // Two halves: what this is, and the way in. The left side is the only place
-  // in the app with room to say what the product does, and a person signing in
-  // to someone else's deployment has usually never been told.
   return h('div', { class: 'gate' },
     h('div', { class: 'gate-panel' },
       h('div', { class: 'gate-aside' },
@@ -3014,9 +2732,6 @@ function gate({ setup = false, minted = true } = {}) {
             h('li', {}, h('b', {}, 'Coupling'), ' — files that move together, ranked by 31 measures'),
             h('li', {}, h('b', {}, 'Across repositories'), ' — every edge backed by a manifest or a bump'),
             h('li', {}, h('b', {}, 'Measured'), ' — every prediction scored against the commits before it')),
-          // Facts about the product, not about this corpus: the figures for
-          // this deployment need a session to read, and a hard-coded "163
-          // repositories" would be a false claim on anyone else's.
           h('div', { class: 'gate-figure' },
             h('span', {}, '29'), ' association measures · ',
             h('span', {}, 'prequential'), ' backtesting · ',
@@ -3041,8 +2756,6 @@ async function loadMe() {
     state.setupTokenMinted = me.setup_token_minted !== false;
     state.authRequired = me.auth_required;
   } catch {
-    // The API is unreachable. Let the view report that rather than showing a
-    // sign-in form for a server that cannot check one.
     state.me = null;
     state.needsSetup = false;
     state.authRequired = false;
@@ -3050,10 +2763,6 @@ async function loadMe() {
   return state.me;
 }
 
-/* Registered once, at module scope. Doing it inside paintProfile added a
-   listener per call -- and that runs on boot, on sign-in, on sign-out and on
-   every 401 -- each closure holding a menu element that had already been
-   replaced. */
 document.addEventListener('click', () => {
   const menu = document.querySelector('.profile-menu');
   if (menu) menu.hidden = true;
@@ -3098,8 +2807,6 @@ function paintProfile() {
 async function boot() {
   wireTheme();
   wireOmnibox();
-  // Before the catalogue, before the footer: every other call needs to know
-  // whether there is a door, and a 401 storm at boot is not a diagnosis.
   await loadMe();
   paintProfile();
   if (state.needsSetup || (state.authRequired && !state.me)) {
@@ -3122,19 +2829,8 @@ async function boot() {
 
 boot();
 
-/* ========================================================================
-   Cross-repository: impact, chains, evidence tiers
-   ======================================================================== */
 
-/**
- * Render the evidence tier for a cross-repo edge.
- *
- * Both tiers are evidence: a dependency declared in a manifest, or a version
- * bump observed and resolved to the upstream commit it consumed. They were
- * measured at AUC 0.88 in sample against real dependency propagation. Tier is
- * always rendered rather than inferred from the score, because the score mixes
- * both and a reader cannot recover which from a number.
- */
+/** Render the evidence tier for a cross-repo edge. */
 const tierBadge = (row) => {
   if (row.is_declared)
     return h('span', { class: 'tier tier-declared', title: 'Declared dependency — validated tier (AUC 0.88 in sample, 0.69 held out)' },
@@ -3142,8 +2838,6 @@ const tierBadge = (row) => {
   if (row.has_bump_history)
     return h('span', { class: 'tier tier-bump', title: 'Observed manifest bumps — ground truth' },
       h('i', { class: 'dot' }), 'bump-backed');
-  // Unreachable: every edge is written from a declared dependency or a bump.
-  // Rendered rather than thrown so a stale row is visible, not silently blank.
   return h('span', { class: 'tier', title: 'No evidence recorded — this should not occur' },
     h('i', { class: 'dot' }), 'no evidence');
 };
@@ -3217,9 +2911,6 @@ on('/insights/impact', async (_args, params) => {
   );
 
   if (!repoId) {
-    // There is no org-wide ranking here on purpose: an edge is a fact about
-    // one pair of repositories, read from a manifest or a bump, and averaging
-    // those into a league table says nothing a reader can act on.
     wrap.append(card('Pick a repository',
       h('div', { class: 'empty' },
         h('strong', {}, 'Choose a repository in Scope above.'),
@@ -3278,8 +2969,6 @@ on('/insights/impact', async (_args, params) => {
         { key: 'manifest', label: 'Manifest', render: (d) => h('span', { class: 'badge muted' }, d.manifest) },
         { key: 'dep_version', label: 'Version', render: (d) => h('span', { class: 'mono', style: 'font-size:11px' }, (d.dep_version || '').slice(0, 34)) },
       ], {
-        // Only a tracked dependency has somewhere to go; an external module is
-        // a name in a manifest and nothing more.
         onRow: (d) => d.dep_repo_id && go(`/repos/${d.dep_repo_id}`),
         empty: 'No manifest dependencies found.',
       }),
@@ -3296,7 +2985,6 @@ on('/insights/impact', async (_args, params) => {
   return wrap;
 });
 
-/* --------------------------------------------------- repo pair detail -- */
 
 on('/insights/impact/:a/:b', async ({ a, b }) => {
   const [depsA] = await Promise.all([
@@ -3324,8 +3012,6 @@ on('/insights/impact/:a/:b', async ({ a, b }) => {
       statTile('Rank', `#${edge.rank_in_source}`, `within ${repoA.name}`)));
   }
 
-  // Lag profile: two directional curves. If A precedes B, the forward curve
-  // sits above the reverse one — that visual gap IS the directional evidence.
   const bump = depsA.bumps.find((x) => String(x.dep_repo_id) === String(a));
   if (bump) {
     wrap.append(h('div', { class: 'help', style: 'margin-top:14px' },
@@ -3335,8 +3021,6 @@ on('/insights/impact/:a/:b', async ({ a, b }) => {
       `commit it consumed where that could be resolved.`));
   }
 
-  // The tiles above summarise; this is the thing they summarise. A count and a
-  // median say a relationship exists without ever saying when anything happened.
   const evidence = await api(`/api/repos/${b}/bumps/${a}`, { limit: 200 })
     .catch((e) => ({ bumps: [], __failed: String(e.message || e) }));
 
@@ -3379,11 +3063,6 @@ on('/insights/impact/:a/:b', async ({ a, b }) => {
   return wrap;
 });
 
-/* Insights is the analysis half of the application: everything derived from
-   history, as opposed to the things history is about, which live under
-   Repositories. Sections are path segments rather than a ?tab= parameter,
-   because cross-repo impact drills further -- to one edge, and to the graph --
-   and a query parameter cannot express where you are inside that. */
 const INSIGHT_SECTIONS = [
   ['graph', 'Map'],
   ['shape', 'Distributions'],
@@ -3393,11 +3072,7 @@ const INSIGHT_SECTIONS = [
   ['modules', 'De-facto modules'],
 ];
 
-/**
- * The frame every Insights section shares: trail, headline figures, the
- * section tabs and the scope selector. Scoped to a repository it is a rung of
- * the drill-down, so it breadcrumbs under that repository.
- */
+/** The frame every Insights section shares: trail, headline figures, the section tabs and the scope selector. */
 async function insightsShell(section, repoId, trail = [], head = null,
                              { scoped = true } = {}) {
   const [ov, repos] = await Promise.all([
@@ -3413,8 +3088,6 @@ async function insightsShell(section, repoId, trail = [], head = null,
   } else if (trail.length) {
     wrap.append(crumbs(['Insights', `/insights/${section}`], ...trail));
   }
-  // A section that is about one specific thing titles itself; the generic
-  // heading would otherwise sit above it and the page would carry two.
   wrap.append(head || pageHead('Insights', 'What history says about the code.'));
 
   const repoSel = repoSelect(repos.repos, {
@@ -3425,10 +3098,6 @@ async function insightsShell(section, repoId, trail = [], head = null,
   wrap.append(h('div', { class: 'tabs' }, ...INSIGHT_SECTIONS.map(([k, l]) =>
     h('button', { class: `tab${section === k ? ' active' : ''}`,
                   onclick: () => go(`/insights/${k}${repoId ? `?repo=${repoId}` : ''}`) }, l))));
-  // A section that reads corpus-wide aggregates has no scope to offer. Showing
-  // the selector anyway meant picking a repository navigated to ?repo=N, the
-  // section ignored it, and the control snapped back to "All repositories" --
-  // which reads as the page refusing the choice.
   wrap.append(scoped
     ? h('div', { class: 'toolbar' },
         h('div', { class: 'field' }, h('label', {}, 'Scope'), repoSel))
@@ -3440,23 +3109,16 @@ async function insightsShell(section, repoId, trail = [], head = null,
   return wrap;
 }
 
-/* Long explanations earn their place, but not above the thing they explain.
-   Collapsed by default: the reader who wants it opens it once. */
 const explainer = (summary, ...body) =>
   h('details', { class: 'explainer' }, h('summary', {}, summary),
     h('div', { class: 'help', style: 'margin:9px 0 0' }, ...body));
 
-// The map leads: a picture of the whole corpus is a better first answer than
-// a table that has to be configured before it says anything.
 on('/insights', (_args, params) => {
   const qs = params.repo ? `?repo=${params.repo}` : '';
   go(`/insights/graph${qs}`);
   return h('div');
 });
 
-/* One route for the three sections that are simply a table, so the tab bar can
-   build its links from INSIGHT_SECTIONS rather than each name being wired
-   twice. Cross-repo impact is registered above, and matches first. */
 on('/insights/:section', async ({ section }, params) => {
   if (!['risk', 'drift', 'modules'].includes(section)) {
     return notFound(`No insight called ${section}`);
@@ -3537,12 +3199,8 @@ on('/insights/:section', async ({ section }, params) => {
   return wrap;
 });
 
-/* ------------------------------------------------------------ accounts -- */
 
 /** Horizontal bars with the value in line. `rows` need `label` and `value`. */
-/* Position along the ramp, in degrees of hue. Teal through blue to violet: one
-   family, so a chart reads as a single object, but far enough apart that
-   neighbouring bars never blur together. */
 const ramp = (i, n) => 172 + (n > 1 ? (i / (n - 1)) * 96 : 0);
 
 function hbars(rows, { max = null, suffix = '', colour = true } = {}) {
@@ -3569,38 +3227,15 @@ const miniStat = (label, value, note) =>
     h('div', { class: 'ministat-label' }, label),
     note ? h('div', { class: 'ministat-note' }, note) : null);
 
-/* Charts, drawn as inline SVG. No library: the UI has no build step, and a
-   bar chart and a stacked bar are a few dozen lines each. Both scale to their
-   container so they survive a narrow window without a resize observer. */
 
 /** Hourly bars. `rows` need `label`, `value`, and optionally `alert`. */
-/**
- * A column chart, built from elements rather than SVG.
- *
- * The SVG version stretched a 100-unit viewBox to the card width with
- * `preserveAspectRatio="none"`, which scales text non-uniformly: every axis
- * label was drawn horizontally squashed. Elements avoid that entirely, and let
- * each column carry its own value where there is room for one.
- *
- * `scale: 'log'` for a heavy tail. These distributions are power laws -- half
- * the coupling pairs sit in the first bucket -- so on a linear axis one bar
- * fills the card and the rest are two pixels tall and indistinguishable. A log
- * axis shows the shape, and says so: read as linear, it makes the tail look far
- * bigger than it is.
- */
+/** A column chart, built from elements rather than SVG. */
 function barChart(rows, { label = 'calls', scale = 'linear', height = 66,
                          values = null } = {}) {
   const max = Math.max(1, ...rows.map((r) => r.value));
   const norm = scale === 'log'
     ? (v) => (v > 0 ? Math.log10(v + 1) / Math.log10(max + 1) : 0)
     : (v) => v / max;
-  // Room, measured rather than assumed: a value like "149.8k" needs about
-  // 42px, and at twelve columns in a card there are 23. Past that the numbers
-  // were drawn and then clipped, which is worse than not drawing them -- the
-  // full chart, one click away, has the room to show every one.
-  // Room, measured rather than assumed: "149.8k" needs about 42px, and twelve
-  // columns in a card leave 23. A caller with room says so rather than being
-  // held to the card's limit -- the full view has 200px a column.
   const wide = values === null ? rows.length <= 8 : values;
   const dense = rows.length > 12;
   const fmt = values === true && rows.length <= 9 ? num : numTight;
@@ -3612,9 +3247,6 @@ function barChart(rows, { label = 'calls', scale = 'linear', height = 66,
     onclick: r.to ? (e) => { e.stopPropagation(); go(r.to); } : null,
     style: `--i:${i}`,
   },
-    // Precision costs width: "142.9k" needs 38px and "143k" needs 26. Nine
-    // columns or fewer have the room even at half width; more do not, at any
-    // size this app draws.
     wide ? h('span', { class: 'cbar-value' }, fmt(r.value)) : null,
     h('span', { class: 'cbar-track' },
       h('span', {
@@ -3631,25 +3263,12 @@ function barChart(rows, { label = 'calls', scale = 'linear', height = 66,
         'Heights follow the logarithm of the count, so the small buckets stay '
         + 'visible. Do not read one bar as a multiple of another.' }, 'log') : null),
     h('div', { class: 'cbars', style: `--bar-h:${height}px` }, ...cols),
-    // The ends of a dense chart belong to the axis, not to a 11px column that
-    // clips them: "2026" was rendering as "026".
     dense ? h('div', { class: 'cbars-axis' },
       h('span', {}, rows[0].label),
       h('span', {}, rows[rows.length - 1].label)) : null);
 }
 
-/**
- * A dropdown you can type into.
- *
- * A native `select` cannot be searched, and the repository list is 164 long --
- * finding one meant scrolling past six accounts. This keeps the shape of a
- * select (a trigger showing the current value, a list below) and adds the one
- * thing missing.
- *
- * `items` are `{ value, label, group }`. It is a combobox in the ARIA sense,
- * so a keyboard reaches everything a mouse does: type to filter, arrows to
- * move, Enter to choose, Escape to close.
- */
+/** A dropdown you can type into. */
 function searchSelect(items, { selected = null, placeholder = 'Search…',
                                emptyLabel = null, onChange = null } = {}) {
   const all = emptyLabel
@@ -3677,8 +3296,6 @@ function searchSelect(items, { selected = null, placeholder = 'Search…',
 
   const paint = () => {
     const term = search.value.trim().toLowerCase();
-    // Match the group too: typing an account name should find its
-    // repositories, which is how someone looks for one they half-remember.
     visible = all.filter((i) => !term
       || i.label.toLowerCase().includes(term)
       || (i.group || '').toLowerCase().includes(term));
@@ -3754,15 +3371,7 @@ function searchSelect(items, { selected = null, placeholder = 'Search…',
   return root;
 }
 
-/**
- * A repository picker, grouped by the account that owns it.
- *
- * A repository name is unique only inside its account: two organisations can
- * each have a `guava`, and a flat list renders both as "guava" with no way to
- * tell which is which. The account is the group label, so the option carries
- * only the part that varies -- which is also how the rest of the application
- * addresses them, account then repository.
- */
+/** A repository picker, grouped by the account that owns it. */
 function repoSelect(repos, { selected = null, allLabel = 'All repositories',
                              onChange = null } = {}) {
   const byAccount = new Map();
@@ -3771,8 +3380,6 @@ function repoSelect(repos, { selected = null, allLabel = 'All repositories',
     if (!byAccount.has(owner)) byAccount.set(owner, []);
     byAccount.get(owner).push(r);
   }
-  // Accounts alphabetically, so a reader can find one; repositories within an
-  // account in the order given, which is busiest first.
   const groups = [...byAccount.entries()].sort((a, b) => a[0].localeCompare(b[0]));
 
   return searchSelect(
@@ -3789,10 +3396,6 @@ const field = (label, control, hint) =>
     control,
     hint ? h('div', { class: 'field-hint' }, hint) : null);
 
-/* "Account" reads as a login you sign in with, which is not what this is: it
-   is a place repositories come from, and one of them may be a self-hosted git
-   server with no accounts at all. The old path still resolves, because links
-   to it exist. */
 on('/accounts', () => { go('/sources'); return h('div'); });
 
 on('/sources', async () => {
@@ -3811,23 +3414,13 @@ on('/sources', async () => {
     statTile('Never scanned', num(rows.filter((r) => !r.last_discovered_at).length), 'awaiting first discovery'),
     statTile('Failing', num(rows.filter((r) => r.last_discover_error).length), 'last discovery errored')));
 
-  // ---- add by URL ---------------------------------------------------------
-  /* One field, because a person adding something has the URL in their
-     clipboard already. Decomposing it into a login, a kind, an allowlist and
-     three toggles is asking them to do work the string contains. */
   const url = h('input', {
     class: 'input mono', id: 'source-url', autocomplete: 'off', spellcheck: 'false',
     placeholder: 'https://github.com/microsoft/vscode',
   });
-  // Distinct from the confirm button the panel renders below it: both are
-  // primary buttons inside the same form, and a selector that cannot tell
-  // them apart is one a test -- or a keyboard user -- will get wrong.
   const submit = h('button', { class: 'btn primary', id: 'source-lookup' }, 'Look up');
   const panel = h('div', { class: 'resolve-panel', hidden: true });
 
-  /* Most sources are public, so the token field is hidden until it is the
-     answer to something: the reader asks for it, or a lookup came back
-     not-found, which is what a private repository looks like from outside. */
   const token = h('input', {
     class: 'input mono', id: 'source-token', type: 'password',
     autocomplete: 'off', spellcheck: 'false',
@@ -3847,24 +3440,11 @@ on('/sources', async () => {
     if (!tokenBox.hidden) token.focus();
   };
 
-  /* The picker. An owner is shown as a list to tick rather than added whole,
-     because "add microsoft" means 8,296 repositories and almost never means
-     what the person wanted. Forks and archived repositories are listed but
-     start unticked: a fork's history is its parent's, so tracking both files
-     every commit twice. */
   function picker(found) {
-    // With no list there is nothing to tick, so the only offer left is the
-    // whole owner -- which needs no list. Forcing the toggle on is the honest
-    // rendering of that: the choice really has collapsed to one.
     const blind = !found.repos.length;
-    // Every host returns a hundred at a time, so the rest arrive behind the
-    // reader while they are already looking at the first hundred. `rows` is
-    // the accumulator; `found.repos` is only ever page one.
     const rows = [...found.repos];
     let more = !!found.has_more;
     let loading = more;
-    // Keyed on `key`, the path under the owner, not on `name`: GitLab groups
-    // nest, so one owner can hold two projects called the same thing.
     const chosen = new Set(found.repos.filter((r) => r.suggested).map((r) => r.key));
     const everything = h('input', { type: 'checkbox', checked: blind, disabled: blind });
     const rowsBox = h('div', { class: 'pick-list' });
@@ -3902,8 +3482,6 @@ on('/sources', async () => {
         });
         return h('label', { class: `pick-row${r.already_tracked ? ' is-done' : ''}` },
           box,
-          // The key, not the name: two projects called `gitlab-runner` in
-          // different subgroups are indistinguishable by name alone.
           h('span', { class: 'pick-name mono', title: r.full_name }, r.key),
           h('span', { class: 'pick-meta' },
             r.language ? h('span', { class: 'badge muted' }, r.language) : null,
@@ -3921,11 +3499,6 @@ on('/sources', async () => {
 
     const note = h('div', { class: 'help', hidden: true });
 
-    /* Keep asking for the next page until the host says there is no more.
-       Sequential rather than parallel: the budget is per hour, and eighty-three
-       requests fired at once is how a host decides you are a robot. A page that
-       fails stops the walk and keeps what arrived -- a partial list somebody
-       can act on beats an error where a list was. */
     const loadRest = async () => {
       let page = found.page || 1;
       while (more && !cancelled) {
@@ -4038,13 +3611,8 @@ on('/sources', async () => {
       h('div', { class: 'form-actions' }, go));
   }
 
-  // The token that produced the panel now on screen, so confirming stores the
-  // one that actually worked rather than whatever the field holds afterwards.
   let lastToken = '';
 
-  /* A background page-walk outlives the panel that started it. Without this a
-     second lookup leaves the first still appending rows into a list nobody is
-     looking at, and still spending request budget on it. */
   let cancelled = false;
 
   const look = async () => {
@@ -4069,8 +3637,6 @@ on('/sources', async () => {
       panel.hidden = false;
     } catch (err) {
       const msg = String(err.message || err);
-      // "Nothing there" is what a private repository looks like from outside,
-      // so this is the moment the token field stops being clutter.
       if (/is private|nothing at/i.test(msg) && tokenBox.hidden) {
         tokenBox.hidden = false;
         token.focus();
@@ -4085,10 +3651,6 @@ on('/sources', async () => {
   submit.onclick = look;
   url.onkeydown = (e) => { if (e.key === 'Enter') look(); };
 
-  /* The button shares the input's line, so the hint has to sit outside the
-     field block: inside it, the block's bottom edge is the bottom of the hint
-     text, and anything aligned to that edge lands below the input rather than
-     beside it. */
   wrap.append(card('Add a source',
     h('div', { class: 'form' },
       h('div', { class: 'url-add' },
@@ -4103,7 +3665,6 @@ on('/sources', async () => {
       panel),
     'Nothing is added until you choose'));
 
-  // ---- existing accounts --------------------------------------------------
   const setEnabled = async (row, value) => {
     try {
       await apiSend('PATCH', `/api/accounts/${row.id}`, { enabled: value });
@@ -4155,8 +3716,6 @@ on('/sources', async () => {
       { key: 'login', label: 'Source', render: (r) => h('span', {},
           h('strong', {}, r.login),
           h('span', { class: 'badge muted', style: 'margin-left:6px' }, r.kind)) },
-      // The host earns a column now that a login is only unique within one:
-      // an internal GitLab group commonly carries the company's GitHub name.
       { key: 'host', label: 'Host', render: (r) => h('span', { class: 'mono', style: 'font-size:11px' },
           r.host || 'github.com') },
       { key: 'live_repo_count', label: 'Repos', num: true,
