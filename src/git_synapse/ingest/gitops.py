@@ -685,10 +685,3 @@ def repo_size_kb(path: Path) -> int:
     return total
 
 
-def remove_mirror(full_name: str, host: str = "github.com") -> bool:
-    """Delete a mirror from disk. Returns True if something was removed."""
-    path = mirror_path_for(full_name, host=host)
-    if path.exists():
-        shutil.rmtree(path)
-        return True
-    return False

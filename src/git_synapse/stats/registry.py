@@ -728,14 +728,3 @@ def resolve(key: str) -> MeasureSpec:
     return BY_KEY[canonical]
 
 
-def compute_all(t: Contingency, keys: tuple[str, ...] = ALL_KEYS) -> dict[str, np.ndarray]:
-    """Evaluate many measures over one contingency table in a single pass.
-
-    Args:
-        t: the contingency table (may hold millions of pairs).
-        keys: which measures to compute; defaults to every registered measure.
-
-    Returns:
-        Mapping of measure key to a float64 array aligned with ``t``.
-    """
-    return {key: BY_KEY[key].compute(t) for key in keys}

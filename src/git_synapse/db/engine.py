@@ -78,12 +78,6 @@ def schema_drift() -> int:
     return max(0, recorded - SCHEMA_VERSION) if recorded is not None else 0
 
 
-def schema_is_current() -> bool:
-    """Return whether this process's schema version is already recorded."""
-    recorded = recorded_schema_version()
-    return recorded is not None and recorded >= SCHEMA_VERSION
-
-
 def apply_schema(force: bool = False) -> None:
     """Create the canonical ORM metadata and record its version."""
     recorded = recorded_schema_version()

@@ -444,19 +444,3 @@ def split_path(path: str) -> tuple[str, str, str | None, int]:
     return dir_path, basename, extension, depth
 
 
-def ancestor_dirs(path: str, max_depth: int | None = None) -> list[str]:
-    """Every directory containing ``path``, from the repo root downward.
-
-    ``a/b/c.go`` yields ``["", "a", "a/b"]``. The empty string represents the
-    repository root, so root-level coupling is expressible too.
-    """
-    dir_path = split_path(path)[0]
-    out = [""]
-    if not dir_path:
-        return out
-    parts = dir_path.split("/")
-    if max_depth is not None:
-        parts = parts[:max_depth]
-    for i in range(1, len(parts) + 1):
-        out.append("/".join(parts[:i]))
-    return out

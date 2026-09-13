@@ -306,20 +306,6 @@ def test_a_changed_clone_mode_forces_a_re_clone(tmp_path, remote, monkeypatch):
         reset_config_cache()
 
 
-def test_remove_mirror_reports_whether_there_was_one(tmp_path, remote, monkeypatch):
-    _, bare = remote
-    monkeypatch.setenv("MIRROR_ROOT", str(tmp_path / "mirrors"))
-    from git_synapse.config import reset_config_cache
-
-    reset_config_cache()
-    try:
-        sync_mirror("t/gone", str(bare), blobless=False)
-        assert gitops.remove_mirror("t/gone") is True
-        assert gitops.remove_mirror("t/gone") is False
-    finally:
-        reset_config_cache()
-
-
 # ------------------------------------------------------- the leftover-state paths
 
 def test_a_stale_incoming_directory_is_cleared_before_cloning(tmp_path, remote):

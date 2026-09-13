@@ -185,11 +185,3 @@ def test_the_record_stream_survives_invalid_utf8():
     assert len(out) == 2
 
 
-def test_ancestor_directories_are_enumerated_to_the_root():
-    from git_synapse.ingest.parser import ancestor_dirs
-
-    # The repository root is an ancestor too, and directory rollups depend on
-    # it being counted.
-    assert ancestor_dirs("a/b/c/file.go") == ["", "a", "a/b", "a/b/c"]
-    assert ancestor_dirs("file.go") == [""]
-    assert ancestor_dirs("a/b/c/file.go", max_depth=2) == ["", "a", "a/b"]

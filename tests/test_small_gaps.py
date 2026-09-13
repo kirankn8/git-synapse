@@ -30,19 +30,6 @@ def test_a_scalar_contingency_has_scalar_shape():
 
 # --------------------------------------------------------------- registry
 
-def test_computing_a_named_subset_of_measures():
-    from git_synapse.stats.contingency import Contingency
-    from git_synapse.stats.registry import compute_all
-
-    t = Contingency.from_counts(
-        n_ab=np.array([4.0]), n_a=np.array([6.0]),
-        n_b=np.array([5.0]), n_total=np.array([20.0]),
-    )
-    out = compute_all(t, ("jaccard", "ochiai"))
-    assert set(out) == {"jaccard", "ochiai"}
-    assert 0.0 <= float(out["jaccard"][0]) <= 1.0
-
-
 # ----------------------------------------------------------------- config
 
 @pytest.mark.parametrize(

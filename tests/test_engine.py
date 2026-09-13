@@ -31,7 +31,7 @@ def test_watermark_round_trips_and_uses_the_caller_transaction(db):
 def test_apply_schema_is_idempotent_and_current(db):
     engine.apply_schema()
     engine.apply_schema()
-    assert engine.schema_is_current()
+    assert engine.recorded_schema_version() == engine.SCHEMA_VERSION
 
 
 def test_wait_for_database_returns_promptly_when_it_is_up(db):
@@ -101,7 +101,6 @@ def test_forcing_the_schema_rewrites_the_recorded_version(db):
     has the schema, which is every deployment after the first boot."""
     engine.apply_schema(force=True)
     assert engine.recorded_schema_version() == engine.SCHEMA_VERSION
-    assert engine.schema_is_current() is True
     assert engine.schema_drift() == 0
 
 
@@ -160,7 +159,6 @@ def test_a_database_ahead_of_this_process_is_reported_as_drift(db, monkeypatch):
     monkeypatch.setattr(
         engine, "recorded_schema_version", lambda: engine.SCHEMA_VERSION + 2)
     assert engine.schema_drift() == 2
-    assert engine.schema_is_current() is True
     # Ahead, so the create path is skipped and the mismatch only logged.
     engine.apply_schema()
 
