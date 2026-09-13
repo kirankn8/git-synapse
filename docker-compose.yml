@@ -1,12 +1,3 @@
-# Git Synapse: change-coupling statistics over git history.
-#
-#   cp .env.example .env   # add your GITHUB_TOKEN
-#   docker compose up -d
-#   docker compose run --rm cli admin setup-token
-#
-# Portable to any machine with a container runtime: no host Python, no host git,
-# no host Postgres. Only `.env` and the two volumes are machine-specific.
-
 name: git-synapse
 
 x-app-env: &app-env
@@ -15,24 +6,13 @@ x-app-env: &app-env
   POSTGRES_USER: ${POSTGRES_USER:-git_synapse}
   POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-git_synapse}
   POSTGRES_DB: ${POSTGRES_DB:-git_synapse}
-  # gh exports GH_TOKEN on this machine, so accept either name and read the
-  # live value rather than a copy that goes stale when gh reissues.
-  # Fallback only. The authoritative source is the mounted token file below,
-  # which the host keeps current and the code reads on every use.
+  # Accepts gh's GH_TOKEN too; the token file below takes precedence.
   GITHUB_TOKEN: ${GITHUB_TOKEN:-${GH_TOKEN:-}}
   GITHUB_TOKEN_FILE: /run/git-synapse/github-token
-  # Other hosts. All optional: a public repository on any of them clones with
-  # no credential at all.
   GITLAB_TOKEN: ${GITLAB_TOKEN:-}
   BITBUCKET_USER: ${BITBUCKET_USER:-}
   BITBUCKET_TOKEN: ${BITBUCKET_TOKEN:-}
-  # Encrypts the per-source access tokens people paste into the UI. Without it
-  # they simply cannot be stored, and the variables above stay the only way to
-  # reach a private repository.
   GS_SECRET_KEY: ${GS_SECRET_KEY:-}
-  # Off. A fork's history is its parent's history, so tracking both stores the
-  # same commits twice and ranks a second copy of every coupling as though it
-  # were independent evidence.
   INGEST_CONCURRENCY: ${INGEST_CONCURRENCY:-8}
   MAX_FILES_PER_COMMIT: ${MAX_FILES_PER_COMMIT:-60}
   MIN_PAIR_SUPPORT: ${MIN_PAIR_SUPPORT:-2}
@@ -40,10 +20,7 @@ x-app-env: &app-env
   BLOBLESS_THRESHOLD_KB: ${BLOBLESS_THRESHOLD_KB:-2097152}
   FORCE_BLOBLESS: ${FORCE_BLOBLESS:-false}
   RECENCY_HALF_LIFE_DAYS: ${RECENCY_HALF_LIFE_DAYS:-365}
-  # Shared, not the scheduler's alone: /api/config reports the schedule and the
-  # Jobs page displays it, so the API has to see the same value the scheduler
-  # runs on. Declared only on the scheduler, the API fell back to the built-in
-  # default and told the reader a cadence nothing was using.
+  # Shared so the API reports the schedule the scheduler actually runs.
   REFRESH_CRON: ${REFRESH_CRON:-0 * * * *}
   DISCOVER_CRON: ${DISCOVER_CRON:-0 3 * * *}
   SCHEDULER_TZ: ${SCHEDULER_TZ:-UTC}
@@ -61,24 +38,16 @@ x-app-base: &app-base
       condition: service_healthy
   volumes:
     - mirrors:/data/mirrors
-    # Serve the hand-edited web UI from the host so edits take effect on refresh
-    # (no image rebuild). The baked /app/web remains the fallback if unmounted.
+    # Served from the host so UI edits need no image rebuild.
     - ./web:/app/web:ro
-    # The directory, not the file: the refresher replaces the token by atomic
-    # rename, which swaps the inode, and a file bind-mount follows the old inode
-    # and breaks. Read on every use, so a rotated credential takes effect with no
-    # restart. Optional: absent, the code falls back to GITHUB_TOKEN.
+    # The directory, not the file: the token is replaced by atomic rename, which a file mount would miss.
     - ${GIT_SYNAPSE_TOKEN_DIR:-${HOME}/.git-synapse}:/run/git-synapse:ro
 
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
-    # Docker gives a container 64MB of /dev/shm, which Postgres uses to pass
-    # tuples between parallel workers. Aggregations over a million-row pair
-    # table exceed it and fail outright -- "could not resize shared memory
-    # segment ... No space left on device" -- which reads as a disk problem and
-    # is not one.
+    # Docker's 64MB default is too small for parallel aggregation over the pair tables.
     shm_size: 1gb
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-git_synapse}
@@ -86,9 +55,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-git_synapse}
       # Checksums catch silent corruption in the fact tables.
       POSTGRES_INITDB_ARGS: "--data-checksums"
-    # Tuned for an analytical workload: the pair-generation self-join and the
-    # metric rebuild are both sort/hash heavy, and default Postgres settings
-    # would spill them to disk.
+    # Tuned for sort- and hash-heavy aggregation.
     command:
       - postgres
       - -c
@@ -126,12 +93,7 @@ services:
     environment:
       <<: *app-env
     ports:
-      # Port 80 so the UI is reachable as a bare hostname (http://git-synapse) once
-      # /etc/hosts maps it. Colima forwards privileged ports without needing
-      # root on the host, unlike Docker Desktop's helper.
       - "${API_HTTP_PORT:-80}:8000"
-      # Kept as a stable fallback: if something else grabs 80, or the hosts
-      # entry is not installed, localhost:8080 still works.
       - "${API_PUBLISHED_PORT:-8080}:8000"
     command: >
       uvicorn git_synapse.api.main:app --host 0.0.0.0 --port 8000
@@ -180,7 +142,5 @@ services:
 
 volumes:
   pgdata:
-  # Bare git mirrors. Kept in a named volume so the ingest is not slowed by a
-  # virtiofs/osxfs bind mount on macOS. Switch to a bind mount by replacing this
-  # with `driver: local` + `device:` if you need the mirrors visible on the host.
+  # A named volume: a macOS bind mount slows ingest considerably.
   mirrors:

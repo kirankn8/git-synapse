@@ -1,17 +1,5 @@
 #!/bin/bash
-#
-# Keep the Git Synapse stack running on macOS.
-#
-# Invoked by a LaunchAgent at login and then every few minutes as a watchdog.
-# Idempotent by design: if everything is already up it does nothing and exits 0,
-# so running it on a short interval is cheap.
-#
-# The step that actually matters is starting Colima. Compose's
-# `restart: unless-stopped` brings containers back whenever the Docker daemon
-# returns, but Colima is a user-level VM that does NOT start at login on its
-# own -- so without this, a reboot leaves the whole stack down and the in-container
-# scheduler never fires.
-
+# Keep Colima and the compose stack running; invoked by the LaunchAgent.
 set -uo pipefail
 
 PROJECT_DIR="${GIT_SYNAPSE_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -51,18 +39,7 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
-# --- 2. Keep the GitHub credential fresh -------------------------------------
-# `gh auth token` issues short-lived ghu_ tokens. When one expires every fetch
-# fails, and before this was hardened the fallback re-clone deleted 213 working
-# mirrors. The daemon runs on the host, where gh is authenticated, so it can
-# refresh the value the containers read.
 cd "$PROJECT_DIR" || exit 1
-# Read the token at start rather than storing a copy: a copy in .env goes stale
-# the moment gh reissues, and the expired copy wins over the live one. Exporting
-# it here means compose interpolates the current value and nothing is written to
-# disk. An empty value is never exported -- that would blank a working token.
-# `gh` here is the real binary, not the shell function the interactive shell
-# defines, so `gh auth token` returns nothing. bulwark is the actual source.
 if [ -x "$PROJECT_DIR/scripts/refresh-token.sh" ]; then
     if ! "$PROJECT_DIR/scripts/refresh-token.sh" >>"$LOG" 2>&1; then
         log "WARNING: could not refresh the GitHub token; the mounted file is unchanged"
@@ -71,8 +48,6 @@ fi
 
 # --- 3. The stack ------------------------------------------------------------
 
-# Long-running services only. `cli` sits behind a compose profile and must not
-# be started here.
 EXPECTED="postgres api scheduler mcp"
 missing=""
 for svc in $EXPECTED; do

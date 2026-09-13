@@ -1,16 +1,5 @@
 #!/usr/bin/env bash
-#
-# Refuse a push that would break the build.
-#
-# Both halves run, because both have been broken before and neither would have
-# been noticed: the backend suite guards a coverage gate that has caught real
-# defects, and the UI smoke test spent months crashing on its first request --
-# reporting nothing, and so catching nothing, while six pages rendered errors.
-#
-# Docker first, because that is how this project actually runs its tests; a
-# local .venv and node are used when they exist. A check that cannot run is
-# reported loudly rather than passed over quietly: a hook that skips everything
-# is worse than no hook, because it reads as approval.
+# Refuse a push that breaks the backend suite, the UI smoke test or the layout checks.
 set -uo pipefail
 
 root="$(git rev-parse --show-toplevel)"
@@ -18,9 +7,6 @@ cd "$root" || exit 1
 fail=0
 ran=0
 
-# A hook that is interrupted -- Ctrl-C, a timeout, a closed terminal -- used to
-# leave its throwaway Postgres and test container running. Three of those
-# starve a laptop, which slows the next run, which is then also interrupted.
 cleanup() {
     docker ps -aq --filter "name=prepush-db-" | xargs -r docker rm -f >/dev/null 2>&1
     docker network ls --format '{{.Name}}' | grep -E '^prepush-[0-9]+$' \
@@ -31,19 +17,10 @@ trap cleanup EXIT INT TERM
 say()  { printf '\033[1mpre-push:\033[0m %s\n' "$1"; }
 warn() { printf '\033[33mpre-push: %s\033[0m\n' "$1"; }
 
-# Ask docker rather than guessing the project name: compose keeps hyphens that
-# a naive slug would strip, and the network simply would not be found.
 compose_net="$(docker network ls --format '{{.Name}}' 2>/dev/null \
     | grep -E "_default$" | grep -F "$(basename "$root")" | head -1)"
 [ -n "$compose_net" ] || compose_net="$(basename "$root")_default"
 
-# --- backend -----------------------------------------------------------------
-# Against a throwaway database, never the running one. Two reasons, both found
-# the hard way: the scheduler holds the ingest advisory lock, so every pipeline
-# test is skipped and reports as a failure; and the suite writes repositories
-# and accounts, which has no business happening in a live corpus.
-#
-# `--cov` makes this fail on a coverage drop too, since the gate is in pyproject.
 if command -v docker >/dev/null 2>&1 && docker image inspect git-synapse-test >/dev/null 2>&1; then
     say "backend suite (docker, throwaway database)"
     net="prepush-$$"
@@ -76,11 +53,6 @@ else
     warn "backend suite NOT RUN: no git-synapse-test image and no .venv"
 fi
 
-# --- lint --------------------------------------------------------------------
-# Cheap and first: a rule that catches an undefined name or a zip that silently
-# truncates should not wait behind a three-minute suite. The selection lives in
-# pyproject; twenty-five noqa comments had been sitting in the source for rules
-# nothing was checking any more.
 if command -v docker >/dev/null 2>&1 && docker image inspect git-synapse-test >/dev/null 2>&1; then
     say "lint (ruff)"
     docker run --rm -v "$root":/work -w /work git-synapse-test \
@@ -88,9 +60,6 @@ if command -v docker >/dev/null 2>&1 && docker image inspect git-synapse-test >/
     ran=1
 fi
 
-# The UI has no build step and therefore no node_modules; biome is a single
-# binary fetched on demand. Skipped without a network rather than failing,
-# since it is the one check here that needs one.
 if command -v docker >/dev/null 2>&1; then
     say "lint the UI (biome)"
     docker run --rm -v "$root":/work -w /work/web node:22-alpine \
@@ -98,13 +67,6 @@ if command -v docker >/dev/null 2>&1; then
         || warn "UI lint failed or could not be fetched; run it by hand to see why"
 fi
 
-# --- frontend ----------------------------------------------------------------
-# Reachability is probed against /api/health, not /api/overview: overview needs
-# a session now, and a 401 was being read as "no API here" -- so both UI suites
-# were quietly skipped on a healthy stack, which is the failure mode this hook
-# exists to prevent.
-# Needs a live API: the bundle is fetched from it rather than read off disk, so
-# the test exercises what is actually served.
 ui() {  # $1 = base url, then the runner
     (cd tests/ui && GIT_SYNAPSE_URL="$1" node build-bundle.mjs >/dev/null \
         && GIT_SYNAPSE_URL="$1" node smoke.mjs)
@@ -127,11 +89,6 @@ else
     warn "UI smoke test NOT RUN: no API reachable; start it with make up"
 fi
 
-# --- layout --------------------------------------------------------------
-# jsdom does no layout and loads no stylesheet, so the smoke test cannot see a
-# component sitting flush against the next one, or an element whose `hidden`
-# attribute is beaten by an author `display` rule. Both shipped. Real Chrome,
-# real boxes.
 if command -v docker >/dev/null 2>&1 \
    && docker image inspect zenika/alpine-chrome:with-puppeteer >/dev/null 2>&1 \
    && docker run --rm --network "$compose_net" curlimages/curl:latest \
