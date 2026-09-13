@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from git_synapse.config import GitHubConfig, get_config
+from git_synapse.config import GitHubConfig, SelectionConfig, get_config
 
 log = logging.getLogger(__name__)
 
@@ -173,7 +173,7 @@ class GitHubClient:
         raises instead, and the caller says what happened.
         """
         self.patient = patient
-        self.cfg = cfg or get_config().github
+        self.cfg = cfg or get_config().providers.github
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -352,10 +352,14 @@ class GitHubClient:
 
 def select_repos(
     records: list[RepoRecord],
-    cfg: GitHubConfig | None = None,
+    cfg: SelectionConfig | None = None,
     tracked: frozenset[str] = frozenset(),
 ) -> list[RepoRecord]:
-    """Apply the configured include/exclude filters to a discovered list.
+    """Apply an account's include/exclude filters to a discovered list.
+
+    Takes a :class:`SelectionConfig` rather than anything host-shaped: these
+    questions are the same whether the listing came from GitHub, GitLab or
+    Bitbucket, and this is called with all three.
 
     An explicit ``ONLY_REPOS`` allowlist overrides every other filter, which
     makes it easy to reproduce a single repo's ingest while debugging.
@@ -371,7 +375,7 @@ def select_repos(
     any other -- dropping it for the label alone discards evidence about a
     codebase somebody works in.
     """
-    cfg = cfg or get_config().github
+    cfg = cfg or get_config().selection
 
     if cfg.only_repos:
         wanted = {name.lower() for name in cfg.only_repos}

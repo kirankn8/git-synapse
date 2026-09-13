@@ -158,7 +158,7 @@ class GitHubProvider(Provider):
         import dataclasses
 
         self._kind: str | None = None
-        cfg = get_config().github
+        cfg = get_config().providers.github
         if source.api_url and source.api_url != cfg.api_url:
             cfg = dataclasses.replace(cfg, api_url=source.api_url)
         if token:
@@ -248,7 +248,7 @@ class GitLabProvider(Provider):
     def __init__(self, source: Source, patient: bool = True, token: str = "") -> None:
         super().__init__(source, patient, token)
         headers = {"User-Agent": "git-synapse-change-coupling/1.0"}
-        secret = token or get_config().providers.gitlab_token
+        secret = token or get_config().providers.token_for("gitlab")
         if secret:
             headers["PRIVATE-TOKEN"] = secret
         self._client = httpx.Client(base_url=source.api_url or "https://gitlab.com/api/v4",
@@ -362,7 +362,9 @@ class BitbucketProvider(Provider):
         headers = {"User-Agent": "git-synapse-change-coupling/1.0"}
         cfg = get_config().providers
         auth = None
-        secret = token or cfg.bitbucket_token
+        secret = token or cfg.token_for("bitbucket")
+        # The username stays a direct read: basic auth needs both halves, and
+        # only this host has a second half to need.
         if cfg.bitbucket_user and secret:
             auth = (cfg.bitbucket_user, secret)
         self._client = httpx.Client(base_url=source.api_url or "https://api.bitbucket.org/2.0",

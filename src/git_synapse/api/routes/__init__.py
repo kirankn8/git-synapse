@@ -64,7 +64,7 @@ def config() -> dict:
     return {
         # Accounts are configured in the database; this is only the seed value
         # a fresh deployment adopts on its first discovery.
-        "default_org": cfg.github.org,
+        "default_org": cfg.providers.github.org,
         "max_files_per_commit": cfg.ingest.max_files_per_commit,
         "min_pair_support": cfg.ingest.min_pair_support,
         "rename_similarity": cfg.ingest.rename_similarity,
@@ -94,7 +94,7 @@ def config() -> dict:
 
 def _token_status() -> dict:
     """Whether a token is configured, and from where. Never its value."""
-    gh = get_config().github
+    gh = get_config().providers.github
     from pathlib import Path as _Path
 
     path = _Path(gh.token_file) if gh.token_file else None

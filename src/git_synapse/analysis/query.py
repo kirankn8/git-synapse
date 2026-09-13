@@ -7,6 +7,7 @@ from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.orm import aliased
 
 from git_synapse.config import get_config
@@ -97,11 +98,22 @@ def get_repo(repo_id: int) -> dict | None:
 
 
 def repo_languages() -> list[dict]:
+    """How many repositories each primary language accounts for.
+
+    Counted in the database rather than in Python. Loading every repository to
+    tally one column of it cost a second on this corpus, and the page that
+    draws this fires it alongside several other calls -- a navigation away
+    cancels the browser's request but not the query behind it, so a slow one
+    holds its connection until it finishes regardless.
+    """
     Repo = _model("Repo")
     with session_scope() as session:
-        counts = Counter(row.primary_language for row in session.query(Repo).all()
-                         if row.primary_language is not None)
-        return [{"language": key, "n": value} for key, value in counts.most_common()]
+        rows = (session.query(Repo.primary_language, func.count().label("n"))
+                .filter(Repo.primary_language.is_not(None))
+                .group_by(Repo.primary_language)
+                .order_by(func.count().desc(), Repo.primary_language)
+                .all())
+        return [{"language": language, "n": n} for language, n in rows]
 
 
 def search_files(term: str | None = None, repo_id: int | None = None, extension: str | None = None,

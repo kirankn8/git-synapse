@@ -80,7 +80,11 @@ def _looks_like_token(value: str) -> bool:
 
 @dataclass(frozen=True)
 class GitHubConfig:
-    """Which repositories to mirror, and how to reach GitHub."""
+    """How to reach GitHub: a credential and an endpoint.
+
+    Which repositories to take is not here. That question is the same on every
+    host, and lives in :class:`SelectionConfig`.
+    """
 
     token: str = field(default_factory=lambda: _env_str("GITHUB_TOKEN", ""))
     #: A file the host keeps current, read fresh on every use. `gh` issues
@@ -113,8 +117,19 @@ class GitHubConfig:
     #: environment because a blank value falls back to it.
     org: str = field(default_factory=lambda: _env_str("GITHUB_ORG", ""))
     api_url: str = field(default_factory=lambda: _env_str("GITHUB_API_URL", "https://api.github.com"))
-    #: Include repositories the token can see but that are private. Held per
-    #: account; this is only the value a newly created one starts from.
+
+
+@dataclass(frozen=True)
+class SelectionConfig:
+    """Which of an owner's repositories to take.
+
+    Nothing here is about a particular host: GitHub, GitLab and Bitbucket all
+    answer the same questions, and `select_repos` asks them of whatever the
+    provider listed. Every value is carried per account and edited on the
+    Accounts page; these are only what a newly created one starts from.
+    """
+
+    #: Include repositories the credential can see but that are private.
     include_private: bool = True
     #: Off, and not a question a deployment is asked: `select_repos` drops a
     #: fork only when the repository it was forked from is also in the corpus,
@@ -267,17 +282,38 @@ class ServerConfig:
 
 @dataclass(frozen=True)
 class ProviderConfig:
-    """Credentials for hosts other than GitHub.
+    """The deployment-wide credential for each host, GitHub included.
 
-    All optional. A public repository on any of these clones and ingests with
-    no credential at all -- these only widen what is visible and lift the
-    anonymous rate limit, which is the same bargain GITHUB_TOKEN makes.
+    All optional. A public repository on any host clones and ingests with no
+    credential at all -- these only widen what is visible and lift the
+    anonymous rate limit, which is the same bargain every one of them makes.
+
+    GitHub sits here beside the others rather than in a class of its own: a
+    credential for a host is one kind of thing however early that host was
+    supported, and asking "what may we use against this host?" should be one
+    lookup rather than a branch per vendor.
     """
 
+    github: GitHubConfig = field(default_factory=GitHubConfig)
     gitlab_token: str = field(default_factory=lambda: _env_str("GITLAB_TOKEN", ""))
     #: Bitbucket app passwords are basic auth, so they need the username too.
     bitbucket_user: str = field(default_factory=lambda: _env_str("BITBUCKET_USER", ""))
     bitbucket_token: str = field(default_factory=lambda: _env_str("BITBUCKET_TOKEN", ""))
+
+    def token_for(self, provider: str) -> str:
+        """The deployment-wide credential for one host, or "" when it has none.
+
+        A source carries its own credential where somebody has pasted one; this
+        is the fallback behind it, and the answer to "is this host reachable at
+        all beyond the anonymous rate limit?"
+        """
+        if provider == "github":
+            return self.github.current_token()
+        if provider == "gitlab":
+            return self.gitlab_token
+        if provider == "bitbucket":
+            return self.bitbucket_token
+        return ""
 
 
 @dataclass(frozen=True)
@@ -285,12 +321,14 @@ class Config:
     """Top-level configuration aggregate."""
 
     db: DatabaseConfig = field(default_factory=DatabaseConfig)
-    github: GitHubConfig = field(default_factory=GitHubConfig)
+    #: Credentials, one entry per host. Reached as ``cfg.providers.github``.
+    providers: ProviderConfig = field(default_factory=ProviderConfig)
+    #: Which repositories an account takes, on any host.
+    selection: SelectionConfig = field(default_factory=SelectionConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
-    providers: ProviderConfig = field(default_factory=ProviderConfig)
     log_level: str = field(default_factory=lambda: _env_str("LOG_LEVEL", "INFO"))
 
 

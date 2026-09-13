@@ -862,7 +862,7 @@ def test_an_absent_token_is_allowed_when_every_repository_is_public(monkeypatch)
     refuse a run that would have worked."""
     from git_synapse.ingest import pipeline as P
 
-    cfg = P.get_config().github
+    cfg = P.get_config().providers.github
     monkeypatch.setattr(type(cfg), "current_token", lambda self: "", raising=False)
     assert P.verify_credentials(required=False) == "anonymous"
 
@@ -873,7 +873,7 @@ def test_an_absent_token_is_refused_when_something_is_private(monkeypatch):
     from git_synapse.ingest import pipeline as P
     from git_synapse.ingest.pipeline import AuthError
 
-    cfg = P.get_config().github
+    cfg = P.get_config().providers.github
     monkeypatch.setattr(type(cfg), "current_token", lambda self: "", raising=False)
     with pytest.raises(AuthError):
         P.verify_credentials(required=True)
@@ -1128,3 +1128,66 @@ def test_a_repository_deleted_mid_ingest_fails_that_repository_by_name(
     result = pipeline._sync_repo_once(record)
     assert result.status == "failed"
     assert "999999999" in (result.error or "") or "disappeared" in (result.error or "")
+
+
+def test_an_accounts_own_endpoint_reaches_the_client(two_accounts, db, monkeypatch):
+    """A self-hosted install stores its endpoint on the account. If that did not
+    reach the provider, every ordinary lookup would fall through to the
+    public API and describe somebody else's organisation.
+    """
+    from git_synapse.ingest import accounts
+
+    seen = []
+
+    class _Fake:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def supports_listing(self): return True
+        def list_page(self, login, page=1):
+            from git_synapse.ingest.providers import Page
+            return Page([], has_more=False, total=0)
+        def fetch_parent(self, full_name): return ""
+
+    def capture(source, patient=True, token=""):
+        seen.append(source)
+        return _Fake()
+
+    monkeypatch.setattr(pipeline.providers, "for_source", capture)
+    monkeypatch.setattr(pipeline, "select_repos",
+                        lambda records, cfg, tracked=frozenset(): list(records))
+
+    alpha = accounts.find_by_login("alpha")
+    accounts.update_account(alpha["id"], api_url="https://ghe.internal/api/v3")
+    pipeline._discover_account(accounts.get_account(alpha["id"]))
+
+    assert seen and seen[0].api_url == "https://ghe.internal/api/v3"
+
+
+def test_an_account_with_no_endpoint_gets_the_providers_public_one(
+    two_accounts, db, monkeypatch,
+):
+    """NULL on the row means "the provider's public API", not "no API" -- which
+    is what sends an ordinary source down the no-API path by mistake."""
+    from git_synapse.ingest import accounts
+
+    seen = []
+
+    class _Fake:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def supports_listing(self): return True
+        def list_page(self, login, page=1):
+            from git_synapse.ingest.providers import Page
+            return Page([], has_more=False, total=0)
+        def fetch_parent(self, full_name): return ""
+
+    monkeypatch.setattr(pipeline.providers, "for_source",
+                        lambda source, patient=True, token="": (seen.append(source), _Fake())[1])
+    monkeypatch.setattr(pipeline, "select_repos",
+                        lambda records, cfg, tracked=frozenset(): list(records))
+
+    beta = accounts.find_by_login("beta")
+    assert beta["api_url"] is None
+    pipeline._discover_account(accounts.get_account(beta["id"]))
+
+    assert seen and seen[0].api_url == "https://api.github.com"

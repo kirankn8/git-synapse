@@ -156,24 +156,48 @@ def test_record_discovery_keeps_the_error_for_the_ui(clean):
 
 # ------------------------------------------------------------- config mapping
 
-def test_config_for_overrides_only_this_accounts_settings(clean):
-    made = accounts.add_account("kubernetes", include_forks=False, only_repos="a,b")
-    cfg = accounts.config_for(made)
-    assert cfg.org == "kubernetes"
-    assert cfg.include_forks is False
-    assert cfg.only_repos == ("a", "b")
-    # Untouched settings still come from the environment.
-    assert cfg.api_url
+def test_config_for_carries_this_accounts_settings_and_no_others(clean):
+    """Two accounts scanned in one run must not see each other's filters, so
+    every value comes from the row rather than from a shared default that the
+    previous account might have replaced."""
+    strict = accounts.add_account("kubernetes", include_forks=False, only_repos="a,b")
+    loose = accounts.add_account("grafana", include_forks=True, include_archived=False)
+
+    a, b = accounts.config_for(strict), accounts.config_for(loose)
+    assert (a.include_forks, a.only_repos) == (False, ("a", "b"))
+    assert (b.include_forks, b.include_archived) == (True, False)
+    # Not named on either row, so both keep the default rather than the other's.
+    assert a.include_archived is True
+    assert b.only_repos == ()
 
 
-def test_config_for_falls_back_to_the_global_api_url(clean):
+def test_an_account_with_no_endpoint_of_its_own_stores_none(clean):
+    """NULL means "the provider's public API", which `sources.parse` supplies.
+    Storing a guessed endpoint instead would freeze today's default into the
+    row and survive any later change to it."""
     made = accounts.add_account("kubernetes")
-    assert accounts.config_for(made).api_url
+    assert made["api_url"] is None
 
 
-def test_a_per_account_api_url_wins(clean):
+def test_a_per_account_api_url_is_stored_as_given(clean):
+    """A self-hosted install knows its endpoint; the host name cannot tell us.
+    Where that endpoint reaches the client is asserted in test_pipeline."""
     made = accounts.add_account("kubernetes", api_url="https://ghe.internal/api/v3")
-    assert accounts.config_for(made).api_url == "https://ghe.internal/api/v3"
+    assert made["api_url"] == "https://ghe.internal/api/v3"
+
+
+def test_config_for_answers_only_what_is_taken(clean):
+    """It returns a SelectionConfig: the same questions on every host. The
+    endpoint and the credential travel with the Source instead, because the
+    account being described may not be a GitHub one."""
+    from git_synapse.config import SelectionConfig
+
+    made = accounts.add_account("kubernetes", include_forks=True, skip_repos="a,b")
+    cfg = accounts.config_for(made)
+    assert isinstance(cfg, SelectionConfig)
+    assert cfg.include_forks is True
+    assert cfg.skip_repos == ("a", "b")
+    assert not hasattr(cfg, "api_url")
 
 
 def test_a_blank_api_url_is_stored_as_null_not_empty(clean):
@@ -362,3 +386,31 @@ def test_recording_discovery_against_a_removed_account_is_a_no_op(db):
     from git_synapse.ingest import accounts
 
     accounts.record_discovery(999_999_999, error=None, repo_count=5)
+
+
+def test_one_lookup_answers_what_credential_a_host_has(monkeypatch):
+    """Every host's credential is reached the same way, so a caller asking
+    "may we use anything against this host?" branches once rather than per
+    vendor. An unknown provider is answered, not raised at."""
+    from git_synapse.config import Config, GitHubConfig, ProviderConfig
+
+    cfg = Config(providers=ProviderConfig(
+        github=GitHubConfig(token="ghp_" + "a" * 36, token_file=""),
+        gitlab_token="glpat-token", bitbucket_user="someone",
+        bitbucket_token="bb-token"))
+
+    assert cfg.providers.token_for("github") == "ghp_" + "a" * 36
+    assert cfg.providers.token_for("gitlab") == "glpat-token"
+    assert cfg.providers.token_for("bitbucket") == "bb-token"
+    assert cfg.providers.token_for("gitea") == ""
+
+
+def test_a_host_with_no_credential_reports_an_empty_one(monkeypatch):
+    """Public repositories clone anonymously on every host, so "none set" is an
+    ordinary answer rather than a misconfiguration."""
+    from git_synapse.config import Config, GitHubConfig, ProviderConfig
+
+    cfg = Config(providers=ProviderConfig(
+        github=GitHubConfig(token="", token_file="")))
+    assert cfg.providers.token_for("github") == ""
+    assert cfg.providers.token_for("gitlab") == ""

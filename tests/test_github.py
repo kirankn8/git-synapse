@@ -10,7 +10,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from git_synapse.config import GitHubConfig
+from git_synapse.config import GitHubConfig, SelectionConfig
 from git_synapse.ingest.github import GitHubClient, RepoRecord, select_repos
 
 
@@ -174,10 +174,10 @@ def test_archived_and_forked_repositories_follow_configuration():
         RepoRecord.from_api(_repo_payload(3, fork=True,
                                           parent={"full_name": "acme/upstream"})),
     ]
-    keep_all = select_repos(records, GitHubConfig(include_archived=True, include_forks=True))
+    keep_all = select_repos(records, SelectionConfig(include_archived=True, include_forks=True))
     assert len(keep_all) == 3
 
-    plain = select_repos(records, GitHubConfig(include_archived=False, include_forks=False))
+    plain = select_repos(records, SelectionConfig(include_archived=False, include_forks=False))
     assert {r.name for r in plain} == {"repo1", "repo3"}
 
 
@@ -187,7 +187,7 @@ def test_a_fork_is_dropped_only_when_its_parent_is_also_here():
     Storing a fork beside its parent puts the same commits in twice and lets
     one project's history be counted as two projects agreeing.
     """
-    cfg = GitHubConfig(include_forks=False)
+    cfg = SelectionConfig(include_forks=False)
 
     # Parent arriving in the same listing: an org that owns a project and a
     # fork of it hands us both at once.
@@ -253,14 +253,14 @@ def test_a_fork_whose_parent_could_not_be_established_is_kept():
     """
     unplaced = [RepoRecord.from_api(_repo_payload(9, fork=True))]
     assert unplaced[0].parent_full_name == ""
-    kept = select_repos(unplaced, GitHubConfig(include_forks=False),
+    kept = select_repos(unplaced, SelectionConfig(include_forks=False),
                         tracked=frozenset({"acme/repo1"}))
     assert [r.name for r in kept] == ["repo9"]
 
 
 def test_an_explicit_allowlist_overrides_every_other_filter():
     records = [RepoRecord.from_api(_repo_payload(i)) for i in range(3)]
-    cfg = GitHubConfig(only_repos=["repo2"], include_archived=False, include_forks=False)
+    cfg = SelectionConfig(only_repos=["repo2"], include_archived=False, include_forks=False)
     assert [r.name for r in select_repos(records, cfg)] == ["repo2"]
 
 
@@ -359,39 +359,33 @@ def _record(name, **flags):
 def test_a_disabled_repository_is_never_included():
     """GitHub disables a repository when it is over quota or under review; there
     is nothing to clone."""
-    import dataclasses
-
-    from git_synapse.config import get_config
+    from git_synapse.config import SelectionConfig
     from git_synapse.ingest.github import select_repos
 
-    cfg = dataclasses.replace(get_config().github, only_repos=(), skip_repos=(),
-                              include_private=True, include_forks=True,
-                              include_archived=True)
+    # Everything else opened up, so only `is_disabled` can account for a drop.
+    cfg = SelectionConfig(include_private=True, include_forks=True,
+                          include_archived=True)
     records = [_record("plain"), _record("dead", is_disabled=True)]
     assert [r.name for r in select_repos(records, cfg=cfg)] == ["plain"]
 
 
 def test_skip_repos_matches_a_bare_name_or_a_full_name():
-    import dataclasses
-
-    from git_synapse.config import get_config
+    from git_synapse.config import SelectionConfig
     from git_synapse.ingest.github import select_repos
 
-    base = dataclasses.replace(get_config().github, only_repos=())
     records = [_record("keep"), _record("byname"), _record("byfullname")]
 
-    cfg = dataclasses.replace(
-        base, skip_repos=("ByName", "acme/byfullname"))
+    cfg = SelectionConfig(skip_repos=("ByName", "acme/byfullname"))
     assert [r.name for r in select_repos(records, cfg=cfg)] == ["keep"]
 
 
 def test_a_disabled_repository_is_never_selected():
     """A disabled repository cannot be cloned at all, so selecting it turns one
     upstream state into a run-long sequence of failures."""
-    from git_synapse.config import GitHubConfig
+    from git_synapse.config import SelectionConfig
     from git_synapse.ingest.github import RepoRecord, select_repos
 
-    cfg = GitHubConfig(org="acme")
+    cfg = SelectionConfig()
     live = RepoRecord(github_id=1, owner="acme", name="live", full_name="acme/live")
     dead = RepoRecord(github_id=2, owner="acme", name="dead", full_name="acme/dead",
                       is_disabled=True)
@@ -402,16 +396,16 @@ def test_a_disabled_repository_is_never_selected():
 def test_a_private_repository_is_excluded_unless_asked_for():
     """Cloning it needs a credential, so selecting it when private access was
     not requested turns one setting into a clone failure."""
-    from git_synapse.config import GitHubConfig
+    from git_synapse.config import SelectionConfig
     from git_synapse.ingest.github import RepoRecord, select_repos
 
     public = RepoRecord(github_id=1, owner="acme", name="open", full_name="acme/open")
     secret = RepoRecord(github_id=2, owner="acme", name="shut", full_name="acme/shut",
                         is_private=True)
     assert {r.name for r in select_repos([public, secret],
-                                         GitHubConfig(org="acme", include_private=False))} == {"open"}
+                                         SelectionConfig(include_private=False))} == {"open"}
     assert {r.name for r in select_repos([public, secret],
-                                         GitHubConfig(org="acme", include_private=True))} == {"open", "shut"}
+                                         SelectionConfig(include_private=True))} == {"open", "shut"}
 
 
 def test_giving_up_reports_what_the_host_actually_said(monkeypatch):

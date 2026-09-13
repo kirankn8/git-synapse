@@ -344,7 +344,7 @@ def verify_credentials(required: bool = True) -> str:
     Raises:
         AuthError: if the token is absent or rejected.
     """
-    cfg = get_config().github
+    cfg = get_config().providers.github
     token = cfg.current_token()
     if not token:
         if not required:
@@ -722,7 +722,7 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
         # This repository's own source credential wins over the deployment
         # one; `authed_clone_url` then refuses to embed either on a host that
         # did not issue it.
-        token = _clone_token(record) or cfg.github.current_token()
+        token = _clone_token(record) or cfg.providers.github.current_token()
         fetch = gitops.sync_mirror(
             record.full_name,
             record.authed_clone_url(token),

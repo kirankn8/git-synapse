@@ -8,14 +8,13 @@ them globally are seeded here once and then ignored.
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 import re
 import time
 from datetime import UTC, datetime
 from typing import Any
 
-from git_synapse.config import GitHubConfig, get_config
+from git_synapse.config import SelectionConfig, get_config
 from git_synapse.db.orm import models, session_scope
 
 log = logging.getLogger(__name__)
@@ -266,17 +265,15 @@ def refresh_repo_counts() -> None:
             account.updated_at = datetime.now(UTC)
 
 
-def config_for(account: dict) -> GitHubConfig:
-    """The global GitHub config with this account's overrides applied.
+def config_for(account: dict) -> SelectionConfig:
+    """What this account takes, as `select_repos` wants it.
 
-    Returned as a :class:`GitHubConfig` so the existing filter and client code
-    works unchanged whether it is driven by an account row or the environment.
+    Every value comes from the account row; the defaults exist only so a row
+    written before a column did still reads. Nothing host-shaped is returned --
+    the endpoint and the credential travel with the `Source` and are fetched
+    separately, because this account may not be a GitHub one.
     """
-    cfg = get_config().github
-    return dataclasses.replace(
-        cfg,
-        org=account["login"],
-        api_url=account.get("api_url") or cfg.api_url,
+    return SelectionConfig(
         include_private=account["include_private"],
         include_forks=account["include_forks"],
         include_archived=account["include_archived"],
@@ -294,23 +291,25 @@ def seed_from_env() -> dict | None:
     """
     if list_accounts():
         return None
-    cfg = get_config().github
-    if not (cfg.org or "").strip():
+    cfg = get_config()
+    org = (cfg.providers.github.org or "").strip()
+    if not org:
         return None
+    selection = cfg.selection
     try:
         account = add_account(
-            cfg.org,
+            org,
             kind="org",
-            include_private=cfg.include_private,
-            include_forks=cfg.include_forks,
-            include_archived=cfg.include_archived,
-            only_repos=list(cfg.only_repos),
-            skip_repos=list(cfg.skip_repos),
+            include_private=selection.include_private,
+            include_forks=selection.include_forks,
+            include_archived=selection.include_archived,
+            only_repos=list(selection.only_repos),
+            skip_repos=list(selection.skip_repos),
         )
     except AccountError as exc:
-        log.warning("could not seed account from GITHUB_ORG=%s: %s", cfg.org, exc)
+        log.warning("could not seed account from GITHUB_ORG=%s: %s", org, exc)
         return None
-    log.info("seeded account %s from GITHUB_ORG", cfg.org)
+    log.info("seeded account %s from GITHUB_ORG", org)
     return account
 
 
@@ -342,13 +341,8 @@ def _not_found_message(source: Any) -> str:
     """
     from git_synapse.config import get_config
 
-    tokens = {
-        "github": get_config().github.current_token(),
-        "gitlab": get_config().providers.gitlab_token,
-        "bitbucket": get_config().providers.bitbucket_token,
-    }
     want = _CREDENTIAL_FOR.get(source.provider)
-    if want and not tokens.get(source.provider):
+    if want and not get_config().providers.token_for(source.provider):
         return (
             f"{source.host} says there is nothing at {source.full_name}. That "
             "means it does not exist, or it is private — a host answers both "
@@ -396,14 +390,14 @@ def _rate_limit_message(source: Any) -> str:
     """
     from git_synapse.config import get_config
 
-    if source.provider == "github" and not get_config().github.current_token():
+    if source.provider == "github" and not get_config().providers.token_for("github"):
         return (
             "GitHub allows 60 requests an hour without a token, and this "
             "deployment has none — one listing of a large organisation spends "
             "that. Set GITHUB_TOKEN to raise it to 5,000."
             + _budget_note(source)
         )
-    if source.provider == "gitlab" and not get_config().providers.gitlab_token:
+    if source.provider == "gitlab" and not get_config().providers.token_for("gitlab"):
         return (f"{source.host} is rate-limiting us. Set GITLAB_TOKEN to raise "
                 "the budget.")
     return (
