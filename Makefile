@@ -35,7 +35,7 @@ refresh:  ## Incremental refresh of already-known repositories
 	$(CLI) ingest
 
 .PHONY: score
-score:  ## Recompute the 29 measures from stored pair counts
+score:  ## Recompute the 31 measures from stored pair counts
 	$(CLI) score
 
 .PHONY: status

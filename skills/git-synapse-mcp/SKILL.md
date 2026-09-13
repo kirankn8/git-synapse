@@ -34,7 +34,7 @@ than no claim.
 | tool | use |
 |---|---|
 | `coupled_files(repo, path)` | Which files move with this one. **Start here before editing.** |
-| `explain_pair(repo, path_a, path_b)` | Full 2×2 table, all 29 measures, and the commits behind them |
+| `explain_pair(repo, path_a, path_b)` | Full 2×2 table, all 31 measures, and the commits behind them |
 | `file_history(repo, path)` | Recent commits and who actually owns the file |
 | `module_context(repo, path)` | In a monorepo: which module owns this file, what it declares, and what declares it |
 | `search_files(term)` | Resolve a path |

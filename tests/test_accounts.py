@@ -345,3 +345,20 @@ def test_the_count_is_reconciled_against_the_repositories_that_exist(db):
             if row is not None:
                 session.delete(row)
         accounts.remove_account(src["id"])
+
+
+def test_updating_an_account_that_is_not_there_says_which_one(db):
+    """The id came from a URL, so "not found" is the answer a 404 is built
+    from -- not an empty success that looks like the edit was applied."""
+    from git_synapse.ingest import accounts
+
+    with pytest.raises(accounts.AccountError, match="999999999"):
+        accounts.update_account(999_999_999, include_forks=True)
+
+
+def test_recording_discovery_against_a_removed_account_is_a_no_op(db):
+    """Discovery runs on a schedule and an account can be deleted while it is
+    in flight. Recording the result then must not resurrect or raise."""
+    from git_synapse.ingest import accounts
+
+    accounts.record_discovery(999_999_999, error=None, repo_count=5)

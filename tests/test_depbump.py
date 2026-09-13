@@ -646,16 +646,21 @@ def test_a_bare_repository_name_is_not_resolved_when_names_are_ambiguous(db):
     from git_synapse.db.orm import models, session_scope
 
     with session_scope() as session:
-        suffix = uuid4().hex[:10]
-        first = models().Repo(full_name=f"acme/core-name-{suffix}", name="core", owner="acme")
-        second = models().Repo(full_name=f"otherco/core-name-{suffix}", name="core", owner="otherco")
+        # The bare `name` is unique per run, not just `full_name`. Sharing it
+        # made ("acme", "core") collide with the row every previous run left
+        # behind, and `by_full` keeps whichever of them the database happened
+        # to return last -- so this asserted the winner of a race.
+        name = f"core-{uuid4().hex[:10]}"
+        first = models().Repo(full_name=f"acme/{name}", name=name, owner="acme")
+        second = models().Repo(full_name=f"otherco/{name}", name=name, owner="otherco")
         session.add_all([first, second])
         session.flush()
         by_full, by_name, by_package = _repo_lookups(session)
         first_id = first.id
-    assert by_full[("acme", "core")] == first_id
-    assert "core" not in by_name
-    assert resolve_repo("core", by_full, by_name, by_package, "") is None
+    assert by_full[("acme", name)] == first_id
+    # Two owners claim it, so the bare name resolves to neither.
+    assert name not in by_name
+    assert resolve_repo(name, by_full, by_name, by_package, "") is None
 
 
 def test_a_bump_is_linked_to_the_repository_that_publishes_the_coordinate(bump_env):
@@ -836,3 +841,157 @@ def test_an_unknown_ecosystem_keeps_the_old_behaviour():
     """Callers that cannot say which ecosystem they are in are not punished for
     it; the guard needs to know what it is guarding."""
     assert resolve_repo("uuid", {("google", "uuid"): 7}, {"uuid": 7}, {}, "") == 7
+
+
+def test_a_ceiling_is_not_resolved_when_the_consuming_commit_is_missing(bump_env):
+    """The ceiling is the version the consumer could see *at the time it moved*,
+    so without that commit's date there is no window to pick a tag from."""
+    from datetime import UTC, datetime
+
+    conn, repo, dep = bump_env
+    row = models().DepBump(
+        consumer_repo_id=repo, consumer_sha="f" * 40, dep_repo_id=dep,
+        dep_name="library", dep_version="<2.0", manifest="pom.xml",
+        bumped_at=datetime(2024, 1, 1, tzinfo=UTC), ecosystem="maven")
+    conn.add(row)
+    conn.flush()
+
+    depbump._resolve_ceilings(conn)
+    assert conn.get(models().DepBump, row.id).dep_commit_id is None
+
+
+def test_a_bump_naming_a_commit_sha_resolves_straight_to_it(bump_env):
+    """A Go pseudo-version carries the upstream commit it was cut from, so the
+    edge is provable rather than inferred from a tag's date."""
+    conn, repo, dep = bump_env
+    dep_sha = "abc123def456" + "0" * 28
+    dep_commit = _commit(conn, dep, dep_sha, "2024-01-05")
+
+    bump_id = _bump(conn, repo, dep, version="v0.0.0-20240105120000-abc123def456",
+                    at="2024-01-06", name="github.com/acme/library", ecosystem="go")
+    conn.get(models().DepBump, bump_id).dep_sha = "abc123def456"
+    conn.flush()
+
+    depbump.resolve_bumps(conn)
+    row = conn.get(models().DepBump, bump_id)
+    assert row.dep_commit_id == dep_commit
+    assert row.resolution == "sha"
+
+
+def test_a_dependency_recorded_before_its_publisher_was_indexed_is_resolved_later(db):
+    """A manifest names a package before the repository publishing it has been
+    ingested, so the row is stored unresolved and picked up on a later pass."""
+    from uuid import uuid4
+
+    from git_synapse.db.orm import session_scope
+
+    tag = uuid4().hex[:10]
+    with session_scope() as session:
+        consumer = models().Repo(full_name=f"acme/app-{tag}", name=f"app-{tag}", owner="acme")
+        library = models().Repo(full_name=f"acme/lib-{tag}", name=f"lib-{tag}", owner="acme")
+        session.add_all([consumer, library])
+        session.flush()
+        row = models().RepoDependency(
+            consumer_repo_id=consumer.id, dep_repo_id=None,
+            dep_name=f"acme/lib-{tag}", manifest="go.mod", ecosystem="go")
+        session.add(row)
+        session.flush()
+        consumer_id, library_id = consumer.id, library.id
+
+    try:
+        with session_scope() as session:
+            depbump.refresh_declared(session)
+        with session_scope() as session:
+            stored = session.query(models().RepoDependency).filter_by(
+                consumer_repo_id=consumer_id).one()
+            assert stored.dep_repo_id == library_id
+    finally:
+        with session_scope() as session:
+            session.query(models().RepoDependency).filter_by(
+                consumer_repo_id=consumer_id).delete(synchronize_session=False)
+            session.query(models().Repo).filter(
+                models().Repo.id.in_([consumer_id, library_id])).delete(
+                    synchronize_session=False)
+
+
+def test_one_manifest_declaring_a_dependency_twice_records_it_once(db, tmp_path, monkeypatch):
+    """A pom can name the same artifact in both `dependencies` and
+    `dependencyManagement`. That is one declaration, not two."""
+    from uuid import uuid4
+
+    from git_synapse.db.orm import session_scope
+
+    tag = uuid4().hex[:10]
+    with session_scope() as session:
+        repo = models().Repo(full_name=f"acme/dup-{tag}", name=f"dup-{tag}",
+                             owner="acme", head_sha="a" * 40)
+        session.add(repo)
+        session.flush()
+        repo_id = repo.id
+
+    monkeypatch.setattr(depbump, "_manifest_repos", lambda s, f, w: [
+        s.get(models().Repo, repo_id)])
+    monkeypatch.setattr(depbump, "mirror_path_for", lambda *a, **kw: tmp_path)
+    monkeypatch.setattr(depbump, "manifest_paths", lambda m: [("pom.xml", "maven")])
+    monkeypatch.setattr(depbump, "declared_at_head", lambda *a, **kw: [
+        ("com.example:widget", "1.0.0"),
+        ("com.example:widget", "1.0.0"),
+    ])
+
+    try:
+        with session_scope() as session:
+            depbump.refresh_declared(session)
+        with session_scope() as session:
+            rows = session.query(models().RepoDependency).filter_by(
+                consumer_repo_id=repo_id).all()
+            assert len(rows) == 1
+    finally:
+        with session_scope() as session:
+            session.query(models().RepoDependency).filter_by(
+                consumer_repo_id=repo_id).delete(synchronize_session=False)
+            session.query(models().Repo).filter_by(id=repo_id).delete(
+                synchronize_session=False)
+
+
+def test_an_edge_already_recorded_is_not_stored_a_second_time(db, tmp_path, monkeypatch):
+    """`rebuild` re-walks manifest history, so every run sees the same edges it
+    saw last time. Re-inserting them would multiply every bump count."""
+    from uuid import uuid4
+
+    from git_synapse.db.orm import session_scope
+
+    tag = uuid4().hex[:10]
+    with session_scope() as session:
+        repo = models().Repo(full_name=f"acme/re-{tag}", name=f"re-{tag}",
+                             owner="acme", head_sha="b" * 40)
+        session.add(repo)
+        session.flush()
+        repo_id = repo.id
+        session.add(models().DepBump(
+            consumer_repo_id=repo_id, consumer_sha="c" * 40,
+            dep_name="com.example:widget", dep_version="2.0.0", manifest="pom.xml",
+            ecosystem="maven"))
+
+    edge = depbump.BumpEdge(consumer_sha="c" * 40, dep_name="com.example:widget",
+                            dep_version="2.0.0", dep_sha=None, manifest="pom.xml",
+                            ecosystem="maven")
+    monkeypatch.setattr(depbump, "_repos_to_scan", lambda s, f: [
+        s.get(models().Repo, repo_id)])
+    monkeypatch.setattr(depbump, "mirror_path_for", lambda *a, **kw: tmp_path)
+    monkeypatch.setattr(depbump, "manifest_paths", lambda m: [("pom.xml", "maven")])
+    monkeypatch.setattr(depbump, "published_at_head", lambda m: set())
+    monkeypatch.setattr(depbump, "extract_from_mirror", lambda *a, **kw: [edge])
+
+    try:
+        with session_scope() as session:
+            depbump.rebuild(conn=session)
+        with session_scope() as session:
+            rows = session.query(models().DepBump).filter_by(
+                consumer_repo_id=repo_id).all()
+            assert len(rows) == 1
+    finally:
+        with session_scope() as session:
+            session.query(models().DepBump).filter_by(
+                consumer_repo_id=repo_id).delete(synchronize_session=False)
+            session.query(models().Repo).filter_by(id=repo_id).delete(
+                synchronize_session=False)

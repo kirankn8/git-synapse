@@ -357,3 +357,37 @@ def test_attempts_past_the_window_stop_counting(person):
     assert auth.prune_login_attempts() >= auth.MAX_FAILURES
     # And the door opens again.
     assert auth.sign_in(person["email"], "a-sufficiently-long-pass")[0]
+
+
+def test_deleting_a_user_who_is_not_there_reports_it_rather_than_raising(db):
+    """The caller is a DELETE endpoint: "nobody by that id" is a 404 it renders,
+    not an exception it has to catch."""
+    from git_synapse import auth
+
+    assert auth.delete_user(999_999_999) is False
+
+
+def test_the_first_admin_can_be_claimed_before_the_schema_row_exists(scratch_db):
+    """The claim locks the schema row to serialise two simultaneous first-run
+    requests. On a database where bootstrap has not written it yet, the lock
+    has to be created rather than waited for."""
+    from git_synapse import auth
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
+
+    with connection() as session:
+        for model in (models().UserSession, models().ApiToken, models().LoginAttempt):
+            session.query(model).delete(synchronize_session=False)
+        session.query(models().AppUser).delete(synchronize_session=False)
+        row = session.get(models().Meta, "schema_version")
+        if row is not None:
+            session.delete(row)
+
+    token = auth.setup_token()
+    _session_token, user = auth.claim_first_admin(
+        "first@example.com", "First Admin", "a-long-password-1234", token)
+    assert user["email"] == "first@example.com"
+    auth.delete_user(user["id"])
+
+    with connection() as session:
+        assert session.get(models().Meta, "schema_version") is not None

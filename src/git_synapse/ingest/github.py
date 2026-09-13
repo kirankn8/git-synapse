@@ -63,6 +63,11 @@ class RepoRecord:
     visibility: str | None = None
     is_private: bool = False
     is_fork: bool = False
+    #: The repository this one was forked from, ``owner/name`` on the same
+    #: host. Empty when this is not a fork, and when the host was asked and
+    #: would not say -- the two are not distinguished because neither is a
+    #: reason to drop the repository.
+    parent_full_name: str = ""
     is_archived: bool = False
     is_template: bool = False
     is_disabled: bool = False
@@ -98,6 +103,7 @@ class RepoRecord:
             visibility=payload.get("visibility"),
             is_private=bool(payload.get("private")),
             is_fork=bool(payload.get("fork")),
+            parent_full_name=((payload.get("parent") or {}).get("full_name") or ""),
             is_archived=bool(payload.get("archived")),
             is_template=bool(payload.get("is_template")),
             is_disabled=bool(payload.get("disabled")),
@@ -324,12 +330,46 @@ class GitHubClient:
             log.warning("could not fetch languages for %s: %s", full_name, exc)
             return {}
 
+    def fetch_parent(self, full_name: str) -> str:
+        """The repository ``full_name`` was forked from, or "" if unknown.
 
-def select_repos(records: list[RepoRecord], cfg: GitHubConfig | None = None) -> list[RepoRecord]:
+        One request per fork, because GitHub's list endpoints return the
+        minimal repository representation, which carries ``fork`` but not
+        ``parent``. Only forks are asked about and they are a small minority,
+        so this costs a handful of calls on a whole organisation.
+
+        An empty answer means "not established", never "no parent": the caller
+        keeps a fork it cannot place rather than discarding real history on a
+        failed request.
+        """
+        try:
+            payload = self._get(f"/repos/{full_name}").json()
+        except Exception as exc:  # noqa: BLE001 - an unplaced fork is kept, not dropped
+            log.warning("could not fetch the parent of %s: %s", full_name, exc)
+            return ""
+        return (payload.get("parent") or {}).get("full_name") or ""
+
+
+def select_repos(
+    records: list[RepoRecord],
+    cfg: GitHubConfig | None = None,
+    tracked: frozenset[str] = frozenset(),
+) -> list[RepoRecord]:
     """Apply the configured include/exclude filters to a discovered list.
 
     An explicit ``ONLY_REPOS`` allowlist overrides every other filter, which
     makes it easy to reproduce a single repo's ingest while debugging.
+
+    Args:
+        tracked: lowercased ``owner/name`` of every repository already in the
+            corpus. Only forks are judged against it -- see below.
+
+    A fork is dropped when, and only when, the repository it was forked from is
+    also here. That is the whole of the harm: the same commits stored twice,
+    every coupling counted as though two projects had agreed on it. A fork of
+    an upstream nobody tracks duplicates nothing, and its history is as real as
+    any other -- dropping it for the label alone discards evidence about a
+    codebase somebody works in.
     """
     cfg = cfg or get_config().github
 
@@ -340,6 +380,10 @@ def select_repos(records: list[RepoRecord], cfg: GitHubConfig | None = None) -> 
         return selected
 
     skip = {name.lower() for name in cfg.skip_repos}
+    # A fork's parent counts as present whether it is already stored or merely
+    # arriving in this same listing -- an org that owns both a project and a
+    # fork of it hands us the pair at once.
+    present = tracked | {r.full_name.lower() for r in records if not r.is_fork}
     selected = []
     for record in records:
         if record.name.lower() in skip or record.full_name.lower() in skip:
@@ -349,7 +393,13 @@ def select_repos(records: list[RepoRecord], cfg: GitHubConfig | None = None) -> 
         if record.is_private and not cfg.include_private:
             continue
         if record.is_fork and not cfg.include_forks:
-            continue
+            parent = record.parent_full_name.lower()
+            if parent and parent in present:
+                log.info(
+                    "%s is a fork of %s, which is already tracked; skipping the copy",
+                    record.full_name, record.parent_full_name,
+                )
+                continue
         if record.is_archived and not cfg.include_archived:
             continue
         selected.append(record)

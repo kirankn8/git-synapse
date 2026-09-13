@@ -35,16 +35,6 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
-def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be a number, got {raw!r}") from exc
-
-
 def _env_list(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -64,7 +54,9 @@ class DatabaseConfig:
     #: Connections held open by each API/worker process.
     pool_size: int = field(default_factory=lambda: _env_int("DB_POOL_SIZE", 10))
     pool_max_overflow: int = field(default_factory=lambda: _env_int("DB_POOL_OVERFLOW", 20))
-    echo: bool = field(default_factory=lambda: _env_bool("DB_ECHO", False))
+    #: SQL echoed to the log. A debugging aid, set in a debugger, not a
+    #: deployment: LOG_LEVEL=DEBUG is what an operator reaches for.
+    echo: bool = False
 
     @property
     def url(self) -> str:
@@ -121,17 +113,19 @@ class GitHubConfig:
     #: environment because a blank value falls back to it.
     org: str = field(default_factory=lambda: _env_str("GITHUB_ORG", ""))
     api_url: str = field(default_factory=lambda: _env_str("GITHUB_API_URL", "https://api.github.com"))
-    #: Include repositories the token can see but that are private.
-    include_private: bool = field(default_factory=lambda: _env_bool("INCLUDE_PRIVATE", True))
-    #: Off. A fork's history is its parent's history, so tracking both stores
-    #: the same commits twice and puts a second copy of every coupling in the
-    #: corpus, ranked as though it were independent evidence.
-    include_forks: bool = field(default_factory=lambda: _env_bool("INCLUDE_FORKS", False))
-    include_archived: bool = field(default_factory=lambda: _env_bool("INCLUDE_ARCHIVED", True))
+    #: Include repositories the token can see but that are private. Held per
+    #: account; this is only the value a newly created one starts from.
+    include_private: bool = True
+    #: Off, and not a question a deployment is asked: `select_repos` drops a
+    #: fork only when the repository it was forked from is also in the corpus,
+    #: which is the only case where anything is duplicated. This remains as the
+    #: explicit override -- take every fork, duplicate or not.
+    include_forks: bool = False
+    include_archived: bool = True
     #: When set, restricts ingestion to exactly these repo names.
-    only_repos: tuple[str, ...] = field(default_factory=lambda: _env_list("ONLY_REPOS"))
+    only_repos: tuple[str, ...] = ()
     #: Repo names to skip regardless of the other filters.
-    skip_repos: tuple[str, ...] = field(default_factory=lambda: _env_list("SKIP_REPOS"))
+    skip_repos: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -151,9 +145,6 @@ class IngestConfig:
     max_files_per_commit: int = field(
         default_factory=lambda: _env_int("MAX_FILES_PER_COMMIT", 60)
     )
-    #: Merge commits duplicate the changes of their parents, so they are skipped
-    #: by default. Recorded in the commits table either way.
-    include_merges: bool = field(default_factory=lambda: _env_bool("INCLUDE_MERGES", False))
     #: Pairs seen fewer times than this are not persisted. The long tail of
     #: one-off pairs is both enormous and statistically meaningless.
     min_pair_support: int = field(default_factory=lambda: _env_int("MIN_PAIR_SUPPORT", 2))
@@ -187,35 +178,18 @@ class IngestConfig:
 class AnalysisConfig:
     """Tuning for the aggregation and scoring passes."""
 
-    #: Pair rows pulled into memory per vectorised scoring batch.
-    score_batch_size: int = field(default_factory=lambda: _env_int("SCORE_BATCH_SIZE", 200000))
+    #: Pair rows pulled into memory per vectorised scoring batch. Sized
+    #: against this process's own memory, not against anything a deployment
+    #: knows better than the code does.
+    score_batch_size: int = 200_000
     #: Half-life in days for recency weighting, when a caller asks for it.
     recency_half_life_days: int = field(
         default_factory=lambda: _env_int("RECENCY_HALF_LIFE_DAYS", 365)
     )
-    #: Default row cap for coupling queries.
-    default_limit: int = field(default_factory=lambda: _env_int("DEFAULT_QUERY_LIMIT", 50))
-    max_limit: int = field(default_factory=lambda: _env_int("MAX_QUERY_LIMIT", 1000))
-
-
-@dataclass(frozen=True)
-class DependencyConfig:
-    """Tuning for the cross-repository dependency graph.
-
-    The graph is read from what repositories declare about each other in their
-    manifests. It replaced a change-set model that grouped commits by ticket key
-    or author session: that inferred relationships from calendar time, and two
-    public repositories sharing no code at all scored G2 = 570 against each other
-    because both were busy in the same years.
-    """
-
-    enabled: bool = field(default_factory=lambda: _env_bool("CROSSREPO_ENABLED", True))
-    #: Confidence below which a transitive chain hop is not traversed.
-    chain_min_confidence: float = field(
-        default_factory=lambda: _env_float("CHAIN_MIN_CONFIDENCE", 0.3)
-    )
-    #: How many hops a chain may compose before it stops being actionable.
-    chain_max_depth: int = field(default_factory=lambda: _env_int("CHAIN_MAX_DEPTH", 3))
+    #: Row caps for coupling queries. Every endpoint takes its own ``limit``,
+    #: so these are the API's shape rather than a deployment's choice.
+    default_limit: int = 50
+    max_limit: int = 1000
 
 
 #: Hourly. A refresh re-fetches every mirror and rewrites the pair tables; on a
@@ -314,7 +288,6 @@ class Config:
     github: GitHubConfig = field(default_factory=GitHubConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
-    crossrepo: DependencyConfig = field(default_factory=DependencyConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     providers: ProviderConfig = field(default_factory=ProviderConfig)

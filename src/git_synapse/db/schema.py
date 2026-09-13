@@ -276,8 +276,6 @@ Index("user_session_user_idx", user_session.__table__.c.user_id)
 Index("user_session_expiry_idx", user_session.__table__.c.expires_at)
 Index("repo_account_idx", repo.__table__.c.account_id)
 
-TABLES = metadata.tables
-
 
 # Keep the deletion semantics explicit.  Derived facts must disappear with
 # their repository/file, while optional identity links may be nulled when an

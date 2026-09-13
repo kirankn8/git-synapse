@@ -206,8 +206,6 @@ def update_account(account_id: int, **fields: Any) -> dict:
         for key, value in sets.items():
             setattr(account, key, value)
         account.updated_at = datetime.now(UTC)
-    if account is None:
-        raise AccountError(f"account {account_id} not found")
     return get_account(account_id)  # type: ignore[return-value]
 
 

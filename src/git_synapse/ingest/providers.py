@@ -61,10 +61,6 @@ class Page:
     total: int | None = None
 
 
-class ProviderError(RuntimeError):
-    """The host refused, or answered something we cannot read."""
-
-
 class Provider:
     """What every host must answer. Subclasses override what they can."""
 
@@ -116,6 +112,15 @@ class Provider:
 
     def supports_listing(self) -> bool:
         return type(self).list_repos is not Provider.list_repos
+
+    def fetch_parent(self, full_name: str) -> str:
+        """The repository ``full_name`` was forked from, or "" if unknown.
+
+        Answered from the listing by every host that puts it there, which is
+        why the default is to add nothing: only GitHub withholds it and has to
+        ask again.
+        """
+        return ""
 
 
 class GitProvider(Provider):
@@ -174,6 +179,9 @@ class GitHubProvider(Provider):
 
     def get_repo(self, owner: str, name: str) -> RepoRecord:
         return self._record(self._client._get(f"/repos/{owner}/{name}").json())
+
+    def fetch_parent(self, full_name: str) -> str:
+        return self._client.fetch_parent(full_name)
 
     def list_page(self, owner: str, page: int = 1) -> Page:
         """One page of an owner's repositories.
@@ -269,6 +277,11 @@ class GitLabProvider(Provider):
             # GitLab calls it a fork relationship; the key is absent when there
             # is none, which is the only signal the list endpoint gives.
             is_fork="forked_from_project" in p,
+            # GitLab names the parent in the listing itself, so a fork costs no
+            # extra request here the way it does on GitHub.
+            parent_full_name=(
+                (p.get("forked_from_project") or {}).get("path_with_namespace") or ""
+            ),
             is_archived=bool(p.get("archived")),
             stargazers=int(p.get("star_count") or 0),
             forks_count=int(p.get("forks_count") or 0),

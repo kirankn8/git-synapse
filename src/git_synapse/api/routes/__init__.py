@@ -67,13 +67,9 @@ def config() -> dict:
         "default_org": cfg.github.org,
         "max_files_per_commit": cfg.ingest.max_files_per_commit,
         "min_pair_support": cfg.ingest.min_pair_support,
-        "include_merges": cfg.ingest.include_merges,
         "rename_similarity": cfg.ingest.rename_similarity,
         "blobless_threshold_kb": cfg.ingest.blobless_threshold_kb,
         "recency_half_life_days": cfg.analysis.recency_half_life_days,
-        "crossrepo_enabled": cfg.crossrepo.enabled,
-        "chain_min_confidence": cfg.crossrepo.chain_min_confidence,
-        "chain_max_depth": cfg.crossrepo.chain_max_depth,
         # The value in force, not the seed: a schedule set from the UI is
         # stored, and reporting the environment's here would tell the reader a
         # cadence nothing runs on.
@@ -987,11 +983,6 @@ def repo_pair_bumps(consumer_id: int, dep_id: int,
 def repo_dependencies(repo_id: int) -> dict:
     """Declared dependencies and observed bumps for one repository."""
     return q.repo_dependencies(repo_id)
-
-
-# ---------------------------------------------------------------------------
-# Directional / lagged analysis
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------

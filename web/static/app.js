@@ -1714,7 +1714,7 @@ on('/repos/:repo/files/*path', async ({ repo, path }, params) => {
             empty: 'No coupling partners above the support threshold.',
           },
         ),
-        'Click a row for the full 2×2 table and all 29 measures',
+        'Click a row for the full 2×2 table and all 31 measures',
       ),
     );
   } else if (tab === 'history') {
@@ -3018,7 +3018,7 @@ function gate({ setup = false, minted = true } = {}) {
             'If I change this file, what else has to change? Answered from the '
             + 'history that is already in your repositories.'),
           h('ul', { class: 'gate-points' },
-            h('li', {}, h('b', {}, 'Coupling'), ' — files that move together, ranked by 29 measures'),
+            h('li', {}, h('b', {}, 'Coupling'), ' — files that move together, ranked by 31 measures'),
             h('li', {}, h('b', {}, 'Across repositories'), ' — every edge backed by a manifest or a bump'),
             h('li', {}, h('b', {}, 'Measured'), ' — every prediction scored against the commits before it')),
           // Facts about the product, not about this corpus: the figures for

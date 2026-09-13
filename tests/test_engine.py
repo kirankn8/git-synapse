@@ -73,3 +73,145 @@ def test_model_values_round_trip_through_the_orm(db):
             row = session.get(Meta, "test-value")
             if row is not None:
                 session.delete(row)
+
+
+# ------------------------------------------------- schema apply and its retries
+
+def test_a_deadlock_is_retryable_and_an_ordinary_failure_is_not():
+    """The retry exists for concurrent `create_all` calls racing each other on
+    startup. Retrying anything else would turn a real fault into five of them."""
+    from sqlalchemy.exc import OperationalError
+
+    deadlock = OperationalError("SELECT 1", {}, Exception("deadlock detected"))
+    assert engine._is_schema_retryable(deadlock) is True
+
+    # Wrapped rather than raised directly: the driver's error arrives as the
+    # cause of whatever SQLAlchemy raises above it.
+    wrapped = RuntimeError("apply failed")
+    wrapped.__cause__ = OperationalError("x", {}, Exception("could not obtain lock"))
+    assert engine._is_schema_retryable(wrapped) is True
+
+    assert engine._is_schema_retryable(RuntimeError("disk full")) is False
+    assert engine._is_schema_retryable(
+        OperationalError("x", {}, Exception("syntax error"))) is False
+
+
+def test_forcing_the_schema_rewrites_the_recorded_version(db):
+    """`force` is the only way the create path runs on a database that already
+    has the schema, which is every deployment after the first boot."""
+    engine.apply_schema(force=True)
+    assert engine.recorded_schema_version() == engine.SCHEMA_VERSION
+    assert engine.schema_is_current() is True
+    assert engine.schema_drift() == 0
+
+
+def test_a_blocked_schema_apply_is_retried_then_succeeds(db, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    from git_synapse.db import schema as schema_mod
+
+    calls = []
+    real = schema_mod.metadata.create_all
+
+    def flaky(*a, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OperationalError("create", {}, Exception("deadlock detected"))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(schema_mod.metadata, "create_all", flaky)
+    monkeypatch.setattr(engine.time, "sleep", lambda _s: None)
+
+    engine.apply_schema(force=True)
+    assert len(calls) == 2
+
+
+def test_a_schema_apply_that_stays_blocked_gives_up_and_says_so(db, monkeypatch):
+    """Five deadlocks in a row is not a lock to wait longer for; it is a
+    database nobody is going to be able to migrate without looking."""
+    from sqlalchemy.exc import OperationalError
+
+    from git_synapse.db import schema as schema_mod
+
+    def always_blocked(*a, **kw):
+        raise OperationalError("create", {}, Exception("deadlock detected"))
+
+    monkeypatch.setattr(schema_mod.metadata, "create_all", always_blocked)
+    monkeypatch.setattr(engine.time, "sleep", lambda _s: None)
+
+    with pytest.raises(RuntimeError, match="could not apply schema after"):
+        engine.apply_schema(force=True)
+
+
+def test_an_unretryable_schema_failure_is_raised_immediately(db, monkeypatch):
+    from git_synapse.db import schema as schema_mod
+
+    def broken(*a, **kw):
+        raise RuntimeError("permission denied for schema public")
+
+    monkeypatch.setattr(schema_mod.metadata, "create_all", broken)
+    with pytest.raises(RuntimeError, match="permission denied"):
+        engine.apply_schema(force=True)
+
+
+def test_a_database_ahead_of_this_process_is_reported_as_drift(db, monkeypatch):
+    """Running older code than the database was migrated to: every write would
+    fail against a constraint this process does not know about."""
+    monkeypatch.setattr(
+        engine, "recorded_schema_version", lambda: engine.SCHEMA_VERSION + 2)
+    assert engine.schema_drift() == 2
+    assert engine.schema_is_current() is True
+    # Ahead, so the create path is skipped and the mismatch only logged.
+    engine.apply_schema()
+
+
+def test_an_unreadable_meta_table_reads_as_no_version_yet(monkeypatch):
+    """Called before the table exists, so a failure here means "not bootstrapped"
+    rather than an error worth propagating."""
+    def boom():
+        raise RuntimeError("relation \"meta\" does not exist")
+
+    monkeypatch.setattr(engine, "session_scope", boom)
+    assert engine.recorded_schema_version() is None
+
+
+def test_an_unreachable_database_names_where_it_looked(monkeypatch):
+    """The message has to carry host and port: "unreachable" alone sends someone
+    to the wrong machine."""
+    def boom():
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(engine, "session_scope", boom)
+    monkeypatch.setattr(engine.time, "sleep", lambda _s: None)
+
+    with pytest.raises(RuntimeError, match="unreachable after"):
+        engine.wait_for_database(timeout_s=0.05, interval_s=0.01)
+
+
+def test_a_database_with_no_recorded_version_has_one_inserted(db):
+    """The first boot: `create_all` runs and the version row is written rather
+    than updated. Every later apply takes the update branch instead."""
+    with session_scope() as session:
+        row = session.get(models().Meta, "schema_version")
+        if row is not None:
+            session.delete(row)
+    assert engine.recorded_schema_version() is None
+
+    engine.apply_schema()
+    assert engine.recorded_schema_version() == engine.SCHEMA_VERSION
+
+
+# --------------------------------------------------- the schema default vocabulary
+
+def test_a_default_that_is_neither_a_keyword_nor_a_number_is_kept_verbatim():
+    """The vocabulary is small on purpose. Anything outside it is handed to
+    SQLAlchemy unchanged rather than guessed at."""
+    from git_synapse.db import schema
+
+    assert schema._python_default("TRUE") is True
+    assert schema._python_default("FALSE") is False
+    assert schema._python_default("42") == 42
+    assert schema._python_default("'M'") == "M"
+    # Not a keyword, not an integer: passed through as written.
+    assert schema._python_default("nextval('seq')") == "nextval('seq')"
+    assert schema._python_default("uuid_generate_v4()") == "uuid_generate_v4()"

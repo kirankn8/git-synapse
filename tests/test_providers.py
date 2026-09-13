@@ -490,3 +490,30 @@ def test_a_client_that_cannot_page_is_sliced_out_of_a_full_listing():
     assert len(first.records) == providers.PAGE and first.has_more is True
     assert len(second.records) == 50 and second.has_more is False
     assert first.total == 150
+
+
+def test_a_host_that_names_the_parent_in_its_listing_asks_nothing_extra():
+    """GitLab puts `forked_from_project` in the listing, so the base answers ""
+    and no second request is made. Only GitHub withholds it."""
+    class _Simple(providers.Provider):
+        def list_repos(self, owner):
+            return []
+
+    client = _Simple(sources.parse("https://git.corp/team"))
+    assert client.fetch_parent("team/anything") == ""
+
+
+def test_the_github_provider_asks_its_client_for_the_parent():
+    """One request per fork, delegated rather than reimplemented, so Enterprise
+    hosts and the api_url override are honoured the same way."""
+    asked = []
+
+    class _Client:
+        def fetch_parent(self, full_name):
+            asked.append(full_name)
+            return "upstream/project"
+
+    client = providers.GitHubProvider(sources.parse("https://github.com/acme"))
+    client._client = _Client()
+    assert client.fetch_parent("acme/fork") == "upstream/project"
+    assert asked == ["acme/fork"]

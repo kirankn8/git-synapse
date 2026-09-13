@@ -61,9 +61,6 @@ NETWORK_FAILURE_ABORT = 12
 #: known is treated as a failed listing rather than as the org having shrunk.
 DISCOVERY_SHRINK_FLOOR = 0.8
 
-#: Advisory lock key serialising ingest runs across processes. Arbitrary but
-#: fixed; anything else taking this key would deadlock with the pipeline.
-INGEST_LOCK_KEY = 0x0C047E5
 
 
 def _try_ingest_lock(session: object) -> bool:
@@ -546,6 +543,15 @@ def _discover_account(account: dict) -> tuple[list[RepoRecord], int]:
                 if not nxt.has_more:
                     break
 
+        # Inside the client's lifetime, and skipped entirely when an allowlist
+        # already decided. Only forks are asked about, and only when the
+        # listing did not already say: on GitHub that is one request each,
+        # everywhere else none.
+        if not only:
+            for record in records:
+                if record.is_fork and not record.parent_full_name:
+                    record.parent_full_name = client.fetch_parent(record.full_name)
+
     if only:
         # An allowlist is an explicit answer, so it decides on its own; running
         # the include filters over it as well would let `include_forks` drop a
@@ -562,7 +568,21 @@ def _discover_account(account: dict) -> tuple[list[RepoRecord], int]:
                 if r.full_name.lower() in wanted
                 or r.full_name.lower().removeprefix(prefix) in wanted]
         return kept, len(records)
-    return select_repos(records, cfg), len(records)
+
+    return select_repos(records, cfg, tracked=_tracked_full_names()), len(records)
+
+
+def _tracked_full_names() -> frozenset[str]:
+    """Every repository already in the corpus, lowercased.
+
+    Enabled ones only. A repository somebody switched off is not evidence, so
+    a fork of it is not a duplicate of anything -- switching a repository off
+    and having its fork silently vanish too would be its own surprise.
+    """
+    Repo = models().Repo
+    with connection() as conn:
+        rows = conn.query(Repo.full_name).filter(Repo.is_enabled.is_(True)).all()
+    return frozenset(row.full_name.lower() for row in rows if row.full_name)
 
 
 def _fetch_by_name(client, login: str, names: list[str]) -> list[RepoRecord]:
@@ -864,6 +884,29 @@ def run_ingest(
         )
 
 
+def _aborted_run(
+    exc: Exception, force_full: bool, trigger: str, started: float
+) -> RunResult:
+    """Record a run that refused to start, so the failure is visible in history.
+
+    An abort still opens and closes a run row: a refusal that leaves no trace
+    is indistinguishable from a scheduler that never fired.
+    """
+    log.error("aborting run: %s", exc)
+    run = RunResult(kind="full" if force_full else "sync")
+    run.run_id = _start_run(run.kind, trigger, 0)
+    run.duration_s = time.monotonic() - started
+    run.status = "failed"
+    with connection() as conn:
+        row = conn.get(models().IngestRun, run.run_id)
+        if row is not None:
+            row.status = "failed"
+            row.finished_at = datetime.now(UTC)
+            row.duration_s = run.duration_s
+            row.error = str(exc)[:4000]
+    return run
+
+
 def _run_ingest_locked(
     records: list[RepoRecord] | None,
     trigger: str,
@@ -876,12 +919,6 @@ def _run_ingest_locked(
 
     reconcile_stale_runs()
 
-    # Fail the whole run on a bad credential rather than letting every
-    # repository fail individually. Deliberately before any mirror is touched.
-    #
-    # Required only when something private is in scope: refusing to run at all
-    # on a wholly public corpus blocked a legitimate configuration for no
-    # reason, since those clone over plain HTTPS.
     # Older code than the database was migrated to. Every write would fail
     # against a constraint this process still expects, one repository at a
     # time, so refuse once with something a reader can act on.
@@ -893,20 +930,14 @@ def _run_ingest_locked(
             "than the database was migrated to, which happens when only some "
             "services were rebuilt. Run `make up` to rebuild them all."
         )
-        log.error("aborting run: %s", exc)
-        run = RunResult(kind="full" if force_full else "sync")
-        run.run_id = _start_run(run.kind, trigger, 0)
-        run.duration_s = time.monotonic() - started
-        run.status = "failed"
-        with connection() as conn:
-            row = conn.get(models().IngestRun, run.run_id)
-            if row is not None:
-                row.status = "failed"
-                row.finished_at = datetime.now(UTC)
-                row.duration_s = run.duration_s
-                row.error = str(exc)[:4000]
-        return run
+        return _aborted_run(exc, force_full, trigger, started)
 
+    # Fail the whole run on a bad credential rather than letting every
+    # repository fail individually. Deliberately before any mirror is touched.
+    #
+    # Required only when something private is in scope: refusing to run at all
+    # on a wholly public corpus blocks a legitimate configuration for no reason,
+    # since those clone over plain HTTPS.
     try:
         verify_credentials(required=private_repos_in_scope() > 0)
         # Materialised analytics are versioned separately from source data.
@@ -914,19 +945,7 @@ def _run_ingest_locked(
         # commits, and runs the affected dependency closure exactly once.
         derived.ensure_current()
     except AuthError as exc:
-        log.error("aborting run: %s", exc)
-        run = RunResult(kind="full" if force_full else "sync")
-        run.run_id = _start_run(run.kind, trigger, 0)
-        run.duration_s = time.monotonic() - started
-        run.status = "failed"
-        with connection() as conn:
-            row = conn.get(models().IngestRun, run.run_id)
-            if row is not None:
-                row.status = "failed"
-                row.finished_at = datetime.now(UTC)
-                row.duration_s = run.duration_s
-                row.error = str(exc)[:4000]
-        return run
+        return _aborted_run(exc, force_full, trigger, started)
 
     if records is None:
         records = discover(trigger)
@@ -991,9 +1010,7 @@ def _run_ingest_locked(
     # The dependency graph is global -- an edge spans repositories -- so it runs
     # once after all per-repo work completes. A failure here must not fail the
     # whole run: the per-repo results are already committed and useful alone.
-    if cfg.crossrepo.enabled and (
-        run.commits_added > 0 or force_full or _crossrepo_rebuild_needed()
-    ):
+    if run.commits_added > 0 or force_full or _crossrepo_rebuild_needed():
         # Manifest bumps first: they are incremental per repository, and they
         # are what dates every edge the graph below carries.
         try:

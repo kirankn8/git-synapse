@@ -412,3 +412,287 @@ def test_label_propagation_does_not_allocate_a_node_by_node_matrix():
     assert peak < dense_would_be / 10, (
         f"peak {peak / 1e6:.1f}MB is within an order of magnitude of the "
         f"{dense_would_be / 1e6:.0f}MB dense matrix this replaced")
+
+
+# ------------------------------------------------------------ npmi, directly
+
+@pytest.mark.parametrize("joint,left,right,population", [
+    (0, 5, 5, 10),   # a pair that never co-occurred
+    (2, 0, 5, 10),   # a file with no changes of its own
+    (2, 5, 0, 10),
+    (2, 5, 5, 0),    # an empty window
+])
+def test_npmi_is_undefined_rather_than_zero_when_a_count_is_missing(
+    joint, left, right, population,
+):
+    """None and 0.0 mean different things here: "no evidence" against "evidence
+    of independence". Returning 0.0 for both would rank them together."""
+    assert mining._npmi(joint, left, right, population) is None
+
+
+def test_npmi_is_one_when_two_files_always_move_together():
+    """Perfect association is the top of the scale, and the denominator is zero
+    there -- computing it would divide by zero rather than say 1.0."""
+    assert mining._npmi(4, 4, 4, 4) == 1.0
+    assert mining._npmi(5, 5, 5, 4) == 1.0
+
+
+def test_npmi_is_bounded_and_ordered_by_how_exclusive_the_pairing_is():
+    loose = mining._npmi(2, 8, 8, 100)
+    tight = mining._npmi(6, 7, 7, 100)
+    assert -1.0 <= loose <= 1.0 and -1.0 <= tight <= 1.0
+    assert tight > loose
+
+
+# --------------------------------------------- drift, clusters and their readers
+
+@pytest.fixture()
+def drift_corpus(db):
+    """One repository whose two files move together in both time windows.
+
+    A pair needs at least two co-changes on each side of the boundary before it
+    is scored, so the fixture supplies exactly that: two recent commits and two
+    old ones, each touching both files.
+    """
+    from datetime import UTC, datetime, timedelta
+    from uuid import uuid4
+
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
+
+    # Additive: this database is shared with every other test in the run, and
+    # several of them skip when the corpus lacks a shape they need. Clearing
+    # the tables to get a clean slate takes that shape away from them.
+    tag = uuid4().hex[:8]
+    with connection() as conn:
+        repo = models().Repo(github_id=abs(hash(tag)) % 10**8, owner="acme",
+                             name=f"drift-{tag}", full_name=f"acme/drift-{tag}",
+                             clone_url="", default_branch="main")
+        conn.add(repo)
+        conn.flush()
+
+        files = []
+        for path in ("src/a.py", "docs/b.md"):
+            row = models().File(repo_id=repo.id, path=path,
+                                dir_path=path.split("/")[0],
+                                basename=path.split("/")[-1], change_count=4)
+            conn.add(row)
+            files.append(row)
+        conn.flush()
+
+        now = datetime.now(UTC)
+        for i, age_days in enumerate((1, 2, 400, 401)):
+            at = now - timedelta(days=age_days)
+            commit = models().Commit(repo_id=repo.id, sha=f"{i:040x}", authored_at=at,
+                                     committed_at=at, pair_eligible=True, n_files=2)
+            conn.add(commit)
+            conn.flush()
+            for f in files:
+                conn.add(models().CommitFile(commit_id=commit.id, file_id=f.id,
+                                             repo_id=repo.id))
+        repo_id, file_ids, name = repo.id, [f.id for f in files], repo.name
+
+    yield {"repo_id": repo_id, "file_ids": file_ids, "name": name}
+
+    with connection() as conn:
+        for model in (models().PairDrift, models().FileCluster, models().FilePairMetric,
+                      models().CommitFile, models().Commit, models().File):
+            conn.query(model).filter_by(repo_id=repo_id).delete(synchronize_session=False)
+        conn.query(models().Repo).filter_by(id=repo_id).delete(synchronize_session=False)
+
+
+def test_a_pair_seen_in_both_windows_is_scored_for_drift(drift_corpus):
+    """Both npmi values and their delta come out of `_rebuild_drift`; a pair
+    present in only one window is not evidence of a trend either way."""
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
+
+    with connection() as session:
+        mining._rebuild_drift(session, drift_corpus["repo_id"])
+
+    with connection() as session:
+        rows = session.query(models().PairDrift).filter_by(
+            repo_id=drift_corpus["repo_id"]).all()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.n_ab_recent == 2 and row.n_ab_historic == 2
+        assert row.trend in {"emerging", "decaying", "stable"}
+        assert row.npmi_recent is not None and row.npmi_historic is not None
+
+
+def test_drifting_pairs_names_both_files_and_their_repository(drift_corpus):
+    """The reader joins the pair back to paths and a repo name, because a row of
+    two integers is not something anybody can act on."""
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
+
+    a, b = sorted(drift_corpus["file_ids"])
+    with connection() as session:
+        session.add(models().PairDrift(
+            repo_id=drift_corpus["repo_id"], file_a_id=a, file_b_id=b,
+            window_days=90, n_ab_recent=6, n_ab_historic=2,
+            npmi_recent=0.8, npmi_historic=0.2, delta=0.6, trend="emerging"))
+
+    rows = mining.drifting_pairs(repo_id=drift_corpus["repo_id"], trend="emerging")
+    assert len(rows) == 1
+    assert rows[0]["path_a"] == "src/a.py"
+    assert rows[0]["path_b"] == "docs/b.md"
+    assert rows[0]["repo"] == drift_corpus["name"]
+
+
+def test_a_drifting_pair_whose_file_was_deleted_is_hidden_unless_asked_for(drift_corpus):
+    """Recommending a file that no longer exists is worse than recommending
+    nothing, so deleted partners are dropped by default."""
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
+
+    a, b = sorted(drift_corpus["file_ids"])
+    with connection() as session:
+        session.add(models().PairDrift(
+            repo_id=drift_corpus["repo_id"], file_a_id=a, file_b_id=b,
+            window_days=90, n_ab_recent=6, n_ab_historic=2,
+            npmi_recent=0.8, npmi_historic=0.2, delta=0.6, trend="emerging"))
+        session.query(models().File).filter_by(id=b).update({"is_deleted": True})
+
+    assert mining.drifting_pairs(repo_id=drift_corpus["repo_id"], trend="emerging") == []
+    kept = mining.drifting_pairs(repo_id=drift_corpus["repo_id"], trend="emerging",
+                                 include_deleted=True)
+    assert len(kept) == 1
+
+
+def test_cross_directory_modules_report_the_directories_they_span(drift_corpus):
+    """The point of the cluster is that it crosses a directory boundary: files
+    that move together while living apart are what a newcomer cannot see."""
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
+
+    with connection() as session:
+        for file_id in drift_corpus["file_ids"]:
+            session.add(models().FileCluster(
+                repo_id=drift_corpus["repo_id"], file_id=file_id, cluster_id=1,
+                cluster_size=3, cohesion=0.75, dirs_spanned=2))
+
+    rows = mining.cross_directory_modules(drift_corpus["repo_id"])
+    assert len(rows) == 1
+    assert rows[0]["cluster_size"] == 3
+    assert rows[0]["dirs_spanned"] == 2
+    assert rows[0]["avg_cohesion"] == 0.75
+    assert rows[0]["directories"] == ["docs", "src"]
+    assert set(rows[0]["sample_files"]) == {"src/a.py", "docs/b.md"}
+
+
+# ------------------------------------------- query readers over a known corpus
+
+def test_a_minimum_score_drops_partners_beneath_it(drift_corpus):
+    """`min_score` is the caller saying "below this is not worth my attention",
+    so a partner under the bar is absent rather than present with a low number.
+    """
+    from git_synapse.analysis import query
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
+
+    a, b = sorted(drift_corpus["file_ids"])
+    with connection() as session:
+        session.add(models().FilePairMetric(
+            repo_id=drift_corpus["repo_id"], file_a_id=a, file_b_id=b,
+            n_ab=4, n_a=4, n_b=4, n_total=4, jaccard=0.5))
+
+    assert [r["other_id"] for r in
+            query.coupled_files(a, measure="jaccard", min_score=0.1)] == [b]
+    assert query.coupled_files(a, measure="jaccard", min_score=0.9) == []
+
+
+def test_an_impact_edge_and_its_declaration_can_be_read_back_singly(impact_corpus):
+    """The UI asks about one edge at a time when somebody clicks it; fetching
+    the whole graph to answer that would be the wrong shape entirely."""
+    from git_synapse.analysis import query
+
+    signer, packager = impact_corpus["signer"], impact_corpus["packager"]
+
+    edge = query.impact_pair(signer, packager)
+    assert edge is not None and edge["source_repo_id"] == signer
+
+    declared = query.declared_dependency(dep_repo_id=signer, consumer_repo_id=packager)
+    assert declared is not None
+    assert declared["dep_name"] == "github.com/acme/signer"
+
+    assert query.impact_pair(signer, 999_999) is None
+    assert query.declared_dependency(dep_repo_id=999_999, consumer_repo_id=packager) is None
+
+
+def test_repo_dependencies_names_the_repository_behind_each_declaration(impact_corpus):
+    """A manifest line is a string; the useful answer is which tracked
+    repository it resolves to, so the reader joins it back."""
+    from git_synapse.analysis import query
+
+    result = query.repo_dependencies(impact_corpus["packager"])
+    names = {d["dep_repo"] for d in result["declared"]}
+    assert "signer" in names
+
+
+def test_a_pairing_with_too_few_bumps_has_no_adoption_statistics(impact_corpus):
+    """A median over one or two observations is not a measurement, so a pairing
+    under three bumps is left out rather than reported with a wide error bar."""
+    from datetime import UTC, datetime
+
+    from git_synapse.analysis import depbump as db_mod
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
+
+    with connection() as session:
+        session.add(models().DepBump(
+            consumer_repo_id=impact_corpus["runtime"], consumer_sha="a" * 40,
+            dep_repo_id=impact_corpus["packager"], dep_name="github.com/acme/packager",
+            dep_version="v9.9.9", manifest="go.mod",
+            bumped_at=datetime.now(UTC), adoption_seconds=3600))
+
+    rows = db_mod.adoption_delays()
+    pairs = {(r["dep"], r["consumer"]) for r in rows}
+    # packager->signer has five bumps and is reported; runtime->packager has one.
+    assert ("signer", "packager") in pairs
+    assert ("packager", "runtime") not in pairs
+
+
+def test_declared_only_hides_an_edge_that_no_manifest_states(impact_corpus):
+    """A bump-only edge is real evidence but not a declaration, so a caller
+    asking for declarations must not be handed one."""
+    from git_synapse.analysis import predict
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
+
+    signer, unrelated = impact_corpus["signer"], impact_corpus["unrelated"]
+    with connection() as session:
+        session.add(models().RepoImpact(
+            source_repo_id=signer, target_repo_id=unrelated, score=0.9,
+            rank_in_source=99, is_declared=False, has_bump_history=True))
+
+    everything = {r["target_repo_id"] for r in predict.impact_for(signer, limit=50)}
+    declared = {r["target_repo_id"]
+                for r in predict.impact_for(signer, limit=50, declared_only=True)}
+    assert unrelated in everything
+    assert unrelated not in declared
+
+
+def test_a_cycle_in_the_graph_does_not_walk_forever(impact_corpus):
+    """Two repositories that each declare the other are a real shape, and a
+    chain walker that revisits a node on the path never terminates."""
+    from git_synapse.analysis import predict
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
+
+    signer, packager = impact_corpus["signer"], impact_corpus["packager"]
+    with connection() as session:
+        session.query(models().RepoImpact).filter_by(
+            source_repo_id=packager, target_repo_id=signer).delete(
+                synchronize_session=False)
+        session.add(models().RepoImpact(
+            source_repo_id=packager, target_repo_id=signer, score=0.9,
+            rank_in_source=1, is_declared=True, has_bump_history=True))
+
+    chains = predict.impact_chains(signer, max_depth=4, min_score=0.1)
+    for chain in chains:
+        assert len(chain["path"]) == len(set(chain["path"])), chain["path"]
+
+    # A chain is at least two hops, so a depth of one stops the walk before it
+    # has anything to report -- the bound is enforced, not merely advertised.
+    assert predict.impact_chains(signer, max_depth=1, min_score=0.1) == []

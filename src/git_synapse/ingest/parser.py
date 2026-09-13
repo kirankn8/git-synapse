@@ -318,7 +318,9 @@ def iter_commits(
     import subprocess
 
     cfg = get_config().ingest
-    include_merges = cfg.include_merges if include_merges is None else include_merges
+    # Default off, and nothing in the product turns it on: a merge restates the
+    # changes of its parents, so counting one is counting the same edit twice.
+    include_merges = bool(include_merges)
     rename_similarity = rename_similarity or cfg.rename_similarity
 
     args = [

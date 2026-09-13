@@ -19,6 +19,11 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.7",
     "mcp>=1.2",
+    "PyYAML>=6.0",
+    # Fernet, for the per-source access tokens that must be replayed to clone a
+    # private repository. Already present transitively; named here because this
+    # is a direct dependency and a transitive one can vanish without notice.
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]

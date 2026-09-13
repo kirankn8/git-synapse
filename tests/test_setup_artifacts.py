@@ -1,3 +1,4 @@
+import re
 import subprocess
 from pathlib import Path
 
@@ -44,3 +45,36 @@ def test_github_pages_publishes_docs_root() -> None:
     assert "enablement: true" not in workflow
     assert "path: docs" in workflow
     assert "setup.html" in index
+
+
+def _requirement_names(lines: list[str]) -> set[str]:
+    """Distribution names, stripped of version pins, extras and markers."""
+    found = set()
+    for line in lines:
+        entry = line.strip().strip('",')
+        if not entry or entry.startswith("#"):
+            continue
+        found.add(re.split(r"[><=;\[]", entry)[0].strip().lower())
+    return found
+
+
+def test_the_two_dependency_lists_name_the_same_distributions() -> None:
+    """requirements.txt builds the image; pyproject.toml builds the package.
+
+    Both exist for a reason -- the Dockerfile installs requirements.txt first so
+    that editing a source file does not invalidate the pip layer -- but a
+    distribution in only one of them is installed for only some of the ways this
+    is run. `cryptography` reaching the image but not the wheel gives a `pip
+    install` whose Sources page cannot store a token, and nothing says why.
+    """
+    requirements = _requirement_names(
+        (ROOT / "requirements.txt").read_text().splitlines()
+    )
+    pyproject = (ROOT / "pyproject.toml").read_text()
+    declared = _requirement_names(
+        pyproject.split("dependencies = [", 1)[1].split("\n]", 1)[0].splitlines()
+    )
+    assert requirements == declared, {
+        "only in requirements.txt": sorted(requirements - declared),
+        "only in pyproject.toml": sorted(declared - requirements),
+    }

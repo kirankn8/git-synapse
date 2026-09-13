@@ -91,12 +91,12 @@ def test_a_since_sha_that_no_longer_exists_is_the_callers_problem(tmp_path):
 def test_configuration_reads_the_environment_and_can_be_reset(monkeypatch):
     from git_synapse.config import get_config, reset_config_cache
 
-    monkeypatch.setenv("MAX_QUERY_LIMIT", "77")
+    monkeypatch.setenv("INGEST_CONCURRENCY", "77")
     reset_config_cache()
     try:
-        assert get_config().analysis.max_limit == 77
+        assert get_config().ingest.concurrency == 77
     finally:
-        monkeypatch.delenv("MAX_QUERY_LIMIT", raising=False)
+        monkeypatch.delenv("INGEST_CONCURRENCY", raising=False)
         reset_config_cache()
 
 
@@ -109,15 +109,15 @@ def test_a_malformed_numeric_setting_fails_loudly_and_names_itself(monkeypatch):
     """
     from git_synapse.config import get_config, reset_config_cache
 
-    monkeypatch.setenv("MAX_QUERY_LIMIT", "not-a-number")
+    monkeypatch.setenv("INGEST_CONCURRENCY", "not-a-number")
     reset_config_cache()
     try:
         with pytest.raises(ValueError) as exc:
             get_config()
-        assert "MAX_QUERY_LIMIT" in str(exc.value)
+        assert "INGEST_CONCURRENCY" in str(exc.value)
         assert "not-a-number" in str(exc.value)
     finally:
-        monkeypatch.delenv("MAX_QUERY_LIMIT", raising=False)
+        monkeypatch.delenv("INGEST_CONCURRENCY", raising=False)
         reset_config_cache()
 
 
@@ -134,22 +134,6 @@ def test_the_dsn_contains_every_part_it_needs():
 
 
 # ------------------------------------------------------------ configuration
-
-def test_a_numeric_setting_that_is_not_a_number_names_itself(monkeypatch):
-    """A typo in one environment variable should say which one, not fail later
-    inside whatever first used the value."""
-    from git_synapse.config import _env_float
-
-    monkeypatch.delenv("GS_RATIO", raising=False)
-    assert _env_float("GS_RATIO", 0.25) == 0.25          # unset falls back
-
-    monkeypatch.setenv("GS_RATIO", "0.5")
-    assert _env_float("GS_RATIO", 0.25) == 0.5
-
-    monkeypatch.setenv("GS_RATIO", "half")
-    with pytest.raises(ValueError, match="GS_RATIO"):
-        _env_float("GS_RATIO", 0.25)
-
 
 def test_a_parse_failure_is_not_swallowed_by_an_empty_repository(tmp_path, monkeypatch):
     """`return` inside a `finally` discards whatever exception is already

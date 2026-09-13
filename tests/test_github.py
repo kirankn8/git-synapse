@@ -163,17 +163,99 @@ def test_each_host_gets_the_clone_username_it_expects():
 # ------------------------------------------------------------------ filters
 
 def test_archived_and_forked_repositories_follow_configuration():
+    """A fork whose parent is nowhere in the corpus duplicates nothing.
+
+    The archived repository is dropped outright; the fork is not, because
+    ``acme/upstream`` is neither in this listing nor already tracked.
+    """
     records = [
         RepoRecord.from_api(_repo_payload(1)),
         RepoRecord.from_api(_repo_payload(2, archived=True)),
-        RepoRecord.from_api(_repo_payload(3, fork=True)),
+        RepoRecord.from_api(_repo_payload(3, fork=True,
+                                          parent={"full_name": "acme/upstream"})),
     ]
     keep_all = select_repos(records, GitHubConfig(include_archived=True, include_forks=True))
     assert len(keep_all) == 3
 
     plain = select_repos(records, GitHubConfig(include_archived=False, include_forks=False))
-    names = {r.name for r in plain}
-    assert names == {"repo1"}
+    assert {r.name for r in plain} == {"repo1", "repo3"}
+
+
+def test_a_fork_is_dropped_only_when_its_parent_is_also_here():
+    """The duplication is the harm, so the parent's presence is the question.
+
+    Storing a fork beside its parent puts the same commits in twice and lets
+    one project's history be counted as two projects agreeing.
+    """
+    cfg = GitHubConfig(include_forks=False)
+
+    # Parent arriving in the same listing: an org that owns a project and a
+    # fork of it hands us both at once.
+    same_listing = [
+        RepoRecord.from_api(_repo_payload(1)),
+        RepoRecord.from_api(_repo_payload(2, fork=True,
+                                          parent={"full_name": "acme/repo1"})),
+    ]
+    assert [r.name for r in select_repos(same_listing, cfg)] == ["repo1"]
+
+    # Parent already in the corpus, and not in this listing at all.
+    fork_only = [RepoRecord.from_api(_repo_payload(2, fork=True,
+                                                   parent={"full_name": "acme/repo1"}))]
+    assert select_repos(fork_only, cfg, tracked=frozenset({"acme/repo1"})) == []
+
+    # Same fork, nothing tracked: nothing is duplicated, so it stays.
+    assert [r.name for r in select_repos(fork_only, cfg)] == ["repo2"]
+
+
+def test_the_parent_is_fetched_per_repository_because_listings_omit_it():
+    """GitHub's list endpoints return the minimal repository representation,
+    which carries `fork` but not `parent`. One request per fork closes that."""
+    asked = []
+
+    def handler(request):
+        asked.append(request.url.path)
+        return httpx.Response(200, json=_repo_payload(
+            3, fork=True, parent={"full_name": "upstream/project"}))
+
+    with _client(handler) as c:
+        assert c.fetch_parent("acme/repo3") == "upstream/project"
+    assert asked == ["/repos/acme/repo3"]
+
+
+def test_a_repository_with_no_parent_reports_an_empty_one():
+    def handler(request):
+        return httpx.Response(200, json=_repo_payload(1))
+
+    with _client(handler) as c:
+        assert c.fetch_parent("acme/repo1") == ""
+
+
+def test_a_failed_parent_lookup_is_empty_rather_than_fatal():
+    """The caller keeps a fork it cannot place, so a refusal here must not be
+    an exception that aborts discovery of the whole organisation.
+
+    404 is the realistic failure: a repository renamed between the listing and
+    this request, or one the token may list but not read.
+    """
+    def handler(request):
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    with _client(handler) as c:
+        assert c.fetch_parent("acme/repo3") == ""
+
+
+def test_a_fork_whose_parent_could_not_be_established_is_kept():
+    """An empty parent means "not established", never "no parent".
+
+    GitHub answers `parent` only on a per-repository request, so a failed or
+    skipped one leaves it blank. Discarding real history on a failed request
+    would lose a codebase somebody works in, and say nothing about why.
+    """
+    unplaced = [RepoRecord.from_api(_repo_payload(9, fork=True))]
+    assert unplaced[0].parent_full_name == ""
+    kept = select_repos(unplaced, GitHubConfig(include_forks=False),
+                        tracked=frozenset({"acme/repo1"}))
+    assert [r.name for r in kept] == ["repo9"]
 
 
 def test_an_explicit_allowlist_overrides_every_other_filter():

@@ -1035,3 +1035,70 @@ def test_serving_is_a_thin_call_that_can_be_stood_in_for(monkeypatch):
     server._serve("an-app", "0.0.0.0", 8081)
     assert calls == {"app": "an-app", "host": "0.0.0.0", "port": 8081,
                      "log_level": "info"}
+
+
+# ------------------------------------------------- the evidence card, directly
+
+def _card(**partner):
+    labels = partner.pop("_labels", [])
+    informative = partner.pop("_informative", True)
+    return server._evidence_card(partner, labels, informative)
+
+
+def test_a_card_with_no_measures_at_all_says_so_rather_than_guessing():
+    """No signals is not the same as signals that disagree, and an agent acting
+    on "weak" needs to know which of the two it is looking at."""
+    card = _card(n_ab=20)
+    assert card["agreement"] == "insufficient signals"
+    assert card["evidence"] == "weak"
+    assert card["summary"] == "Limited evidence; treat this relationship cautiously."
+
+
+def test_signals_that_all_point_the_same_way_are_reported_as_agreeing():
+    card = _card(n_ab=20, confidence_out=0.9, npmi=0.6, log_likelihood_ratio=9.0)
+    assert card["agreement"] == "signals agree"
+    assert card["evidence"] == "strong"
+    assert card["summary"] == "Strong evidence that this file is meaningfully related."
+
+
+def test_signals_that_all_point_away_also_agree_but_stay_weak():
+    """Three measures agreeing that a pair is unrelated is agreement too; the
+    evidence is what is weak, not the consensus."""
+    card = _card(n_ab=20, confidence_out=0.1, npmi=0.0, log_likelihood_ratio=0.5)
+    assert card["agreement"] == "signals agree"
+    assert card["evidence"] == "weak"
+
+
+def test_a_split_verdict_is_reported_as_mixed():
+    card = _card(n_ab=8, confidence_out=0.9, npmi=0.0, log_likelihood_ratio=0.1)
+    assert card["agreement"] == "mixed signals"
+    assert card["evidence"] == "moderate"
+    assert card["summary"] == "Moderate evidence of a meaningful relationship."
+
+
+def test_jaccard_alone_is_enough_to_count_as_a_signal():
+    """The pair is read as one signal: either measure clearing the bar is the
+    same claim about the same relationship."""
+    assert _card(n_ab=20, jaccard=0.5)["agreement"] == "signals agree"
+    assert _card(n_ab=20, npmi=0.5)["agreement"] == "signals agree"
+
+
+def test_support_below_the_reporting_floor_is_weak_whatever_the_measures_say():
+    """Three co-changes can make every ratio look perfect. Support gates them
+    all, so a handful of commits cannot read as strong evidence."""
+    card = _card(n_ab=server.MIN_REPORTABLE_SUPPORT - 1,
+                 confidence_out=1.0, npmi=1.0, log_likelihood_ratio=99.0)
+    assert card["evidence"] == "weak"
+
+
+def test_a_labelled_partner_is_described_by_its_label():
+    """Generated files and lockfiles co-change with everything; the label is
+    the useful thing to say, not the strength of an artefact's correlation."""
+    card = _card(n_ab=50, confidence_out=1.0, npmi=1.0, _labels=["lockfile"])
+    assert card["summary"] == "Flagged as lockfile; verify before editing."
+
+
+def test_an_uninformative_partner_is_called_structural_noise():
+    card = _card(n_ab=50, confidence_out=1.0, npmi=1.0, _informative=False)
+    assert card["evidence"] == "weak"
+    assert card["summary"] == "Likely structural noise; verify before editing."

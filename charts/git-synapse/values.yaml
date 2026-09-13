@@ -66,13 +66,9 @@ config:
   schedulerEnabled: true
   refreshOnStart: false
   githubOrg: ""
-  includePrivate: true
-  includeForks: false
-  includeArchived: true
   ingestConcurrency: 8
   maxFilesPerCommit: 60
   minPairSupport: 2
-  includeMerges: false
 
 resources: {}
 nodeSelector: {}

@@ -150,7 +150,7 @@ def test_discovery_refuses_a_collapsed_listing(two_accounts, db, monkeypatch):
 
     monkeypatch.setattr(pipeline.providers, "for_source",
                         lambda src, patient=True, token="": _Client())
-    monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: [])
+    monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg, tracked=frozenset(): [])
 
     with pytest.raises(AuthError, match="already known"):
         pipeline.discover()
@@ -181,7 +181,7 @@ def test_discovery_accepts_a_listing_that_is_merely_smaller(two_accounts, db, mo
 
     monkeypatch.setattr(pipeline.providers, "for_source",
                         lambda src, patient=True, token="": _Client())
-    monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: list(records))
+    monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg, tracked=frozenset(): list(records))
     monkeypatch.setattr(pipeline, "upsert_repo", lambda record, conn, **kwargs: None)
 
     assert len(pipeline.discover()) == keep
@@ -715,11 +715,11 @@ def two_accounts(db):
                 conn.delete(row)
 
 
-def _record(full_name):
+def _record(full_name, **over):
     from git_synapse.ingest.github import RepoRecord
     owner, name = full_name.split("/")
     return RepoRecord(github_id=abs(hash(full_name)) % 10**8, owner=owner,
-                      name=name, full_name=full_name)
+                      name=name, full_name=full_name, **over)
 
 
 def _client_returning(mapping):
@@ -760,7 +760,7 @@ def test_one_failing_account_does_not_stop_the_others(two_accounts, db, monkeypa
     good = [_record("beta/keep")]
     monkeypatch.setattr(pipeline.providers, "for_source", _client_returning(
         {"alpha": RuntimeError("listing blew up"), "beta": good}))
-    monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: list(records))
+    monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg, tracked=frozenset(): list(records))
 
     selected = pipeline.discover()
     assert [r.full_name for r in selected] == ["beta/keep"]
@@ -773,10 +773,48 @@ def test_every_account_failing_is_reported_as_one_error(two_accounts, db, monkey
 
     monkeypatch.setattr(pipeline.providers, "for_source", _client_returning(
         {"alpha": RuntimeError("down"), "beta": RuntimeError("also down")}))
-    monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: [])
+    monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg, tracked=frozenset(): [])
 
     with pytest.raises(AuthError, match="every configured account failed"):
         pipeline.discover()
+
+
+def test_a_forks_parent_is_looked_up_because_the_listing_omits_it(
+    two_accounts, db, monkeypatch,
+):
+    """GitHub's list endpoints carry `fork` but not `parent`, so discovery asks
+    once per fork. That answer is the whole basis for telling a duplicate copy
+    from a codebase somebody actually works in.
+    """
+    fork = _record("alpha/fork", is_fork=True)
+    plain = _record("alpha/plain")
+    asked = []
+
+    class _Fake:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def supports_listing(self): return True
+
+        def list_page(self, login, page=1):
+            from git_synapse.ingest.providers import Page
+            rows = [fork, plain] if login == "alpha" else []
+            return Page(rows, has_more=False, total=len(rows))
+
+        def fetch_parent(self, full_name):
+            asked.append(full_name)
+            return "upstream/fork"
+
+    monkeypatch.setattr(pipeline.providers, "for_source",
+                        lambda src, patient=True, token="": _Fake())
+    monkeypatch.setattr(pipeline, "select_repos",
+                        lambda records, cfg, tracked=frozenset(): list(records))
+    monkeypatch.setattr(pipeline, "DISCOVERY_SHRINK_FLOOR", 0.0)
+
+    pipeline.discover()
+
+    # Only the fork is asked about; the ordinary repository costs no request.
+    assert asked == ["alpha/fork"]
+    assert fork.parent_full_name == "upstream/fork"
 
 
 def test_a_discovered_repository_records_which_account_found_it(two_accounts, db, monkeypatch):
@@ -787,7 +825,7 @@ def test_a_discovered_repository_records_which_account_found_it(two_accounts, db
 
     monkeypatch.setattr(pipeline.providers, "for_source", _client_returning(
         {"alpha": [_record("alpha/one")], "beta": []}))
-    monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: list(records))
+    monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg, tracked=frozenset(): list(records))
     monkeypatch.setattr(pipeline, "DISCOVERY_SHRINK_FLOOR", 0.0)
 
     pipeline.discover()
@@ -803,7 +841,7 @@ def test_the_shrink_guard_stands_down_when_an_account_errored(two_accounts, db, 
     bad credential, and refusing the run twice for one cause helps nobody."""
     monkeypatch.setattr(pipeline.providers, "for_source", _client_returning(
         {"alpha": RuntimeError("down"), "beta": [_record("beta/still-here")]}))
-    monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: list(records))
+    monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg, tracked=frozenset(): list(records))
 
     selected = pipeline.discover()          # must not raise the shrink AuthError
     assert [r.full_name for r in selected] == ["beta/still-here"]
@@ -908,7 +946,7 @@ def test_a_collapsed_listing_is_refused_even_with_accounts_configured(two_accoun
     try:
         monkeypatch.setattr(pipeline.providers, "for_source", _client_returning(
             {"alpha": [_record("alpha/one")], "beta": []}))
-        monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg: list(records))
+        monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg, tracked=frozenset(): list(records))
         with pytest.raises(AuthError, match="already known"):
             pipeline.discover()
     finally:
@@ -949,3 +987,144 @@ def test_the_clone_path_stays_patient(db):
     src = inspect.getsource(pipeline._sync_repo_once)
     assert "patient=False" not in src, \
         "a clone should wait out a rate limit rather than fail the repository"
+
+
+# --------------------------------------------------- the single-run lock, and aborts
+
+class _FakeSession:
+    """Stands in for the session `_try_ingest_lock` locks its meta row through."""
+
+    def __init__(self, error):
+        self._error = error
+        self.rolled_back = False
+
+    def get(self, *a, **kw):
+        raise self._error
+
+    def rollback(self):
+        self.rolled_back = True
+
+
+def _operational(detail):
+    from sqlalchemy.exc import OperationalError
+
+    return OperationalError("SELECT", {}, Exception(detail))
+
+
+def test_a_second_ingest_finds_the_lock_held_and_declines(db):
+    """PostgreSQL reports NOWAIT contention as 55P03. That is the one failure
+    that means "somebody else is already running", not "the lock is broken"."""
+    session = _FakeSession(_operational("55P03: could not obtain lock on row"))
+    assert pipeline._try_ingest_lock(session) is False
+    assert session.rolled_back is True
+
+    # The same condition spelled out in words rather than by code.
+    worded = _FakeSession(_operational("could not obtain lock on row"))
+    assert pipeline._try_ingest_lock(worded) is False
+
+
+def test_a_database_error_that_is_not_contention_is_not_swallowed(db):
+    """Treating every OperationalError as "busy" would turn a broken database
+    into a run that silently does nothing, forever."""
+    from sqlalchemy.exc import OperationalError
+
+    session = _FakeSession(_operational("57P01: terminating connection"))
+    with pytest.raises(OperationalError):
+        pipeline._try_ingest_lock(session)
+    assert session.rolled_back is False
+
+
+def test_a_run_against_a_newer_database_refuses_before_touching_a_mirror(db, monkeypatch):
+    """Older code than the database was migrated to: every write would fail one
+    repository at a time, so the run refuses once and records why."""
+    import time as _time
+
+    monkeypatch.setattr(pipeline, "schema_drift", lambda: 2)
+
+    run = pipeline._run_ingest_locked([], "manual", False, None, _time.monotonic())
+    assert run.status == "failed"
+    assert run.run_id is not None
+
+
+def test_a_duplicated_history_is_reported_at_the_end_of_a_run(db, monkeypatch):
+    """Two copies of one history make every corpus-wide total count it twice,
+    and neither row looks wrong on its own -- so the run says so out loud."""
+    import time as _time
+
+    from git_synapse.analysis import query
+
+    monkeypatch.setattr(pipeline, "schema_drift", lambda: 0)
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda required=True: "ok")
+    monkeypatch.setattr(pipeline, "private_repos_in_scope", lambda: 0)
+    monkeypatch.setattr(pipeline.derived, "ensure_current", lambda: None)
+    monkeypatch.setattr(query, "duplicate_histories", lambda: [
+        {"copies": 2, "host": "gitlab.com", "commits": 13981,
+         "names": ["veloren/veloren", "veloren/dev/veloren"]},
+    ])
+
+    run = pipeline._run_ingest_locked([], "manual", False, None, _time.monotonic())
+    assert run.status != "failed"
+
+
+def test_a_failing_duplicate_report_does_not_lose_a_finished_run(db, monkeypatch):
+    """The repositories are already ingested and recorded by this point. A
+    report that cannot run is not a reason to throw that away."""
+    import time as _time
+
+    from git_synapse.analysis import query
+
+    def boom():
+        raise RuntimeError("the reporting query blew up")
+
+    monkeypatch.setattr(pipeline, "schema_drift", lambda: 0)
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda required=True: "ok")
+    monkeypatch.setattr(pipeline, "private_repos_in_scope", lambda: 0)
+    monkeypatch.setattr(pipeline.derived, "ensure_current", lambda: None)
+    monkeypatch.setattr(query, "duplicate_histories", boom)
+
+    run = pipeline._run_ingest_locked([], "manual", False, None, _time.monotonic())
+    assert run.status != "failed"
+
+
+def test_the_first_ingest_creates_the_lock_row_it_locks(db):
+    """On a fresh database there is nothing to lock yet, so the first run makes
+    the row. Every later run locks it instead."""
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
+
+    with connection() as session:
+        row = session.get(models().Meta, "lock:ingest")
+        if row is not None:
+            session.delete(row)
+
+    with connection() as session:
+        assert pipeline._try_ingest_lock(session) is True
+
+    with connection() as session:
+        assert session.get(models().Meta, "lock:ingest") is not None
+
+
+def test_a_repository_deleted_mid_ingest_fails_that_repository_by_name(
+    db, monkeypatch, tmp_path,
+):
+    """A run can be hours long and an account can be removed while it is in
+    flight, taking its repositories with it. The row is gone by the time the
+    mirror comes back, and the result has to name which one rather than raise
+    an attribute error off a None."""
+    from git_synapse.ingest import gitops
+    from git_synapse.ingest.github import RepoRecord
+
+    record = RepoRecord(github_id=None, owner="acme", name="vanishing",
+                        full_name="acme/vanishing",
+                        clone_url="https://github.com/acme/vanishing.git")
+
+    # Upsert reports an id that is not in the table, which is what a concurrent
+    # delete leaves behind.
+    monkeypatch.setattr(pipeline, "upsert_repo", lambda rec, conn: 999_999_999)
+    monkeypatch.setattr(gitops, "sync_mirror", lambda *a, **kw: gitops.FetchResult(
+        path=tmp_path / "mirror", head_sha="0" * 40, cloned=False,
+        changed=False, duration_s=0.0, blobless=True, size_kb=0))
+
+    result = pipeline._sync_repo_once(record)
+    assert result.status == "failed"
+    assert "999999999" in (result.error or "") or "disappeared" in (result.error or "")

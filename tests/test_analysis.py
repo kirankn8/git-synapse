@@ -468,3 +468,120 @@ def test_a_directory_nothing_lives_in_any_more_is_removed(db):
             session.query(models().Directory).filter_by(repo_id=rid).delete(synchronize_session=False)
             session.query(models().File).filter_by(repo_id=rid).delete(synchronize_session=False)
             session.query(models().Repo).filter_by(id=rid).delete(synchronize_session=False)
+
+
+def test_pairs_are_streamed_in_fixed_size_batches(db, monkeypatch):
+    """The batch exists so a repository with tens of millions of pairs never
+    materialises in the client. The configured size is 200,000, which no test
+    corpus reaches, so this lowers it to the floor and crosses that instead.
+    """
+    import dataclasses
+    from uuid import uuid4
+
+    from git_synapse.analysis import score as score_mod
+    from git_synapse.analysis.score import _iter_pair_batches
+    from git_synapse.config import get_config
+
+    base = get_config()
+    monkeypatch.setattr(score_mod, "get_config", lambda: dataclasses.replace(
+        base, analysis=dataclasses.replace(base.analysis, score_batch_size=1)))
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
+
+    tag = uuid4().hex[:8]
+    with connection() as session:
+        repo = models().Repo(github_id=abs(hash(tag)) % 10**8, owner="acme",
+                             name=f"batched-{tag}", full_name=f"acme/batched-{tag}",
+                             clone_url="", default_branch="main")
+        session.add(repo)
+        session.flush()
+
+        # 46 files make 1,035 distinct pairs, which clears the 1,000 floor the
+        # batch size is clamped to.
+        files = [models().File(repo_id=repo.id, path=f"f{i}.py", dir_path="",
+                               basename=f"f{i}.py", pair_change_count=3)
+                 for i in range(46)]
+        session.add_all(files)
+        session.flush()
+        ids = [f.id for f in files]
+        session.add_all([
+            models().FilePair(repo_id=repo.id, file_a_id=a, file_b_id=b, n_ab=2)
+            for i, a in enumerate(ids) for b in ids[i + 1:]
+        ])
+        session.flush()
+        repo_id = repo.id
+
+    try:
+        with connection() as session:
+            sizes = [len(batch.n_ab) for batch in
+                     _iter_pair_batches(session, repo_id, "file", n_total=10)]
+        assert len(sizes) == 2, sizes
+        assert sizes[0] == 1000          # flushed on reaching the batch size
+        assert sizes[1] == 35            # the remainder, flushed at the end
+    finally:
+        with connection() as session:
+            session.query(models().FilePair).filter_by(repo_id=repo_id).delete(
+                synchronize_session=False)
+            session.query(models().File).filter_by(repo_id=repo_id).delete(
+                synchronize_session=False)
+            session.query(models().Repo).filter_by(id=repo_id).delete(
+                synchronize_session=False)
+
+
+def test_an_ineligible_commit_contributes_no_pairs(db):
+    """A merge restates its parents' changes and a sweeping commit touches
+    files that have nothing to do with each other. Both are stored, and both
+    are excluded from pair counting -- otherwise one commit invents a coupling
+    between every file it happened to touch.
+    """
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from git_synapse.analysis import aggregate
+    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import models
+
+    tag = uuid4().hex[:8]
+    with connection() as session:
+        repo = models().Repo(github_id=abs(hash(tag)) % 10**8, owner="acme",
+                             name=f"eligible-{tag}", full_name=f"acme/eligible-{tag}",
+                             clone_url="", default_branch="main")
+        session.add(repo)
+        session.flush()
+        files = [models().File(repo_id=repo.id, path=f"m{i}.py", dir_path="",
+                               basename=f"m{i}.py") for i in range(2)]
+        session.add_all(files)
+        session.flush()
+
+        now = datetime.now(UTC)
+        # Two ordinary commits, because a pair needs `min_pair_support` (2)
+        # co-changes before it is persisted at all; plus one merge, which is
+        # the commit under test.
+        for i, is_merge in enumerate((False, False, True)):
+            commit = models().Commit(repo_id=repo.id, sha=f"{i:040x}", authored_at=now,
+                                     committed_at=now, is_merge=is_merge, n_files=2)
+            session.add(commit)
+            session.flush()
+            for f in files:
+                session.add(models().CommitFile(commit_id=commit.id, file_id=f.id,
+                                                repo_id=repo.id))
+        repo_id = repo.id
+
+    try:
+        with connection() as session:
+            aggregate.rebuild_repo(repo_id, session)
+
+        with connection() as session:
+            # Two eligible commits out of three: the merge is stored but not counted.
+            pair = session.query(models().FilePair).filter_by(repo_id=repo_id).one()
+            assert pair.n_ab == 2          # the merge contributed nothing
+            assert session.get(models().Repo, repo_id).pair_population == 2
+    finally:
+        with connection() as session:
+            for model in (models().DirPair, models().FilePair, models().FileDirectory,
+                          models().Directory, models().CommitFile, models().Commit,
+                          models().File):
+                session.query(model).filter_by(repo_id=repo_id).delete(
+                    synchronize_session=False)
+            session.query(models().Repo).filter_by(id=repo_id).delete(
+                synchronize_session=False)

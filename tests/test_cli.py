@@ -893,3 +893,44 @@ def test_enabling_an_account_shows_its_new_state(db, monkeypatch):
     r = runner.invoke(app, ["account", "enable", "1", "--off"])
     assert r.exit_code == 0
     assert "toggled" in " ".join(r.stdout.split())
+
+
+def test_reset_deletes_every_ingested_class_but_leaves_the_schema(monkeypatch):
+    """Driven through a fake session on purpose: the real command empties the
+    database, and this suite shares one with every other test in the run."""
+    from contextlib import contextmanager
+
+    deleted = []
+
+    class _Row:
+        def __init__(self, cls):
+            self.cls = cls
+
+    class _Query:
+        def __init__(self, cls):
+            self.cls = cls
+
+        def all(self):
+            return [_Row(self.cls)]
+
+    class _Session:
+        def query(self, cls):
+            return _Query(cls)
+
+        def delete(self, row):
+            deleted.append(row.cls)
+
+    @contextmanager
+    def fake_scope():
+        yield _Session()
+
+    monkeypatch.setattr(cli, "session_scope", fake_scope)
+    monkeypatch.setattr(cli, "_setup", lambda: None)
+
+    result = runner.invoke(app, ["reset", "--yes"])
+    assert result.exit_code == 0
+    assert "all ingested data removed" in result.stdout
+    # Children before parents: deleting Repo first would trip every foreign key.
+    names = [c.__name__ for c in deleted]
+    assert names[0] == "RepoImpact" and names[-1] == "Repo"
+    assert "Commit" in names and "File" in names

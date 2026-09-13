@@ -355,3 +355,50 @@ def test_a_real_api_record_still_updates_those_fields(db):
         row = session.get(models().Repo, repo_id)
         assert (row.stargazers, row.is_archived, row.visibility) == (9, True, "private")
         session.delete(row)
+
+
+# ---------------------------------------------------- author identity, in place
+
+def test_an_author_seen_again_gains_a_display_name_and_keeps_the_old_one(db):
+    """One person commits as "j.doe" and later as "Jane Doe" from the same
+    address. The row is the same person: the name fills in, and both spellings
+    are remembered rather than one overwriting the other."""
+    from uuid import uuid4
+
+    from git_synapse.ingest.store import AuthorCache
+
+    email = f"jane-{uuid4().hex[:8]}@example.com"
+    with session_scope() as session:
+        cache = AuthorCache(session)
+        first = cache.resolve(email, "")
+        assert first is not None
+
+        # A second cache, so the in-process shortcut does not hide the lookup.
+        again = AuthorCache(session).resolve(email, "Jane Doe")
+        assert again == first
+
+        row = session.get(models().Author, first)
+        assert row.display_name == "Jane Doe"
+        assert row.known_names == ["Jane Doe"]
+
+        AuthorCache(session).resolve(email, "j.doe")
+        row = session.get(models().Author, first)
+        assert row.display_name == "Jane Doe"
+        assert row.known_names == ["Jane Doe", "j.doe"]
+
+        # Already known, so it is not appended twice.
+        AuthorCache(session).resolve(email, "j.doe")
+        row = session.get(models().Author, first)
+        assert row.known_names == ["Jane Doe", "j.doe"]
+
+
+def test_a_rename_onto_a_file_that_vanished_is_skipped(db):
+    """The rename is applied at flush time, by which point the row it names can
+    have been deleted -- an unreachable-commit sweep runs in the same pass."""
+    from git_synapse.ingest.store import FileResolver
+
+    with session_scope() as session:
+        resolver = FileResolver(session, repo_id=1)
+        resolver._pending_renames = {999_999_999: "moved/elsewhere.py"}
+        resolver._pending_aliases = []
+        assert resolver.flush() == 0

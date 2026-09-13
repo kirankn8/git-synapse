@@ -81,13 +81,29 @@ def test_the_measure_count_is_the_registry_size():
     from git_synapse.stats import registry
 
     n = len(registry.ALL_KEYS)
+    root = Path(__file__).resolve().parents[1]
     sources = {
         "README.md": README,
         "DESIGN.md": DESIGN,
         "the MCP instructions": server.INSTRUCTIONS,
+        # The surfaces a person or an agent actually reads the number on. The
+        # symmetric subset is 29 and is stored nowhere, so a count that is not
+        # the registry size sends someone looking for two missing bars.
+        "the skill an agent is handed": (
+            root / "skills/git-synapse-mcp/SKILL.md").read_text(encoding="utf-8"),
+        "the web UI": (root / "web/static/app.js").read_text(encoding="utf-8")
+        + (root / "web/index.html").read_text(encoding="utf-8"),
+        "the Makefile help": (root / "Makefile").read_text(encoding="utf-8"),
     }
     for name, text in sources.items():
-        stated = {int(m) for m in re.findall(r"\b(\d+) (?:association )?measures\b", text)}
+        # A count spelled out as its parts -- "29 association measures + 2
+        # directional" -- is the registry described exactly, not a stale total.
+        stated = {
+            int(m) for m in re.findall(
+                r"\b(\d+) (?:association )?measures\b(?!\s*\+\s*\d+\s*directional)",
+                text,
+            )
+        }
         assert stated <= {n}, f"{name} says {sorted(stated)} measures; there are {n}"
 
 

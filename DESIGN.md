@@ -153,11 +153,11 @@ flowchart TB
 ```
 
 Two repositories never share a commit, so cross-repo coupling cannot reuse the
-commit as its unit. Grouping commits into **change sets** — by ticket key, or by
-one author's work session — was the answer for a while, and it was measured and
-removed: the best measure scored AUC 0.80 while managing 0.63 on which way the
-arrow points, and a baseline ignoring coupling entirely matched it. Nothing is
-inferred across repositories now. The unit is a declared version bump, and these
+commit as its unit. The obvious repair is to group commits into **change sets**
+— by ticket key, or by one author's work session. Measured, that construction is
+unsound: the best measure scores AUC 0.80 while managing 0.63 on which way the
+arrow points, and a baseline ignoring coupling entirely matches it. Nothing is
+inferred across repositories. The unit is a declared version bump, and these
 are separate tables rather than the same ones widened:
 
 | | Within a repository | Across repositories |
@@ -283,8 +283,8 @@ erDiagram
 
 - Adding a 30th measure is one function plus one registry entry, then
   `git-synapse score`. No re-clone, no re-parse.
-- Changing the fan-out cap, support threshold, session gap, ticket pattern or
-  lag bin width is a re-aggregate, not a re-ingest.
+- Changing the fan-out cap or the support threshold is a re-aggregate, not a
+  re-ingest.
 - The contingency cells `(n_ab, n_a, n_b, N)` sit beside every score, so any
   number in the UI traces back to four counts and then to actual commits.
 
@@ -671,40 +671,32 @@ The nightly job updates everything automatically. It is not uniformly
 | aggregate + score | **yes** | per repo, `last_aggregate_at < last_ingest_at` |
 | manifest bumps | **yes** | per repo, `last_depbump_sha <> head_sha` |
 | declared dependencies | **yes** | same sha watermark; per-repo delete-and-reinsert, so a *removed* dependency still disappears |
-| change sets | **yes** | only the tickets and authors touched by new commits are re-partitioned |
 | impact graph | **skipped when unchanged** | fingerprint over repo_dependency and dep_bump |
 | impact prediction | **skipped when unchanged** | fingerprint over its three input tables |
 | mining | **yes** | per repo, `last_mining_at < last_aggregate_at` |
 
-Two stages are deliberately *recomputed whole* rather than delta-merged when
-their inputs do move:
+One stage is deliberately *recomputed whole* rather than delta-merged when its
+inputs do move:
 
-- **Lagged coupling** — the computation *is* one matrix product per lag. A delta
-  would still multiply the changed repository's row against every other
-  repository across every bin, so there is nothing cheaper to do. 12 s.
-- **Cross-repo marginals and scores** — adding any change set shifts the
+- **Cross-repo marginals and scores** — adding any dependency edge shifts the
   population `N`, and `N` appears in every pair's contingency table. Recomputing
   is ~4 s and provably consistent; delta-merging would let stored values drift
   from the true ones.
 
 Verified by fingerprinting: an incremental pass over unchanged data reproduces
-the change-set table byte-for-byte, and re-scoring a repository is bit-identical.
+the dependency tables byte-for-byte, and re-scoring a repository is bit-identical.
 
-Two watermark bugs found while validating this, both of which silently defeated
-the gating:
+One trap here silently defeats the gating, so the watermark avoids it:
 
-- `last_ingest_at` advances on every run whether or not commits land, so a
-  timestamp comparison re-scanned all 187 manifest-bearing repos nightly. Now
-  keyed on `head_sha`.
-- 73 commits have neither an author nor a ticket key, so they can never join a
-  change set — but they were counted as pending work, which made the change-set
-  early return unreachable.
+- `last_ingest_at` advances on every run whether or not commits land, so gating
+  on that timestamp re-scans all 187 manifest-bearing repos nightly. The
+  watermark is keyed on `head_sha` instead.
 
 Force a complete rebuild after changing a tuning knob:
 
 ```bash
 docker compose run --rm cli ingest --force-full     # everything
-docker compose run --rm cli crossrepo --force       # after SESSION_GAP_HOURS / TICKET_PATTERN
+docker compose run --rm cli depbump --force         # after a manifest or dependency change
 docker compose run --rm cli mine --force            # after a mining threshold
 ```
 

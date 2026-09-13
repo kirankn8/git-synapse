@@ -154,7 +154,11 @@ def declared_modules_at_head(mirror: Path, repo_name: str, manifest: str) -> lis
 
 def _repo_lookups(session: object) -> tuple[dict[tuple[str, str], int], dict[str, int], dict[tuple[str, str], int]]:
     Repo, Package = models().Repo, models().RepoPackage
-    rows = session.query(Repo.owner, Repo.name, Repo.id).all()
+    # Ordered, because `by_full` below is a dict comprehension: when two
+    # repositories share an owner and a name -- the same project mirrored on
+    # two hosts, say -- the last row read wins, and an unordered query makes
+    # that whichever one the database felt like returning last.
+    rows = session.query(Repo.owner, Repo.name, Repo.id).order_by(Repo.id).all()
     by_full = {(str(owner).lower(), str(name).lower()): int(repo_id) for owner, name, repo_id in rows}
     grouped = defaultdict(set)
     for _, name, repo_id in rows:

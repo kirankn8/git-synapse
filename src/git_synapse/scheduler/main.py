@@ -127,7 +127,8 @@ def main() -> int:
 
     scheduler = BlockingScheduler(timezone=cfg.schedule.timezone)
 
-    fast = CronTrigger.from_crontab(live_cron("refresh"), timezone=cfg.schedule.timezone)
+    fast_cron = live_cron("refresh")
+    fast = CronTrigger.from_crontab(fast_cron, timezone=cfg.schedule.timezone)
     scheduler.add_job(
         refresh,
         trigger=fast,
@@ -139,9 +140,8 @@ def main() -> int:
         misfire_grace_time=_grace_for(fast, cfg.schedule.timezone),
     )
 
-    slow = CronTrigger.from_crontab(
-        live_cron("discover"), timezone=cfg.schedule.timezone
-    )
+    slow_cron = live_cron("discover")
+    slow = CronTrigger.from_crontab(slow_cron, timezone=cfg.schedule.timezone)
     scheduler.add_job(
         refresh,
         trigger=slow,
@@ -171,11 +171,11 @@ def main() -> int:
     now = datetime.now(ZoneInfo(cfg.schedule.timezone))
     log.info(
         "fast refresh cron %r in %s; next run %s",
-        cfg.schedule.cron, cfg.schedule.timezone, fast.get_next_fire_time(None, now),
+        fast_cron, cfg.schedule.timezone, fast.get_next_fire_time(None, now),
     )
     log.info(
         "discovery cron %r in %s; next run %s",
-        cfg.schedule.discover_cron, cfg.schedule.timezone,
+        slow_cron, cfg.schedule.timezone,
         slow.get_next_fire_time(None, now),
     )
 

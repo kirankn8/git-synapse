@@ -31,25 +31,16 @@ x-app-env: &app-env
   # they simply cannot be stored, and the variables above stay the only way to
   # reach a private repository.
   GS_SECRET_KEY: ${GS_SECRET_KEY:-}
-  INCLUDE_PRIVATE: ${INCLUDE_PRIVATE:-true}
   # Off. A fork's history is its parent's history, so tracking both stores the
   # same commits twice and ranks a second copy of every coupling as though it
   # were independent evidence.
-  INCLUDE_FORKS: ${INCLUDE_FORKS:-false}
-  INCLUDE_ARCHIVED: ${INCLUDE_ARCHIVED:-true}
-  ONLY_REPOS: ${ONLY_REPOS:-}
-  SKIP_REPOS: ${SKIP_REPOS:-}
   INGEST_CONCURRENCY: ${INGEST_CONCURRENCY:-8}
   MAX_FILES_PER_COMMIT: ${MAX_FILES_PER_COMMIT:-60}
-  INCLUDE_MERGES: ${INCLUDE_MERGES:-false}
   MIN_PAIR_SUPPORT: ${MIN_PAIR_SUPPORT:-2}
   RENAME_SIMILARITY: ${RENAME_SIMILARITY:-50}
   BLOBLESS_THRESHOLD_KB: ${BLOBLESS_THRESHOLD_KB:-2097152}
   FORCE_BLOBLESS: ${FORCE_BLOBLESS:-false}
-  SCORE_BATCH_SIZE: ${SCORE_BATCH_SIZE:-200000}
   RECENCY_HALF_LIFE_DAYS: ${RECENCY_HALF_LIFE_DAYS:-365}
-  DEFAULT_QUERY_LIMIT: ${DEFAULT_QUERY_LIMIT:-50}
-  MAX_QUERY_LIMIT: ${MAX_QUERY_LIMIT:-1000}
   # Shared, not the scheduler's alone: /api/config reports the schedule and the
   # Jobs page displays it, so the API has to see the same value the scheduler
   # runs on. Declared only on the scheduler, the API fell back to the built-in

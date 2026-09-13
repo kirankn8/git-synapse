@@ -75,20 +75,12 @@ app.kubernetes.io/instance: {{ .Release.Name }}
       optional: true
 - name: GITHUB_ORG
   value: {{ .Values.config.githubOrg | quote }}
-- name: INCLUDE_PRIVATE
-  value: {{ .Values.config.includePrivate | quote }}
-- name: INCLUDE_FORKS
-  value: {{ .Values.config.includeForks | quote }}
-- name: INCLUDE_ARCHIVED
-  value: {{ .Values.config.includeArchived | quote }}
 - name: INGEST_CONCURRENCY
   value: {{ .Values.config.ingestConcurrency | quote }}
 - name: MAX_FILES_PER_COMMIT
   value: {{ .Values.config.maxFilesPerCommit | quote }}
 - name: MIN_PAIR_SUPPORT
   value: {{ .Values.config.minPairSupport | quote }}
-- name: INCLUDE_MERGES
-  value: {{ .Values.config.includeMerges | quote }}
 - name: REFRESH_CRON
   value: {{ .Values.config.refreshCron | quote }}
 - name: DISCOVER_CRON
