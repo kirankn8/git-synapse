@@ -15,18 +15,18 @@ import pytest
 
 def test_aggregating_an_unknown_repo_is_a_no_op(scratch_db):
     from git_synapse.analysis.aggregate import rebuild_repo
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import session_scope
 
-    with connection() as conn:
+    with session_scope() as conn:
         stats = rebuild_repo(999999999, conn)
     assert stats.file_pairs == 0
 
 
 def test_scoring_an_unknown_repo_is_a_no_op(scratch_db):
     from git_synapse.analysis.score import score_repo
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import session_scope
 
-    with connection() as conn:
+    with session_scope() as conn:
         score_repo(999999999, conn)  # must not raise
 
 

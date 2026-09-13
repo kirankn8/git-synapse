@@ -205,50 +205,6 @@ def test_a_blank_api_url_is_stored_as_null_not_empty(clean):
     assert made["api_url"] is None
 
 
-# ------------------------------------------------------------------- seeding
-
-def test_seeding_adopts_the_legacy_env_org_once(clean, monkeypatch):
-    """Without this an existing deployment discovers nothing after upgrading."""
-    from git_synapse.config import reset_config_cache
-
-    monkeypatch.setenv("GITHUB_ORG", "legacy-org")
-    reset_config_cache()
-    try:
-        seeded = accounts.seed_from_env()
-        assert seeded is not None and seeded["login"] == "legacy-org"
-        assert accounts.seed_from_env() is None, "seeding twice would duplicate the org"
-    finally:
-        reset_config_cache()
-
-
-def test_seeding_does_nothing_when_accounts_already_exist(clean):
-    accounts.add_account("kubernetes")
-    assert accounts.seed_from_env() is None
-
-
-def test_seeding_does_nothing_without_an_env_org(clean, monkeypatch):
-    from git_synapse.config import reset_config_cache
-
-    monkeypatch.setenv("GITHUB_ORG", "")
-    reset_config_cache()
-    try:
-        assert accounts.seed_from_env() is None
-    finally:
-        reset_config_cache()
-
-
-def test_seeding_survives_an_invalid_env_org(clean, monkeypatch):
-    """A bad GITHUB_ORG must not make every discovery raise on startup."""
-    from git_synapse.config import reset_config_cache
-
-    monkeypatch.setenv("GITHUB_ORG", "not a login")
-    reset_config_cache()
-    try:
-        assert accounts.seed_from_env() is None
-    finally:
-        reset_config_cache()
-
-
 # ---------------------------------------------- owner-driven resolution
 
 def test_owners_are_read_from_ingested_repos_not_configured_accounts(clean):
@@ -259,10 +215,10 @@ def test_owners_are_read_from_ingested_repos_not_configured_accounts(clean):
         "id": 987654, "name": "thing", "full_name": "acme-owner/thing",
         "owner": {"login": "acme-owner"},
     })
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import session_scope
     from git_synapse.ingest.store import upsert_repo
 
-    with connection() as conn:
+    with session_scope() as conn:
         upsert_repo(with_owner, conn)
     with session_scope() as session:
         owners = {r.owner.lower() for r in session.query(models().Repo).all()}

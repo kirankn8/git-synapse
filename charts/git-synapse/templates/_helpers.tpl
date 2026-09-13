@@ -73,8 +73,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
       name: {{ include "git-synapse.secretName" . }}
       key: GITHUB_TOKEN
       optional: true
-- name: GITHUB_ORG
-  value: {{ .Values.config.githubOrg | quote }}
 - name: INGEST_CONCURRENCY
   value: {{ .Values.config.ingestConcurrency | quote }}
 - name: MAX_FILES_PER_COMMIT

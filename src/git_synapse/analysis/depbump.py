@@ -14,8 +14,7 @@ from statistics import median
 
 from git_synapse.analysis import manifests
 from git_synapse.analysis.manifests import bounds, version_key
-from git_synapse.db.engine import connection
-from git_synapse.db.orm import models
+from git_synapse.db.orm import models, session_scope
 from git_synapse.ingest.gitops import _base_env, mirror_path_for
 
 log = logging.getLogger(__name__)
@@ -217,7 +216,7 @@ def refresh_modules(conn: object | None = None) -> int:
         return session.query(Module).count()
     if conn is not None:
         return run(conn)
-    with connection() as session:
+    with session_scope() as session:
         return run(session)
 
 
@@ -255,7 +254,7 @@ def refresh_declared(conn: object | None = None, force: bool = False) -> int:
         return session.query(Dependency).filter(Dependency.dep_repo_id.is_not(None)).count()
     if conn is not None:
         return run(conn)
-    with connection() as session:
+    with session_scope() as session:
         return run(session)
 
 
@@ -400,7 +399,7 @@ def resolve_bumps(conn: object | None = None) -> int:
         return sum(x.dep_commit_id is not None for x in session.query(Bump).all())
     if conn is not None:
         return run(conn)
-    with connection() as session:
+    with session_scope() as session:
         return run(session)
 
 
@@ -446,13 +445,13 @@ def rebuild(force: bool = False, conn: object | None = None) -> BumpStats:
         return stats
     if conn is not None:
         return run(conn)
-    with connection() as session:
+    with session_scope() as session:
         return run(session)
 
 
 def adoption_delays(limit: int = 20) -> list[dict]:
     Bump, Repo = models().DepBump, models().Repo
-    with connection() as session:
+    with session_scope() as session:
         rows = session.query(Bump).filter(Bump.dep_repo_id.is_not(None), Bump.adoption_seconds >= 0).all()
         repos = {r.id: r for r in session.query(Repo).filter(
             Repo.id.in_({x.consumer_repo_id for x in rows} | {x.dep_repo_id for x in rows})

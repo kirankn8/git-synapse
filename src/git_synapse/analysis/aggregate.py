@@ -11,8 +11,7 @@ from datetime import UTC, datetime
 from itertools import combinations
 
 from git_synapse.config import get_config
-from git_synapse.db.engine import connection
-from git_synapse.db.orm import models
+from git_synapse.db.orm import models, session_scope
 
 log = logging.getLogger(__name__)
 
@@ -190,7 +189,7 @@ def rebuild_repo(repo_id: int, conn: object | None = None) -> AggregateStats:
 
     if conn is not None:
         return run(conn)
-    with connection() as session:
+    with session_scope() as session:
         return run(session)
 
 
@@ -207,5 +206,5 @@ def repos_needing_aggregation(conn: object | None = None) -> list[int]:
         return result
     if conn is not None:
         return run(conn)
-    with connection() as session:
+    with session_scope() as session:
         return run(session)

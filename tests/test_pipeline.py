@@ -78,8 +78,7 @@ def test_a_commit_reachable_only_from_a_tag_is_not_unreachable(tmp_path, db):
     above the branch count, which is the condition that runs the sweep."""
     from datetime import UTC, datetime
 
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e",
@@ -104,7 +103,7 @@ def test_a_commit_reachable_only_from_a_tag_is_not_unreachable(tmp_path, db):
     bare = tmp_path / "m.git"
     subprocess.run(["git", "clone", "--quiet", "--bare", str(work), str(bare)], check=True)
 
-    with connection() as conn:
+    with session_scope() as conn:
         repo = models().Repo(full_name="acme/tagged", name="tagged", owner="acme")
         conn.add(repo)
         conn.flush()
@@ -130,11 +129,10 @@ def test_a_commit_reachable_only_from_a_tag_is_not_unreachable(tmp_path, db):
 def test_discovery_refuses_a_collapsed_listing(two_accounts, db, monkeypatch):
     """An unauthenticated request returns HTTP 200 and only public repositories
     -- 59 of 272 here -- and discovery accepted it silently."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest.pipeline import AuthError
 
-    with connection() as session:
+    with session_scope() as session:
         known = session.query(models().Repo).filter_by(is_enabled=True).count()
     if known < 10:
         pytest.skip("needs a populated corpus")
@@ -158,10 +156,9 @@ def test_discovery_refuses_a_collapsed_listing(two_accounts, db, monkeypatch):
 
 def test_discovery_accepts_a_listing_that_is_merely_smaller(two_accounts, db, monkeypatch):
     """Repositories do get archived; only a collapse is suspicious."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as session:
+    with session_scope() as session:
         known = session.query(models().Repo).filter_by(is_enabled=True).count()
     if known < 10:
         pytest.skip("needs a populated corpus")
@@ -207,10 +204,9 @@ def test_load_repo_records_returns_usable_records(db):
     that every column survives the round trip, which needs a row whose columns
     are known.
     """
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as session:
+    with session_scope() as session:
         row = models().Repo(
             github_id=4242, owner="roundtrip", name="thing",
             full_name="roundtrip/thing", host="github.com", provider="github",
@@ -236,7 +232,7 @@ def test_load_repo_records_returns_usable_records(db):
         assert r.stargazers == 77 and r.disk_usage_kb == 512
         assert r.github_id == 4242
     finally:
-        with connection() as session:
+        with session_scope() as session:
             session.delete(session.get(models().Repo, row_id))
 
 
@@ -585,8 +581,7 @@ def swept_repo(scratch_db, tmp_path):
     """A repo row whose stored commits outnumber what its mirror still reaches."""
     from datetime import UTC, datetime
 
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     mirror = _commit_repo(tmp_path, 2)
     reachable = subprocess.run(
@@ -594,7 +589,7 @@ def swept_repo(scratch_db, tmp_path):
         check=True,
     ).stdout.split()
 
-    with connection() as conn:
+    with session_scope() as conn:
         for model in (models().Commit, models().Repo):
             conn.query(model).delete(synchronize_session=False)
         repo = models().Repo(github_id=1, owner="t", name="w", full_name="t/w",
@@ -617,12 +612,11 @@ def swept_repo(scratch_db, tmp_path):
 
 
 def test_the_sweep_removes_only_the_commits_git_no_longer_reaches(swept_repo):
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     repo_id, mirror = swept_repo
     assert _drop_unreachable_commits(repo_id, mirror) == 2
-    with connection() as session:
+    with session_scope() as session:
         assert session.query(models().Commit).filter_by(repo_id=repo_id).count() == 2
     # Idempotent: a second sweep has nothing to do and must not pay for the walk.
     assert _drop_unreachable_commits(repo_id, mirror) == 0
@@ -633,8 +627,7 @@ def test_a_git_failure_during_the_sweep_deletes_nothing(swept_repo, monkeypatch,
                                                         failing_call):
     """Deleting commits on the strength of a failed reachability walk would
     erase real history."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     repo_id, mirror = swept_repo
     calls = {"n": 0}
@@ -648,7 +641,7 @@ def test_a_git_failure_during_the_sweep_deletes_nothing(swept_repo, monkeypatch,
 
     monkeypatch.setattr(subprocess, "run", flaky)
     assert _drop_unreachable_commits(repo_id, mirror) == 0
-    with connection() as session:
+    with session_scope() as session:
         assert session.query(models().Commit).filter_by(repo_id=repo_id).count() == 4
 
 
@@ -697,18 +690,17 @@ def test_an_empty_reachable_set_deletes_nothing(swept_repo, monkeypatch):
 
 @pytest.fixture
 def two_accounts(db):
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest import accounts
 
-    with connection() as conn:
+    with session_scope() as conn:
         for login in ("alpha", "beta"):
             row = conn.query(models().Account).filter_by(login=login).one_or_none()
             if row is not None:
                 conn.delete(row)
     made = [accounts.add_account("alpha"), accounts.add_account("beta")]
     yield made
-    with connection() as conn:
+    with session_scope() as conn:
         for login in ("alpha", "beta"):
             row = conn.query(models().Account).filter_by(login=login).one_or_none()
             if row is not None:
@@ -749,7 +741,6 @@ def test_discovery_with_no_accounts_says_how_to_add_one(db, monkeypatch):
     from git_synapse.ingest.pipeline import AuthError
 
     monkeypatch.setattr(accounts, "list_accounts", lambda **k: [])
-    monkeypatch.setattr(accounts, "seed_from_env", lambda: None)
     with pytest.raises(AuthError, match="account add"):
         pipeline.discover()
 
@@ -820,8 +811,7 @@ def test_a_forks_parent_is_looked_up_because_the_listing_omits_it(
 def test_a_discovered_repository_records_which_account_found_it(two_accounts, db, monkeypatch):
     """`repo.account_id` is what lets an account be removed without deleting the
     history mined from it."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     monkeypatch.setattr(pipeline.providers, "for_source", _client_returning(
         {"alpha": [_record("alpha/one")], "beta": []}))
@@ -829,7 +819,7 @@ def test_a_discovered_repository_records_which_account_found_it(two_accounts, db
     monkeypatch.setattr(pipeline, "DISCOVERY_SHRINK_FLOOR", 0.0)
 
     pipeline.discover()
-    with connection() as session:
+    with session_scope() as session:
         row = session.query(models().Account).join(
             models().Repo, models().Repo.account_id == models().Account.id
         ).filter(models().Repo.full_name == "alpha/one").one_or_none()
@@ -850,10 +840,10 @@ def test_the_shrink_guard_stands_down_when_an_account_errored(two_accounts, db, 
 def test_marking_no_replays_touches_nothing(db):
     """Called for every repository, and most have none. An empty set must not
     become a bulk mutation with an empty collection clause."""
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import session_scope
     from git_synapse.ingest.pipeline import _mark_replays
 
-    with connection() as conn:
+    with session_scope() as conn:
         assert _mark_replays(1, set(), conn) == 0
 
 
@@ -885,11 +875,10 @@ def test_marking_a_replay_takes_it_out_of_the_statistics(db):
     together on evidence that is one observation repeated."""
     from datetime import UTC, datetime
 
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest.pipeline import _mark_replays
 
-    with connection() as conn:
+    with session_scope() as conn:
         repo_row = models().Repo(full_name="acme/replayed", name="replayed", owner="acme")
         conn.add(repo_row)
         conn.flush()
@@ -934,11 +923,10 @@ def test_a_bad_credential_stops_discovery_rather_than_repeating_itself(two_accou
 def test_a_collapsed_listing_is_refused_even_with_accounts_configured(two_accounts, db, monkeypatch):
     """An unauthenticated request returns HTTP 200 and only public repositories,
     and the run then quietly refreshes a fraction of the corpus."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest.pipeline import AuthError
 
-    with connection() as conn:
+    with session_scope() as conn:
         for i in range(30):
             if conn.query(models().Repo).filter_by(full_name=f"bulk/r{i}").one_or_none() is None:
                 conn.add(models().Repo(full_name=f"bulk/r{i}", name=f"r{i}",
@@ -950,7 +938,7 @@ def test_a_collapsed_listing_is_refused_even_with_accounts_configured(two_accoun
         with pytest.raises(AuthError, match="already known"):
             pipeline.discover()
     finally:
-        with connection() as conn:
+        with session_scope() as conn:
             for row in conn.query(models().Repo).filter_by(owner="bulk").all():
                 conn.delete(row)
 
@@ -1089,18 +1077,17 @@ def test_a_failing_duplicate_report_does_not_lose_a_finished_run(db, monkeypatch
 def test_the_first_ingest_creates_the_lock_row_it_locks(db):
     """On a fresh database there is nothing to lock yet, so the first run makes
     the row. Every later run locks it instead."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as session:
+    with session_scope() as session:
         row = session.get(models().Meta, "lock:ingest")
         if row is not None:
             session.delete(row)
 
-    with connection() as session:
+    with session_scope() as session:
         assert pipeline._try_ingest_lock(session) is True
 
-    with connection() as session:
+    with session_scope() as session:
         assert session.get(models().Meta, "lock:ingest") is not None
 
 

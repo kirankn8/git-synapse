@@ -268,49 +268,18 @@ def refresh_repo_counts() -> None:
 def config_for(account: dict) -> SelectionConfig:
     """What this account takes, as `select_repos` wants it.
 
-    Every value comes from the account row; the defaults exist only so a row
-    written before a column did still reads. Nothing host-shaped is returned --
-    the endpoint and the credential travel with the `Source` and are fetched
-    separately, because this account may not be a GitHub one.
+    Every value comes from the row, which always has all of them: the columns
+    are NOT NULL with defaults, and `_account_dict` serialises the full set.
+    Nothing host-shaped is returned -- the endpoint and the credential travel
+    with the `Source`, because this account may not be a GitHub one.
     """
     return SelectionConfig(
         include_private=account["include_private"],
         include_forks=account["include_forks"],
         include_archived=account["include_archived"],
-        only_repos=tuple(account.get("only_repos") or ()),
-        skip_repos=tuple(account.get("skip_repos") or ()),
+        only_repos=tuple(account["only_repos"]),
+        skip_repos=tuple(account["skip_repos"]),
     )
-
-
-def seed_from_env() -> dict | None:
-    """Adopt GITHUB_ORG as an account, once, if nothing is configured.
-
-    The environment is a seed for the account table, not a source discovery
-    reads: a deployment can be brought up with one organisation already listed,
-    and everything after that is a write to the table.
-    """
-    if list_accounts():
-        return None
-    cfg = get_config()
-    org = (cfg.seed_org or "").strip()
-    if not org:
-        return None
-    selection = cfg.selection
-    try:
-        account = add_account(
-            org,
-            kind="org",
-            include_private=selection.include_private,
-            include_forks=selection.include_forks,
-            include_archived=selection.include_archived,
-            only_repos=list(selection.only_repos),
-            skip_repos=list(selection.skip_repos),
-        )
-    except AccountError as exc:
-        log.warning("could not seed account from GITHUB_ORG=%s: %s", org, exc)
-        return None
-    log.info("seeded account %s from GITHUB_ORG", org)
-    return account
 
 
 def _is_rate_limited(exc: Exception) -> bool:
@@ -339,7 +308,6 @@ def _not_found_message(source: Any) -> str:
     Which means we cannot tell the reader which it is, and must not guess. Both
     possibilities, and the one thing that separates them, is the whole answer.
     """
-    from git_synapse.config import get_config
 
     want = _CREDENTIAL_FOR.get(source.provider)
     if want and not get_config().providers.token_for(source.provider):
@@ -388,7 +356,6 @@ def _rate_limit_message(source: Any) -> str:
     exhaust, and the fix there is a token rather than patience -- so say which
     of the two situations this is, and when waiting would actually work.
     """
-    from git_synapse.config import get_config
 
     if source.provider == "github" and not get_config().providers.token_for("github"):
         return (

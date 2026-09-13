@@ -233,9 +233,9 @@ class ScheduleConfig:
 
     enabled: bool = field(default_factory=lambda: _env_bool("SCHEDULER_ENABLED", True))
     #: Fast refresh of already-known repositories. Five-field cron, in
-    #: ``timezone``. This is the *seed*: a value stored from the UI overrides it,
-    #: the way GITHUB_ORG seeds the account table. Read the value in force with
-    #: :func:`live_cron`, never straight off this field.
+    #: ``timezone``. This is the *seed*: a value stored from the UI overrides
+    #: it. Read the value in force with :func:`live_cron`, never straight off
+    #: this field.
     cron: str = field(default_factory=lambda: _env_str("REFRESH_CRON", DEFAULT_REFRESH_CRON))
     #: Slower pass that re-discovers the organisation from the GitHub API.
     discover_cron: str = field(default_factory=lambda: _env_str("DISCOVER_CRON", "0 3 * * *"))
@@ -333,12 +333,6 @@ class Config:
     providers: ProviderConfig = field(default_factory=ProviderConfig)
     #: Which repositories an account takes, on any host.
     selection: SelectionConfig = field(default_factory=SelectionConfig)
-    #: Legacy single-org setting, seeded into the `account` table on first boot
-    #: and ignored thereafter. Not a credential and not an endpoint, so it sits
-    #: here rather than beside either. Empty by default: there is no sensible
-    #: org to guess, and a non-empty default could not be switched off from the
-    #: environment because a blank value would fall back to it.
-    seed_org: str = field(default_factory=lambda: _env_str("GITHUB_ORG", ""))
     ingest: IngestConfig = field(default_factory=IngestConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)

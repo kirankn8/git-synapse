@@ -177,8 +177,7 @@ def test_search_files_finds_a_known_path(db):
 
 
 def test_report_gap_rejects_an_opinion_and_accepts_a_defect(db):
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     bad = server.report_gap(kind="opinion", detail="I disagree with the ranking")
     assert "error" in bad
@@ -188,7 +187,7 @@ def test_report_gap_rejects_an_opinion_and_accepts_a_defect(db):
         tool="coupled_files", repo="t/probe", expected="x", observed="y",
     )
     assert "error" not in good and good.get("id")
-    with connection() as conn:
+    with session_scope() as conn:
         conn.delete(conn.get(models().Feedback, good["id"]))
 
 

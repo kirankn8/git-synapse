@@ -21,7 +21,6 @@ import pytest
 from git_synapse.analysis.aggregate import rebuild_repo
 from git_synapse.analysis.query import coupled_files, pair_detail
 from git_synapse.analysis.score import score_repo
-from git_synapse.db.engine import connection
 from git_synapse.db.orm import models, session_scope
 from git_synapse.ingest.github import RepoRecord
 from git_synapse.ingest.parser import FileChange, ParsedCommit
@@ -62,7 +61,7 @@ def analysed(scratch_db):
         full_name="test/analysis-fixture",
         clone_url="https://example.invalid/test/analysis-fixture.git",
     )
-    with connection() as conn:
+    with session_scope() as conn:
         repo_id = upsert_repo(record, conn)
         conn.query(models().Commit).filter_by(repo_id=repo_id).delete(synchronize_session=False)
         conn.query(models().File).filter_by(repo_id=repo_id).delete(synchronize_session=False)
@@ -84,7 +83,7 @@ def analysed(scratch_db):
         for i, paths in enumerate(HISTORY)
     ]
 
-    with connection() as conn:
+    with session_scope() as conn:
         load_commits(repo_id, commits, conn)
     rebuild_repo(repo_id)
     score_repo(repo_id)
@@ -228,7 +227,7 @@ def test_deleting_a_repo_cascades_its_derived_metrics(db):
         full_name="test/cascade-fixture",
         clone_url="https://example.invalid/test/cascade-fixture.git",
     )
-    with connection() as conn:
+    with session_scope() as conn:
         repo_id = upsert_repo(record, conn)
 
     commits = [
@@ -247,7 +246,7 @@ def test_deleting_a_repo_cascades_its_derived_metrics(db):
         )
         for i in range(4)
     ]
-    with connection() as conn:
+    with session_scope() as conn:
         load_commits(repo_id, commits, conn)
     rebuild_repo(repo_id)
     score_repo(repo_id)
@@ -310,9 +309,9 @@ def test_the_derived_stages_accept_a_caller_supplied_connection(db):
     and that is the one the pipeline actually uses."""
     from git_synapse.analysis import depbump, score
     from git_synapse.analysis.aggregate import rebuild_repo
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import session_scope
 
-    with connection() as conn:
+    with session_scope() as conn:
         repo_row = models().Repo(full_name="acme/staged", name="staged", owner="acme")
         conn.add(repo_row)
         conn.flush()
@@ -356,9 +355,9 @@ def test_repositories_can_be_listed_by_the_account_that_owns_them(db):
     """The rung that makes the hierarchy navigable. Without it the Accounts page
     can only send a reader to every repository in the corpus."""
     from git_synapse.analysis import query as q
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import session_scope
 
-    with connection() as conn:
+    with session_scope() as conn:
         account = models().Account(login="owner-test", kind="org")
         conn.add(account)
         conn.flush()
@@ -485,11 +484,10 @@ def test_pairs_are_streamed_in_fixed_size_batches(db, monkeypatch):
     base = get_config()
     monkeypatch.setattr(score_mod, "get_config", lambda: dataclasses.replace(
         base, analysis=dataclasses.replace(base.analysis, score_batch_size=1)))
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     tag = uuid4().hex[:8]
-    with connection() as session:
+    with session_scope() as session:
         repo = models().Repo(github_id=abs(hash(tag)) % 10**8, owner="acme",
                              name=f"batched-{tag}", full_name=f"acme/batched-{tag}",
                              clone_url="", default_branch="main")
@@ -512,14 +510,14 @@ def test_pairs_are_streamed_in_fixed_size_batches(db, monkeypatch):
         repo_id = repo.id
 
     try:
-        with connection() as session:
+        with session_scope() as session:
             sizes = [len(batch.n_ab) for batch in
                      _iter_pair_batches(session, repo_id, "file", n_total=10)]
         assert len(sizes) == 2, sizes
         assert sizes[0] == 1000          # flushed on reaching the batch size
         assert sizes[1] == 35            # the remainder, flushed at the end
     finally:
-        with connection() as session:
+        with session_scope() as session:
             session.query(models().FilePair).filter_by(repo_id=repo_id).delete(
                 synchronize_session=False)
             session.query(models().File).filter_by(repo_id=repo_id).delete(
@@ -538,11 +536,10 @@ def test_an_ineligible_commit_contributes_no_pairs(db):
     from uuid import uuid4
 
     from git_synapse.analysis import aggregate
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     tag = uuid4().hex[:8]
-    with connection() as session:
+    with session_scope() as session:
         repo = models().Repo(github_id=abs(hash(tag)) % 10**8, owner="acme",
                              name=f"eligible-{tag}", full_name=f"acme/eligible-{tag}",
                              clone_url="", default_branch="main")
@@ -568,16 +565,16 @@ def test_an_ineligible_commit_contributes_no_pairs(db):
         repo_id = repo.id
 
     try:
-        with connection() as session:
+        with session_scope() as session:
             aggregate.rebuild_repo(repo_id, session)
 
-        with connection() as session:
+        with session_scope() as session:
             # Two eligible commits out of three: the merge is stored but not counted.
             pair = session.query(models().FilePair).filter_by(repo_id=repo_id).one()
             assert pair.n_ab == 2          # the merge contributed nothing
             assert session.get(models().Repo, repo_id).pair_population == 2
     finally:
-        with connection() as session:
+        with session_scope() as session:
             for model in (models().DirPair, models().FilePair, models().FileDirectory,
                           models().Directory, models().CommitFile, models().Commit,
                           models().File):

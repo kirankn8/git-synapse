@@ -138,7 +138,7 @@ def corpus(scratch_db, tmp_path_factory):
     reset_config_cache()
 
     from git_synapse.analysis import aggregate, depbump, mining, predict, score
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import session_scope
     from git_synapse.ingest import pipeline
 
     # `dsx-lib` is the upstream; `dsx-app` declares it in go.mod and bumps it.
@@ -174,12 +174,12 @@ def corpus(scratch_db, tmp_path_factory):
         res = pipeline.sync_repo(r, force_full=True)
         assert res.status != "failed", res.error
 
-    with connection() as conn:
+    with session_scope() as conn:
         Repo = __import__("git_synapse.db.orm", fromlist=["models"]).models().Repo
         ids = {r.name: r.id for r in conn.query(Repo).filter(Repo.github_id.in_([920001, 920002])).all()}
         for rid in ids.values():
             aggregate.rebuild_repo(rid, conn)
-    with connection() as conn:
+    with session_scope() as conn:
         for rid in ids.values():
             score.score_repo(rid, conn)
 

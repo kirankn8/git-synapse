@@ -372,10 +372,9 @@ def test_the_first_admin_can_be_claimed_before_the_schema_row_exists(scratch_db)
     requests. On a database where bootstrap has not written it yet, the lock
     has to be created rather than waited for."""
     from git_synapse import auth
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as session:
+    with session_scope() as session:
         for model in (models().UserSession, models().ApiToken, models().LoginAttempt):
             session.query(model).delete(synchronize_session=False)
         session.query(models().AppUser).delete(synchronize_session=False)
@@ -389,5 +388,5 @@ def test_the_first_admin_can_be_claimed_before_the_schema_row_exists(scratch_db)
     assert user["email"] == "first@example.com"
     auth.delete_user(user["id"])
 
-    with connection() as session:
+    with session_scope() as session:
         assert session.get(models().Meta, "schema_version") is not None

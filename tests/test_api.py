@@ -811,7 +811,6 @@ def test_deleting_a_missing_account_is_404(no_accounts):
 
 def test_a_deleted_account_keeps_its_repositories(no_accounts):
     """The mined statistics are the expensive part; they must survive."""
-    from git_synapse.db.engine import connection
     from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.store import upsert_repo
@@ -821,7 +820,7 @@ def test_a_deleted_account_keeps_its_repositories(no_accounts):
         "id": 424242, "name": "kept", "full_name": "keepme/kept",
         "owner": {"login": "keepme"},
     })
-    with connection() as conn:
+    with session_scope() as conn:
         repo_id = upsert_repo(record, conn, account_id=made["id"])
 
     try:

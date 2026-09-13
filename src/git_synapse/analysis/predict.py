@@ -9,8 +9,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from git_synapse.db.engine import connection, get_watermark, set_watermark
-from git_synapse.db.orm import models
+from git_synapse.db.engine import get_watermark, set_watermark
+from git_synapse.db.orm import models, session_scope
 
 log = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ def rebuild(conn: object | None = None, force: bool = False) -> PredictStats:
 
     if conn is not None:
         return run(conn)
-    with connection() as session:
+    with session_scope() as session:
         return run(session)
 
 
@@ -110,7 +110,7 @@ def _impact_rows(repo_id: int, *, upstream: bool = False, limit: int = 20,
     Impact, Repo = models().RepoImpact, models().Repo
     side = Impact.target_repo_id if upstream else Impact.source_repo_id
     other = Impact.source_repo_id if upstream else Impact.target_repo_id
-    with connection() as session:
+    with session_scope() as session:
         impacts = session.query(Impact).filter(side == repo_id, Impact.score >= min_score).order_by(
             Impact.is_declared.desc(), Impact.score.desc()).limit(max(limit, 1)).all()
         repos = {r.id: r for r in session.query(Repo).filter(
@@ -140,7 +140,7 @@ def upstream_of(repo_id: int, limit: int = 20) -> list[dict]:
 
 def _chains(repo_id: int, reverse: bool, max_depth: int, min_score: float, limit: int) -> list[dict]:
     Impact, Repo = models().RepoImpact, models().Repo
-    with connection() as session:
+    with session_scope() as session:
         rows = session.query(Impact).filter(Impact.score >= min_score).order_by(Impact.score.desc()).all()
         names = {r.id: r.name for r in session.query(Repo).all()}
     adjacency: dict[int, list[object]] = defaultdict(list)

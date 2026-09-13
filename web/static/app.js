@@ -291,12 +291,11 @@ const on = (pattern, handler) => {
 /**
  * Navigate to an in-app route.
  *
- * Accepts either a clean path ("/insights") or the legacy hash form ("#/insights")
- * so older links keep working, and always pushes a real path so the address bar
- * reads /insights rather than /#/insights.
+ * Takes a path ("/insights") and pushes it as one, so the address bar reads
+ * /insights and a copied link is an ordinary URL.
  */
 export const go = (to) => {
-  const path = String(to || '/').replace(/^#/, '') || '/';
+  const path = String(to || '/') || '/';
   if (path === currentPath()) return;
   window.history.pushState({}, '', path);
   route();
@@ -325,12 +324,6 @@ function measureRanksSomething(path, params) {
 let navToken = 0;
 
 async function route() {
-  // Support a legacy #/foo URL by rewriting it to /foo once, so bookmarks and
-  // anything that still emits hashes land on the right view.
-  if (window.location.hash.startsWith('#/')) {
-    const legacy = window.location.hash.slice(1);
-    window.history.replaceState({}, '', legacy);
-  }
   const raw = currentPath();
   const [rawPath, qs] = raw.split('?');
   // "/repos/4/tree/" and "/repos/4/tree" are the same address. Normalising here

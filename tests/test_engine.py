@@ -39,9 +39,9 @@ def test_wait_for_database_returns_promptly_when_it_is_up(db):
 
 
 def test_connection_yields_an_orm_session(db):
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import session_scope
 
-    with connection() as session:
+    with session_scope() as session:
         assert isinstance(session, Session)
         assert session.get(models().Meta, "schema_version") is not None
 

@@ -17,15 +17,14 @@ def test_directory_rollups_handle_a_repo_with_only_root_files(scratch_db):
     from datetime import datetime
 
     from git_synapse.analysis.aggregate import rebuild_repo
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.parser import FileChange, ParsedCommit
     from git_synapse.ingest.store import load_commits, upsert_repo
 
     rec = RepoRecord(github_id=990101, owner="t", name="rootonly",
                      full_name="t/rootonly", clone_url="", default_branch="main")
-    with connection() as conn:
+    with session_scope() as conn:
         rid = upsert_repo(rec, conn)
         load_commits(rid, [
             ParsedCommit(
@@ -40,7 +39,7 @@ def test_directory_rollups_handle_a_repo_with_only_root_files(scratch_db):
         ], conn)
         stats = rebuild_repo(rid, conn)
     assert stats is not None
-    with connection() as conn:
+    with session_scope() as conn:
         conn.delete(conn.get(models().Repo, rid))
 
 
@@ -53,8 +52,7 @@ def test_scoring_a_repo_with_a_single_file_produces_no_pairs(scratch_db):
 
     from git_synapse.analysis.aggregate import rebuild_repo
     from git_synapse.analysis.score import score_repo
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.parser import FileChange, ParsedCommit
     from git_synapse.ingest.store import load_commits, upsert_repo
@@ -62,7 +60,7 @@ def test_scoring_a_repo_with_a_single_file_produces_no_pairs(scratch_db):
     rec = RepoRecord(github_id=990102, owner="t", name="onefile",
                      full_name="t/onefile", clone_url="", default_branch="main")
     base = datetime(2026, 1, 1, tzinfo=UTC)
-    with connection() as conn:
+    with session_scope() as conn:
         rid = upsert_repo(rec, conn)
         load_commits(rid, [
             ParsedCommit(
@@ -74,12 +72,12 @@ def test_scoring_a_repo_with_a_single_file_produces_no_pairs(scratch_db):
             ) for i in range(4)
         ], conn)
         rebuild_repo(rid, conn)
-    with connection() as conn:
+    with session_scope() as conn:
         score_repo(rid, conn)
-    with connection() as conn:
+    with session_scope() as conn:
         n = conn.query(models().FilePair).filter_by(repo_id=rid).count()
     assert n == 0
-    with connection() as conn:
+    with session_scope() as conn:
         conn.delete(conn.get(models().Repo, rid))
 
 

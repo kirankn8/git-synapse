@@ -11,8 +11,7 @@ from datetime import UTC, datetime, timedelta
 
 import numpy as np
 
-from git_synapse.db.engine import connection
-from git_synapse.db.orm import models
+from git_synapse.db.orm import models, session_scope
 
 log = logging.getLogger(__name__)
 LABEL_PROPAGATION_ROUNDS = 10
@@ -70,7 +69,7 @@ def rebuild(repo_id: int | None = None, conn: object | None = None, force: bool 
 
     if conn is not None:
         return run(conn)
-    with connection() as session:
+    with session_scope() as session:
         return run(session)
 
 
@@ -216,7 +215,7 @@ def _refresh_mining_counts(session: object, stats: MiningStats) -> None:
 
 def cross_directory_modules(repo_id: int, limit: int = 20) -> list[dict]:
     Cluster, File = models().FileCluster, models().File
-    with connection() as session:
+    with session_scope() as session:
         clusters = session.query(Cluster).filter(
             Cluster.repo_id == repo_id, Cluster.dirs_spanned > 1, Cluster.cluster_size >= 3
         ).all()
@@ -237,7 +236,7 @@ def cross_directory_modules(repo_id: int, limit: int = 20) -> list[dict]:
 def drifting_pairs(repo_id: int | None = None, trend: str = "emerging", limit: int = 25,
                    include_deleted: bool = False) -> list[dict]:
     Drift, File, Repo = models().PairDrift, models().File, models().Repo
-    with connection() as session:
+    with session_scope() as session:
         query = session.query(Drift).filter_by(trend=trend)
         if repo_id is not None:
             query = query.filter_by(repo_id=repo_id)
@@ -258,7 +257,7 @@ def drifting_pairs(repo_id: int | None = None, trend: str = "emerging", limit: i
 
 def risky_files(repo_id: int | None = None, limit: int = 25, include_deleted: bool = False) -> list[dict]:
     Risk, File, Repo, Link, Author = models().FileRisk, models().File, models().Repo, models().AuthorFile, models().Author
-    with connection() as session:
+    with session_scope() as session:
         query = session.query(Risk).filter(Risk.change_count >= 5)
         if repo_id is not None:
             query = query.filter_by(repo_id=repo_id)

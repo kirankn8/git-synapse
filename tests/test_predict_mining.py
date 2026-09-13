@@ -18,10 +18,9 @@ from git_synapse.analysis import mining, predict
 def test_impact_and_upstream_are_exact_inverses(db):
     """If A is upstream of B then B must be downstream of A, or the two tools
     contradict each other about the same edge."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as session:
+    with session_scope() as session:
         edges = [
             {"s": row.source_repo_id, "t": row.target_repo_id}
             for row in session.query(models().RepoImpact)
@@ -40,20 +39,18 @@ def test_impact_and_upstream_are_exact_inverses(db):
 
 
 def test_no_repository_is_its_own_upstream(db):
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as session:
+    with session_scope() as session:
         assert session.query(models().RepoImpact).filter(
             models().RepoImpact.source_repo_id == models().RepoImpact.target_repo_id
         ).count() == 0
 
 
 def test_impact_scores_are_probabilities_and_ranked(db):
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as session:
+    with session_scope() as session:
         first = session.query(models().RepoImpact.source_repo_id).first()
     rows = [{"source_repo_id": first[0]}] if first else []
     if not rows:
@@ -76,10 +73,9 @@ def test_impact_on_a_nonexistent_repo_is_empty_not_an_error(db, repo_id):
 
 def test_chains_never_revisit_a_repository(db):
     """A cycle would loop forever or report a repo as its own ancestor."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as session:
+    with session_scope() as session:
         rows = [{"t": value[0]} for value in session.query(
             models().RepoImpact.target_repo_id).distinct().limit(8).all()]
     for r in rows:
@@ -94,10 +90,9 @@ def test_chains_never_revisit_a_repository(db):
 def test_cross_directory_modules_span_more_than_one_directory(db):
     """The whole point of the label-propagation clusters is finding modules the
     directory tree does not show."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as session:
+    with session_scope() as session:
         rows = [{"repo_id": value[0]} for value in session.query(
             models().FileCluster.repo_id).distinct().limit(5).all()]
     if not rows:
@@ -141,10 +136,9 @@ def impact_corpus(scratch_db):
     from datetime import UTC, datetime, timedelta
 
     from git_synapse.analysis import predict
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as conn:
+    with session_scope() as conn:
         for model in (models().RepoImpact, models().DepBump,
                       models().RepoDependency, models().Repo):
             conn.query(model).delete(synchronize_session=False)
@@ -178,10 +172,9 @@ def impact_corpus(scratch_db):
 
 
 def _edges():
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as session:
+    with session_scope() as session:
         rows = session.query(models().RepoImpact,
                              models().Repo.name,
                              models().Repo.name).join(
@@ -239,9 +232,8 @@ def test_no_repository_is_its_own_dependency(impact_corpus):
 
 
 def test_edges_are_ranked_within_each_source(impact_corpus):
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
-    with connection() as session:
+    from git_synapse.db.orm import models, session_scope
+    with session_scope() as session:
         rows = session.query(models().RepoImpact).order_by(
             models().RepoImpact.source_repo_id,
             models().RepoImpact.rank_in_source,
@@ -257,9 +249,9 @@ def test_a_second_rebuild_is_skipped_when_no_input_changed(impact_corpus):
 
 def test_a_rebuild_can_run_inside_a_callers_transaction(impact_corpus):
     from git_synapse.analysis import predict
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import session_scope
 
-    with connection() as conn:
+    with session_scope() as conn:
         assert predict.rebuild(conn, force=True).rows_written > 0
 
 
@@ -273,10 +265,9 @@ def dead_file(db):
     another test's data passes or fails on the order they run in, which is the
     flake this suite has been bitten by before.
     """
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as session:
+    with session_scope() as session:
         repo = models().Repo(owner="ranktest", name="dead", full_name="ranktest/dead",
                               host="github.com", provider="github", is_enabled=True,
                               commit_count=500, pair_population=500)
@@ -290,7 +281,7 @@ def dead_file(db):
         session.flush()
         repo_id, file_id = repo.id, file_row.id
     yield repo_id, file_id
-    with connection() as session:
+    with session_scope() as session:
         risk = session.get(models().FileRisk, file_id)
         if risk is not None:
             session.delete(risk)
@@ -315,11 +306,10 @@ def test_risk_leaves_out_files_that_no_longer_exist(dead_file):
     """Risk answers "what happens if I change this, and who understands it" --
     a question that cannot be asked of a file that is gone."""
     from git_synapse.analysis import mining
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     repo_id, fid = dead_file
-    with connection() as session:
+    with session_scope() as session:
         if session.get(models().FileRisk, fid) is None:
             session.add(models().FileRisk(
                 file_id=fid, repo_id=repo_id, churn_pct=1, coupling_pct=1,
@@ -337,10 +327,9 @@ def test_a_coupling_query_still_reports_a_deleted_partner(db):
     specific file, the coupling is a historical fact, and the answer labels it
     rather than hiding it."""
     from git_synapse.analysis import query as q
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as session:
+    with session_scope() as session:
         row = session.query(models().FilePair).join(
             models().File, models().File.id == models().FilePair.file_b_id
         ).filter(models().File.is_deleted.is_(True)).first()
@@ -457,14 +446,13 @@ def drift_corpus(db):
     from datetime import UTC, datetime, timedelta
     from uuid import uuid4
 
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     # Additive: this database is shared with every other test in the run, and
     # several of them skip when the corpus lacks a shape they need. Clearing
     # the tables to get a clean slate takes that shape away from them.
     tag = uuid4().hex[:8]
-    with connection() as conn:
+    with session_scope() as conn:
         repo = models().Repo(github_id=abs(hash(tag)) % 10**8, owner="acme",
                              name=f"drift-{tag}", full_name=f"acme/drift-{tag}",
                              clone_url="", default_branch="main")
@@ -494,7 +482,7 @@ def drift_corpus(db):
 
     yield {"repo_id": repo_id, "file_ids": file_ids, "name": name}
 
-    with connection() as conn:
+    with session_scope() as conn:
         for model in (models().PairDrift, models().FileCluster, models().FilePairMetric,
                       models().CommitFile, models().Commit, models().File):
             conn.query(model).filter_by(repo_id=repo_id).delete(synchronize_session=False)
@@ -504,13 +492,12 @@ def drift_corpus(db):
 def test_a_pair_seen_in_both_windows_is_scored_for_drift(drift_corpus):
     """Both npmi values and their delta come out of `_rebuild_drift`; a pair
     present in only one window is not evidence of a trend either way."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as session:
+    with session_scope() as session:
         mining._rebuild_drift(session, drift_corpus["repo_id"])
 
-    with connection() as session:
+    with session_scope() as session:
         rows = session.query(models().PairDrift).filter_by(
             repo_id=drift_corpus["repo_id"]).all()
         assert len(rows) == 1
@@ -523,11 +510,10 @@ def test_a_pair_seen_in_both_windows_is_scored_for_drift(drift_corpus):
 def test_drifting_pairs_names_both_files_and_their_repository(drift_corpus):
     """The reader joins the pair back to paths and a repo name, because a row of
     two integers is not something anybody can act on."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     a, b = sorted(drift_corpus["file_ids"])
-    with connection() as session:
+    with session_scope() as session:
         session.add(models().PairDrift(
             repo_id=drift_corpus["repo_id"], file_a_id=a, file_b_id=b,
             window_days=90, n_ab_recent=6, n_ab_historic=2,
@@ -543,11 +529,10 @@ def test_drifting_pairs_names_both_files_and_their_repository(drift_corpus):
 def test_a_drifting_pair_whose_file_was_deleted_is_hidden_unless_asked_for(drift_corpus):
     """Recommending a file that no longer exists is worse than recommending
     nothing, so deleted partners are dropped by default."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     a, b = sorted(drift_corpus["file_ids"])
-    with connection() as session:
+    with session_scope() as session:
         session.add(models().PairDrift(
             repo_id=drift_corpus["repo_id"], file_a_id=a, file_b_id=b,
             window_days=90, n_ab_recent=6, n_ab_historic=2,
@@ -563,10 +548,9 @@ def test_a_drifting_pair_whose_file_was_deleted_is_hidden_unless_asked_for(drift
 def test_cross_directory_modules_report_the_directories_they_span(drift_corpus):
     """The point of the cluster is that it crosses a directory boundary: files
     that move together while living apart are what a newcomer cannot see."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as session:
+    with session_scope() as session:
         for file_id in drift_corpus["file_ids"]:
             session.add(models().FileCluster(
                 repo_id=drift_corpus["repo_id"], file_id=file_id, cluster_id=1,
@@ -588,11 +572,10 @@ def test_a_minimum_score_drops_partners_beneath_it(drift_corpus):
     so a partner under the bar is absent rather than present with a low number.
     """
     from git_synapse.analysis import query
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     a, b = sorted(drift_corpus["file_ids"])
-    with connection() as session:
+    with session_scope() as session:
         session.add(models().FilePairMetric(
             repo_id=drift_corpus["repo_id"], file_a_id=a, file_b_id=b,
             n_ab=4, n_a=4, n_b=4, n_total=4, jaccard=0.5))
@@ -636,10 +619,9 @@ def test_a_pairing_with_too_few_bumps_has_no_adoption_statistics(impact_corpus):
     from datetime import UTC, datetime
 
     from git_synapse.analysis import depbump as db_mod
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as session:
+    with session_scope() as session:
         session.add(models().DepBump(
             consumer_repo_id=impact_corpus["runtime"], consumer_sha="a" * 40,
             dep_repo_id=impact_corpus["packager"], dep_name="github.com/acme/packager",
@@ -657,11 +639,10 @@ def test_declared_only_hides_an_edge_that_no_manifest_states(impact_corpus):
     """A bump-only edge is real evidence but not a declaration, so a caller
     asking for declarations must not be handed one."""
     from git_synapse.analysis import predict
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     signer, unrelated = impact_corpus["signer"], impact_corpus["unrelated"]
-    with connection() as session:
+    with session_scope() as session:
         session.add(models().RepoImpact(
             source_repo_id=signer, target_repo_id=unrelated, score=0.9,
             rank_in_source=99, is_declared=False, has_bump_history=True))
@@ -677,11 +658,10 @@ def test_a_cycle_in_the_graph_does_not_walk_forever(impact_corpus):
     """Two repositories that each declare the other are a real shape, and a
     chain walker that revisits a node on the path never terminates."""
     from git_synapse.analysis import predict
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     signer, packager = impact_corpus["signer"], impact_corpus["packager"]
-    with connection() as session:
+    with session_scope() as session:
         session.query(models().RepoImpact).filter_by(
             source_repo_id=packager, target_repo_id=signer).delete(
                 synchronize_session=False)

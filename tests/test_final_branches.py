@@ -175,9 +175,9 @@ def test_the_input_fingerprint_changes_only_when_the_inputs_do(db):
     """It is what lets the fifteen-minute tick skip a rebuild; if it moved on
     its own the corpus would be rebuilt every time for nothing."""
     from git_synapse.analysis.predict import _input_fingerprint
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import session_scope
 
-    with connection() as conn:
+    with session_scope() as conn:
         first = _input_fingerprint(conn)
         second = _input_fingerprint(conn)
     assert first == second
@@ -187,10 +187,9 @@ def test_the_input_fingerprint_sees_in_place_dependency_changes(scratch_db):
     from uuid import uuid4
 
     from git_synapse.analysis.predict import _input_fingerprint
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as conn:
+    with session_scope() as conn:
         first = _input_fingerprint(conn)
         suffix = uuid4().hex[:10]
         repo = models().Repo(github_id=900001 + int(suffix[:6], 16), owner="acme",

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -25,13 +23,6 @@ def close_pool() -> None:
     from git_synapse.db.orm import close
 
     close()
-
-
-@contextmanager
-def connection() -> Iterator[Any]:
-    """Compatibility-free transitional alias for an ORM session."""
-    with session_scope() as session:
-        yield session
 
 
 def _is_schema_retryable(exc: BaseException) -> bool:

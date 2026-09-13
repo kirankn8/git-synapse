@@ -15,8 +15,7 @@ from dataclasses import dataclass
 
 from git_synapse.analysis.manifests import version_key
 from git_synapse.config import get_config
-from git_synapse.db.engine import connection
-from git_synapse.db.orm import models
+from git_synapse.db.orm import models, session_scope
 from git_synapse.ingest.github import RepoRecord
 from git_synapse.ingest.parser import ParsedCommit, split_path
 
@@ -80,7 +79,7 @@ def upsert_repo(record: RepoRecord, conn: object | None = None, account_id: int 
 
     if conn is not None:
         return write(conn)
-    with connection() as session:
+    with session_scope() as session:
         return write(session)
 
 

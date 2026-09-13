@@ -63,8 +63,7 @@ def ingested(scratch_db, tmp_path_factory):
     reset_config_cache()
 
     from git_synapse.analysis import aggregate, score
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest import pipeline
 
     # `a.py` and `b.py` always move together; `lonely.py` never does.
@@ -83,13 +82,13 @@ def ingested(scratch_db, tmp_path_factory):
     results = [pipeline.sync_repo(r, force_full=True) for r in records]
     assert all(x.status != "failed" for x in results), [x.error for x in results]
 
-    with connection() as conn:
+    with session_scope() as conn:
         ids = {r.name: r.id for r in conn.query(models().Repo).filter(
             models().Repo.github_id.in_([910001, 910002])
         ).all()}
         for rid in ids.values():
             aggregate.rebuild_repo(rid, conn)
-    with connection() as conn:
+    with session_scope() as conn:
         for rid in ids.values():
             score.score_repo(rid, conn)
     ids["_alpha_remote"] = str(alpha)
@@ -104,22 +103,21 @@ def ingested(scratch_db, tmp_path_factory):
 
 
 def test_commits_and_atoms_land(ingested):
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     alpha = ingested["e2e-alpha"]
-    with connection() as session:
+    with session_scope() as session:
         assert session.query(models().Commit).filter_by(repo_id=alpha).count() == 10
         assert session.query(models().File).filter_by(repo_id=alpha).count() == 3
 
 
 def test_the_always_together_pair_is_found_and_the_lonely_file_is_not(ingested):
     """The structure was planted: a.py and b.py in every one of six commits."""
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import session_scope
 
     alpha = ingested["e2e-alpha"]
     from git_synapse.db.orm import models
-    with connection() as session:
+    with session_scope() as session:
         files = {f.id: f.path for f in session.query(models().File).filter_by(repo_id=alpha).all()}
         pair = next((m for m in session.query(models().FilePairMetric).filter_by(repo_id=alpha).all()
                      if {files.get(m.file_a_id), files.get(m.file_b_id)} == {"a.py", "b.py"}), None)
@@ -128,7 +126,7 @@ def test_the_always_together_pair_is_found_and_the_lonely_file_is_not(ingested):
     assert float(pair.confidence_ab) == pytest.approx(1.0)
     assert float(pair.jaccard) == pytest.approx(1.0)
 
-    with connection() as session:
+    with session_scope() as session:
         lonely_ids = [f.id for f in session.query(models().File).filter_by(
             repo_id=alpha, path="lonely.py",
         ).all()]
@@ -141,11 +139,10 @@ def test_the_always_together_pair_is_found_and_the_lonely_file_is_not(ingested):
 
 
 def test_marginals_agree_with_the_atoms(ingested):
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     repo_ids = [v for v in ingested.values() if isinstance(v, int)]
-    with connection() as session:
+    with session_scope() as session:
         files = session.query(models().File).filter(models().File.repo_id.in_(repo_ids)).all()
         counts = {file.id: session.query(models().CommitFile).filter_by(file_id=file.id).count()
                   for file in files}
@@ -155,11 +152,10 @@ def test_marginals_agree_with_the_atoms(ingested):
 
 
 def test_every_contingency_table_is_feasible(ingested):
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     repo_ids = [v for v in ingested.values() if isinstance(v, int)]
-    with connection() as session:
+    with session_scope() as session:
         metrics = session.query(models().FilePairMetric).filter(
             models().FilePairMetric.repo_id.in_(repo_ids)
         ).all()
@@ -186,12 +182,11 @@ def test_coupled_files_answers_through_the_real_query_path(ingested):
 
 def test_a_second_ingest_with_no_new_commits_changes_nothing(ingested):
     """An idempotent re-read is what makes the 15-minute schedule safe."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest import pipeline
 
     repo_ids = [v for v in ingested.values() if isinstance(v, int)]
-    with connection() as session:
+    with session_scope() as session:
         before_rows = session.query(models().FilePairMetric).filter(
             models().FilePairMetric.repo_id.in_(repo_ids)
         ).all()
@@ -204,7 +199,7 @@ def test_a_second_ingest_with_no_new_commits_changes_nothing(ingested):
     result = pipeline.sync_repo(record)
     assert result.status != "failed", result.error
 
-    with connection() as session:
+    with session_scope() as session:
         after_rows = session.query(models().FilePairMetric).filter(
             models().FilePairMetric.repo_id.in_(repo_ids)
         ).all()
@@ -229,12 +224,11 @@ def _alpha(ingested):
 def test_a_watermark_written_by_an_older_version_is_still_honoured(ingested):
     """The watermark used to be a single SHA. A repository last synced by that
     version must not re-read its whole history on the next tick."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest import pipeline
 
     repo_id = ingested["e2e-alpha"]
-    with connection() as conn:
+    with session_scope() as conn:
         repo = conn.get(models().Repo, repo_id)
         head = repo.last_ingested_sha
         repo.last_ingested_refs = []
@@ -248,12 +242,11 @@ def test_a_watermark_written_by_an_older_version_is_still_honoured(ingested):
 def test_a_force_pushed_away_ref_tip_does_not_fail_the_repository(ingested):
     """Asking git for `^<missing>` is a hard error, so an orphaned tip has to be
     dropped rather than passed through."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest import pipeline
 
     repo_id = ingested["e2e-alpha"]
-    with connection() as conn:
+    with session_scope() as conn:
         conn.get(models().Repo, repo_id).last_ingested_refs = ["f" * 40]
     result = pipeline.sync_repo(_alpha(ingested))
     assert result.status != "failed", result.error
@@ -262,12 +255,11 @@ def test_a_force_pushed_away_ref_tip_does_not_fail_the_repository(ingested):
 def test_a_rewritten_commit_is_swept_during_the_next_sync(ingested):
     """Insert-only was the bug: 735 commits across 24 repositories outlived the
     history they came from, inflating the N of every contingency table there."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest import pipeline
 
     repo_id = ingested["e2e-alpha"]
-    with connection() as conn:
+    with session_scope() as conn:
         author = conn.query(models().Author).filter_by(email="ghost@e").one_or_none()
         if author is None:
             author = models().Author(email="ghost@e", display_name="ghost")
@@ -279,7 +271,7 @@ def test_a_rewritten_commit_is_swept_during_the_next_sync(ingested):
 
     result = pipeline.sync_repo(_alpha(ingested))
     assert result.status != "failed", result.error
-    with connection() as conn:
+    with session_scope() as conn:
         assert conn.query(models().Commit).filter_by(repo_id=repo_id, sha="c" * 40).count() == 0
 
 
@@ -287,8 +279,7 @@ def test_a_repository_that_fails_mid_sync_records_why_on_the_row(ingested,
                                                                  monkeypatch):
     """`git-synapse status` reads ingest_error. Losing it means a repository that
     silently stops updating looks identical to one that is simply quiet."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest import pipeline
 
     repo_id = ingested["e2e-alpha"]
@@ -301,12 +292,12 @@ def test_a_repository_that_fails_mid_sync_records_why_on_the_row(ingested,
     assert result.status == "failed"
     assert "parser fell over" in result.error
 
-    with connection() as conn:
+    with session_scope() as conn:
         row = conn.get(models().Repo, repo_id)
         assert row.ingest_status == "failed"
         assert "parser fell over" in row.ingest_error
 
-    with connection() as conn:
+    with session_scope() as conn:
         row = conn.get(models().Repo, repo_id)
         row.ingest_status = "ok"
         row.ingest_error = None
@@ -319,7 +310,7 @@ def test_a_failed_status_write_does_not_mask_the_original_failure(ingested,
     from git_synapse.ingest import pipeline
 
     broken = {"yet": False}
-    real_connection = pipeline.connection
+    real_session_scope = pipeline.session_scope
 
     def explode_then_break_the_database(*a, **k):
         broken["yet"] = True
@@ -328,11 +319,11 @@ def test_a_failed_status_write_does_not_mask_the_original_failure(ingested,
     def no_database(*a, **k):
         if broken["yet"]:
             raise OSError("connection refused")
-        return real_connection(*a, **k)
+        return real_session_scope(*a, **k)
 
     explode = explode_then_break_the_database
     monkeypatch.setattr(pipeline, "iter_commits", explode)
-    monkeypatch.setattr(pipeline, "connection", no_database)
+    monkeypatch.setattr(pipeline, "session_scope", no_database)
     result = pipeline._sync_repo_once(_alpha(ingested))
     assert result.status == "failed"
     assert "parser fell over" in result.error
@@ -362,14 +353,13 @@ def mined(ingested, tmp_path_factory):
     assert result.status != "failed", result.error
 
     from git_synapse.analysis import aggregate, score
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as conn:
+    with session_scope() as conn:
         repo_id = conn.query(models().Repo.id).filter_by(github_id=910003).scalar()
-    with connection() as conn:
+    with session_scope() as conn:
         aggregate.rebuild_repo(repo_id, conn)
-    with connection() as conn:
+    with session_scope() as conn:
         score.score_repo(repo_id, conn)
     return repo_id
 
@@ -378,14 +368,13 @@ def test_mining_finds_the_module_the_coupled_files_form(mined):
     """x, y and z always move together and alone.py never does, so label
     propagation must put the first three in a cluster and leave the fourth out."""
     from git_synapse.analysis import mining
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     repo_id = mined
     stats = mining.rebuild(repo_id=repo_id, force=True)
     assert stats.clustered_files >= 3
 
-    with connection() as session:
+    with session_scope() as session:
         files = {f.id: f.path for f in session.query(models().File).filter_by(repo_id=repo_id).all()}
         clusters = session.query(models().FileCluster).filter_by(repo_id=repo_id).all()
     by_path = {files[row.file_id]: row.cluster_id for row in clusters}
@@ -397,12 +386,11 @@ def test_mining_finds_the_module_the_coupled_files_form(mined):
 def test_mining_a_repository_with_no_coupled_pairs_writes_nothing(ingested):
     """beta has five commits that never touch the same file twice."""
     from git_synapse.analysis import mining
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     repo_id = ingested["e2e-beta"]
     mining.rebuild(repo_id=repo_id, force=True)
-    with connection() as session:
+    with session_scope() as session:
         assert session.query(models().FileCluster).filter_by(repo_id=repo_id).count() == 0
 
 
@@ -417,9 +405,9 @@ def test_a_second_mining_pass_over_unchanged_repositories_is_skipped(ingested):
 
 def test_mining_can_run_inside_a_callers_transaction(mined):
     from git_synapse.analysis import mining
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import session_scope
 
-    with connection() as conn:
+    with session_scope() as conn:
         stats = mining.rebuild(repo_id=mined, conn=conn, force=True)
     assert stats.clustered_files >= 3
 
@@ -441,25 +429,23 @@ def test_drifting_pairs_can_be_scoped_to_one_repository(ingested):
 
 def test_scoring_every_repository_covers_every_repository(mined):
     from git_synapse.analysis import score
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
-    with connection() as session:
+    with session_scope() as session:
         enabled = session.query(models().Repo).filter_by(is_enabled=True).count()
     assert len(score.score_all()) == enabled
 
 
 def test_a_repository_upsert_without_a_connection_is_committed(mined):
     """`git-synapse discover` writes repositories outside any transaction of its own."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest.store import upsert_repo
 
     record = RepoRecord(github_id=910099, owner="t", name="e2e-standalone",
                         full_name="t/e2e-standalone", clone_url="",
                         default_branch="main")
     repo_id = upsert_repo(record)
-    with connection() as session:
+    with session_scope() as session:
         assert session.query(models().Repo.id).filter_by(github_id=910099).scalar() == repo_id
     # Idempotent: discovery runs on every scheduled tick.
     assert upsert_repo(record) == repo_id
@@ -467,10 +453,10 @@ def test_a_repository_upsert_without_a_connection_is_committed(mined):
 
 def test_an_author_connection_that_is_already_closed_closes_cleanly(mined):
     """Closing must never mask the real error that ended the run."""
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import session_scope
     from git_synapse.ingest.store import AuthorCache
 
-    with connection() as conn:
+    with session_scope() as conn:
         cache = AuthorCache(conn)
         assert cache.resolve("", "nobody") is None
         first = cache.resolve("Someone@Example.com", "Someone")
@@ -483,13 +469,12 @@ def test_an_author_connection_that_is_already_closed_closes_cleanly(mined):
 def test_the_file_resolver_knows_paths_a_rename_left_behind(mined):
     """A path that only exists as an alias must still resolve, or the file gets
     a second identity and its history splits in two."""
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest.store import FileResolver
 
-    with connection() as conn:
+    with session_scope() as conn:
         row = conn.query(models().File).filter_by(repo_id=mined).order_by(models().File.id).first()
-    with connection() as conn:
+    with session_scope() as conn:
         alias = conn.query(models().FileAlias).filter_by(repo_id=mined, old_path="old/name.py").first()
         if alias is None:
             conn.add(models().FileAlias(repo_id=mined, old_path="old/name.py", file_id=row.id))
@@ -506,9 +491,9 @@ def test_a_mirror_that_cannot_be_read_does_not_mark_every_file_deleted(mined,
     import subprocess as sp
 
     from git_synapse.analysis.aggregate import _head_tree_paths
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import session_scope
 
-    with connection() as conn:
+    with session_scope() as conn:
         assert _head_tree_paths(conn, -1) is None
 
         real = sp.run
@@ -533,12 +518,12 @@ def test_a_repository_whose_mirror_is_gone_reads_as_unreadable(mined, monkeypatc
     from pathlib import Path
 
     from git_synapse.analysis.aggregate import _head_tree_paths
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import session_scope
     from git_synapse.ingest import gitops
 
     monkeypatch.setattr(gitops, "mirror_path_for",
                         lambda *a, **k: Path("/nonexistent/mirror.git"))
-    with connection() as conn:
+    with session_scope() as conn:
         assert _head_tree_paths(conn, mined) is None
 
 
@@ -575,8 +560,7 @@ def manifests(ingested, tmp_path_factory):
     monorepos keep their real dependencies in per-module files, which hid 371
     internal references across 29 repositories.
     """
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest import pipeline
 
     root = tmp_path_factory.mktemp("mani")
@@ -602,18 +586,17 @@ def manifests(ingested, tmp_path_factory):
                             default_branch="main")
         result = pipeline.sync_repo(record, force_full=True)
         assert result.status != "failed", result.error
-        with connection() as conn:
+        with session_scope() as conn:
             ids[name] = conn.query(models().Repo.id).filter_by(github_id=gh).scalar()
     return ids
 
 
 def test_a_declared_dependency_is_recorded_from_the_manifest(manifests):
     from git_synapse.analysis import depbump
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     assert depbump.refresh_declared(force=True) > 0
-    with connection() as conn:
+    with session_scope() as conn:
         rows = conn.query(models().RepoDependency).filter_by(
             consumer_repo_id=manifests["e2e-mono"],
         ).all()
@@ -625,11 +608,10 @@ def test_a_declared_dependency_is_recorded_from_the_manifest(manifests):
 
 def test_the_internal_module_graph_is_recorded_per_manifest(manifests):
     from git_synapse.analysis import depbump
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     assert depbump.refresh_modules() > 0
-    with connection() as conn:
+    with session_scope() as conn:
         rows = conn.query(models().ModuleDependency).filter_by(
             repo_id=manifests["e2e-mono"],
         ).all()
@@ -639,11 +621,10 @@ def test_the_internal_module_graph_is_recorded_per_manifest(manifests):
 
 def test_a_vendored_manifest_is_not_read_as_this_repositorys_dependency(manifests):
     from git_synapse.analysis import depbump
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     depbump.refresh_declared(force=True)
-    with connection() as conn:
+    with session_scope() as conn:
         manifest_paths = {r.manifest for r in conn.query(models().RepoDependency).filter_by(
             consumer_repo_id=manifests["e2e-mono"],
         ).all()}

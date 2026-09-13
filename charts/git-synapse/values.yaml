@@ -65,7 +65,6 @@ config:
   schedulerTimezone: UTC
   schedulerEnabled: true
   refreshOnStart: false
-  githubOrg: ""
   ingestConcurrency: 8
   maxFilesPerCommit: 60
   minPairSupport: 2

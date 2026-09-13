@@ -11,7 +11,6 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from git_synapse.db.engine import connection
 from git_synapse.db.orm import models, session_scope
 from git_synapse.ingest.github import RepoRecord
 from git_synapse.ingest.parser import FileChange, ParsedCommit
@@ -48,7 +47,7 @@ def temp_repo(scratch_db):
         full_name="test/store-fixture",
         clone_url="https://example.invalid/test/store-fixture.git",
     )
-    with connection() as conn:
+    with session_scope() as conn:
         repo_id = upsert_repo(record, conn)
     yield repo_id
     with session_scope() as session:
@@ -69,7 +68,7 @@ def counts(repo_id: int) -> tuple[int, int, int]:
 
 def test_loads_commits_and_files(temp_repo):
     commits = [make_commit(i, ["a.py", "b.py"]) for i in range(5)]
-    with connection() as conn:
+    with session_scope() as conn:
         stats = load_commits(temp_repo, commits, conn)
     assert stats.commits_written == 5
     assert stats.changes_written == 10
@@ -86,7 +85,7 @@ def test_survives_the_flush_boundary(temp_repo):
     """
     total = COMMIT_FLUSH_SIZE * 2 + 17
     commits = (make_commit(i, [f"pkg/mod_{i % 50}.py", "shared.py"]) for i in range(total))
-    with connection() as conn:
+    with session_scope() as conn:
         stats = load_commits(temp_repo, commits, conn)
 
     assert stats.commits_read == total
@@ -100,10 +99,10 @@ def test_survives_the_flush_boundary(temp_repo):
 def test_reingest_is_idempotent(temp_repo):
     """Re-loading the same commits must not duplicate anything."""
     commits = [make_commit(i, ["a.py", "b.py"]) for i in range(20)]
-    with connection() as conn:
+    with session_scope() as conn:
         load_commits(temp_repo, list(commits), conn)
     before = counts(temp_repo)
-    with connection() as conn:
+    with session_scope() as conn:
         load_commits(temp_repo, list(commits), conn)
     assert counts(temp_repo) == before
 
@@ -128,7 +127,7 @@ def test_rename_preserves_file_identity(temp_repo):
         ),
         make_commit(3, ["new/name.go"]),
     ]
-    with connection() as conn:
+    with session_scope() as conn:
         load_commits(temp_repo, history, conn)
 
     with session_scope() as session:
@@ -150,7 +149,7 @@ def test_oversized_commits_are_stored_but_not_pair_eligible(temp_repo):
     """The fan-out cap must exclude a commit from pairing without discarding it."""
     small = make_commit(0, ["a.py", "b.py"])
     huge = make_commit(1, [f"f{i}.py" for i in range(200)])
-    with connection() as conn:
+    with session_scope() as conn:
         stats = load_commits(temp_repo, [small, huge], conn, max_files_per_commit=60)
 
     assert stats.skipped_oversized == 1
@@ -165,7 +164,7 @@ def test_oversized_commits_are_stored_but_not_pair_eligible(temp_repo):
 
 def test_merge_commits_are_not_pair_eligible(temp_repo):
     merge = make_commit(1, ["a.py", "b.py"], parents=[f"{0:040x}", f"{99:040x}"])
-    with connection() as conn:
+    with session_scope() as conn:
         stats = load_commits(temp_repo, [merge], conn)
     assert stats.pair_eligible == 0
     with session_scope() as session:
@@ -176,7 +175,7 @@ def test_merge_commits_are_not_pair_eligible(temp_repo):
 def test_duplicate_paths_within_one_commit_are_collapsed(temp_repo):
     """The (commit_id, file_id) primary key must not be violated."""
     commit = make_commit(0, ["a.py", "a.py", "b.py"])
-    with connection() as conn:
+    with session_scope() as conn:
         stats = load_commits(temp_repo, [commit], conn)
     assert stats.changes_written == 2
     assert counts(temp_repo)[1] == 2
@@ -197,7 +196,7 @@ def test_rename_onto_an_occupied_path_does_not_cross_identities(temp_repo):
     rename.files = [FileChange(path="new.txt", change_type="R", old_path="old.txt",
                                similarity=100, insertions=1, deletions=0)]
     later = make_commit(3, ["new.txt"])
-    with connection() as conn:
+    with session_scope() as conn:
         load_commits(repo_id, [both, rename, later], conn)
 
     with session_scope() as session:
@@ -236,7 +235,7 @@ def test_a_refresh_does_not_blank_the_metadata_discovery_collected(db):
     """`load_repo_records` rebuilds a record from the database and hands it
     straight back to `upsert_repo`. When it read only the columns the pipeline
     needed, every ingest wiped language, description, topics and stars."""
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import session_scope
     from git_synapse.ingest.pipeline import load_repo_records
 
     full = RepoRecord(
@@ -245,12 +244,12 @@ def test_a_refresh_does_not_blank_the_metadata_discovery_collected(db):
         description="a description", primary_language="Rust",
         topics=["a", "b"], license_spdx="MIT", stargazers=42,
     )
-    with connection() as conn:
+    with session_scope() as conn:
         upsert_repo(full, conn)
 
     reloaded = [r for r in load_repo_records() if r.full_name == "acme/meta-probe"]
     assert reloaded, "the repository must come back from the database"
-    with connection() as conn:
+    with session_scope() as conn:
         upsert_repo(reloaded[0], conn)
 
     with session_scope() as session:
@@ -266,13 +265,13 @@ def test_a_refresh_does_not_blank_the_metadata_discovery_collected(db):
 def test_tags_are_indexed_and_resolved_to_their_commit(db):
     """The tag loader was unreachable while mirrors excluded tags, so nothing
     exercised it: the first real tag must be persisted and resolved by the ORM."""
-    from git_synapse.db.engine import connection
+    from git_synapse.db.orm import session_scope
     from git_synapse.ingest.gitops import Tag
     from git_synapse.ingest.store import load_tags
 
     record = RepoRecord(github_id=777002, owner="acme", name="tagged",
                         full_name="acme/tagged", clone_url="", default_branch="main")
-    with connection() as conn:
+    with session_scope() as conn:
         repo_id = upsert_repo(record, conn)
         load_commits(repo_id, [make_commit(0, ["a.py"])], conn)
         # Read through the same connection: the commits are not committed yet,
@@ -291,7 +290,7 @@ def test_tags_are_indexed_and_resolved_to_their_commit(db):
         assert rows["v1.1.0"].annotated is True
 
     # Replaced wholesale, so a deleted or moved tag cannot linger.
-    with connection() as conn:
+    with session_scope() as conn:
         load_tags(repo_id, [Tag(name="v2.0.0", commit_sha=sha, tagged_at=BASE, annotated=False)], conn)
     with session_scope() as session:
         assert {r.name for r in session.query(models().RefTag).filter_by(repo_id=repo_id)} == {"v2.0.0"}

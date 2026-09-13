@@ -22,8 +22,7 @@ import numpy as np
 from sqlalchemy.orm import aliased
 
 from git_synapse.config import get_config
-from git_synapse.db.engine import connection
-from git_synapse.db.orm import models
+from git_synapse.db.orm import models, session_scope
 from git_synapse.stats.contingency import Contingency
 from git_synapse.stats.registry import ALL_KEYS, BY_KEY
 
@@ -61,7 +60,7 @@ def score_repo(repo_id: int, conn: object | None = None) -> ScoreStats:
 
     if conn is not None:
         return _run(conn)
-    with connection() as own:
+    with session_scope() as own:
         return _run(own)
 
 
@@ -216,5 +215,5 @@ def score_all(conn: object | None = None) -> list[ScoreStats]:
 
     if conn is not None:
         return _run(conn)
-    with connection() as own:
+    with session_scope() as own:
         return _run(own)

@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass
 
 from git_synapse.analysis import aggregate, depbump, mining, predict, score
-from git_synapse.db.engine import connection, set_watermark
+from git_synapse.db.engine import set_watermark
 from git_synapse.db.orm import models, session_scope
 
 log = logging.getLogger(__name__)
@@ -127,7 +127,7 @@ def ensure_current(conn: object | None = None) -> list[str]:
                     Repo.is_enabled.is_(True),
                 ).order_by(Repo.id).all()]
             for repo_id in repo_ids:
-                with connection() as c:
+                with session_scope() as c:
                     aggregate.rebuild_repo(repo_id, c)
         elif stage.name == "score":
             with session_scope() as session:
@@ -136,7 +136,7 @@ def ensure_current(conn: object | None = None) -> list[str]:
                     Repo.is_enabled.is_(True),
                 ).order_by(Repo.id).all()]
             for repo_id in repo_ids:
-                with connection() as c:
+                with session_scope() as c:
                     score.score_repo(repo_id, c)
         elif stage.name == "mining":
             with session_scope() as session:
@@ -145,13 +145,13 @@ def ensure_current(conn: object | None = None) -> list[str]:
                     Repo.is_enabled.is_(True), Repo.pair_count > 0,
                 ).order_by(Repo.id).all()]
             for repo_id in repo_ids:
-                with connection() as c:
+                with session_scope() as c:
                     mining.rebuild(repo_id=repo_id, conn=c, force=True)
         else:
-            with connection() as c:
+            with session_scope() as c:
                 _run_stage(stage, c)
 
-        with connection() as c:
+        with session_scope() as c:
             set_watermark(f"derived:{stage.name}", stage.version, c)
         rebuilt.append(stage.name)
 

@@ -31,8 +31,8 @@ from git_synapse.analysis import depbump, derived, mining, predict
 from git_synapse.analysis.aggregate import rebuild_repo
 from git_synapse.analysis.score import score_repo
 from git_synapse.config import get_config
-from git_synapse.db.engine import SCHEMA_VERSION, connection, schema_drift
-from git_synapse.db.orm import models
+from git_synapse.db.engine import SCHEMA_VERSION, schema_drift
+from git_synapse.db.orm import models, session_scope
 from git_synapse.ingest import accounts, gitops, providers, sources
 from git_synapse.ingest.github import RepoRecord, select_repos
 from git_synapse.ingest.parser import iter_commits
@@ -152,7 +152,7 @@ def reconcile_stale_runs(max_age_hours: int = STALE_RUN_HOURS) -> int:
     cutoff = datetime.now(UTC).timestamp() - max_age_hours * 3600
     cutoff_at = datetime.fromtimestamp(cutoff, tz=UTC)
     IngestRun = models().IngestRun
-    with connection() as conn:
+    with session_scope() as conn:
         rows = conn.query(IngestRun).filter(
             IngestRun.status == "running", IngestRun.started_at < cutoff_at,
         ).all()
@@ -172,7 +172,7 @@ def active_run() -> dict | None:
     """The currently in-flight run, if one is genuinely still running."""
     reconcile_stale_runs()
     IngestRun = models().IngestRun
-    with connection() as conn:
+    with session_scope() as conn:
         row = conn.query(IngestRun).filter(IngestRun.status == "running").order_by(
             IngestRun.started_at.desc()
         ).first()
@@ -183,7 +183,7 @@ def active_run() -> dict | None:
 
 def _start_run(kind: str, trigger: str, repos_total: int) -> int:
     IngestRun = models().IngestRun
-    with connection() as conn:
+    with session_scope() as conn:
         row = IngestRun(kind=kind, trigger=trigger, repos_total=repos_total)
         conn.add(row)
         conn.flush()
@@ -251,7 +251,7 @@ def _crossrepo_rebuild_needed() -> bool:
     Repo = models().Repo
     File = models().File
     Meta = models().Meta
-    with connection() as conn:
+    with session_scope() as conn:
         manifest_names = set(depbump.manifests.MANIFEST_FILES)
         repos = conn.query(Repo).filter(Repo.is_enabled.is_(True)).all()
         manifest_repo_ids = {
@@ -285,7 +285,7 @@ def _finish_run(run: RunResult) -> None:
     run.status = status
 
     IngestRun = models().IngestRun
-    with connection() as conn:
+    with session_scope() as conn:
         row = conn.get(IngestRun, run.run_id)
         if row is not None:
             row.status = status
@@ -303,7 +303,7 @@ def _record_repo_result(run_id: int, result: RepoResult) -> None:
     if result.repo_id is None:
         return
     IngestRunRepo = models().IngestRunRepo
-    with connection() as conn:
+    with session_scope() as conn:
         row = conn.get(IngestRunRepo, (run_id, result.repo_id))
         if row is None:
             row = IngestRunRepo(run_id=run_id, repo_id=result.repo_id)
@@ -326,7 +326,7 @@ def private_repos_in_scope() -> int:
     plain HTTPS and needs no credential at all.
     """
     Repo = models().Repo
-    with connection() as conn:
+    with session_scope() as conn:
         return int(conn.query(Repo).filter(Repo.is_enabled.is_(True), Repo.is_private.is_(True)).count())
 
 
@@ -397,7 +397,6 @@ def discover(trigger: str = "manual") -> list[RepoRecord]:
 
     Returns the filtered set that ingestion should operate on.
     """
-    accounts.seed_from_env()
     configured = accounts.list_accounts(enabled_only=True)
     if not configured:
         raise AuthError(
@@ -443,7 +442,7 @@ def discover(trigger: str = "manual") -> list[RepoRecord]:
     # change with an error about the credential. Skipped when an account errored,
     # since then the shrinkage is explained and already reported.
     Repo = models().Repo
-    with connection() as conn:
+    with session_scope() as conn:
         known = int(conn.query(Repo).filter(Repo.is_enabled.is_(True)).count())
     if not failures and known and listed < known * DISCOVERY_SHRINK_FLOOR:
         raise AuthError(
@@ -452,7 +451,7 @@ def discover(trigger: str = "manual") -> list[RepoRecord]:
             "repositories disappearing. Check the credential; nothing was changed."
         )
 
-    with connection() as conn:
+    with session_scope() as conn:
         for record in selected:
             upsert_repo(record, conn, account_id=owners.get(record.full_name))
     # After the writes, never before: what was selected is an intention, and a
@@ -580,7 +579,7 @@ def _tracked_full_names() -> frozenset[str]:
     and having its fork silently vanish too would be its own surprise.
     """
     Repo = models().Repo
-    with connection() as conn:
+    with session_scope() as conn:
         rows = conn.query(Repo.full_name).filter(Repo.is_enabled.is_(True)).all()
     return frozenset(row.full_name.lower() for row in rows if row.full_name)
 
@@ -658,7 +657,7 @@ def _drop_unreachable_commits(repo_id: int, mirror: Path) -> int:
     the prune.
     """
     Commit = models().Commit
-    with connection() as conn:
+    with session_scope() as conn:
         stored = int(conn.query(Commit).filter(Commit.repo_id == repo_id).count())
     if stored == 0:
         return 0
@@ -685,7 +684,7 @@ def _drop_unreachable_commits(repo_id: int, mirror: Path) -> int:
     if not reachable:
         return 0
 
-    with connection() as conn:
+    with session_scope() as conn:
         doomed = conn.query(Commit).filter(
             Commit.repo_id == repo_id, ~Commit.sha.in_(reachable)
         ).all()
@@ -712,7 +711,7 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
     result = RepoResult(full_name=record.full_name)
 
     try:
-        with connection() as conn:
+        with session_scope() as conn:
             repo_id = upsert_repo(record, conn)
         result.repo_id = repo_id
 
@@ -733,7 +732,7 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
         result.cloned = fetch.cloned
 
         Repo = models().Repo
-        with connection() as conn:
+        with session_scope() as conn:
             repo_row = conn.get(Repo, repo_id)
             if repo_row is None:
                 raise RuntimeError(f"repository {repo_id} disappeared during ingest")
@@ -774,7 +773,7 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
             include_tags=True,
         )
 
-        with connection() as conn:
+        with session_scope() as conn:
             stats = load_commits(repo_id, commits, conn)
             # Marked after loading, because a replay is only recognisable by
             # comparing against the branch, and the flag is what keeps the same
@@ -807,24 +806,24 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
         # pass ingested commits but failed before aggregating them. Without the
         # second condition that failure was permanent: the commit watermark had
         # already advanced, so every later run saw nothing to do.
-        with connection() as conn:
+        with session_scope() as conn:
             repo_row = conn.get(Repo, repo_id)
             stale_aggregate = bool(
                 repo_row is not None and repo_row.last_aggregate_sha != repo_row.last_ingested_sha
             )
         if stats.commits_written > 0 or removed or force_full or stale_aggregate:
-            with connection() as conn:
+            with session_scope() as conn:
                 agg = rebuild_repo(repo_id, conn)
                 result.pairs = agg.file_pairs
-            with connection() as conn:
+            with session_scope() as conn:
                 score_repo(repo_id, conn)
             # Only now is the repository's derived state actually current.
-            with connection() as conn:
+            with session_scope() as conn:
                 repo_row = conn.get(Repo, repo_id)
                 if repo_row is not None:
                     repo_row.last_aggregate_sha = repo_row.last_ingested_sha
 
-        with connection() as conn:
+        with session_scope() as conn:
             repo_row = conn.get(Repo, repo_id)
             if repo_row is not None:
                 repo_row.ingest_status = "ready"
@@ -838,7 +837,7 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
         log.exception("repository %s failed", record.full_name)
         if result.repo_id is not None:
             try:
-                with connection() as conn:
+                with session_scope() as conn:
                     repo_row = conn.get(Repo, result.repo_id)
                     if repo_row is not None:
                         repo_row.ingest_status = "failed"
@@ -871,7 +870,7 @@ def run_ingest(
 
     # One ingest at a time, across processes. The mapped meta row is locked for
     # this transaction and released automatically if the process exits.
-    with connection() as conn:
+    with session_scope() as conn:
         if not _try_ingest_lock(conn):
             log.warning("another ingest run holds the lock; skipping this one")
             run = RunResult(kind="full" if force_full else "sync")
@@ -897,7 +896,7 @@ def _aborted_run(
     run.run_id = _start_run(run.kind, trigger, 0)
     run.duration_s = time.monotonic() - started
     run.status = "failed"
-    with connection() as conn:
+    with session_scope() as conn:
         row = conn.get(models().IngestRun, run.run_id)
         if row is not None:
             row.status = "failed"
@@ -1026,7 +1025,7 @@ def _run_ingest_locked(
             # Keep both structural graphs in one transaction. If the module
             # refresh fails, the declared graph remains stale too and the next
             # ordinary refresh retries both stages.
-            with connection() as conn:
+            with session_scope() as conn:
                 depbump.refresh_declared(conn=conn, force=force_full)
                 depbump.refresh_modules(conn=conn)
         except Exception:
@@ -1103,7 +1102,7 @@ def load_repo_records() -> list[RepoRecord]:
         "github_pushed_at",
     )
     Repo = models().Repo
-    with connection() as conn:
+    with session_scope() as conn:
         rows = conn.query(Repo).filter(Repo.is_enabled.is_(True)).order_by(Repo.id).all()
 
     booleans = {"is_private", "is_fork", "is_archived", "is_template", "is_disabled"}

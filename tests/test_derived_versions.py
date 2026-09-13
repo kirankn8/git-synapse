@@ -11,11 +11,10 @@ def test_stage_versions_propagate_staleness():
 
 def test_derived_stages_rebuild_once_in_dependency_order(scratch_db, monkeypatch):
     from git_synapse.analysis import derived
-    from git_synapse.db.engine import connection
-    from git_synapse.db.orm import models
+    from git_synapse.db.orm import models, session_scope
 
     calls: list[str] = []
-    with connection() as conn:
+    with session_scope() as conn:
         conn.query(models().Repo).filter_by(full_name="test/derived").delete(synchronize_session=False)
         conn.add(models().Repo(owner="test", name="derived", full_name="test/derived", pair_count=1))
     monkeypatch.setattr(derived.aggregate, "rebuild_repo",
@@ -35,7 +34,7 @@ def test_derived_stages_rebuild_once_in_dependency_order(scratch_db, monkeypatch
     monkeypatch.setattr(derived.mining, "rebuild",
                         lambda **kwargs: calls.append("mining"))
 
-    with connection() as conn:
+    with session_scope() as conn:
         conn.query(models().Meta).filter(models().Meta.key.like("watermark:derived:%")).delete(synchronize_session=False)
         first = derived.ensure_current(conn)
     ordered = [name for name in calls if name != "aggregate"]
@@ -43,7 +42,7 @@ def test_derived_stages_rebuild_once_in_dependency_order(scratch_db, monkeypatch
     positions = [ordered.index(name) for name in expected]
     assert positions == sorted(positions)
     calls.clear()
-    with connection() as conn:
+    with session_scope() as conn:
         conn.query(models().Meta).filter(models().Meta.key.like("watermark:derived:%")).delete(synchronize_session=False)
     isolated = derived.ensure_current()
     calls.clear()
@@ -56,5 +55,5 @@ def test_derived_stages_rebuild_once_in_dependency_order(scratch_db, monkeypatch
 
     # The connection-supplied path also needs to skip a stage whose watermark
     # is already current; this is the fast path used by service requests.
-    with connection() as conn:
+    with session_scope() as conn:
         assert derived.ensure_current(conn) == []
