@@ -1,15 +1,4 @@
-"""Recording and reading what callers asked for.
-
-Two surfaces consume this product -- agents over MCP, and the UI over HTTP --
-and neither left a trace, so "is anything using this?" had no answer and "what
-did it ask for, and what did it get back?" had no answer either.
-
-Writes never happen on the request path. A caller hands a row to a bounded
-queue and returns; one daemon thread batches them into Postgres. If the queue
-fills, rows are dropped and counted rather than blocking a reply: telemetry
-that slows the thing it measures is a bad trade, and telemetry that can wedge
-it is a worse one.
-"""
+"""Recording and reading what callers asked for."""
 from __future__ import annotations
 
 import atexit
@@ -28,20 +17,10 @@ from git_synapse.db.orm import models, session_scope
 
 log = logging.getLogger(__name__)
 
-#: Bounded so a database outage cannot grow the process without limit. At the
-#: rates this sees, reaching it means the flusher is stuck, not that traffic is
-#: high, and dropping is the right answer either way.
 _QUEUE_MAX = 2000
 
-#: How much of a reply to keep. This is a log record, so the default keeps the
-#: whole body for anything of a readable size; a thousand-row table is cut, with
-#: its true size and row count still recorded, because storing every one would
-#: make the log larger than the data it describes. Raise or lower with
-#: CALL_LOG_BODY_BYTES.
 PREVIEW_BYTES = int(os.environ.get("CALL_LOG_BODY_BYTES") or 65536)
 
-#: Pruning bounds. This table grows with traffic; everything else here grows
-#: with history, which is much slower.
 KEEP_DAYS = 30
 KEEP_ROWS = 200_000
 
@@ -65,13 +44,7 @@ def record(
     result_bytes: int | None = None,
     result_rows: int | None = None,
 ) -> None:
-    """Queue one call. Never raises, never blocks.
-
-    ``result_bytes`` and ``result_rows`` may be given when the caller already
-    knows them -- an HTTP reply is bytes on the wire, and measuring it by
-    re-encoding the parsed body would report a different number than the client
-    received.
-    """
+    """Queue one call. Never raises, never blocks."""
     global _dropped
     try:
         preview, size, rows = _summarise(result)
@@ -96,8 +69,6 @@ def record(
         with _lock:
             _dropped += 1
     except Exception:  # pragma: no cover
-        # Deliberately blind: this runs on every request and every tool call,
-        # and there is no failure here worth turning into a caller's failure.
         log.debug("could not record a call", exc_info=True)
 
 
@@ -117,11 +88,7 @@ def _json_or_none(value: Any) -> str | None:
 
 
 def _summarise(result: Any) -> tuple[str | None, int | None, int | None]:
-    """A bounded preview of a reply, plus its true size and row count.
-
-    Size and shape are recorded in full even when the body is cut, because
-    "what came back" is usually a question about how much, not about which.
-    """
+    """A bounded preview of a reply, plus its true size and row count."""
     if result is None:
         return None, None, None
     try:
@@ -197,8 +164,6 @@ def _drain_at_exit() -> None:  # pragma: no cover - process teardown
         while _flush_once():
             pass
     except Exception:  # noqa: BLE001, S110 - the process is exiting
-        # Whatever went wrong, there is nowhere left to report it and nothing
-        # left to protect: the alternative is a traceback on every shutdown.
         pass
 
 
@@ -216,7 +181,6 @@ def prune() -> int:
         return session.query(CallLog).filter(doomed).delete(synchronize_session=False)
 
 
-# --------------------------------------------------------------------- reads
 
 def known_mcp_tools() -> list[str]:
     """The tools the MCP server published at startup, called or not."""
@@ -288,9 +252,6 @@ def by_name(surface: str | None = None, hours: int = 24, limit: int = 50,
     if surface == "http" or status:
         return rows
 
-    # A tool nobody has called is the interesting row, and it cannot appear in a
-    # table built from calls. Without this the page showed two tools and read as
-    # "this server has two tools".
     seen = {r["name"] for r in rows if r["surface"] == "mcp"}
     idle = [
         {"surface": "mcp", "name": name, "calls": 0, "errors": 0,

@@ -1,9 +1,4 @@
-"""The scheduler's guards.
-
-It runs unattended every 15 minutes, so its failure modes are the ones nobody
-watches: a tick that overlaps the previous one, or an exception that kills the
-loop and stops all future refreshes silently.
-"""
+"""The scheduler's guards."""
 from __future__ import annotations
 
 import threading
@@ -70,8 +65,7 @@ class _Result:
 
 
 def test_refresh_survives_an_exception_rather_than_killing_the_loop(monkeypatch):
-    """apscheduler would stop calling a job that propagates; the process must
-    keep scheduling."""
+    """apscheduler would stop calling a job that propagates; the process must keep scheduling."""
     monkeypatch.setattr(
         sched.pipeline, "run_ingest",
         lambda **kw: (_ for _ in ()).throw(ValueError("bad run")),
@@ -81,8 +75,7 @@ def test_refresh_survives_an_exception_rather_than_killing_the_loop(monkeypatch)
 
 
 def test_the_frequent_tier_does_not_spend_api_quota(monkeypatch):
-    """Discovery is the only part that calls GitHub; the 15-minute tick must
-    reuse the stored repository list instead."""
+    """Discovery is the only part that calls GitHub; the 15-minute tick must reuse the stored repository list instead."""
     used_discovery = []
     monkeypatch.setattr(
         sched.pipeline, "load_repo_records", lambda: used_discovery.append("stored") or []
@@ -122,8 +115,7 @@ def test_the_real_configured_crons_are_valid():
 
 
 def test_main_wires_both_tiers_and_survives_a_bad_run(monkeypatch):
-    """`main()` is the container's entrypoint: if it raises, nothing ever
-    refreshes and the only symptom is silence."""
+    """`main()` is the container's entrypoint: if it raises, nothing ever refreshes and the only symptom is silence."""
     import git_synapse.scheduler.main as sched_main
 
     added = []
@@ -145,8 +137,7 @@ def test_main_wires_both_tiers_and_survives_a_bad_run(monkeypatch):
 
 
 def test_main_waits_for_the_database_before_scheduling(monkeypatch):
-    """Starting jobs against a database that is not up yet fails every tick
-    until someone restarts the container."""
+    """Starting jobs against a database that is not up yet fails every tick until someone restarts the container."""
     import git_synapse.scheduler.main as sched_main
 
     order = []
@@ -168,9 +159,7 @@ def test_main_waits_for_the_database_before_scheduling(monkeypatch):
 
 
 def test_a_disabled_scheduler_idles_instead_of_exiting(monkeypatch):
-    """The container must stay up with SCHEDULER_ENABLED=false. Exiting would
-    make the orchestrator restart it forever, and the logs would fill with
-    crash-loop noise rather than the one line saying it was turned off."""
+    """The container must stay up with SCHEDULER_ENABLED=false."""
     import git_synapse.scheduler.main as sched_main
     from git_synapse.config import get_config, reset_config_cache
 
@@ -244,10 +233,7 @@ def test_refresh_on_start_runs_one_immediately_without_blocking_startup(monkeypa
     ("0 3 * * *",  43200),   # daily -> twelve hours; nothing caps the top end
 ])
 def test_the_misfire_grace_follows_the_configured_interval(cron, expected):
-    """A late tick is worth running if the next one is far off, and worth
-    dropping if it is imminent. That was a fixed 600s, which suited a
-    quarter-hourly cron and silently cost a whole hour once the default became
-    hourly. It is now half the interval, floored."""
+    """A late tick is worth running if the next one is far off, and worth dropping if it is imminent."""
     from apscheduler.triggers.cron import CronTrigger
 
     import git_synapse.scheduler.main as sched
@@ -257,8 +243,7 @@ def test_the_misfire_grace_follows_the_configured_interval(cron, expected):
 
 
 def test_a_trigger_that_never_fires_still_yields_a_usable_grace():
-    """`get_next_fire_time` returns None for an exhausted trigger. Returning
-    None from here would make APScheduler run every misfire, however stale."""
+    """`get_next_fire_time` returns None for an exhausted trigger."""
     import git_synapse.scheduler.main as sched
 
     class Never:
@@ -279,10 +264,7 @@ def test_a_trigger_that_never_fires_still_yields_a_usable_grace():
 
 
 def test_the_refresh_default_is_declared_once_and_matches_everywhere():
-    """The default lives in three files -- the config constant, the compose
-    environment and .env.example. They drifted apart before; a reader who
-    changes one and not the others gets a different cadence depending on how
-    the stack was started."""
+    """The default lives in three files -- the config constant, the compose environment and .env.example."""
     import re
     from pathlib import Path
 
@@ -293,9 +275,6 @@ def test_the_refresh_default_is_declared_once_and_matches_everywhere():
     declared = re.findall(r"REFRESH_CRON: \$\{REFRESH_CRON:-([^}]+)\}", compose_text)
     assert declared == [DEFAULT_REFRESH_CRON], declared
 
-    # Declared once, in the shared anchor. On the scheduler alone, /api/config
-    # reported the built-in default and the Jobs page named a cadence nothing
-    # was running on.
     anchor = compose_text[compose_text.index("x-app-env:"):compose_text.index("services:")]
     assert "REFRESH_CRON:" in anchor, "the API must see the same schedule as the scheduler"
 
@@ -304,11 +283,9 @@ def test_the_refresh_default_is_declared_once_and_matches_everywhere():
     assert example and example.group(1).strip() == DEFAULT_REFRESH_CRON, example
 
 
-# ------------------------------------------------- settings changed at runtime
 
 def test_a_stored_schedule_overrides_the_environment_and_clearing_restores_it(db):
-    """A deployment that must be restarted to be slowed down will not be slowed
-    down, so the schedule is stored and the environment is only the seed."""
+    """A deployment that must be restarted to be slowed down will not be slowed down, so the schedule is stored and the environment is only the seed."""
     from git_synapse.analysis import settings
     from git_synapse.config import get_config, live_cron
 
@@ -333,8 +310,7 @@ def test_only_named_settings_can_be_stored(db):
 
 
 def test_a_settings_read_that_fails_falls_back_rather_than_stopping_the_loop(monkeypatch):
-    """The scheduler reads this every minute. A database blip must not take the
-    refresh down; the configured value is always a safe answer."""
+    """The scheduler reads this every minute."""
     from git_synapse.analysis import settings
 
     def boom(_name):
@@ -345,8 +321,7 @@ def test_a_settings_read_that_fails_falls_back_rather_than_stopping_the_loop(mon
 
 
 def test_the_scheduler_follows_a_schedule_changed_while_it_runs(monkeypatch):
-    """The whole point of storing it: a change made in the UI applies without a
-    restart, and within a minute."""
+    """The whole point of storing it: a change made in the UI applies without a restart, and within a minute."""
     import git_synapse.scheduler.main as sched
 
     calls = {"rescheduled": [], "modified": []}
@@ -371,8 +346,7 @@ def test_the_scheduler_follows_a_schedule_changed_while_it_runs(monkeypatch):
 
 
 def test_an_unchanged_schedule_is_left_alone(monkeypatch):
-    """Rescheduling every minute would reset the next fire time every minute,
-    so a job on a long cron could never reach it."""
+    """Rescheduling every minute would reset the next fire time every minute, so a job on a long cron could never reach it."""
     from apscheduler.triggers.cron import CronTrigger
 
     import git_synapse.scheduler.main as sched
@@ -396,8 +370,7 @@ def test_an_unchanged_schedule_is_left_alone(monkeypatch):
 
 
 def test_a_stored_cron_that_does_not_parse_leaves_the_job_running(monkeypatch):
-    """Written by hand, or by a future version. Stopping the refresh over it
-    would be a worse outcome than ignoring it."""
+    """Written by hand, or by a future version."""
     import git_synapse.scheduler.main as sched
 
     touched = []

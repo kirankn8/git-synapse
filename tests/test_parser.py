@@ -1,8 +1,4 @@
-"""Commit parsing: the NUL-separated git log stream, decoded.
-
-`commit_file` is the atomic fact the whole system rests on, so a parse error
-here is not a crash -- it is a statistic that is quietly wrong.
-"""
+"""Commit parsing: the NUL-separated git log stream, decoded."""
 from __future__ import annotations
 
 import subprocess
@@ -33,7 +29,6 @@ def _bare(tmp_path, steps):
     return bare
 
 
-# ------------------------------------------------------------- split_path
 
 @pytest.mark.parametrize(("path", "expected"), [
     ("a/b/c.go", ("a/b", "c.go", "go", 2)),
@@ -54,7 +49,6 @@ def test_split_path_survives_unicode_and_spaces():
     assert d == "日本" and base == "テスト ファイル.go" and ext == "go" and depth == 1
 
 
-# ------------------------------------------------------- real git streams
 
 def test_parses_authors_committers_and_subjects(tmp_path):
     mirror = _bare(tmp_path, [("first change", lambda w: (w / "a.txt").write_text("1"))])
@@ -91,8 +85,6 @@ def test_a_rename_carries_its_old_path(tmp_path):
 
 
 def test_commits_arrive_oldest_first(tmp_path):
-    # `i=i` binds the value at definition; the immediately-invoked wrapper this
-    # replaces did the same thing less legibly.
     steps = [(f"c{i}", lambda w, i=i: (w / f"f{i}.txt").write_text(str(i)))
              for i in range(4)]
     subjects = [c.subject for c in iter_commits(_bare(tmp_path, steps))]
@@ -100,8 +92,6 @@ def test_commits_arrive_oldest_first(tmp_path):
 
 
 def test_since_shas_excludes_already_read_history(tmp_path):
-    # `i=i` binds the value at definition; the immediately-invoked wrapper this
-    # replaces did the same thing less legibly.
     steps = [(f"c{i}", lambda w, i=i: (w / f"f{i}.txt").write_text(str(i)))
              for i in range(4)]
     mirror = _bare(tmp_path, steps)
@@ -133,8 +123,7 @@ def test_unicode_paths_and_subjects_round_trip(tmp_path):
 
 
 def test_a_subject_containing_the_field_separator_does_not_corrupt_the_stream(tmp_path):
-    """The parser splits on control characters; a subject containing one would
-    desynchronise every commit after it."""
+    """The parser splits on control characters; a subject containing one would desynchronise every commit after it."""
     def add(w): (w / "a.txt").write_text("x")
 
     c = next(iter(iter_commits(_bare(tmp_path, [("weird | subject -- with $chars", add)]))))
@@ -189,7 +178,6 @@ def test_only_the_default_branch_is_walked(tmp_path):
     assert subjects == ["on main"], subjects
 
 
-# ------------------------------------------- paths git is allowed to produce
 
 def _repo_with(paths: list[str], tmp_path):
     """A real repository containing exactly these files, and its bare mirror."""
@@ -219,14 +207,7 @@ def _repo_with(paths: list[str], tmp_path):
 
 
 def test_a_path_starting_with_a_colon_is_a_path_not_a_status_line(tmp_path):
-    """The raw block's status records start with ':', and so may a filename.
-
-    Sniffing the first byte before checking whether a path was expected ate
-    `:zz.txt` as a status line: the real file lost its status letter and its
-    line counts, and the numstat record behind it was consumed as a path --
-    putting a file literally called "1\\t0\\t1a.txt" into the corpus, where it
-    then co-occurred with every real file in that commit.
-    """
+    """The raw block's status records start with ':', and so may a filename."""
     mirror = _repo_with(["1a.txt", ":zz.txt"], tmp_path)
     commits = list(iter_commits(mirror))
     assert len(commits) == 1
@@ -240,10 +221,7 @@ def test_a_path_starting_with_a_colon_is_a_path_not_a_status_line(tmp_path):
 
 
 def test_a_path_starting_with_a_newline_survives(tmp_path):
-    """git emits one newline between the header and the diff block. Stripping
-    leading newlines from every record instead rewrote any path whose own first
-    character is one, and because the raw and numstat blocks were then keyed on
-    two different strings, one real file became two rows."""
+    """git emits one newline between the header and the diff block."""
     mirror = _repo_with(["\nleading.txt", "z.txt"], tmp_path)
     commits = list(iter_commits(mirror))
     files = {f.path for f in commits[0].files}

@@ -1,10 +1,4 @@
-"""The remaining guards, grouped by what they protect against.
-
-Everything here is a branch someone wrote deliberately: a retry, a fallback, an
-empty-input case. They are the cheapest things in the codebase to get subtly
-wrong and among the most annoying to debug, because they only run when something
-else has already gone wrong.
-"""
+"""The remaining guards, grouped by what they protect against."""
 from __future__ import annotations
 
 import subprocess
@@ -19,11 +13,9 @@ ENV = {
 }
 
 
-# ------------------------------------------------------------ network retry
 
 def test_a_network_git_command_retries_then_gives_up(tmp_path, monkeypatch):
-    """Four attempts at a two-minute timeout is nine minutes per repository;
-    the retry has to happen, and it has to end."""
+    """Four attempts at a two-minute timeout is nine minutes per repository; the retry has to happen, and it has to end."""
     from git_synapse.ingest import gitops
     from git_synapse.ingest.gitops import GitError, run_git_network
 
@@ -72,11 +64,9 @@ def test_a_git_timeout_is_reported_as_one(tmp_path, monkeypatch):
     assert "timed out" in str(exc.value).lower()
 
 
-# ------------------------------------------------------------- blobless mode
 
 def test_a_blobless_mirror_is_detected_and_has_no_line_counts(tmp_path):
-    """Blobless clones cannot count lines; claiming otherwise would make churn
-    statistics silently wrong for those repositories."""
+    """Blobless clones cannot count lines; claiming otherwise would make churn statistics silently wrong for those repositories."""
     from git_synapse.ingest.gitops import clone_mirror, mirror_is_blobless
     from git_synapse.ingest.parser import iter_commits
 
@@ -99,7 +89,6 @@ def test_a_blobless_mirror_is_detected_and_has_no_line_counts(tmp_path):
     assert all(f.insertions == 0 and f.deletions == 0 for c in commits for f in c.files)
 
 
-# ------------------------------------------------------------------ parser
 
 def test_a_binary_file_is_marked_and_carries_no_line_counts(tmp_path):
     from git_synapse.ingest.parser import iter_commits
@@ -140,7 +129,6 @@ def test_a_commit_with_an_empty_tree_is_kept_with_no_files(tmp_path):
     assert commits["empty"].files == []
 
 
-# ------------------------------------------------------------------ predict
 
 def test_impact_chains_respect_max_depth(db):
     from git_synapse.analysis import predict
@@ -166,14 +154,11 @@ def test_chains_are_ranked_by_path_confidence(db):
     assert scores == sorted(scores, reverse=True)
 
 
-# ------------------------------------------------------------ lagged internals
 
 
-# ------------------------------------------------------------ predict internals
 
 def test_the_input_fingerprint_changes_only_when_the_inputs_do(db):
-    """It is what lets the fifteen-minute tick skip a rebuild; if it moved on
-    its own the corpus would be rebuilt every time for nothing."""
+    """It is what lets the fifteen-minute tick skip a rebuild; if it moved on its own the corpus would be rebuilt every time for nothing."""
     from git_synapse.analysis.predict import _input_fingerprint
     from git_synapse.db.orm import session_scope
 
@@ -203,11 +188,9 @@ def test_the_input_fingerprint_sees_in_place_dependency_changes(scratch_db):
     assert first != second
 
 
-# --------------------------------------------------------- the MCP entrypoint
 
 def test_the_mcp_entrypoint_defaults_to_stdio(monkeypatch):
-    """`main()` is how the container starts. If argument parsing is wrong the
-    server never comes up and the only symptom is tools that never register."""
+    """`main()` is how the container starts."""
     from git_synapse.mcp import server
 
     started = {}
@@ -219,9 +202,7 @@ def test_the_mcp_entrypoint_defaults_to_stdio(monkeypatch):
 
 
 def test_the_mcp_entrypoint_accepts_http_with_host_and_port(monkeypatch):
-    """http does not go through `server.run`: the app is wrapped in a token
-    check first, which means serving it ourselves. Patch what actually serves,
-    or the test starts a real server and the suite hangs rather than fails."""
+    """http does not go through `server.run`: the app is wrapped in a token check first, which means serving it ourselves."""
     from git_synapse.mcp import server
 
     served = {}
@@ -234,12 +215,7 @@ def test_the_mcp_entrypoint_accepts_http_with_host_and_port(monkeypatch):
 
 
 def test_the_mcp_transport_can_come_from_the_environment(monkeypatch):
-    """The container sets MCP_TRANSPORT rather than passing flags.
-
-    http serves its own wrapped app, so `_serve` is what to patch here. With
-    only `server.run` patched this reached the real uvicorn and the suite hung
-    at 46% -- no failure, no output, just a process waiting to be killed.
-    """
+    """The container sets MCP_TRANSPORT rather than passing flags."""
     from git_synapse.mcp import server
 
     served = {}
@@ -251,14 +227,11 @@ def test_the_mcp_transport_can_come_from_the_environment(monkeypatch):
     assert served["app"] is not None and served["port"] == 8081
 
 
-# ------------------------------------------------------------------ asymmetry
 
 
-# --------------------------------------------------------- run status wording
 
 def test_a_run_with_some_failures_is_partial_not_success(db, monkeypatch):
-    """"success" on a run where a quarter of the corpus failed is the kind of
-    green that stops anyone looking."""
+    """"success" on a run where a quarter of the corpus failed is the kind of green that stops anyone looking."""
     from git_synapse.ingest import pipeline
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.pipeline import RepoResult
@@ -313,11 +286,9 @@ def test_run_ingest_discovers_when_given_no_records(db, monkeypatch):
     assert called == ["test"], "no records means discover, not do nothing"
 
 
-# ------------------------------------------------------------------ health
 
 def test_health_never_throws_even_when_the_database_is_unreachable(monkeypatch):
-    """The health endpoint is what a supervisor polls; it must report a problem
-    rather than become one."""
+    """The health endpoint is what a supervisor polls; it must report a problem rather than become one."""
     from git_synapse.api import routes
 
     def broken(*a, **kw):

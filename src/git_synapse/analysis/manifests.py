@@ -1,49 +1,4 @@
-"""Dependency references, read from the manifests of many ecosystems.
-
-Every package manager solves the same problem the same way: a consumer records,
-in a file it commits, which version of a dependency it is built against. That
-record is **dated** (it lives in a commit), **directional** (the consumer names
-the dependency, never the reverse) and **provable** (it is a literal string, not
-an inference). It is the only evidence in this system that needs no statistical
-argument, which is why it is worth reading properly for every ecosystem rather
-than well for one.
-
-What a reference resolves to
-----------------------------
-References come in three strengths, and the distinction is kept because it is
-exactly the confidence of the resulting edge:
-
-``commit``
-    The manifest names a commit outright. A Go pseudo-version embeds one, a git
-    submodule *is* one, and most lockfiles record one because pinning exactly is
-    their whole purpose: ``composer.lock`` has ``reference``, ``Package.resolved``
-    has ``revision``, ``flake.lock`` has ``rev``, ``Cargo.lock``, ``mix.lock``
-    and ``Gemfile.lock`` carry git revisions. Nothing needs resolving.
-
-``tag``
-    The manifest names a release -- ``v1.2.3``. Resolvable to a commit when the
-    upstream repository's tags are known, which is what extends this to the
-    ecosystems that never record SHAs at all: Maven, NuGet, Gradle, plain npm.
-
-``range``
-    ``^1.2.0``, ``~=2.1``, ``>=3,<4``. A constraint, not a version. Recorded so
-    the dependency edge exists, but it pins no commit and is never presented as
-    though it did.
-
-Parsing
--------
-Real parsers, not regex, wherever the format has one: ``tomllib`` and
-``xml.etree`` from the standard library and PyYAML for the rest. A regex reading
-of TOML mishandles nested tables, arrays of tables and multi-line strings, and a
-manifest that parses *almost* correctly is worse than one that fails loudly.
-Formats with no parser -- go.mod, requirements.txt, Gemfile.lock, deps.edn --
-keep bespoke readers, because there is nothing else to use.
-
-Deliberately not resolved by network lookup: asking a registry what ``1.2.3``
-means would make the answer depend on a third party that can change it, and the
-point of this table is that every row can be re-derived from the repositories
-themselves.
-"""
+"""Dependency references, read from the manifests of many ecosystems."""
 
 from __future__ import annotations
 
@@ -66,9 +21,7 @@ log = logging.getLogger(__name__)
 #: A 40- or 12-character hex string: the two forms a manifest ever writes.
 _SHA = re.compile(r"\b([0-9a-f]{40}|[0-9a-f]{12})\b")
 
-#: Go pseudo-version. The separator before the timestamp is '-' in
-#: vX.0.0-<ts>-<sha> but '.' in vX.Y.Z-0.<ts>-<sha>; accepting only '-'
-#: silently drops a sixth of them.
+# Go pseudo-version: '-' before the timestamp in vX.0.0-<ts>-<sha>, '.' in vX.Y.Z-0.<ts>-<sha>.
 _PSEUDO = re.compile(r"[-.](\d{14})-([0-9a-f]{12})$")
 
 #: A release tag as manifests write it, with or without the leading v.
@@ -80,8 +33,6 @@ _PIN_KEYS = ("rev", "revision", "reference", "resolved-ref", "commit", "sha", "d
 #: Keys under which it records a version or tag.
 _VERSION_KEYS = ("version", "tag", "ref")
 
-#: Wrapper objects that hold a pin but are not themselves the package: the name
-#: lives on the parent, so recursing through these must not rename the entry.
 _STRUCTURAL = ("locked", "source", "state", "dist", "original", "metadata", "resolved")
 
 #: Mapping blocks that hold `name -> constraint` pairs.
@@ -106,47 +57,19 @@ class Reference:
         return self.kind == "commit" and bool(self.sha)
 
 
-#: Suffixes that name a *build* of a release rather than a different release.
-#: Guava ships `33.4.0-jre` and `33.4.0-android` from one tag, `v33.4.0`.
-#: Strictly an allowlist: `-rc1` and `-beta` are separate releases with their
-#: own tags and their own commits, and collapsing them would resolve a release
-#: candidate to the final release while looking perfectly successful.
 _CLASSIFIERS = frozenset(("jre", "android", "ga", "final"))
 
-#: The version at the end of a string, ignoring whatever precedes it. Absorbs
-#: every component prefix a monorepo invents -- `guava-33.4.0`, `sub/v1.2.0`,
-#: `@babel/core@7.0.0` -- without needing to know the package's name.
-#: The separator before a suffix is optional because PEP 440 writes `2.0a1`
-#: with none; requiring one made that version canonicalise to its own trailing
-#: digit. Underscores separate numbers as well as dots, because the older Java
-#: and autotools convention tags `release_0_10` and `VERSION_1_2_3` -- without
-#: that, Truth's every tag reduced to its last number alone.
 _VERSION_AT_END = re.compile(
     r"(\d+(?:[._]\d+)*)([-+._]?[A-Za-z][0-9A-Za-z.+-]*)?$")
 
-#: A comparator and the version it bounds, as ranges are written everywhere:
-#: `^4.17.21`, `~> 7.0`, `>=2, <3`, `<3.0`.
 _BOUND = re.compile(r"(>=|<=|==|>|<|\^|~>|~|=)?\s*(\d[0-9A-Za-z.+-]*)")
 
-#: A wildcard occupying a whole segment: `5.5.*` and `1.0.x` both state 5.5 and
-#: 1.0 as their floor. The separator is required so a suffix that merely ends in
-#: the letter -- `1.0.0-linux` -- is left alone.
+# 5.5.* and 1.0.x; requiring the separator leaves 1.0.0-linux alone.
 _WILDCARD_TAIL = re.compile(r"[.\-][*xX]$")
 
 
 def version_key(raw: str) -> str | None:
-    """Canonical form of a version or tag name, for matching one to the other.
-
-    A manifest names versions in the package registry's namespace and git names
-    them in the repository's, so the two are never equal as strings:
-    `33.4.0-jre` against `v33.4.0`. Reducing both to the same key makes the
-    match an indexed join rather than a pile of transformations at lookup time.
-
-    Trailing zeros are dropped so `1.2` and `1.2.0` agree, and a prerelease
-    suffix is kept so `1.0.0-rc1` never collapses onto `1.0.0`.
-
-    Returns None when there is no version in the string at all.
-    """
+    """Canonical form of a version or tag name, for matching one to the other."""
     text = (raw or "").strip().strip("\"'")
     if not (m := _VERSION_AT_END.search(text)):
         return None
@@ -159,18 +82,10 @@ def version_key(raw: str) -> str | None:
 
 
 def bounds(raw: str) -> tuple[str | None, str | None]:
-    """The `(floor, ceiling)` a range declares, as written.
-
-    Neither is inferred: `^4.17.21` states 4.17.21 as its own lower bound, and
-    that is the version taken. What actually got installed may have drifted
-    above it, but a manifest left untouched is one where nothing had to adapt --
-    so the floor is the last version anyone made a decision about.
-    """
+    """The `(floor, ceiling)` a range declares, as written."""
     text = (raw or "").strip().strip("\"'")
     floor = ceiling = None
     for comparator, raw_version in _BOUND.findall(text):
-        # A match always begins with a digit and the strip only removes a
-        # trailing wildcard segment, so what is left is never empty.
         version = _WILDCARD_TAIL.sub("", raw_version).rstrip(".")
         if comparator in ("<", "<="):
             ceiling = ceiling or version
@@ -179,10 +94,6 @@ def bounds(raw: str) -> tuple[str | None, str | None]:
     return floor, ceiling
 
 
-#: Where a manifest states the package *it* publishes, rather than what it
-#: consumes. Every ecosystem records this, which turns "which repository is
-#: `com.google.guava:guava`?" from a guess about strings into something the
-#: repository itself declared.
 def _dig(doc: Any, path: tuple[str, ...]) -> list[str]:
     for key in path:
         if not isinstance(doc, dict):
@@ -192,13 +103,7 @@ def _dig(doc: Any, path: tuple[str, ...]) -> list[str]:
 
 
 def published_names(path: str, text: str) -> list[str]:
-    """The package coordinates this manifest publishes under.
-
-    Read from a repository's *own* manifests, this says "this repository is
-    `lodash`" -- a declared fact, where matching a dependency's name against
-    repository names is a guess that resolves another company's library to
-    yours whenever the names happen to agree.
-    """
+    """The package coordinates this manifest publishes under."""
     base = path.rsplit("/", 1)[-1]
     if base == "go.mod":
         m = re.search(r"^\s*module\s+(\S+)", text, re.MULTILINE)
@@ -220,12 +125,7 @@ def published_names(path: str, text: str) -> list[str]:
 
 
 def _maven_coordinates(text: str) -> list[str]:
-    """`groupId:artifactId` for a pom, inheriting the group from its parent.
-
-    A child module usually omits `groupId`, which it inherits, so reading only
-    the top-level element finds nothing for exactly the modules a monorepo
-    publishes.
-    """
+    """`groupId:artifactId` for a pom, inheriting the group from its parent."""
     root = _parse_xml(text)
     if root is None:
         return []
@@ -261,7 +161,6 @@ def classify(name: str, raw: str, ecosystem: str) -> Reference:
     return Reference(name, value, "range", ecosystem)
 
 
-# --------------------------------------------------------------- loading --
 
 def _load_toml(text: str) -> Any:
     try:
@@ -287,12 +186,7 @@ def _load_json(text: str) -> Any:
 
 
 def _walk(doc: Any) -> list[tuple[str, str]]:
-    """Every (name, pin) a parsed manifest carries, whatever its shape.
-
-    One walker for TOML, YAML and JSON: once parsed they are all dicts and lists,
-    and every ecosystem ends up with a package object holding a pin. Walking for
-    the pin survives format-version changes that modelling each layout does not.
-    """
+    """Every (name, pin) a parsed manifest carries, whatever its shape."""
     out: list[tuple[str, str]] = []
 
     def visit(node: Any, label: str) -> None:
@@ -315,8 +209,6 @@ def _walk(doc: Any) -> list[tuple[str, str]]:
                         elif isinstance(spec, dict):
                             visit(spec, str(dep))
                 else:
-                    # Keep the package name across wrapper objects; otherwise the
-                    # key is the name, as in `{"nixpkgs": {...}}`.
                     child = name if (explicit or lowered in _STRUCTURAL) else str(key)
                     visit(value, child)
         elif isinstance(node, list):
@@ -379,19 +271,7 @@ def parse_json_deps(text: str) -> list[tuple[str, str]]:
 
 
 def _parse_xml(text: str):
-    """Parse a manifest as XML, refusing anything carrying a DTD.
-
-    These files come from repositories we mirror, which is to say from anyone.
-    ElementTree expands internal entities, so a twenty-line `pom.xml` can
-    define nested entities that expand to gigabytes -- the billion-laughs
-    attack -- and take the ingest down with it. Entity definitions live in a
-    DOCTYPE, and no real Maven or MSBuild manifest has one, so refusing them
-    closes the hole without taking on a parser dependency.
-
-    Returns None when the document cannot or should not be parsed; every caller
-    treats that as "no dependencies here", which is what a malformed manifest
-    means anyway.
-    """
+    """Parse a manifest as XML, refusing anything carrying a DTD."""
     if "<!DOCTYPE" in text[:4096].upper():
         log.warning("manifest declares a DTD; refusing to expand it")
         return None
@@ -461,12 +341,7 @@ def parse_gemfile_lock(text: str) -> list[tuple[str, str]]:
 
 
 def parse_pinned_refs(text: str) -> list[tuple[str, str]]:
-    """Formats with no parser that still pin a repository to a ref.
-
-    Bazel's `http_archive`/`git_repository`, Dockerfiles pinned by digest, Zig's
-    build.zig.zon and Clojure's deps.edn share no syntax, but all put a name and
-    a hash in the same stanza.
-    """
+    """Formats with no parser that still pin a repository to a ref."""
     out = []
     for m in re.finditer(r'(?:name|repo|url|image|:git/url)\s*[=:]\s*"?([^\s",]+)"?'
                          r'(?:[^\n]*\n){0,6}?[^\n]*?'
@@ -505,8 +380,6 @@ class Ecosystem:
     parse: Callable[[str], list[tuple[str, str]]]
 
 
-#: Ordered so a lockfile wins over the loose manifest beside it: the lock pins,
-#: the manifest only constrains.
 ECOSYSTEMS: tuple[Ecosystem, ...] = (
     Ecosystem("go", ("go.mod",), parse_go),
 
@@ -618,14 +491,8 @@ def references(path: str, text: str) -> list[Reference]:
         name = (name or "").strip()
         if not name or len(name) > 200 or name.lower() in _DEP_BLOCKS:
             continue
-        # No package name contains whitespace. This is what a CI step title
-        # ("Setup uv") looks like when a walker mistakes it for a package.
         if any(c.isspace() for c in name):
             continue
-        # A version says something about a number. Prose does not: django ships
-        # `docs/.../constraints.txt`, which is documentation, and parsing it as a
-        # pip constraints file invented dependencies called `expressions` and
-        # `name` -- a parse error that reads as a fact.
         if not any(c.isdigit() for c in str(raw)):
             continue
         ref = classify(name, raw, eco.name)

@@ -1,32 +1,4 @@
-"""Git mirror management: bare clones in full or blobless mode, plus fetches.
-
-Two mirror modes
-----------------
-**full** -- an ordinary bare clone. Carries blob objects, so ``git log`` can
-compute ``--numstat`` line counts and perform *inexact* rename detection
-(``-M50%``). This is the default because it yields strictly richer atomic data.
-
-**blobless** -- ``--filter=blob:none``. One to two orders of magnitude smaller,
-but blob contents are absent, which has two hard consequences verified against
-real repositories:
-
-* ``--numstat`` **cannot** be used. Line counts require reading file contents,
-  and asking for them makes git try to lazily fetch every blob from the
-  promisor remote -- which either fails outright or hangs on the network.
-* Rename detection must be pinned to ``-M100%``. Exact renames are resolvable
-  by comparing blob SHAs in the tree, but inexact ones need content.
-
-``--raw -M100%`` walks a blobless mirror completely and correctly, which is all
-the 31 association measures require: they depend only on *which paths* co-occur
-in a commit, never on how many lines changed. A blobless repo therefore yields
-complete coupling statistics and merely loses churn as an extra attribute.
-
-The mode is chosen per repository by size, so a single 9.8 GB documentation
-monorepo does not force the whole org onto the degraded path.
-
-Every git invocation sets ``GIT_NO_LAZY_FETCH=1``. On a blobless mirror that
-converts a potential indefinite network hang into an immediate, visible error.
-"""
+"""Git mirror management: bare clones in full or blobless mode, plus fetches."""
 
 from __future__ import annotations
 
@@ -68,12 +40,7 @@ class FetchResult:
 
 
 def _base_env() -> dict[str, str]:
-    """Environment for every git call.
-
-    Disables interactive prompting so a bad credential fails fast instead of
-    hanging a worker, and skips the user's global config so behaviour is
-    identical inside and outside the container.
-    """
+    """Environment for every git call."""
     env = dict(os.environ)
     env.update(
         {
@@ -81,11 +48,7 @@ def _base_env() -> dict[str, str]:
             "GIT_ASKPASS": "echo",
             "GCM_INTERACTIVE": "never",
             "GIT_CONFIG_NOSYSTEM": "1",
-            # On a blobless mirror an accidental blob read would otherwise
-            # block on the promisor remote. Fail loudly instead of hanging.
             "GIT_NO_LAZY_FETCH": "1",
-            # Only a fallback: git needs a writable HOME for its config, and
-            # the container sets one. Never used to hold anything.
             "HOME": env.get("HOME", "/tmp"),  # noqa: S108
             "LC_ALL": "C",
         }
@@ -99,17 +62,7 @@ def run_git(
     timeout: int | None = None,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a git command and return the completed process.
-
-    Args:
-        args: arguments after the ``git`` executable.
-        cwd: working directory, normally the mirror path.
-        timeout: seconds before the process is killed; falls back to config.
-        check: raise :class:`GitError` on a non-zero exit.
-
-    Raises:
-        GitError: when ``check`` is set and git fails.
-    """
+    """Run a git command and return the completed process."""
     cfg = get_config().ingest
     timeout = timeout or cfg.git_timeout
     cmd = ["git", *args]
@@ -127,10 +80,6 @@ def run_git(
     return proc
 
 
-#: Substrings that identify a transient network failure rather than a real
-#: problem with the repository. Matched case-insensitively against git's stderr.
-#: A DNS blip or a reset connection must not fail a repository permanently --
-#: over a 270-repo run, an occasional one is close to certain.
 TRANSIENT_ERROR_MARKERS = (
     "could not resolve host",
     "connection reset",
@@ -154,13 +103,6 @@ TRANSIENT_ERROR_MARKERS = (
     "504 gateway timeout",
 )
 
-#: Substrings identifying a PERMANENT failure: retrying or re-cloning cannot
-#: help, because the problem is credentials or the repository itself.
-#:
-#: Distinguishing these matters more than it looks. An expired token made every
-#: fetch fail, `sync_mirror` treated that like a corrupt mirror and fell back to
-#: a fresh clone, and the clone deleted the existing mirror before failing on the
-#: same auth error -- destroying 213 of 272 working mirrors in one run.
 PERMANENT_ERROR_MARKERS = (
     "authentication failed",
     "invalid username or token",
@@ -196,15 +138,7 @@ def run_git_network(
     timeout: int | None = None,
     attempts: int = NETWORK_RETRIES,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a git command that talks to a remote, retrying transient failures.
-
-    Permanent failures -- a deleted repository, a bad credential, a missing ref --
-    are raised on the first attempt rather than retried, so a genuinely broken
-    repo still fails fast.
-
-    Raises:
-        GitError: on a permanent failure, or after the last attempt.
-    """
+    """Run a git command that talks to a remote, retrying transient failures."""
     last: GitError | None = None
     for attempt in range(1, attempts + 1):
         try:
@@ -233,31 +167,15 @@ def run_git_network(
 
 def mirror_path_for(full_name: str, cfg: IngestConfig | None = None,
                     host: str = "github.com") -> Path:
-    """Filesystem location of a repo's bare mirror.
-
-    ``<root>/<owner>/<name>.git`` for github.com and ``<root>/<host>/<owner>/
-    <name>.git`` for anything else. The host is in the path for the same reason
-    it is in the repository's database identity: `owner/name` is unique on one
-    host, and two mirrors sharing a directory would fetch into each other.
-
-    github.com keeps the shorter form so existing mirrors stay where they are
-    and the tree reads the way the URL does.
-    """
+    """Filesystem location of a repo's bare mirror."""
     cfg = cfg or get_config().ingest
     owner, _, name = full_name.partition("/")
     root = cfg.mirror_root if host in ("", "github.com") else cfg.mirror_root / host
-    # A GitLab group nests, so `owner` may itself contain slashes; that is a
-    # directory tree, which is exactly what we want it to become.
     return root / owner / f"{name}.git"
 
 
 def is_valid_mirror(path: Path) -> bool:
-    """True if ``path`` looks like a usable bare repository.
-
-    Guards against a half-written clone left behind by a killed container: such
-    a directory exists but has no HEAD, and reusing it would fail every
-    subsequent fetch.
-    """
+    """True if ``path`` looks like a usable bare repository."""
     if not path.is_dir():
         return False
     try:
@@ -273,31 +191,12 @@ def clone_mirror(
     public_url: str | None = None,
     blobless: bool = False,
 ) -> None:
-    """Create a bare mirror at ``path``.
-
-    Clones into a sibling temporary directory and swaps it into place only once
-    the clone has succeeded. The obvious implementation -- remove the old mirror,
-    then clone -- loses the existing mirror whenever the clone fails, which is
-    exactly what happened when a token expired: 213 working mirrors were deleted
-    and not replaced. A mirror is expensive to rebuild, so it must never be
-    destroyed on the strength of an operation that has not completed.
-
-    Args:
-        clone_url: URL used for the clone; may embed a token.
-        path: final destination directory.
-        public_url: token-free URL to store as the remote afterwards, so the
-            credential is never written into the mirror's config on disk.
-        blobless: omit blob objects. See the module docstring for what this costs.
-    """
+    """Create a bare mirror at ``path``."""
     path.parent.mkdir(parents=True, exist_ok=True)
     staging = path.with_name(path.name + ".incoming")
     if staging.exists():
         shutil.rmtree(staging)
 
-    # Tags are fetched: a manifest that pins `v1.2.3` names a release, and
-    # `ref_tag` is what turns that into a commit. Excluding them made every
-    # ecosystem that pins by version rather than by SHA resolve to nothing,
-    # silently -- the tag index was built and stayed empty.
     args = ["clone", "--bare", "--quiet"]
     if blobless:
         args.append("--filter=blob:none")
@@ -306,10 +205,6 @@ def clone_mirror(
     log.info("cloning %s mirror -> %s", "blobless" if blobless else "full", path)
     try:
         run_git_network(args)
-        # Mirror refspec so future fetches track every branch and every tag,
-        # not just HEAD. Written explicitly because a bare clone has no fetch
-        # refspec of its own: without this, `git fetch` updates FETCH_HEAD and
-        # nothing else, and the mirror silently stops moving.
         run_git(["config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"], cwd=staging)
         run_git(["config", "--add", "remote.origin.fetch", "+refs/tags/*:refs/tags/*"],
                 cwd=staging)
@@ -338,15 +233,7 @@ def fetch_mirror(
     public_url: str | None = None,
     blobless: bool = False,
 ) -> bool:
-    """Fetch new refs into an existing mirror.
-
-    The token-bearing URL is passed in argv for the duration of the fetch only,
-    then the remote is reset to the public URL, so the credential is never
-    persisted.
-
-    Returns:
-        True if any ref moved.
-    """
+    """Fetch new refs into an existing mirror."""
     before = current_head(path)
     args = ["fetch", "--prune", "--quiet"]
     if blobless:
@@ -360,15 +247,7 @@ def fetch_mirror(
 
 
 def choose_clone_mode(github_size_kb: int | None, cfg: IngestConfig | None = None) -> bool:
-    """Decide whether a repo should be mirrored blobless.
-
-    Args:
-        github_size_kb: repository size as reported by the GitHub API.
-        cfg: ingest configuration.
-
-    Returns:
-        True to clone blobless.
-    """
+    """Decide whether a repo should be mirrored blobless."""
     cfg = cfg or get_config().ingest
     if cfg.force_blobless:
         return True
@@ -384,14 +263,7 @@ def sync_mirror(
     blobless: bool = False,
     host: str = "github.com",
 ) -> FetchResult:
-    """Ensure a current mirror exists for ``full_name``.
-
-    Clones when absent or corrupt, fetches otherwise. A fetch failure falls back
-    to a fresh clone only when the cause suggests the mirror itself is damaged.
-    Auth failures and network failures both keep the existing mirror: neither
-    says anything is wrong with it, and re-cloning on those destroyed 213 working
-    mirrors once and wasted an hour of an outage the other time.
-    """
+    """Ensure a current mirror exists for ``full_name``."""
     started = time.monotonic()
     path = mirror_path_for(full_name, host=host)
     cloned = False
@@ -401,8 +273,6 @@ def sync_mirror(
         cloned = True
         changed = True
     elif mirror_is_blobless(path) != blobless:
-        # The configured mode changed since the last run (e.g. the size
-        # threshold moved). Re-clone rather than serve mismatched data.
         log.info("clone mode changed for %s; re-cloning", full_name)
         clone_mirror(clone_url, path, public_url, blobless=blobless)
         cloned = True
@@ -412,9 +282,6 @@ def sync_mirror(
             changed = fetch_mirror(path, clone_url, public_url, blobless=blobless)
         except GitError as exc:
             if is_permanent_error(exc.stderr):
-                # Bad credentials or a repository that no longer exists. A
-                # re-clone would fail identically, so surface the real error and
-                # keep the mirror we already have.
                 log.error(
                     "fetch failed for %s and the cause is not recoverable "
                     "(mirror preserved): %s",
@@ -422,11 +289,6 @@ def sync_mirror(
                 )
                 raise
             if is_transient_error(exc.stderr):
-                # A network failure says nothing about the mirror, which is
-                # still perfectly good. Re-cloning here threw away a working
-                # mirror and spent ten minutes per repository failing to
-                # replace it; during one outage that was 213 repositories. Fail
-                # this repository and let the next run retry the fetch.
                 log.warning(
                     "fetch failed for %s and the cause looks transient "
                     "(mirror preserved, will retry next run): %s",
@@ -453,11 +315,7 @@ def sync_mirror(
 
 
 def mirror_is_blobless(path: Path) -> bool:
-    """True if the mirror on disk was cloned with a blob filter.
-
-    Read back from the repo's own config rather than trusted from the caller,
-    so a mode change is detected even across restarts.
-    """
+    """True if the mirror on disk was cloned with a blob filter."""
     proc = run_git(
         ["config", "--get", "remote.origin.partialclonefilter"],
         cwd=path,
@@ -485,16 +343,7 @@ def default_branch(path: Path) -> str | None:
 
 
 def ref_tips(path: Path) -> list[str]:
-    """Every tip the walk visits: the default branch, and every tag.
-
-    The watermark for an incremental walk, so it has to cover exactly what the
-    walk covers. Excluding only the branch tip would re-read every release
-    commit on each run; excluding a branch the walk never visits would skip
-    commits that must still be read when that branch merges.
-    """
-    # `rev-list --no-walk` peels to commits; `rev-parse --tags` would hand back
-    # the tag *object* for an annotated tag, which is not a commit and which the
-    # watermark check below would discard on every run.
+    """Every tip the walk visits: the default branch, and every tag."""
     proc = run_git(
         ["rev-list", "--no-walk", "--tags", "HEAD"],
         cwd=path,
@@ -503,10 +352,6 @@ def ref_tips(path: Path) -> list[str]:
     )
     if proc.returncode != 0:
         return []
-    # `git rev-parse HEAD` exits 0 and echoes the literal "HEAD" when the ref
-    # does not resolve, which an empty repository always hits. Storing that as
-    # the watermark would make the next run exclude `^HEAD` and read nothing --
-    # harmless while the repository stays empty, and permanent once it does not.
     return [
         tip for tip in (line.strip() for line in proc.stdout.splitlines())
         if len(tip) == 40 and all(c in "0123456789abcdef" for c in tip)
@@ -521,22 +366,11 @@ class Tag:
     commit_sha: str
     tagged_at: datetime | None
     annotated: bool
-    #: The commit on the shipping branch this release was cut from. Equal to
-    #: ``commit_sha`` when the tag sits on that branch; the merge-base when it
-    #: sits on a release branch; None when the histories are unrelated.
     main_sha: str | None = None
 
 
 def read_tags(path: Path, default_branch: str | None = None) -> list[Tag]:
-    """Every tag in a mirror, peeled, in one git call.
-
-    An annotated tag points at a tag *object* which points at the commit, so
-    `%(objectname)` is the wrong field for half of them; `%(*objectname)` is the
-    peeled target and is empty for lightweight tags. Asking git to do the
-    peeling avoids a `rev-parse` per tag, and its date is the tagger's for an
-    annotated tag and the committer's otherwise -- which is the date a release
-    was actually cut.
-    """
+    """Every tag in a mirror, peeled, in one git call."""
     if not path.is_dir():
         return []
     proc = run_git(
@@ -555,10 +389,6 @@ def read_tags(path: Path, default_branch: str | None = None) -> list[Tag]:
         if len(parts) != 6:
             continue
         name, kind, obj, peeled, peeled_kind, when = parts
-        # `git tag` will name a blob or a tree as readily as a commit, and their
-        # object ids are forty hex characters too -- so the shape check below
-        # cannot tell them apart. Such a tag is not a release: it resolves to no
-        # commit, and indexing it puts a non-commit in the version index.
         if (peeled_kind or kind) != "commit":
             continue
         sha = peeled or obj
@@ -574,20 +404,7 @@ def read_tags(path: Path, default_branch: str | None = None) -> list[Tag]:
 
 
 def _anchor_to_branch(path: Path, tags: list[Tag], branch: str | None) -> list[Tag]:
-    """Give every tag a commit on the shipping branch.
-
-    Projects that cut a release branch tag *on that branch*, so the tagged
-    commit is never walked and resolves to nothing: 116 of guava's 123 tags
-    point off the branch that ships. The merge-base is the commit the release
-    was cut from, which is on the branch and therefore already ingested.
-
-    One `rev-list` establishes which commits are both on the branch and stored,
-    so the slower path runs only for the tags that actually need it. It asks for
-    `--no-merges` because a tag pointing straight at a merge commit -- which is
-    how Prometheus tags nearly half its releases -- is on the branch yet names a
-    row that was never written, and treating "on the branch" as "resolvable"
-    left 247 of its tags anchored to nothing.
-    """
+    """Give every tag a commit on the shipping branch."""
     if not branch or not tags:
         return tags
     proc = run_git(["rev-list", "--no-merges", branch], cwd=path, check=False, timeout=300)
@@ -602,28 +419,13 @@ def _anchor_to_branch(path: Path, tags: list[Tag], branch: str | None) -> list[T
             continue
         mb = run_git(["merge-base", branch, tag.commit_sha],
                      cwd=path, check=False, timeout=60)
-        # No merge-base means unrelated histories -- an imported tree or an
-        # orphan branch. Left None rather than anchored to something arbitrary.
         found = mb.stdout.strip() if mb.returncode == 0 else ""
         anchored.append(replace(tag, main_sha=_first_real_commit(path, found)))
     return anchored
 
 
 def replayed_commits(path: Path, branch: str | None) -> set[str]:
-    """Commits off the branch whose diff already exists on it.
-
-    A fix landed on the shipping branch and then cherry-picked onto a release
-    branch is the same change twice, and counting the second would say those
-    files belong together on evidence that is really one observation repeated.
-
-    `--cherry-mark` is git's own answer: it compares by patch id, normalised for
-    whitespace and line offsets, so it recognises a backport that had to shift
-    to apply -- and it does *not* recognise one that had to touch extra files,
-    which is correct, because that is a different change.
-
-    Only the divergent commits are compared, so the cost follows how much lives
-    off the branch rather than the size of the history.
-    """
+    """Commits off the branch whose diff already exists on it."""
     if not branch or not path.is_dir():
         return set()
     proc = run_git(["for-each-ref", "--format=%(objectname)", "refs/tags"],
@@ -644,14 +446,7 @@ def replayed_commits(path: Path, branch: str | None) -> set[str]:
 
 
 def _first_real_commit(path: Path, sha: str) -> str | None:
-    """`sha` itself, or the newest non-merge commit before it on the same line.
-
-    The walk skips merges, because a merge restates its parents' changes. A
-    merge-base often *is* a merge, and anchoring to one names a commit that was
-    deliberately never stored -- 27 of auto's tags landed exactly there.
-    Following first parents keeps to the branch's own line of development
-    rather than wandering into a side branch that was merged in.
-    """
+    """`sha` itself, or the newest non-merge commit before it on the same line."""
     if not sha:
         return None
     proc = run_git(["rev-list", "--first-parent", "--no-merges", "-n", "1", sha],
@@ -660,12 +455,7 @@ def _first_real_commit(path: Path, sha: str) -> str | None:
 
 
 def commit_exists(path: Path, sha: str) -> bool:
-    """True if ``sha`` is present in the mirror.
-
-    Used to validate the watermark from the previous run before asking git for
-    a ``sha..HEAD`` range: a force-push can orphan the old tip, and passing a
-    missing SHA to ``git log`` is a hard error.
-    """
+    """True if ``sha`` is present in the mirror."""
     if not sha:
         return False
     proc = run_git(["cat-file", "-e", f"{sha}^{{commit}}"], cwd=path, check=False, timeout=30)

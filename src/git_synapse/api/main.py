@@ -1,9 +1,4 @@
-"""FastAPI application: the REST API and the static web UI.
-
-The API is deliberately thin. All real work lives in :mod:`git_synapse.analysis.query`
-and :mod:`git_synapse.ingest.pipeline`, so the MCP server and the CLI expose exactly
-the same behaviour without duplicating logic.
-"""
+"""FastAPI application: the REST API and the static web UI."""
 
 from __future__ import annotations
 
@@ -36,17 +31,7 @@ def configure_logging() -> None:
 
 
 def _announce_setup_token() -> None:
-    """Print the token that claims the first administrator account.
-
-    Only while there is no account to claim. Once one exists the token is gone
-    from the table and this says nothing, so a long-running deployment is not
-    repeating a dead secret into its log at every restart.
-
-    Deliberately loud. The alternative to a console handshake is an admin
-    password in the environment, which ends up in the compose file and in every
-    process listing; this way the secret is visible exactly to whoever can read
-    the logs of the thing they just started.
-    """
+    """Print the token that claims the first administrator account."""
     try:
         if auth.count_users() > 0:
             return
@@ -67,16 +52,10 @@ def _announce_setup_token() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Wait for Postgres and apply the schema before serving traffic.
-
-    Compose starts the API alongside the database, so the first request can
-    otherwise arrive before Postgres is accepting connections.
-    """
+    """Wait for Postgres and apply the schema before serving traffic."""
     configure_logging()
     wait_for_database()
     apply_schema()
-    # A run left in flight by a killed container would otherwise block the
-    # refresh endpoint indefinitely.
     from git_synapse.ingest.pipeline import reconcile_stale_runs
 
     reconcile_stale_runs()
@@ -114,34 +93,15 @@ app.add_middleware(
 app.include_router(router, prefix="/api")
 
 
-#: Reading the log through the log would make every visit to the activity page
-#: generate the traffic it is displaying.
-#: Never recorded. `/api/calls` because reading the log would generate the
-#: traffic it displays; the rest because they have nothing worth keeping.
-#:
-#: `/api/auth/` is here because its replies carry credentials. Minting a token
-#: returns the secret once -- that is the whole design, and `create_token`
-#: promises it is stored only as a hash -- but the reply was also being written
-#: verbatim into `call_log`, where `GET /api/calls/{id}` handed it back. Two
-#: requests turned any signed-in member into whoever had last minted a token.
 _UNLOGGED = ("/api/calls", "/api/health", "/api/openapi.json", "/api/docs",
              "/api/auth/")
 
-#: Reachable without a caller, always. Everything else follows the access mode.
-#: `/api/auth/*` because you cannot sign in through a door that needs you to be
-#: signed in; `/api/health` because a probe has no credentials to offer.
 _ALWAYS_OPEN = ("/api/auth/", "/api/health")
 
 
 @app.middleware("http")
 async def _require_caller(request, call_next):
-    """Turn the access policy into a closed door, or not, per request.
-
-    Read live rather than at startup: an administrator switching sign-in on
-    expects it to apply to the next request, not the next deployment. The SPA
-    shell is always served -- it is the thing that renders the sign-in form --
-    so only /api/* is gated.
-    """
+    """Turn the access policy into a closed door, or not, per request."""
     path = request.url.path
     if not path.startswith("/api/") or path.startswith(_ALWAYS_OPEN):
         return await call_next(request)
@@ -154,15 +114,7 @@ async def _require_caller(request, call_next):
 
 @app.middleware("http")
 async def _record_calls(request, call_next):
-    """Record every API call: what was asked, how it went, how long it took.
-
-    The route *template* is recorded rather than the concrete path, so a
-    thousand repositories collapse to one row in a ranking instead of a
-    thousand rows nobody can read. The body is captured too, bounded: this is a
-    log record, and "what came back" is unanswerable without it. FastAPI has
-    already built the whole reply in memory by this point, so reading it here
-    costs a copy, not a second render.
-    """
+    """Record every API call: what was asked, how it went, how long it took."""
     path = request.url.path
     if not path.startswith("/api/") or path.startswith(_UNLOGGED):
         return await call_next(request)
@@ -181,8 +133,6 @@ async def _record_calls(request, call_next):
     if response.status_code >= 400:
         status, error = "error", f"HTTP {response.status_code}"
 
-    # The template carries no mount prefix, so /api/repos/{repo_id} would be
-    # logged as /repos/{repo_id} and rank separately from the path it is.
     route = request.scope.get("route")
     name = request.scope.get("root_path", "") + getattr(route, "path", "") or path
     if not name.startswith("/api"):
@@ -203,13 +153,7 @@ async def _record_calls(request, call_next):
 
 
 async def _replay_body(response):
-    """Read a response's body and hand back one that can still be sent.
-
-    A streaming response's iterator is consumed once. Draining it to log the
-    reply and then returning the same object would send the client nothing at
-    all, so the drained bytes are wrapped in a fresh response carrying the
-    original status, headers and media type.
-    """
+    """Read a response's body and hand back one that can still be sent."""
     from starlette.responses import Response as _Response
 
     chunks = [chunk async for chunk in response.body_iterator]
@@ -250,27 +194,14 @@ async def _key_error_handler(_request, exc: KeyError) -> JSONResponse:
     return JSONResponse(status_code=400, content={"detail": str(exc).strip("'\"")})
 
 
-# --- static UI -------------------------------------------------------------
-# Mounted last so /api/* always wins. The SPA is plain ES modules with no build
-# step, which keeps the image free of a Node toolchain.
 _web_root = _cfg.server.web_root
 if _web_root.is_dir():
     app.mount("/static", StaticFiles(directory=str(_web_root / "static")), name="static")
 
-    #: The UI uses the History API, so a deep link like /insights arrives as a
-    #: real path. Every non-API path therefore has to serve the shell and let the
-    #: client router take over -- without this, refreshing on /insights 404s.
     _INDEX = _web_root / "index.html"
 
     def _asset_version() -> str:
-        """A token that changes whenever a served asset changes.
-
-        The shell used to link `app.js?v=2`, a hand-written constant. Nobody
-        bumps it, so browsers held a cached copy across redeploys and rendered
-        blank routes from code that no longer existed. Deriving it from the
-        files' modification times invalidates exactly when they change, with no
-        build step.
-        """
+        """A token that changes whenever a served asset changes."""
         stamp = 0.0
         for name in ("static/app.js", "static/style.css", "static/graph.js"):
             asset = _web_root / name
@@ -279,8 +210,6 @@ if _web_root.is_dir():
         return str(int(stamp))
 
     def _shell() -> HTMLResponse:
-        # no-store on the shell so the asset URLs it carries are always current;
-        # the assets themselves are versioned and may be cached.
         html = _INDEX.read_text(encoding="utf-8")
         version = _asset_version()
         html = re.sub(r'(/static/[\w.-]+?)(\?v=[^"\']*)?(["\'])',
@@ -297,14 +226,7 @@ if _web_root.is_dir():
     async def favicon() -> FileResponse:
         return FileResponse(str(_web_root / "static" / "favicon.svg"))
 
-    #: Client-side routes the SPA owns. Enumerated rather than matched with a
-    #: catch-all so a genuine typo still returns 404 instead of silently
-    #: rendering the shell.
-    #: Every deeper view lives under the tab that owns it -- a file is
-    #: /repos/{id}/files/{id}, not /file/{id} -- so this is exactly the nav.
     SPA_ROUTES = (
-        # "sources" is the tab; "accounts" stays reachable so a bookmark or a
-        # link somebody sent still lands, and the client redirects it.
         "sources", "accounts",
         "repos", "insights", "activity", "measures", "jobs", "feedback",
         # Reachable while signed out: the shell renders the sign-in form.

@@ -1,11 +1,4 @@
-"""Adding something by pasting its URL.
-
-The behaviour worth pinning down is what a paste *costs* and what it commits
-to. A repository URL must not enumerate its owner -- that is the whole reason
-this exists, since `microsoft` is 8,296 repositories and someone asking for
-`vscode` asked one question. And a lookup must write nothing, because it is how
-a person finds out whether the thing is there at all.
-"""
+"""Adding something by pasting its URL."""
 from __future__ import annotations
 
 import httpx
@@ -25,8 +18,7 @@ def _record(full_name, **over):
 
 
 class _Fake:
-    """A provider that records what it was asked, so a test can assert the
-    *absence* of a listing rather than only the presence of a result."""
+    """A provider that records what it was asked, so a test can assert the *absence* of a listing rather than only the presence of a result."""
 
     def __init__(self, one=None, many=None, listing=True, error=None):
         self.one, self.many, self.listing, self.error = one, many, listing, error
@@ -81,7 +73,6 @@ def clean():
             accounts.remove_account(a["id"])
 
 
-# ------------------------------------------------------------------ lookups
 
 def test_a_repository_url_costs_one_request_and_never_lists_the_owner(db, fake, clean):
     client = fake(_Fake(one=_record("microsoft/vscode", primary_language="TypeScript",
@@ -107,11 +98,7 @@ def test_an_owner_url_offers_the_repositories_under_it(db, fake, clean):
                      _record("acme/old", is_archived=True)]))
     found = accounts.resolve_url("https://github.com/acme")
     assert found["kind"] == "owner" and found["total"] == 4
-    # Most-starred first: a list somebody reads should start with what they
-    # most likely came for.
     assert [r["name"] for r in found["repos"]][:2] == ["two", "one"]
-    # Offered, but not pre-selected: a fork's history is its parent's, and an
-    # archive cannot change again.
     suggested = {r["name"] for r in found["repos"] if r["suggested"]}
     assert suggested == {"one", "two"}
 
@@ -123,8 +110,7 @@ def test_a_host_with_no_api_says_what_to_do_instead(db, fake, clean):
 
 
 def test_a_rate_limited_owner_still_offers_the_whole_owner(db, fake, clean):
-    """Not a dead end: choosing from a list is one way to answer, and taking
-    everything is the other -- and that one needs no list."""
+    """Not a dead end: choosing from a list is one way to answer, and taking everything is the other -- and that one needs no list."""
     limit = httpx.HTTPStatusError(
         "429", request=httpx.Request("GET", "https://x"),
         response=httpx.Response(429, request=httpx.Request("GET", "https://x")))
@@ -152,9 +138,7 @@ def test_a_rate_limit_names_the_missing_token_when_there_is_none(db, fake, clean
 
 
 def test_a_missing_repository_admits_it_might_be_private(db, fake, clean, monkeypatch):
-    """A host answers 404 for both, deliberately. We cannot tell, and must not
-    guess -- so both possibilities are stated, with the thing that separates
-    them."""
+    """A host answers 404 for both, deliberately."""
     from git_synapse.config import get_config
 
     monkeypatch.setenv("GITHUB_TOKEN", "")
@@ -179,9 +163,7 @@ def test_an_error_that_is_neither_is_raised_as_it_is(db, fake, clean):
 
 
 def test_an_owner_arrives_one_page_at_a_time(db, fake, clean):
-    """Every host caps a listing at a hundred, so 8,296 repositories is 83
-    requests -- which as one blocking call is twenty-five seconds of blank
-    screen. Page one is drawn, and the rest arrive behind the reader."""
+    """Every host caps a listing at a hundred, so 8,296 repositories is 83 requests -- which as one blocking call is twenty-five seconds of blank screen."""
     fake(_Fake(many=[_record(f"acme/r{i}") for i in range(250)]))
     first = accounts.resolve_url("https://github.com/acme")
     assert len(first["repos"]) == providers.PAGE
@@ -209,7 +191,6 @@ def test_each_page_is_cached_on_its_own(db, fake, clean):
     assert len(client.calls) == 2
 
 
-# ------------------------------------------------------------------ writing
 
 def test_adding_a_repository_tracks_only_it(db, fake, clean):
     fake(_Fake(one=_record("microsoft/vscode")))
@@ -233,8 +214,7 @@ def test_adding_the_same_repository_twice_changes_nothing(db, fake, clean):
 
 
 def test_choosing_nothing_means_the_whole_owner(db, fake, clean):
-    """The one intent an allowlist cannot express: everything, including what
-    is created tomorrow."""
+    """The one intent an allowlist cannot express: everything, including what is created tomorrow."""
     fake(_Fake())
     row = accounts.add_from_url("https://github.com/acme", repos=[])
     assert row["only_repos"] == [] and row["kind"] == "org"
@@ -248,8 +228,7 @@ def test_naming_a_subset_of_an_owner_already_tracked_whole_does_not_narrow_it(db
 
 
 def test_a_gitlab_subgroup_project_is_keyed_by_its_path_under_the_owner(db, fake, clean):
-    """Two projects in one group can share a name. Keying on the name alone
-    puts one entry in the allowlist that then matches both."""
+    """Two projects in one group can share a name."""
     fake(_Fake(many=[
         _record("gitlab-org/gitlab-runner", provider="gitlab", host="gitlab.com"),
         RepoRecord(github_id=None, owner="gitlab-org/ci-cd", name="gitlab-runner",
@@ -270,7 +249,6 @@ def test_a_source_on_another_host_is_a_different_source(db, fake, clean):
     assert (a["host"], b["host"]) == ("github.com", "gitlab.com")
 
 
-# ---------------------------------------------------------------- credentials
 
 def test_a_token_given_while_adding_is_stored_encrypted(db, fake, clean, monkeypatch):
     from git_synapse import vault
@@ -306,7 +284,6 @@ def test_credential_for_falls_back_to_nothing(db):
     assert accounts.credential_for({}) == ""
 
 
-# ------------------------------------------------- the allowlist fetch path
 
 def test_a_whole_owner_on_a_host_with_no_api_yields_nothing_rather_than_raising(
         db, fake, clean, caplog):
@@ -402,8 +379,7 @@ def test_a_clone_reads_the_source_credential(db, fake, clean, monkeypatch):
 
 
 def test_an_unreadable_credential_does_not_stop_an_ingest(db, monkeypatch):
-    """The deployment-wide token is a working fallback; an exception here would
-    take the whole run down over one source."""
+    """The deployment-wide token is a working fallback; an exception here would take the whole run down over one source."""
     from git_synapse.ingest import pipeline
 
     monkeypatch.setattr(accounts, "find_by_login",
@@ -413,8 +389,7 @@ def test_an_unreadable_credential_does_not_stop_an_ingest(db, monkeypatch):
 
 def test_a_rate_limited_single_repository_explains_rather_than_raising_httpx(
         db, fake, clean):
-    """A repository lookup is one request, so hitting a limit here means the
-    budget was already spent -- and the reader needs the same explanation."""
+    """A repository lookup is one request, so hitting a limit here means the budget was already spent -- and the reader needs the same explanation."""
     limit = httpx.HTTPStatusError(
         "403", request=httpx.Request("GET", "https://x"),
         response=httpx.Response(403, request=httpx.Request("GET", "https://x")))
@@ -424,27 +399,23 @@ def test_a_rate_limited_single_repository_explains_rather_than_raising_httpx(
 
 
 def test_a_listing_error_that_is_not_a_rate_limit_is_raised_as_it_is(db, fake, clean):
-    """Only a rate limit has the "take the whole owner instead" answer. A
-    genuine failure must not be dressed up as one."""
+    """Only a rate limit has the "take the whole owner instead" answer."""
     fake(_Fake(error=RuntimeError("dns exploded")))
     with pytest.raises(RuntimeError, match="dns exploded"):
         accounts.resolve_url("https://github.com/acme")
 
 
-# ----------------------------------------------------------------- budgeting
 
 @pytest.fixture(autouse=True)
 def _empty_listing_cache():
-    """Every test starts with a cold cache, or the second one to look up an
-    owner asserts against the first one's answer."""
+    """Every test starts with a cold cache, or the second one to look up an owner asserts against the first one's answer."""
     accounts._LISTINGS.clear()
     yield
     accounts._LISTINGS.clear()
 
 
 def test_a_second_look_at_the_same_owner_spends_nothing(db, fake, clean):
-    """Paste, look, adjust, look again is one person's normal back-and-forth --
-    and on an anonymous GitHub it is three of the sixty requests in that hour."""
+    """Paste, look, adjust, look again is one person's normal back-and-forth -- and on an anonymous GitHub it is three of the sixty requests in that hour."""
     client = fake(_Fake(many=[_record("acme/one")]))
     first = accounts.resolve_url("https://github.com/acme")
     second = accounts.resolve_url("https://github.com/acme")
@@ -456,8 +427,6 @@ def test_a_second_look_at_the_same_owner_spends_nothing(db, fake, clean):
 def test_the_cache_expires(db, fake, clean, monkeypatch):
     fake(_Fake(many=[_record("acme/one")]))
     accounts.resolve_url("https://github.com/acme")
-    # Capture the real clock first: patching `time.time` and then calling it
-    # through the module is a call to the patch.
     now = accounts.time.time()
     monkeypatch.setattr(accounts.time, "time",
                         lambda: now + accounts.LISTING_TTL_SECONDS + 1)
@@ -465,9 +434,7 @@ def test_the_cache_expires(db, fake, clean, monkeypatch):
 
 
 def test_a_lookup_carrying_a_token_never_reads_the_anonymous_answer(db, fake, clean):
-    """A token changes what is visible. Serving one caller's private listing to
-    the next, or an anonymous listing to someone who supplied a credential,
-    would both be wrong."""
+    """A token changes what is visible."""
     client = fake(_Fake(many=[_record("acme/one")]))
     accounts.resolve_url("https://github.com/acme")
     found = accounts.resolve_url("https://github.com/acme", token="ghp_x")
@@ -486,8 +453,7 @@ def test_a_refused_listing_is_not_cached(db, fake, clean):
 
 
 def test_the_refusal_says_when_waiting_would_help(db, fake, clean, monkeypatch):
-    """"Rate limited" leaves someone guessing between a minute and an hour.
-    GitHub's own budget endpoint is exempt from the limit, so asking is free."""
+    """"Rate limited" leaves someone guessing between a minute and an hour."""
     from git_synapse.config import get_config
     from git_synapse.ingest import github
 
@@ -538,8 +504,7 @@ def test_a_non_github_host_is_not_asked_for_a_github_budget(db, fake, clean):
 
 
 def test_a_small_owner_is_listed_once_however_many_names_are_given(db, fake, clean):
-    """Seven names in an org of thirty is seven requests by name and one by
-    listing. A threshold on the number of names gets this exactly backwards."""
+    """Seven names in an org of thirty is seven requests by name and one by listing."""
     from git_synapse.ingest import pipeline
 
     client = fake(_Fake(many=[_record(f"acme/r{i}") for i in range(30)]))
@@ -551,8 +516,7 @@ def test_a_small_owner_is_listed_once_however_many_names_are_given(db, fake, cle
 
 
 def test_a_few_names_out_of_a_huge_owner_are_fetched_by_name(db, fake, clean):
-    """One repository out of microsoft's 8,296 is one request by name and
-    eighty-three by listing -- on every nightly refresh."""
+    """One repository out of microsoft's 8,296 is one request by name and eighty-three by listing -- on every nightly refresh."""
     from git_synapse.ingest import pipeline
 
     client = fake(_Fake(many=[_record(f"big/r{i}") for i in range(1000)]))
@@ -578,8 +542,7 @@ def test_many_names_out_of_a_large_owner_still_prefer_the_listing(db, fake, clea
 
 
 def test_one_unfetchable_name_does_not_cost_the_others_by_name(db, fake, clean):
-    """A repository renamed or deleted upstream is a fact about that
-    repository, not about the source it was named in."""
+    """A repository renamed or deleted upstream is a fact about that repository, not about the source it was named in."""
     from git_synapse.ingest import pipeline
 
     class _Picky(_Fake):
@@ -610,11 +573,7 @@ def test_a_long_allowlist_on_a_host_that_cannot_list_falls_back_to_names(db, fak
 
 
 def test_an_ordinary_source_reaches_its_provider_not_the_no_api_fallback(db, clean, monkeypatch):
-    """A NULL api_url on an account means "the provider's public API", but
-    `has_api` reads None as "no API at all" -- so building the Source by hand
-    here sent every ordinary GitHub source down the fallback and re-imported
-    164 repositories as bare git URLs with no stars, no fork flags and no
-    visibility."""
+    """A NULL api_url on an account means "the provider's public API", but `has_api` reads None as "no API at all" -- so building the Source by hand here sent every ordinary GitHub source down the fallback and re-imported 164 repositories as bare git URLs with no stars, no fork flags and no visibility."""
     from git_synapse.ingest import pipeline, providers
 
     seen = {}

@@ -1,9 +1,4 @@
-"""The backtest, which is the one thing that judges the product rather than the corpus.
-
-The failure that matters here is leakage: if a commit's own pairs inform its own
-prediction, every measure looks excellent and the number is worthless. Most of
-these tests exist to pin that down.
-"""
+"""The backtest, which is the one thing that judges the product rather than the corpus."""
 
 from __future__ import annotations
 
@@ -16,11 +11,7 @@ from git_synapse.analysis import backtest as bt
 
 
 def replay(monkeypatch, commits, paths=None, **kw):
-    """Run the backtest over a synthetic history, without touching the database.
-
-    The neighbour baselines need file paths, so a synthetic layout is supplied
-    too: one directory per repository unless a test says otherwise.
-    """
+    """Run the backtest over a synthetic history, without touching the database."""
     monkeypatch.setattr(bt, "_history", lambda repo_id: [
         (repo, files, i) for i, (repo, files) in enumerate(commits)])
     if paths is None:
@@ -72,8 +63,7 @@ ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
 
 @pytest.fixture
 def repo(tmp_path):
-    """A real repository, because the search baseline is defined by what git
-    would have answered and a stub would only test the stub."""
+    """A real repository, because the search baseline is defined by what git would have answered and a stub would only test the stub."""
     git(tmp_path, "init", "-q", "-b", "main")
     return tmp_path
 
@@ -101,8 +91,7 @@ def test_a_name_is_split_into_the_words_an_agent_would_search_for(name, expected
 
 
 def test_the_search_finds_a_caller_in_an_unrelated_directory(repo):
-    """The whole reason this baseline is hard: an agent greps for a symbol and
-    finds the file that uses it, which no directory or filename rule links."""
+    """The whole reason this baseline is hard: an agent greps for a symbol and finds the file that uses it, which no directory or filename rule links."""
     commit(repo, "base",
            **{"core__registry.go": "package core\nfunc ResolveHandler() {}\n",
               "web__server.go": "package web\nfunc main() { ResolveHandler() }\n",
@@ -116,9 +105,7 @@ def test_the_search_finds_a_caller_in_an_unrelated_directory(repo):
 
 
 def test_the_search_reads_the_parent_tree_not_the_commit_being_scored(repo):
-    """Grepping the commit's own tree would let a file that this very commit
-    edited answer for it -- the file would already contain the reference the
-    change introduced. That is leakage, and it inflates the baseline."""
+    """Grepping the commit's own tree would let a file that this very commit edited answer for it -- the file would already contain the reference the change introduced."""
     commit(repo, "base", **{"core__registry.go": "package core\nfunc ResolveHandler() {}\n"})
     # `web/server.go` only mentions the symbol as of the commit being scored.
     sha = commit(repo, "next",
@@ -134,29 +121,24 @@ def test_the_search_reads_the_parent_tree_not_the_commit_being_scored(repo):
     "static/app.min.js",
 ])
 def test_vendored_and_generated_paths_are_never_offered(path):
-    """An agent ignores these. Scoring their *names* while the grep refuses to
-    read their *contents* would credit the baseline for a rule it never ran."""
+    """An agent ignores these."""
     assert not bt._wanted(path)
 
 
 @pytest.mark.parametrize("path", ["src/vendorised/thing.go", "internal/testdata.go"])
 def test_a_path_that_merely_looks_vendored_is_kept(path):
-    """`vendor/` is a directory, not a substring; excluding by substring would
-    silently drop real source files."""
+    """`vendor/` is a directory, not a substring; excluding by substring would silently drop real source files."""
     assert bt._wanted(path)
 
 
 def test_a_failing_git_call_costs_one_prompt_not_the_whole_run(tmp_path):
-    """A replay scores hundreds of thousands of prompts. Letting one slow or
-    broken git invocation raise would throw all of that away, so a baseline
-    that cannot answer simply misses."""
+    """A replay scores hundreds of thousands of prompts."""
     assert bt._git(str(tmp_path / "does-not-exist"), ["ls-tree", "HEAD"], timeout=5) == ""
     assert bt.agent_search(tmp_path / "does-not-exist", "deadbeef", "a/b.go", 5) == []
 
 
 def test_the_same_commit_is_searched_the_same_way_twice(repo):
-    """Search terms came off an unordered set, so results moved between runs
-    and the benchmark was not reproducible."""
+    """Search terms came off an unordered set, so results moved between runs and the benchmark was not reproducible."""
     commit(repo, "base",
            **{"core__registry.go": "package core\nfunc ResolveHandler() {}\nfunc BuildIndex() {}\n",
               "web__server.go": "package web\nfunc main() { ResolveHandler() }\n"})
@@ -184,17 +166,13 @@ def test_a_root_commit_has_no_parent_to_search(repo):
     ("spec/user_spec.rb", "user"),
 ])
 def test_a_file_and_its_partner_share_a_stem(path, stem):
-    """The cheapest guess anyone makes is the test beside the source, so the
-    baseline has to make it too."""
+    """The cheapest guess anyone makes is the test beside the source, so the baseline has to make it too."""
     assert bt.stem_of(path) == stem
 
 
-# ------------------------------------------------------------------- leakage
 
 def test_a_commit_cannot_inform_its_own_prediction(monkeypatch):
-    """The whole point. Files that only ever co-occur in the commit being
-    scored must be unpredictable, because at that moment nothing has taught us
-    they belong together."""
+    """The whole point."""
     history = flat([1, 2], bt.WARMUP_COMMITS + 1)   # noise to get past warmup
     history.append((1, [90, 91]))                        # first and only sighting
     result = replay(monkeypatch, history, measures=("npmi",))
@@ -236,7 +214,6 @@ def test_single_file_commits_produce_no_prompt(monkeypatch):
     assert replay(monkeypatch, history, measures=("npmi",)).prompts == before
 
 
-# ------------------------------------------------------------------ baseline
 
 def test_the_baseline_ignores_coupling_entirely(monkeypatch):
     """It answers with the busiest files, which is what makes lift meaningful."""
@@ -256,13 +233,11 @@ def test_lift_is_relative_to_the_baseline(monkeypatch):
 
 
 def test_a_measure_that_only_matches_the_baseline_earns_no_lift(monkeypatch):
-    """Two files that always move together: coupling and popularity agree, so
-    the statistics have added nothing and lift must not exceed 1."""
+    """Two files that always move together: coupling and popularity agree, so the statistics have added nothing and lift must not exceed 1."""
     result = replay(monkeypatch, flat([1, 2], bt.WARMUP_COMMITS + 30), measures=("npmi",))
     assert result.scores[0].lift <= 1.0 + 1e-9
 
 
-# ---------------------------------------------------------------- honest reporting
 
 def test_a_small_sample_is_reported_as_inconclusive(monkeypatch):
     result = replay(monkeypatch, flat([1, 2], bt.WARMUP_COMMITS + 5), measures=("npmi",))
@@ -291,7 +266,6 @@ def test_no_history_is_reported_rather_than_dividing_by_zero(monkeypatch):
     assert result.verdict
 
 
-# ------------------------------------------------------------------ mechanics
 
 def test_every_requested_measure_is_scored(monkeypatch):
     keys = ("npmi", "jaccard", "ochiai")
@@ -334,30 +308,20 @@ def test_k_bounds_how_many_suggestions_are_counted(monkeypatch):
 
 
 def test_counts_are_never_pooled_across_repositories(monkeypatch):
-    """Two files in different repositories cannot co-occur. Pooling them hands
-    the popularity baseline candidates it can never hit, which does not weaken
-    the baseline honestly -- it breaks it, and inflates every lift measured
-    against it."""
+    """Two files in different repositories cannot co-occur."""
     a = flat([1, 2], bt.WARMUP_COMMITS + 10, repo=1)
     b = flat([50, 51], bt.WARMUP_COMMITS + 10, repo=2)
     result = replay(monkeypatch, a + b, measures=("npmi",))
 
-    # Each repository's own pair is learnable, so the baseline -- which ranks
-    # that repository's busiest files -- must do well rather than near zero.
     assert result.baseline.hit_rate > 0.5, (
         "a pooled population would make the baseline miss almost everything, "
         f"got {result.baseline.hit_rate:.1%}")
     assert result.scores[0].lift <= 1.5
 
 
-# ------------------------------------------- what history adds over free rules
 
 def test_prompts_the_neighbour_rules_solve_are_excluded_from_the_hard_score(monkeypatch):
-    """The headline hit rate flatters every measure, because most prompts are
-    answered by the test beside the source. The number worth quoting is what
-    survives once those are taken away."""
-    # Files 1 and 2 sit in one directory, so the neighbour rule solves them and
-    # they must not count towards the hard score.
+    """The headline hit rate flatters every measure, because most prompts are answered by the test beside the source."""
     history = flat([1, 2], bt.WARMUP_COMMITS + 20)
     result = replay(monkeypatch, history, measures=("npmi",))
 
@@ -368,8 +332,7 @@ def test_prompts_the_neighbour_rules_solve_are_excluded_from_the_hard_score(monk
 
 
 def test_a_cross_directory_pair_counts_as_a_hard_prompt(monkeypatch):
-    """Files that share neither a name nor a directory are exactly the case
-    this product exists for, so they must reach the hard score."""
+    """Files that share neither a name nor a directory are exactly the case this product exists for, so they must reach the hard score."""
     paths = {1: "api/handler.py", 2: "web/template.html"}
     history = flat([1, 2], bt.WARMUP_COMMITS + 20)
     result = replay(monkeypatch, history, paths=paths, measures=("npmi",))
@@ -380,18 +343,13 @@ def test_a_cross_directory_pair_counts_as_a_hard_prompt(monkeypatch):
 
 
 def test_the_verdict_names_the_baseline_that_actually_won(monkeypatch):
-    """It used to say 'popularity' regardless of which baseline was hardest,
-    which misreported what the product had been compared against. It now names
-    the rung that actually won."""
-    # Enough commits to clear MIN_PROMPTS_FOR_A_VERDICT, or the verdict is
-    # replaced by the "indicative only" notice and names no baseline at all.
+    """It used to say 'popularity' regardless of which baseline was hardest, which misreported what the product had been compared against."""
     history = flat([1, 2], bt.WARMUP_COMMITS + bt.MIN_PROMPTS_FOR_A_VERDICT)
     result = replay(monkeypatch, history, measures=("npmi",))
     assert result.conclusive
     assert result.baseline.label.split(" --")[0] in result.verdict
 
 
-# ------------------------------------------------------------------- seeding
 
 def test_every_changed_file_takes_a_turn_by_default(monkeypatch):
     """A commit touching three files asks three questions, one per file."""
@@ -402,8 +360,7 @@ def test_every_changed_file_takes_a_turn_by_default(monkeypatch):
 
 
 def test_obscure_seeding_asks_once_per_commit(monkeypatch):
-    """One question per commit, so a commit touching many files cannot dominate
-    the sample with its own easy cases."""
+    """One question per commit, so a commit touching many files cannot dominate the sample with its own easy cases."""
     history = [*flat([1, 2], bt.WARMUP_COMMITS), (1, [1, 2, 3])]
     before = replay(monkeypatch, flat([1, 2], bt.WARMUP_COMMITS),
                     measures=("npmi",), seeding="obscure").prompts
@@ -412,8 +369,7 @@ def test_obscure_seeding_asks_once_per_commit(monkeypatch):
 
 
 def test_obscure_seeding_starts_from_the_least_changed_file():
-    """Seeding from a hub that half the repository moves with makes the rest
-    easy to guess. The quiet file is the honest starting point."""
+    """Seeding from a hub that half the repository moves with makes the rest easy to guess."""
     marginal = {1: 500, 2: 40, 3: 2}
     assert bt._seeds([1, 2, 3], marginal, "obscure") == [3]
     assert bt._seeds([1, 2, 3], marginal, "all") == [1, 2, 3]
@@ -429,7 +385,6 @@ def test_an_unknown_seeding_is_refused(monkeypatch):
         replay(monkeypatch, flat([1, 2], 5), measures=("npmi",), seeding="sideways")
 
 
-# ---------------------------------------------------- sampling the New Hire
 
 def sampled_commits(monkeypatch, n_commits, sample):
     """Which commits the search baseline actually got run against."""
@@ -450,10 +405,7 @@ def sampled_commits(monkeypatch, n_commits, sample):
 
 
 def test_the_search_sample_is_drawn_from_the_whole_replay(monkeypatch):
-    """It used to sample with a fixed probability and stop at the cap, so the
-    entire sample came from the oldest commits while every other measure was
-    scored across all of history. That compares two different eras of the
-    repository and calls the difference a result."""
+    """It used to sample with a fixed probability and stop at the cap, so the entire sample came from the oldest commits while every other measure was scored across all of history."""
     n_commits = 2_000
     seen = sampled_commits(monkeypatch, n_commits, sample=50)
 
@@ -473,12 +425,9 @@ def test_a_replay_smaller_than_the_sample_is_taken_whole(monkeypatch):
     assert 0 < len(seen) <= 400
 
 
-# --------------------------------------------------- what lift is divided by
 
 def test_lift_is_never_divided_by_a_sampled_rate(monkeypatch):
-    """Lift is a ratio. Dividing a rate measured over every prompt by one
-    measured over a few hundred mixes two estimators, and the figure then moves
-    with the draw rather than with the product."""
+    """Lift is a ratio."""
     history = flat([1, 2], bt.WARMUP_COMMITS + 400)
     monkeypatch.setattr(bt, "_commit_shas",
                         lambda repo_id: {i: (f"sha{i}", "org/repo", "github.com")
@@ -494,8 +443,7 @@ def test_lift_is_never_divided_by_a_sampled_rate(monkeypatch):
 
 
 def test_beating_the_baseline_requires_the_interval_to_clear_it(monkeypatch):
-    """A point estimate one noisy percent above the baseline has not beaten it,
-    and the property used to say it had."""
+    """A point estimate one noisy percent above the baseline has not beaten it, and the property used to say it had."""
     history = flat([1, 2], bt.WARMUP_COMMITS + 400)
     result = replay(monkeypatch, history, measures=("npmi",))
     s = result.scores[0]
@@ -511,11 +459,9 @@ def test_the_unaided_rate_is_zero_when_nothing_was_sampled(monkeypatch):
     assert result.sampled == 0
 
 
-# ------------------------------------------------------- reporting edge cases
 
 def test_the_unaided_interval_is_reported_alongside_the_rate():
-    """It is the number with the smallest denominator and the one most likely
-    to be over-read, so it must carry its own interval."""
+    """It is the number with the smallest denominator and the one most likely to be over-read, so it must carry its own interval."""
     s = bt.Score(measure="npmi", label="npmi", prompts=100, hit_prompts=50,
                  found=50, wanted=100, hit_rate=0.5, ci_low=0.4, ci_high=0.6,
                  recall_at_k=0.5, precision_at_k=0.1, mrr=0.3,
@@ -526,8 +472,7 @@ def test_the_unaided_interval_is_reported_alongside_the_rate():
 
 
 def test_a_run_with_prompts_but_no_measures_says_so(monkeypatch):
-    """Scoring nothing is not the same as having no history, and reporting the
-    second when the first happened would hide a misconfigured measure list."""
+    """Scoring nothing is not the same as having no history, and reporting the second when the first happened would hide a misconfigured measure list."""
     result = bt.BacktestResult(repo_id=None, k=5, min_support=2, commits_seen=10,
                                commits_scored=5, prompts=40)
     assert result.best is None
@@ -539,8 +484,7 @@ def test_a_run_with_prompts_but_no_measures_says_so(monkeypatch):
     ("spec_runner.rb", "runner"),
 ])
 def test_a_leading_test_affix_is_stripped_too(path, stem):
-    """`test_helpers.go` is the partner of `helpers.go`; only stripping
-    trailing affixes would miss half the convention."""
+    """`test_helpers.go` is the partner of `helpers.go`; only stripping trailing affixes would miss half the convention."""
     assert bt.stem_of(path) == stem
 
 
@@ -551,8 +495,7 @@ def test_a_seed_with_no_known_path_offers_no_neighbours(monkeypatch):
 
 
 def test_a_name_sibling_outranks_the_rest_of_the_directory():
-    """The test beside the source is the cheapest and most reliable guess, so
-    it has to come first rather than merely be included."""
+    """The test beside the source is the cheapest and most reliable guess, so it has to come first rather than merely be included."""
     paths = {1: "pkg/auth.go", 2: "pkg/auth_test.go", 3: "pkg/unrelated.go"}
     by_stem = {"auth": [1, 2], "unrelated": [3]}
     by_dir = {"pkg": [1, 2, 3]}
@@ -570,7 +513,6 @@ def test_the_search_declines_a_seed_it_cannot_name(tmp_path):
     assert bt.agent_search(work, sha, "pkg/io.go", 5) == []
 
 
-# --------------------------------------------- reading the replay from the db
 
 @pytest.fixture
 def seeded(db):
@@ -614,9 +556,7 @@ def seeded(db):
 
 
 def test_the_replay_reads_commits_oldest_first(seeded, monkeypatch):
-    """Prequential scoring depends on the order: a commit scored before its
-    predecessors were learned from would be judged on a history that had not
-    happened yet."""
+    """Prequential scoring depends on the order: a commit scored before its predecessors were learned from would be judged on a history that had not happened yet."""
     repo, _files, (first, second) = seeded
 
     history = bt._history(repo)
@@ -624,22 +564,19 @@ def test_the_replay_reads_commits_oldest_first(seeded, monkeypatch):
 
 
 def test_a_commit_excluded_from_pairs_never_becomes_a_prompt(seeded, monkeypatch):
-    """`pair_eligible` is the one switch that keeps a sweep out of the
-    statistics, so the replay has to honour it at the source."""
+    """`pair_eligible` is the one switch that keeps a sweep out of the statistics, so the replay has to honour it at the source."""
     repo, _files, _ = seeded
     assert len(bt._history(repo)) == 2, "the ineligible commit must not appear"
 
 
 def test_the_replay_carries_the_repository_with_each_commit(seeded, monkeypatch):
-    """Counts are kept per repository, so the owner has to travel with the
-    commit rather than being looked up later."""
+    """Counts are kept per repository, so the owner has to travel with the commit rather than being looked up later."""
     repo, _, _ = seeded
     assert {r for r, _, _ in bt._history(repo)} == {repo}
 
 
 def test_commit_shas_are_read_with_their_repository_name(seeded, monkeypatch):
-    """The search baseline needs both: the sha to check out, and the name to
-    find the mirror on disk."""
+    """The search baseline needs both: the sha to check out, and the name to find the mirror on disk."""
     repo, _, (first, _) = seeded
     shas = bt._commit_shas(repo)
     assert shas[first] == ("a" * 40, "acme/replay", "github.com")
@@ -656,15 +593,10 @@ def test_the_path_index_groups_by_stem_and_by_directory(seeded, monkeypatch):
 
 
 def test_the_search_scores_a_filename_match_without_reading_the_file(tmp_path):
-    """The `.*` half of an agent's query: a file whose *name* shares a concept
-    is a candidate even when it mentions none of the seed's symbols, which is
-    what reaches across directories and languages."""
+    """The `.*` half of an agent's query: a file whose *name* shares a concept is a candidate even when it mentions none of the seed's symbols, which is what reaches across directories and languages."""
     work = worktree(tmp_path, "byname")
     (work / "web").mkdir()
     (work / "invoice_loader.py").write_text("def load(): return 1\n")
-    # Shares the concept in its name and mentions nothing from the seed. Note
-    # `config` would not do here: it is a stopword, because a term appearing in
-    # half a repository's files selects nothing.
     (work / "web" / "invoice_renderer.py").write_text("# unrelated contents\n")
     (work / "web" / "unrelated.py").write_text("x = 1\n")
     g(work, "add", "-A")
@@ -678,8 +610,7 @@ def test_the_search_scores_a_filename_match_without_reading_the_file(tmp_path):
 
 
 def test_the_search_widens_using_what_the_first_round_returned(tmp_path):
-    """The read-a-result-and-search-again step. Without it the search stops at
-    files that mention the seed, and never reaches what those files pull in."""
+    """The read-a-result-and-search-again step."""
     work = worktree(tmp_path, "widen")
     (work / "parser.py").write_text("class ParseTree:\n    pass\n")
     # Found in round one: it mentions the seed's symbol.
@@ -703,8 +634,7 @@ def test_grepping_for_no_terms_asks_git_nothing(tmp_path):
 
 
 def test_grep_output_that_is_not_for_this_commit_is_ignored(tmp_path, monkeypatch):
-    """`git grep` prefixes every line with the revision. A line without it did
-    not come from the tree being searched."""
+    """`git grep` prefixes every line with the revision."""
     work = worktree(tmp_path, "prefix")
     add_commit(work, "auth.py", "def check(): pass\n")
     sha = g(work, "rev-parse", "HEAD").stdout.strip()
@@ -713,16 +643,14 @@ def test_grep_output_that_is_not_for_this_commit_is_ignored(tmp_path, monkeypatc
 
 
 def test_a_commit_touching_one_file_yields_no_prompt(monkeypatch):
-    """There is no "what else" when nothing else changed, and counting it as a
-    miss would punish every measure for a question never asked."""
+    """There is no "what else" when nothing else changed, and counting it as a miss would punish every measure for a question never asked."""
     history = [*flat([1, 2], bt.WARMUP_COMMITS), (1, [1, 1])]   # one distinct file
     before = replay(monkeypatch, flat([1, 2], bt.WARMUP_COMMITS), measures=("npmi",)).prompts
     assert replay(monkeypatch, history, measures=("npmi",)).prompts == before
 
 
 def test_prompts_that_defeat_both_free_rules_are_counted_separately(monkeypatch):
-    """The only number where this product is not redundant: prompts that
-    neither the naming rules nor the agent's own search could answer."""
+    """The only number where this product is not redundant: prompts that neither the naming rules nor the agent's own search could answer."""
     paths = {1: "api/handler.py", 2: "web/template.html"}   # no shared stem or folder
     history = flat([1, 2], bt.WARMUP_COMMITS + 400)
     monkeypatch.setattr(bt, "_commit_shas",

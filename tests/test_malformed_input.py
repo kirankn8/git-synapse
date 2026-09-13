@@ -1,10 +1,4 @@
-"""Malformed and unusual input, at the parsing boundaries.
-
-Git output, manifests and paths all come from repositories nobody on this team
-controls. Every branch here handles something a real repository can contain, and
-the failure mode for all of them is the same: a statistic that is quietly wrong
-rather than an error anyone sees.
-"""
+"""Malformed and unusual input, at the parsing boundaries."""
 from __future__ import annotations
 
 import subprocess
@@ -21,7 +15,6 @@ ENV = {
 }
 
 
-# ------------------------------------------------------------------- paths
 
 @pytest.mark.parametrize("path", [
     "a" * 300 + ".go",              # very long
@@ -42,12 +35,9 @@ def test_depth_counts_separators_not_characters():
     assert split_path("c.go")[3] == 0
 
 
-# ------------------------------------------------------------- git surprises
 
 def test_a_commit_with_a_multiline_body_is_parsed_whole(tmp_path):
-    """Bodies contain blank lines and trailers; the parser splits on control
-    characters and a body that swallowed the next record would desynchronise
-    every commit after it."""
+    """Bodies contain blank lines and trailers; the parser splits on control characters and a body that swallowed the next record would desynchronise every commit after it."""
     from git_synapse.ingest.parser import iter_commits
 
     work = tmp_path / "w"
@@ -71,8 +61,7 @@ def test_a_commit_with_a_multiline_body_is_parsed_whole(tmp_path):
 
 
 def test_a_path_containing_unusual_characters_survives_the_stream(tmp_path):
-    """The stream is NUL-separated precisely so a quote or newline in a path
-    cannot break it."""
+    """The stream is NUL-separated precisely so a quote or newline in a path cannot break it."""
     from git_synapse.ingest.parser import iter_commits
 
     work = tmp_path / "w"
@@ -116,19 +105,14 @@ def test_a_type_change_is_recorded(tmp_path):
     assert types.get("thing") in ("T", "M"), types
 
 
-# -------------------------------------------------- the parser's own helpers
 
 @pytest.mark.parametrize("value", ["", "not-a-date", None, "2026-13-45T99:99:99"])
 def test_an_unparseable_commit_date_falls_back_to_the_epoch(value):
-    """A handful of commits in any large org carry corrupt dates. Losing the
-    whole repository over one of them would be the wrong trade."""
+    """A handful of commits in any large org carry corrupt dates."""
     from git_synapse.ingest.parser import _parse_git_date
 
     got = _parse_git_date(value)
     assert got is not None
-    # The epoch, compared as an instant: in a negative-offset zone its local
-    # calendar year is 1969, which is the sort of thing that makes a date
-    # assertion pass in one timezone and fail in another.
     assert got.timestamp() == 0
 
 

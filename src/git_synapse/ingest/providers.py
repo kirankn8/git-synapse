@@ -1,24 +1,4 @@
-"""Asking a host what it has.
-
-Coupling needs nothing but a clone: the atomic fact is *this commit touched
-this file*, and `git log` yields it identically wherever the repository came
-from. Everything a provider API adds -- stars, languages, the fork and archived
-flags, the list of repositories under an owner -- is convenience on top.
-
-That ordering is the design. :class:`GitProvider` is the fallback and it needs
-no API at all, so a self-hosted host nobody has written a client for still
-ingests; a provider client, where one exists, only enriches what is already
-sufficient. The alternative -- refuse what we cannot introspect -- would refuse
-exactly the deployments this is most useful in.
-
-Each client implements two questions:
-
-* `get_repo(owner, name)` -- one repository, without listing anything else.
-  This is what a pasted repository URL uses, and it is why adding
-  `microsoft/vscode` costs one request rather than the 83 pages it takes to
-  enumerate an organisation of 8,296.
-* `list_repos(owner)` -- everything under an owner, for the picker.
-"""
+"""Asking a host what it has."""
 from __future__ import annotations
 
 import logging
@@ -33,28 +13,14 @@ from git_synapse.ingest.sources import Source
 
 log = logging.getLogger(__name__)
 
-#: What a host returns in one request. Every one of them caps at 100 and
-#: silently ignores a larger number -- asking GitHub for 500 returns 100 and a
-#: "there is more" link -- so this is a fact about the hosts, not a choice.
 PAGE = 100
 
-#: The cap on a *single blocking call*. Nothing is lost past it: the caller
-#: takes the next page, and the picker keeps asking in the background while the
-#: reader is already looking at the first hundred. Fetching all 83 pages of an
-#: 8,296-repository organisation before drawing anything would be twenty-five
-#: seconds of blank screen.
 LIST_CAP = 300
 
 
 @dataclass
 class Page:
-    """One page of a listing, and whether the host says there is more.
-
-    `total` is the owner's true repository count where the host will say --
-    from a `rel="last"` link, a header, or a field. None means unknown, which
-    must be rendered as unknown: stating the number fetched so far as the total
-    is stating our own progress as a fact about somebody else's organisation.
-    """
+    """One page of a listing, and whether the host says there is more."""
 
     records: list[RepoRecord]
     has_more: bool
@@ -67,18 +33,7 @@ class Provider:
     name = "git"
 
     def __init__(self, source: Source, patient: bool = True, token: str = "") -> None:
-        """`patient` is whether a rate limit is waited out or reported.
-
-        `token` is this source's own credential where it has one, overriding
-        the deployment-wide credential in the environment. One organisation's
-        read-only token has no business being the one used against another
-        organisation's private repositories.
-
-        False for anything a person is waiting on. An organisation of 8,296
-        repositories takes 83 listings, which is enough to trip GitHub's
-        secondary limit -- and a handler that answers that by sleeping a minute
-        is indistinguishable from one that has hung.
-        """
+        """`patient` is whether a rate limit is waited out or reported."""
         self.source = source
         self.patient = patient
         self.token = token
@@ -99,12 +54,7 @@ class Provider:
         raise NotImplementedError
 
     def list_page(self, owner: str, page: int = 1) -> Page:
-        """One page, for a picker that draws as it loads.
-
-        The default walks `list_repos` and slices, which is correct for any
-        client that cannot do better; the three real ones override it so that
-        page five costs one request rather than five.
-        """
+        """One page, for a picker that draws as it loads."""
         rows = self.list_repos(owner)
         start = (page - 1) * PAGE
         return Page(rows[start:start + PAGE], has_more=len(rows) > start + PAGE,
@@ -114,24 +64,12 @@ class Provider:
         return type(self).list_repos is not Provider.list_repos
 
     def fetch_parent(self, full_name: str) -> str:
-        """The repository ``full_name`` was forked from, or "" if unknown.
-
-        Answered from the listing by every host that puts it there, which is
-        why the default is to add nothing: only GitHub withholds it and has to
-        ask again.
-        """
+        """The repository ``full_name`` was forked from, or "" if unknown."""
         return ""
 
 
 class GitProvider(Provider):
-    """No API. Everything is derived from the URL itself.
-
-    The record is deliberately sparse rather than guessed: `is_fork` and
-    `is_archived` default false because we do not know, and inventing a value
-    that a filter then acts on would be worse than admitting ignorance. The
-    ingest fills in what git can actually prove -- default branch, commit
-    counts, dates -- once the mirror exists.
-    """
+    """No API. Everything is derived from the URL itself."""
 
     name = "git"
 
@@ -162,8 +100,6 @@ class GitHubProvider(Provider):
         if source.api_url and source.api_url != cfg.api_url:
             cfg = dataclasses.replace(cfg, api_url=source.api_url)
         if token:
-            # `token_file` too: current_token() prefers the file, and leaving it
-            # set would silently ignore the credential this source carries.
             cfg = dataclasses.replace(cfg, token=token, token_file="")
         self._client = GitHubClient(cfg, patient=patient)
 
@@ -173,8 +109,6 @@ class GitHubProvider(Provider):
     def _record(self, payload: dict[str, Any]) -> RepoRecord:
         import dataclasses
 
-        # from_api knows GitHub's payload but not which GitHub: an Enterprise
-        # install answers the same shape on a different host.
         return dataclasses.replace(RepoRecord.from_api(payload), host=self.source.host)
 
     def get_repo(self, owner: str, name: str) -> RepoRecord:
@@ -184,14 +118,7 @@ class GitHubProvider(Provider):
         return self._client.fetch_parent(full_name)
 
     def list_page(self, owner: str, page: int = 1) -> Page:
-        """One page of an owner's repositories.
-
-        Whether an owner is an organisation or a person is not knowable from a
-        URL, so the org endpoint is tried and a 404 falls back -- as part of
-        the real request rather than a probe before it. A probe would be an
-        extra request on every single lookup, which on an anonymous GitHub is
-        one of only sixty an hour.
-        """
+        """One page of an owner's repositories."""
         import dataclasses
         import re as _re
 
@@ -214,17 +141,11 @@ class GitHubProvider(Provider):
         return Page(
             rows,
             has_more='rel="next"' in link,
-            # The last page number times the page size is an upper bound, not
-            # the count; the final page is rarely full. Good enough to say
-            # "about 8,300", which is what a progress line needs.
             total=int(last.group(1)) * PAGE if last else (
                 (page - 1) * PAGE + len(rows) if 'rel="next"' not in link else None),
         )
 
     def list_repos(self, owner: str) -> list[RepoRecord]:
-        # An owner may be an organisation or a person, and the caller pasting a
-        # URL has no way to know which. Try the org endpoint and fall back,
-        # rather than making that someone's problem to answer.
         import dataclasses
 
         try:
@@ -237,11 +158,7 @@ class GitHubProvider(Provider):
 
 
 class GitLabProvider(Provider):
-    """GitLab groups nest, so a project is addressed by its full path.
-
-    `owner` here may itself contain slashes (`gitlab-org/security`), which is
-    why the path is URL-encoded whole rather than assembled from two segments.
-    """
+    """GitLab groups nest, so a project is addressed by its full path."""
 
     name = "gitlab"
 
@@ -274,11 +191,7 @@ class GitLabProvider(Provider):
             topics=list(p.get("topics") or []),
             visibility=p.get("visibility"),
             is_private=p.get("visibility") != "public",
-            # GitLab calls it a fork relationship; the key is absent when there
-            # is none, which is the only signal the list endpoint gives.
             is_fork="forked_from_project" in p,
-            # GitLab names the parent in the listing itself, so a fork costs no
-            # extra request here the way it does on GitHub.
             parent_full_name=(
                 (p.get("forked_from_project") or {}).get("path_with_namespace") or ""
             ),
@@ -300,12 +213,7 @@ class GitLabProvider(Provider):
         return self._record(self._get(f"/projects/{encoded}").json())
 
     def list_page(self, owner: str, page: int = 1) -> Page:
-        """One page of a group's projects, subgroups included.
-
-        GitLab reports the totals in headers, and omits them once a set is
-        large enough that counting it would be expensive -- so a missing header
-        means unknown, not zero.
-        """
+        """One page of a group's projects, subgroups included."""
         from urllib.parse import quote
 
         encoded = quote(owner, safe="")

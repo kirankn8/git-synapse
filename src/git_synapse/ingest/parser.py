@@ -1,27 +1,4 @@
-"""Streaming parser for ``git log`` output.
-
-Output format
--------------
-The pipeline invokes git with ``-z --raw --numstat`` and a custom ``--format``.
-That produces a single NUL-separated record stream, empirically verified against
-real repositories, laid out per commit as:
-
-1. One header record, prefixed with ``\\x01`` and holding ten ``\\x1f``-separated
-   fields (sha, parents, author, ..., subject, body).
-2. A *raw* block: for each changed path, one record ``:<mode> <mode> <sha>
-   <sha> <STATUS>`` followed by one path record -- or, for renames and copies,
-   two path records (old then new).
-3. A *numstat* block: one record per path, ``<adds>\\t<dels>\\t<path>``, except
-   for renames and copies where the path is empty and the old and new paths
-   follow as two further records. Binary files report ``-`` for both counts.
-
-Both blocks are parsed because neither alone is sufficient: the raw block
-carries the status letter and rename similarity, the numstat block carries line
-counts. They are joined on the (new) path.
-
-Everything is streamed. A repository with a million commits is processed with
-one commit resident in memory at a time.
-"""
+"""Streaming parser for ``git log`` output."""
 
 from __future__ import annotations
 
@@ -93,12 +70,7 @@ class ParsedCommit:
 
 
 def _parse_git_date(value: str) -> datetime:
-    """Parse git's strict-ISO ``%aI`` output.
-
-    Falls back to the Unix epoch rather than raising: a handful of commits in
-    any large org carry corrupt author dates, and losing the whole repository
-    over one of them would be the wrong trade.
-    """
+    """Parse git's strict-ISO ``%aI`` output."""
     try:
         return datetime.fromisoformat(value.strip())
     except (ValueError, AttributeError):
@@ -160,11 +132,7 @@ class _CommitAssembler:
         self._pending_numstat_old: str | None = None
 
     def _note(self, path: str) -> None:
-        """Record first-appearance order for a path.
-
-        Tracked in a separate set rather than by probing ``raw``/``numstat``,
-        because callers insert into those dicts before calling here.
-        """
+        """Record first-appearance order for a path."""
         if path not in self._seen:
             self._seen.add(path)
             self.order.append(path)
@@ -174,15 +142,6 @@ class _CommitAssembler:
         if not record:
             return
 
-        # --- a path record following a raw status line ---
-        #
-        # Tested before the ":" sniff, not after. A record that arrives where a
-        # path is due *is* a path, whatever its first byte -- and `:` is a legal
-        # first character for a filename. Sniffing first ate `:zz.txt` as a
-        # status line: the real file lost its status letter and its line counts,
-        # and the numstat record that followed was consumed as a path, putting a
-        # file called `1\t0\t1a.txt` into the corpus, co-occurring with every
-        # real file in that commit.
         if self._pending_raw is not None:
             letter, similarity = self._pending_raw
             if letter in ("R", "C"):
@@ -201,7 +160,6 @@ class _CommitAssembler:
             self._pending_raw = None
             return
 
-        # --- raw block: a ":<modes> <shas> <STATUS>" line ---
         if record.startswith(":"):
             status_field = record.rsplit(" ", 1)[-1].strip()
             letter = status_field[:1].upper() or "M"
@@ -212,7 +170,6 @@ class _CommitAssembler:
             self._pending_rename_old = None
             return
 
-        # --- numstat block: "<adds>\t<dels>\t<path>" ---
         parts = record.split("\t")
         if len(parts) >= 3:
             adds_s, dels_s, path = parts[0], parts[1], "\t".join(parts[2:])
@@ -228,7 +185,6 @@ class _CommitAssembler:
                 self._note(path)
             return
 
-        # --- path records trailing a rename numstat header ---
         if self._pending_numstat is not None:
             if self._pending_numstat_old is None:
                 self._pending_numstat_old = record
@@ -276,50 +232,10 @@ def iter_commits(
     blobless: bool = False,
     reverse: bool = True,
 ) -> Iterator[ParsedCommit]:
-    """Stream commits out of a bare mirror, newest first.
-
-    Args:
-        mirror: path to the bare repository.
-        rev: what to walk. Defaults to HEAD, i.e. the default branch only.
-        include_tags: also walk commits reachable from tags. A release is often
-            cut on a branch that never merges back, so its commits are otherwise
-            never read -- and the range between two releases is uncomputable.
-            Coupling is a claim about the code that shipped, and 25.8% of this
-            corpus exists solely on branches that never merged: abandoned
-            experiments, and backports that restate a change already counted on
-            the mainline. Walking those inflated co-change counts with work that
-            was never released and, because a branch can delete a file the
-            mainline still has, produced flatly false statements about HEAD.
-        since_shas: exclude these commits and all their ancestors, giving an
-            incremental read. Pass the previous run's tip, not
-            the previous run's default-branch tip. The caller must have
-            verified each SHA still
-            exists -- a force-push can orphan one, and git errors on an unknown
-            revision.
-        include_merges: keep merge commits. Merges restate their parents'
-            changes, so they are excluded by default.
-        rename_similarity: git rename-detection threshold, as a percentage.
-            Ignored for blobless mirrors, which are pinned to 100.
-        blobless: the mirror has no blob objects. Drops ``--numstat`` and
-            forces exact-only rename detection, because both line counting and
-            inexact rename detection read file contents -- on a blobless mirror
-            that triggers a promisor fetch that fails or hangs.
-        reverse: emit oldest commits first. Required by the loader, whose
-            rename tracking depends on having already seen a file's previous
-            name by the time the move is reported.
-
-    Yields:
-        One :class:`ParsedCommit` per commit, in git log order. On a blobless
-        mirror every ``FileChange`` reports zero insertions and deletions.
-
-    Raises:
-        GitError: if git exits non-zero.
-    """
+    """Stream commits out of a bare mirror, newest first."""
     import subprocess
 
     cfg = get_config().ingest
-    # Default off, and nothing in the product turns it on: a merge restates the
-    # changes of its parents, so counting one is counting the same edit twice.
     include_merges = bool(include_merges)
     rename_similarity = rename_similarity or cfg.rename_similarity
 
@@ -332,8 +248,6 @@ def iter_commits(
         "--date-order",
     ]
     if blobless:
-        # Exact renames only: git resolves these by comparing blob SHAs
-        # recorded in the trees, without ever reading blob content.
         args.append("-M100%")
     else:
         args.append("--numstat")
@@ -342,10 +256,6 @@ def iter_commits(
         args.append("--no-merges")
     if reverse:
         args.append("--reverse")
-    # The revision goes after the options, not before them. Leading `--all` was
-    # fine because it is an option; a bare revision that fails to resolve -- as
-    # HEAD does in a repository with no commits -- is read as a path, and git
-    # then rejects every option that follows it.
     args.append(rev)
     if include_tags:
         args.append("--tags")
@@ -363,12 +273,6 @@ def iter_commits(
 
     current: ParsedCommit | None = None
     assembler = _CommitAssembler()
-    # git emits one newline between a commit's --format output and its diff
-    # block, and it lands as a prefix on the record that follows the header.
-    # Exactly one, exactly there: `lstrip("\n")` on every record instead
-    # rewrote any path whose own first character is a newline, and since the raw
-    # and numstat blocks were then keyed on two different strings, one real file
-    # became two rows -- one of them a path that has never existed.
     after_header = False
     try:
         for record in _iter_records(proc.stdout):
@@ -397,16 +301,6 @@ def iter_commits(
             proc.stderr.close()
         returncode = proc.wait()
         if returncode != 0:
-            # A repository with no commits has no HEAD to resolve. `--all`
-            # returned nothing and exited 0, so scoping the walk to the default
-            # branch turned three empty repositories into hard failures. An
-            # empty repository is a legitimate no-op, not an error.
-            #
-            # Falling off the end rather than returning: a `return` inside a
-            # `finally` discards whatever exception was already propagating, so
-            # a parse error in the loop above vanished whenever git also
-            # reported an empty repository -- the run then looked like a
-            # repository with no commits.
             lowered = stderr.lower()
             if "unknown revision" in lowered or "does not have any commits yet" in lowered:
                 log.info("no commits reachable in %s; nothing to read", mirror)
@@ -415,24 +309,13 @@ def iter_commits(
 
 
 def split_path(path: str) -> tuple[str, str, str | None, int]:
-    """Decompose a repo-relative path into ``(dir, basename, extension, depth)``.
-
-    Dotfiles are handled explicitly: ``.gitignore`` has basename ``.gitignore``
-    and no extension, while ``.eslintrc.json`` correctly yields ``json``. Only a
-    literal ``./`` prefix is stripped -- using ``lstrip("./")`` here would eat the
-    leading dot of every dotfile.
-
-    Extensions are lowercased and length-capped so a pathological filename
-    cannot overflow the column.
-    """
+    """Decompose a repo-relative path into ``(dir, basename, extension, depth)``."""
     normalised = path.strip().removeprefix("./")
     if "/" in normalised:
         dir_path, _, basename = normalised.rpartition("/")
     else:
         dir_path, basename = "", normalised
 
-    # Ignore leading dots when looking for an extension, so a dotfile with no
-    # further dots is treated as extensionless.
     stem = basename.lstrip(".")
     extension: str | None = None
     if "." in stem:

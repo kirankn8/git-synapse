@@ -1,16 +1,4 @@
-"""Settings a running deployment can change, stored in the database.
-
-Environment variables configure a deployment; they cannot be changed from the
-UI without a restart, and a restart is not something a reader should need in
-order to slow a cron down. So the schedule follows the model accounts already
-use: the environment supplies the seed, the database holds the live value, and
-the database wins once something has written one.
-
-Only settings that are genuinely operational live here. Anything that changes
-what the numbers *mean* -- pair support, rename similarity, the measure set --
-stays in the environment, where it is versioned with the deployment and cannot
-be altered between two readings of the same table.
-"""
+"""Settings a running deployment can change, stored in the database."""
 from __future__ import annotations
 
 import logging
@@ -19,15 +7,8 @@ from git_synapse.db.orm import models, session_scope
 
 log = logging.getLogger(__name__)
 
-#: Settings the API is allowed to write, and how to validate each. Anything not
-#: named here is rejected: an open key/value endpoint is an invitation to store
-#: configuration nothing reads.
-#: Schedules, which are cron expressions.
 SCHEDULES = ("refresh_cron", "discover_cron")
 
-#: Access policy, which is one of auth.ACCESS_MODES. Kept apart from the
-#: schedules because the two are validated and reported differently, and a
-#: single list had /api/settings describing "dashboard_auth" as a cron.
 ACCESS = ("dashboard_auth", "mcp_auth")
 
 WRITABLE = SCHEDULES + ACCESS
@@ -68,13 +49,7 @@ def clear(name: str) -> None:
 
 
 def effective(name: str, fallback: str) -> str:
-    """The value in force: the stored override, else the environment's.
-
-    Every read goes to the database rather than a cached copy. The schedule is
-    read once a minute by one process, so the query costs nothing, and a cache
-    here would mean a change in the UI taking effect at a time nobody could
-    predict.
-    """
+    """The value in force: the stored override, else the environment's."""
     try:
         stored = get(name)
     except Exception:  # noqa: BLE001  # pragma: no cover - a read must not take the

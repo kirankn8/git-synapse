@@ -1,39 +1,16 @@
-"""What a pasted URL means.
-
-Adding something to scan should be one field. A person has a URL in their
-clipboard -- the page they were just looking at -- and asking them to decompose
-it into a provider, a login, a kind and an allowlist is asking them to do work
-the string already contains.
-
-So this turns any of these into a :class:`Source`::
-
-    https://github.com/microsoft/vscode        one repository
-    https://github.com/microsoft               every repository under an owner
-    git@gitlab.com:gitlab-org/gitlab.git       ssh form, one repository
-    https://bitbucket.org/team/repo/src/main/  a deep link, trimmed back
-    https://git.internal.corp/team/svc.git     a host we have no API for
-
-The last one matters. Cloning needs no API, so a host nobody has written a
-client for is still perfectly ingestible -- it simply arrives with less
-metadata. Refusing it would be refusing the case the abstraction exists for.
-"""
+"""What a pasted URL means."""
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-#: Hosts we can ask questions of, and the API each answers on. A host that is
-#: not here is not rejected; it is cloned, which is all that coupling needs.
 KNOWN_HOSTS: dict[str, tuple[str, str]] = {
     "github.com": ("github", "https://api.github.com"),
     "gitlab.com": ("gitlab", "https://gitlab.com/api/v4"),
     "bitbucket.org": ("bitbucket", "https://api.bitbucket.org/2.0"),
 }
 
-#: Path segments a provider puts *after* the repository, which a person pasting
-#: from their browser will bring along. Everything from one of these onward is
-#: not part of the repository's address.
 _TRAILING = {
     # GitHub / gitea
     "tree", "blob", "commits", "commit", "pulls", "pull", "issues", "actions",
@@ -53,12 +30,7 @@ class SourceError(ValueError):
 
 @dataclass(frozen=True)
 class Source:
-    """What a URL resolved to.
-
-    `repo` is None for an owner, which is the difference that decides whether
-    the caller is offered a list to choose from or a single repository to
-    confirm.
-    """
+    """What a URL resolved to."""
 
     provider: str
     host: str
@@ -78,11 +50,7 @@ class Source:
 
     @property
     def has_api(self) -> bool:
-        """Whether an owner can be enumerated and metadata fetched.
-
-        False is a normal state, not a degraded one: the repository still
-        mirrors, parses and scores identically.
-        """
+        """Whether an owner can be enumerated and metadata fetched."""
         return self.api_url is not None
 
 
@@ -100,12 +68,7 @@ def _split_path(path: str) -> list[str]:
 
 
 def parse(raw: str) -> Source:
-    """Resolve a pasted string to a repository or an owner.
-
-    Accepts the browser URL, the clone URL, the ssh remote, and a bare
-    ``owner/repo`` on the assumption of GitHub -- which is how people write it
-    in prose, and refusing it would be pedantry.
-    """
+    """Resolve a pasted string to a repository or an owner."""
     text = (raw or "").strip()
     if not text:
         raise SourceError("paste a repository or organisation URL")
@@ -133,9 +96,6 @@ def parse(raw: str) -> Source:
 
     provider, api_url = KNOWN_HOSTS.get(host, ("git", None))
 
-    # GitLab nests groups arbitrarily deep (gitlab-org/security/gitlab), so the
-    # repository is the last segment and everything before it is the owner.
-    # Everywhere else an owner is one segment and a repository is the second.
     if provider == "gitlab" and len(parts) > 2:
         owner, repo = "/".join(parts[:-1]), _clean(parts[-1])
     elif len(parts) >= 2:
@@ -154,8 +114,5 @@ def parse(raw: str) -> Source:
         repo=repo,
         api_url=api_url,
         web_url=web,
-        # Always the https form: the mirror is read-only and anonymous unless a
-        # token is configured, and an ssh remote would need a key in the
-        # container that nothing else here requires.
         clone_url=f"{web}.git" if repo else "",
     )

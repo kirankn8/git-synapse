@@ -1,12 +1,4 @@
-"""Manifest parsing, across every ecosystem this reads.
-
-This layer produces the `declared` evidence tier, which agents are told to trust
-above everything else, so a parse error here is the most expensive kind: it does
-not look like a failure, it looks like a fact.
-
-The property that matters throughout is that a reference is classified at the
-right *strength*. Calling a range a commit would present a guess as ground truth.
-"""
+"""Manifest parsing, across every ecosystem this reads."""
 
 from __future__ import annotations
 
@@ -17,7 +9,6 @@ from git_synapse.analysis import manifests as M
 SHA = "5fc63d6f3055aa11b3e0d2ff6a4a06f2c0e0a1b7"
 
 
-# ------------------------------------------------------------- classification
 
 @pytest.mark.parametrize(("raw", "kind"), [
     ("v3.0.0-20260626221153-5fc63d6f3055", "commit"),   # go pseudo-version
@@ -52,7 +43,6 @@ def test_a_range_pins_nothing():
     assert not M.classify("dep", "^1.2.0", "npm").provable
 
 
-# ------------------------------------------------------------------ per format
 
 CASES = [
     ("go.mod", "require github.com/acme/signer v1.4.0\n", "github.com/acme/signer", "tag"),
@@ -103,7 +93,6 @@ def test_a_github_workflow_pin_is_read_as_a_commit():
     assert refs["actions/checkout"].sha == SHA
 
 
-# ------------------------------------------------------------------- robustness
 
 @pytest.mark.parametrize("path", ["Cargo.toml", "package.json", "pom.xml", "flake.lock",
                                   "pubspec.yaml", "go.mod", "app.csproj"])
@@ -143,7 +132,6 @@ def test_conda_reads_pip_subsection_and_rejects_non_mappings():
     assert M.parse_conda("- not a mapping") == []
 
 
-# ------------------------------------------------------------------- coverage
 
 def test_the_popular_ecosystems_are_all_covered():
     """A language with no manifest reader contributes no provable edges at all."""
@@ -161,7 +149,6 @@ def test_a_lockfile_is_registered_before_the_manifest_beside_it():
     assert order.index("Gemfile.lock") < order.index("Gemfile")
 
 
-# ------------------------------------------------- matching a version to a tag
 
 @pytest.mark.parametrize(("declared", "tag"), [
     ("33.4.0-jre",     "v33.4.0"),      # Maven classifier vs git tag
@@ -178,8 +165,7 @@ def test_a_lockfile_is_registered_before_the_manifest_beside_it():
     ("1.2.3",          "R_1_2_3"),      # autotools
 ])
 def test_a_declared_version_matches_the_tag_that_shipped_it(declared, tag):
-    """A manifest names versions in the registry's namespace and git names them
-    in the repository's, so the two are never equal as strings."""
+    """A manifest names versions in the registry's namespace and git names them in the repository's, so the two are never equal as strings."""
     assert M.version_key(declared) == M.version_key(tag)
 
 
@@ -191,8 +177,7 @@ def test_a_declared_version_matches_the_tag_that_shipped_it(declared, tag):
     ("2.0", "2.0.1"),
 ])
 def test_versions_that_are_not_the_same_release_never_collapse(a, b):
-    """Stripping every suffix would resolve a release candidate to the final
-    release while looking perfectly successful."""
+    """Stripping every suffix would resolve a release candidate to the final release while looking perfectly successful."""
     assert M.version_key(a) != M.version_key(b)
 
 
@@ -221,18 +206,15 @@ def test_a_range_declares_its_own_bounds(raw, floor, ceiling):
     assert M.bounds(raw) == (floor, ceiling)
 
 
-# ------------------------------------------------- parsers with no coverage
 
 def _with_parser(monkeypatch, parse):
-    """Swap the parser for `package.json`. `Ecosystem` is frozen, so the whole
-    record is replaced rather than one of its fields."""
+    """Swap the parser for `package.json`."""
     import dataclasses
     eco = dataclasses.replace(M.ecosystem_for("package.json"), parse=parse)
     monkeypatch.setattr(M, "ecosystem_for", lambda path: eco)
 
 def test_a_gemfile_lock_yields_both_gems_and_git_pins():
-    """A Gemfile.lock records ordinary gems by version and git dependencies by
-    revision, and dropping either loses half the file."""
+    """A Gemfile.lock records ordinary gems by version and git dependencies by revision, and dropping either loses half the file."""
     lock = """GIT
   remote: https://github.com/acme/widget.git
   revision: a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0
@@ -247,17 +229,13 @@ GEM
 """
     pairs = M.parse_gemfile_lock(lock)
     assert ("rails", "7.0.4") in pairs and ("rack", "2.2.6") in pairs
-    # A git dependency is listed twice: once by revision, once by version in
-    # `specs:`. Both are emitted, and the revision comes first, so the stronger
-    # evidence is what survives deduplication.
     assert any(n == "widget" and v.startswith("a1b2c3d4") for n, v in pairs)
     widget = [r for r in M.references("Gemfile.lock", lock) if r.name == "widget"]
     assert widget and widget[0].kind == "commit"
 
 
 def test_a_manifest_whose_parser_raises_is_skipped_not_fatal(monkeypatch):
-    """One unreadable manifest in a monorepo must not end the scan for the
-    other two hundred."""
+    """One unreadable manifest in a monorepo must not end the scan for the other two hundred."""
     def _explode(_text):
         raise ValueError("malformed")
 
@@ -271,8 +249,7 @@ def test_a_path_that_is_not_a_manifest_yields_nothing():
 
 @pytest.mark.parametrize("name", ["Setup uv", "a" * 201])
 def test_a_name_that_cannot_be_a_package_is_dropped(name, monkeypatch):
-    """A walker that wanders into a CI step title produces things like
-    "Setup uv" -- no package name contains whitespace, and none is 200 long."""
+    """A walker that wanders into a CI step title produces things like "Setup uv" -- no package name contains whitespace, and none is 200 long."""
     _with_parser(monkeypatch, lambda _t: [(name, "1.0.0")])
     assert M.references("package.json", "{}") == []
 
@@ -284,8 +261,7 @@ def test_a_block_name_is_not_a_dependency(monkeypatch):
 
 
 def test_a_bazel_stanza_pins_a_repository_to_a_ref():
-    """Bazel, Dockerfiles and deps.edn share no syntax, but each puts a name
-    and a hash in one stanza."""
+    """Bazel, Dockerfiles and deps.edn share no syntax, but each puts a name and a hash in one stanza."""
     text = '''
 http_archive(
     name = "com_google_absl",
@@ -303,28 +279,24 @@ def test_a_comparator_with_no_version_bounds_nothing(raw):
 
 
 def test_a_pom_without_an_artifact_publishes_nothing():
-    """`groupId` alone does not name a package, and inventing one from it would
-    claim this repository publishes something it does not."""
+    """`groupId` alone does not name a package, and inventing one from it would claim this repository publishes something it does not."""
     assert M.published_names("pom.xml", "<project><groupId>com.acme</groupId></project>") == []
 
 
 def test_yaml_that_is_not_a_mapping_is_not_a_manifest():
-    """A workflow file that parses to a list has no dependency block, and
-    treating its entries as packages invents them."""
+    """A workflow file that parses to a list has no dependency block, and treating its entries as packages invents them."""
     assert M.references("pnpm-lock.yaml", "- one\n- two\n") == []
 
 
 def test_a_nested_dependency_table_is_walked(monkeypatch):
-    """Cargo writes `serde = { version = "1.0", features = [...] }`; reading only
-    the string form would miss every dependency that carries options."""
+    """Cargo writes `serde = { version = "1.0", features = [...] }`; reading only the string form would miss every dependency that carries options."""
     toml = '[dependencies]\nserde = { version = "1.0.188", features = ["derive"] }\n'
     names = {r.name: r.raw for r in M.references("Cargo.toml", toml)}
     assert names.get("serde") == "1.0.188"
 
 
 def test_a_stanza_without_a_submodule_header_takes_its_name_from_the_url():
-    """conanfile.txt and a bare .gitmodules fragment record a url and a ref and
-    no name, so neither line means anything without the other."""
+    """conanfile.txt and a bare .gitmodules fragment record a url and a ref and no name, so neither line means anything without the other."""
     text = "url = https://github.com/acme/widget.git\nrevision = v1.2.3\n"
     assert M.parse_ini_like(text) == [("widget", "v1.2.3")]
 
@@ -340,8 +312,7 @@ def test_yaml_that_cannot_be_parsed_yields_nothing():
 
 
 def test_a_version_with_no_digits_is_not_a_version():
-    """`name` as a version is what a walker produces when it wanders into a CI
-    step definition -- a parse error that reads as a fact."""
+    """`name` as a version is what a walker produces when it wanders into a CI step definition -- a parse error that reads as a fact."""
     import dataclasses
     eco = dataclasses.replace(M.ecosystem_for("package.json"),
                               parse=lambda _t: [("lodash", "name")])
@@ -351,17 +322,13 @@ def test_a_version_with_no_digits_is_not_a_version():
 
 
 def test_yaml_manifests_are_skipped_when_the_parser_is_absent(monkeypatch):
-    """PyYAML is optional. Without it a lockfile must yield nothing rather than
-    raise on every scan."""
+    """PyYAML is optional. Without it a lockfile must yield nothing rather than raise on every scan."""
     monkeypatch.setattr(M, "yaml", None)
     assert M.references("pnpm-lock.yaml", "packages:\n  /left-pad/1.0.0: {}\n") == []
 
 
 def test_a_manifest_declaring_a_dtd_is_refused_rather_than_expanded():
-    """These files come from repositories we mirror, which is to say from
-    anyone. ElementTree expands internal entities, so twenty lines of `pom.xml`
-    can define nested entities that expand to gigabytes and take the ingest
-    down with it. No real Maven or MSBuild manifest declares a DTD."""
+    """These files come from repositories we mirror, which is to say from anyone."""
     bomb = (
         '<?xml version="1.0"?>\n'
         '<!DOCTYPE lolz [<!ENTITY lol "lol">\n'

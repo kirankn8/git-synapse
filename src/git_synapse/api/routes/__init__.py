@@ -23,9 +23,6 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# ---------------------------------------------------------------------------
-# Health & meta
-# ---------------------------------------------------------------------------
 
 
 @router.get("/health", tags=["meta"])
@@ -67,15 +64,10 @@ def config() -> dict:
         "rename_similarity": cfg.ingest.rename_similarity,
         "blobless_threshold_kb": cfg.ingest.blobless_threshold_kb,
         "recency_half_life_days": cfg.analysis.recency_half_life_days,
-        # The value in force, not the seed: a schedule set from the UI is
-        # stored, and reporting the environment's here would tell the reader a
-        # cadence nothing runs on.
         "refresh_cron": live_cron("refresh"),
         "discover_cron": live_cron("discover"),
         "scheduler_timezone": cfg.schedule.timezone,
         "scheduler_enabled": cfg.schedule.enabled,
-        # Which of these the UI may change, and whether each is currently
-        # overridden or still coming from the environment.
         "editable": {
             name: {"value": live_cron(name.removesuffix("_cron")),
                    "overridden": settings.get(name) is not None,
@@ -83,8 +75,6 @@ def config() -> dict:
                                        else "discover_cron")}
             for name in settings.SCHEDULES
         },
-        # Never the token itself -- only whether one is present and how it got
-        # here, so the UI can say "set" without being able to read it back.
         "github_token": _token_status(),
     }
 
@@ -99,8 +89,6 @@ def _token_status() -> dict:
     return {
         "present": bool(gh.current_token()),
         "source": "file" if file_has else ("environment" if gh.token else "none"),
-        # A host-managed file is authoritative and rotates on its own; saying so
-        # stops a reader pasting a token that will be ignored.
         "editable_here": not file_has,
     }
 
@@ -134,14 +122,7 @@ def list_settings(request: Request) -> dict:
 
 @router.put("/settings/{name}", tags=["meta"])
 def put_setting(name: str, body: SettingIn, request: Request) -> dict:
-    """Store an operational setting, or clear it back to the environment's.
-
-    Validated here rather than at the scheduler: a cron that does not parse
-    would otherwise be accepted, stored, and then silently ignored once a
-    minute by a process the reader is not watching.
-    """
-    # Changing the schedule affects the corpus; changing the access policy
-    # affects who can see it. Both are an administrator's call.
+    """Store an operational setting, or clear it back to the environment's."""
     _require(request, admin=True)
     if name not in settings.WRITABLE:
         raise HTTPException(404, f"{name!r} is not a settable option")
@@ -173,9 +154,6 @@ def put_setting(name: str, body: SettingIn, request: Request) -> dict:
     return {"name": name, "value": value, "overridden": True}
 
 
-# ---------------------------------------------------------------------------
-# Sign-in, and the people who may sign in
-# ---------------------------------------------------------------------------
 
 #: The session cookie. Host-only, so it is never sent to a sibling subdomain.
 COOKIE = "gs_session"
@@ -194,12 +172,7 @@ class NewUser(BaseModel):
 
 
 class FirstUser(NewUser):
-    """The first administrator, who has nobody to be authorised by.
-
-    The setup token stands in for the admin who does not exist yet. It proves
-    the caller can read the deployment's console or its secret store, which is
-    the same thing being an administrator will later mean.
-    """
+    """The first administrator, who has nobody to be authorised by."""
 
     setup_token: str = Field(min_length=1, max_length=200)
 
@@ -224,25 +197,14 @@ def _set_cookie(response: Response, token: str, secure: bool) -> None:
 
 @router.get("/auth/me", tags=["auth"])
 def whoami(request: Request) -> dict:
-    """Who is signed in, and whether anyone exists yet.
-
-    Answers for the signed-out caller too: the UI needs to know whether to show
-    a sign-in form or a first-run setup screen, and that must not require being
-    signed in already.
-    """
+    """Who is signed in, and whether anyone exists yet."""
     user = caller(request)
     needs_setup = auth.count_users() == 0
     return {
         "user": user,
         "authenticated": user is not None,
         "needs_setup": needs_setup,
-        # Where to tell the reader to look for the setup token, which differs:
-        # a minted one is in the API log, a configured one is wherever the
-        # deployment keeps its secrets. Never the token itself -- the whole
-        # point is that reading it requires access this endpoint does not.
         "setup_token_minted": needs_setup and auth.setup_token_is_minted(),
-        # The UI needs this to know whether a signed-out visitor should see a
-        # sign-in form or the dashboard.
         "auth_required": auth.access_mode("dashboard") == "required",
     }
 
@@ -253,12 +215,8 @@ def login(body: Credentials, request: Request, response: Response) -> dict:
         token, user = auth.sign_in(body.email, body.password,
                                    request.headers.get("user-agent"))
     except auth.TooManyAttempts as exc:
-        # 429, not 401: the credentials were never examined, and telling the
-        # caller to wait is different from telling them they are wrong.
         raise HTTPException(429, str(exc)) from exc
     except auth.AuthError as exc:
-        # 401 rather than 400: the credentials were the problem, and the client
-        # distinguishes the two.
         raise HTTPException(401, str(exc)) from exc
     _set_cookie(response, token, request.url.scheme == "https")
     return {"user": user}
@@ -273,18 +231,7 @@ def logout(request: Request, response: Response) -> dict:
 
 @router.post("/auth/setup", tags=["auth"], status_code=201)
 def setup(body: FirstUser, request: Request, response: Response) -> dict:
-    """Create the first administrator, once, for whoever holds the setup token.
-
-    A password in the environment would sit in a shell history, a compose file
-    and every process listing; this asks for one at the console instead. The
-    endpoint refuses as soon as a single user exists, so it cannot be used to
-    add a second administrator later.
-
-    The window between a migrated database and a claimed account is the one
-    moment nothing is signed in, and the screen that ends it is by necessity
-    reachable without signing in. The token is what stops a stranger who
-    reaches the port first from becoming the administrator of the deployment.
-    """
+    """Create the first administrator, once, for whoever holds the setup token."""
     if auth.count_users() > 0:
         raise HTTPException(409, "this deployment already has users")
     try:
@@ -307,11 +254,7 @@ def setup(body: FirstUser, request: Request, response: Response) -> dict:
 
 
 def caller(request: Request) -> dict | None:
-    """Whoever is making this request: a browser session, or a bearer token.
-
-    Both carry a person, so everything downstream -- roles, the call log, the
-    audit of who added whom -- works the same either way.
-    """
+    """Whoever is making this request: a browser session, or a bearer token."""
     header = request.headers.get("authorization") or ""
     if header.lower().startswith("bearer "):
         user = auth.token_user(header[7:].strip())
@@ -323,8 +266,6 @@ def caller(request: Request) -> dict | None:
 def _require(request: Request, admin: bool = False) -> dict:
     user = caller(request)
     if user is None:
-        # With sign-in switched off there is still nobody to attribute an
-        # administrative act to, so these endpoints always need a caller.
         raise HTTPException(401, "sign in to continue")
     if admin and user["role"] != "admin":
         raise HTTPException(403, "only an administrator can do that")
@@ -345,11 +286,7 @@ def my_tokens(request: Request) -> dict:
 
 @router.post("/auth/tokens", tags=["auth"], status_code=201)
 def mint_token(body: NewToken, request: Request) -> dict:
-    """Create a personal token. The secret is returned once and never again.
-
-    It carries the maker's identity and role, so it can do what they can do and
-    nothing more, and it stops working when their account does.
-    """
+    """Create a personal token. The secret is returned once and never again."""
     me = _require(request)
     try:
         secret, row = auth.create_token(me["id"], body.name, body.days)
@@ -389,8 +326,6 @@ def patch_user(user_id: int, body: UserPatch, request: Request) -> dict:
     _require(request, admin=True)
     if auth.get_user(user_id) is None:
         raise HTTPException(404, f"user {user_id} not found")
-    # Demoting or deactivating the last administrator leaves a deployment
-    # nobody can add a person to, and no way back except the database.
     losing_admin = body.role == "member" or body.is_active is False
     if losing_admin and auth.admin_count(exclude=user_id) == 0:
         raise HTTPException(409, "this is the only administrator")
@@ -407,25 +342,14 @@ def delete_user(user_id: int, request: Request) -> dict:
         raise HTTPException(409, "you cannot remove your own account")
     if auth.get_user(user_id) is None:
         raise HTTPException(404, f"user {user_id} not found")
-    # No "last administrator" check here, unlike the patch above: the caller is
-    # an active administrator by definition, and cannot be the person being
-    # removed, so one always remains. Demotion is the case that needs guarding,
-    # because there you can demote yourself.
     auth.delete_user(user_id)
     return {"deleted": user_id}
 
 
-# ---------------------------------------------------------------------------
-# Accounts: the orgs and users whose repositories get scanned
-# ---------------------------------------------------------------------------
 
 
 class AccountIn(BaseModel):
-    """A new source to scan, described field by field.
-
-    Most callers want :class:`SourceIn` instead, which takes a URL. This is the
-    explicit form, for a caller that already knows every part.
-    """
+    """A new source to scan, described field by field."""
 
     login: str = Field(min_length=1, max_length=200)
     kind: str = "org"
@@ -434,9 +358,6 @@ class AccountIn(BaseModel):
     api_url: str | None = None
     enabled: bool = True
     include_private: bool = True
-    #: A fork's history is its parent's history, so tracking both stores the
-    #: same commits twice and ranks a second copy of every coupling as if it
-    #: were independent evidence.
     include_forks: bool = False
     include_archived: bool = True
     only_repos: list[str] = Field(default_factory=list)
@@ -458,34 +379,16 @@ class AccountPatch(BaseModel):
 
 
 class SourceIn(BaseModel):
-    """Something a person pasted, plus what they chose to track from it.
-
-    No filter flags. In a URL-driven flow the URL and the ticks are the whole
-    answer: a repository someone named is one they want, fork or not, and a
-    toggle beside it could only contradict them. Filters apply to the one case
-    where nothing was named -- tracking a whole owner -- and there the answer
-    is fixed rather than asked, because a fork's history is its parent's.
-    """
+    """Something a person pasted, plus what they chose to track from it."""
 
     url: str = Field(min_length=1, max_length=2000)
-    #: Which repositories under the owner. An empty list means *everything*,
-    #: including repositories created later -- the one intent an allowlist
-    #: cannot express. Omitted entirely for a repository URL, which names one.
     repos: list[str] | None = None
-    #: This source's own access token, for a private repository. Stored
-    #: encrypted; never returned. Empty leaves the deployment-wide credential
-    #: in the environment as the only one.
     token: str = Field(default="", max_length=500)
 
 
 class ResolveIn(BaseModel):
     url: str = Field(min_length=1, max_length=2000)
-    #: Which page of an owner's repositories. Every host caps a listing at a
-    #: hundred, so a large organisation is fetched a page at a time while the
-    #: reader is already looking at the first one.
     page: int = Field(default=1, ge=1, le=500)
-    #: Tried but not stored. The whole point of a lookup is to find out whether
-    #: a credential works before committing to it.
     token: str = Field(default="", max_length=500)
 
 
@@ -498,12 +401,7 @@ def list_accounts(enabled_only: bool = False) -> dict:
 
 @router.post("/accounts/resolve", tags=["accounts"])
 def resolve_source(body: ResolveIn, request: Request) -> dict:
-    """What is at this URL, and what could be tracked from it.
-
-    Reads only. A repository URL comes back as one already-fetched repository
-    to confirm; an owner URL comes back with the repositories under it, for a
-    person to tick. Nothing is written until :func:`create_source`.
-    """
+    """What is at this URL, and what could be tracked from it."""
     _require(request, admin=True)
     try:
         return {**accounts.resolve_url(body.url, token=body.token, page=body.page),
@@ -529,9 +427,6 @@ def create_source(body: SourceIn, request: Request) -> dict:
     except AccountError as exc:
         raise HTTPException(409, str(exc)) from exc
     except VaultError as exc:
-        # A token was offered and cannot be kept. Refusing is the point: the
-        # alternative is silently adding the source without it, which then
-        # fails to clone for a reason nothing on screen explains.
         raise HTTPException(422, str(exc)) from exc
 
 
@@ -591,9 +486,6 @@ def delete_account(account_id: int, request: Request) -> dict:
     return {"deleted": account_id}
 
 
-# ---------------------------------------------------------------------------
-# Callers: what asked for what, and what came back
-# ---------------------------------------------------------------------------
 
 
 @router.get("/calls/summary", tags=["calls"])
@@ -602,12 +494,7 @@ def calls_summary(
     surface: str | None = Query(None, pattern="^(mcp|http)$"),
     status: str | None = Query(None, pattern="^(ok|error)$"),
 ) -> dict:
-    """Volume, failures and latency over a window, for the operator view.
-
-    Honours ``surface``: without it the figures ignored the filter the reader
-    had just set, so the page looked broken -- the list narrowed and everything
-    above it stayed the same.
-    """
+    """Volume, failures and latency over a window, for the operator view."""
     return {
         "summary": calls.summary(hours, surface=surface),
         "by_name": calls.by_name(surface=surface, hours=hours, status=status),
@@ -644,9 +531,6 @@ def get_call(call_id: int) -> dict:
     return row
 
 
-# ---------------------------------------------------------------------------
-# Repositories
-# ---------------------------------------------------------------------------
 
 
 @router.get("/repos", tags=["repos"])
@@ -661,11 +545,7 @@ def list_repos(
     account_id: int | None = None,
     include_paused: bool = False,
 ) -> dict:
-    """List repositories with ingest state and history summary.
-
-    A paused source's repositories are excluded unless asked for, or unless a
-    single source is being listed by `account_id` -- see `q.list_repos`.
-    """
+    """List repositories with ingest state and history summary."""
     rows = q.list_repos(search, language, status, order_by, descending, limit,
                         offset, account_id, include_paused)
     return {"count": len(rows), "repos": rows}
@@ -761,9 +641,6 @@ def repo_graph(
     return q.coupling_graph(repo_id, measure, limit, min_support, center_file_id, min_score)
 
 
-# ---------------------------------------------------------------------------
-# Files & coupling
-# ---------------------------------------------------------------------------
 
 
 @router.get("/files", tags=["files"])
@@ -782,11 +659,7 @@ def search_files(
 
 @router.get("/files/resolve", tags=["files"])
 def resolve_file(path: str, repo: str | None = None, repo_id: int | None = None) -> dict:
-    """Look a file up by repo and path, following renames through the alias table.
-
-    Name the repository either way: ``repo`` for humans and agents, ``repo_id``
-    for the UI, whose URLs address files by path so they survive a re-ingest.
-    """
+    """Look a file up by repo and path, following renames through the alias table."""
     if (repo is None) == (repo_id is None):
         raise HTTPException(400, "give exactly one of repo or repo_id")
     row = q.resolve_file(repo, path, repo_id)
@@ -811,11 +684,7 @@ def coupled(
     min_support: int = Query(1, ge=1),
     min_score: float | None = None,
 ) -> dict:
-    """Files that historically change together with this one, ranked.
-
-    The central question of the product: "I am editing this, what else must
-    change?"
-    """
+    """Files that historically change together with this one, ranked."""
     if q.get_file(file_id) is None:
         raise HTTPException(404, f"file {file_id} not found")
     return {
@@ -856,12 +725,7 @@ def pair_commits(
 def coupled_dirs(
     dir_id: int, measure: str = DEFAULT_MEASURE, limit: int = Query(25, ge=1, le=500)
 ) -> dict:
-    """Directories that change with this one, and which directory it is.
-
-    The identity is returned because without it the page is an orphan: it can
-    rank partners but cannot say whose directory this is, so a reader arriving
-    from anywhere has no way back up to the repository or its account.
-    """
+    """Directories that change with this one, and which directory it is."""
 
     row = q.directory_detail(dir_id)
     if row is None:
@@ -889,9 +753,6 @@ def hotspots(repo_id: int | None = None, limit: int = Query(25, ge=1, le=200)) -
     return {"hotspots": q.hotspots(repo_id, limit)}
 
 
-# ---------------------------------------------------------------------------
-# Impact prediction
-# ---------------------------------------------------------------------------
 
 
 @router.get("/repos/{repo_id}/impact", tags=["impact"])
@@ -901,11 +762,7 @@ def repo_impact(
     limit: int = Query(20, ge=1, le=200),
     declared_only: bool = False,
 ) -> dict:
-    """What else to look at when changing this repository.
-
-    ``downstream`` is what a change here forces others to update; ``upstream`` is
-    where a change here may actually belong.
-    """
+    """What else to look at when changing this repository."""
     if q.get_repo(repo_id) is None:
         raise HTTPException(404, f"repository {repo_id} not found")
     rows = (
@@ -951,12 +808,7 @@ def impact_graph(
     min_score: float = Query(0.4, ge=0.0, le=1.0),
     limit: int = Query(400, ge=1, le=3000),
 ) -> dict:
-    """Repository-level impact graph, for the force-directed view.
-
-    There is no evidence filter because there is nothing to filter: every row in
-    ``repo_impact`` comes from a declared dependency or an observed version
-    bump, by construction in :func:`git_synapse.analysis.predict.rebuild`.
-    """
+    """Repository-level impact graph, for the force-directed view."""
     graph = q.impact_graph_data(min_score, limit)
     return {**graph, "stats": {"node_count": len(graph["nodes"]), "edge_count": len(graph["edges"])} }
 
@@ -964,13 +816,7 @@ def impact_graph(
 @router.get("/repos/{consumer_id}/bumps/{dep_id}", tags=["impact"])
 def repo_pair_bumps(consumer_id: int, dep_id: int,
                     limit: int = Query(100, ge=1, le=500)) -> dict:
-    """Every version bump one repository made to another, newest first.
-
-    The aggregate above it says "13 bumps, median lag 41.8 days", which is a
-    summary of something and never shows the something. This is the evidence:
-    which version, on what date, and the upstream commit it consumed where that
-    could be resolved.
-    """
+    """Every version bump one repository made to another, newest first."""
     rows = q.repo_pair_bumps(consumer_id, dep_id, limit)
     return {"consumer_repo_id": consumer_id, "dep_repo_id": dep_id,
             "count": len(rows), "bumps": rows}
@@ -982,9 +828,6 @@ def repo_dependencies(repo_id: int) -> dict:
     return q.repo_dependencies(repo_id)
 
 
-# ---------------------------------------------------------------------------
-# Mining: modules, drift, risk
-# ---------------------------------------------------------------------------
 
 
 @router.get("/repos/{repo_id}/modules", tags=["mining"])
@@ -1021,9 +864,6 @@ def mining_overview() -> dict:
         ).count()
     return result
 
-# ---------------------------------------------------------------------------
-# Feedback: defects in Git Synapse reported by the sessions using it
-# ---------------------------------------------------------------------------
 
 
 @router.get("/feedback", tags=["feedback"])
@@ -1032,12 +872,7 @@ def feedback(
     kind: str | None = None,
     limit: int = Query(50, ge=1, le=500),
 ) -> dict:
-    """Defects reported against Git Synapse, most-hit first.
-
-    ``status=all`` is explicit rather than an empty string, because the client's
-    query-string builder drops empty values and the filter would silently fall
-    back to "open".
-    """
+    """Defects reported against Git Synapse, most-hit first."""
     return {
         "summary": q.feedback_summary(),
         "reports": q.list_feedback(None if status == "all" else status, kind, limit),
@@ -1058,9 +893,6 @@ def resolve_feedback(feedback_id: int, request: Request, status: str,
     return {"id": feedback_id, "status": status}
 
 
-# ---------------------------------------------------------------------------
-# Ingest control
-# ---------------------------------------------------------------------------
 
 
 @router.get("/runs", tags=["ingest"])
@@ -1082,13 +914,7 @@ def trigger_refresh(
     force_full: bool = False,
     skip_discovery: bool = False,
 ) -> dict:
-    """Kick off an ingest run in the background.
-
-    Returns immediately; poll ``/api/runs`` for progress. A full ingest of a
-    large org takes tens of minutes, far longer than any sane HTTP timeout.
-    """
-    # Reconciles abandoned runs first, so a killed container cannot block
-    # ingestion forever.
+    """Kick off an ingest run in the background."""
     running = pipeline.active_run()
     if running:
         raise HTTPException(

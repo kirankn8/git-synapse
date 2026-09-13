@@ -1,14 +1,4 @@
-"""The whole pipeline over a synthetic corpus, in one pass.
-
-Every other test checks a part. This one builds real git repositories with a
-known coupling structure, runs the actual ingest and every derived stage against
-a scratch database, and asserts the answers come back right. If the stages stop
-composing -- an aggregate that reads a column another stage stopped writing --
-only this catches it.
-
-No network: the "remote" is a bare repo on disk, which is what sync_mirror
-clones from.
-"""
+"""The whole pipeline over a synthetic corpus, in one pass."""
 from __future__ import annotations
 
 import subprocess
@@ -207,12 +197,6 @@ def test_a_second_ingest_with_no_new_commits_changes_nothing(ingested):
     assert after == before
 
 
-# ------------------------------------------------ watermarks that went wrong
-#
-# Everything below re-reads an already-ingested repository whose watermark is in
-# some damaged state. Each of these damaged a real sync once: the whole point of
-# the guards is that a rewritten history costs one repository a slow re-read, not
-# a failed run.
 
 def _alpha(ingested):
     return RepoRecord(
@@ -222,8 +206,7 @@ def _alpha(ingested):
 
 
 def test_a_watermark_written_by_an_older_version_is_still_honoured(ingested):
-    """The watermark used to be a single SHA. A repository last synced by that
-    version must not re-read its whole history on the next tick."""
+    """The watermark used to be a single SHA."""
     from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest import pipeline
 
@@ -240,8 +223,7 @@ def test_a_watermark_written_by_an_older_version_is_still_honoured(ingested):
 
 
 def test_a_force_pushed_away_ref_tip_does_not_fail_the_repository(ingested):
-    """Asking git for `^<missing>` is a hard error, so an orphaned tip has to be
-    dropped rather than passed through."""
+    """Asking git for `^<missing>` is a hard error, so an orphaned tip has to be dropped rather than passed through."""
     from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest import pipeline
 
@@ -253,8 +235,7 @@ def test_a_force_pushed_away_ref_tip_does_not_fail_the_repository(ingested):
 
 
 def test_a_rewritten_commit_is_swept_during_the_next_sync(ingested):
-    """Insert-only was the bug: 735 commits across 24 repositories outlived the
-    history they came from, inflating the N of every contingency table there."""
+    """Insert-only was the bug: 735 commits across 24 repositories outlived the history they came from, inflating the N of every contingency table there."""
     from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest import pipeline
 
@@ -304,8 +285,7 @@ def test_a_repository_that_fails_mid_sync_records_why_on_the_row(ingested,
 
 def test_a_failed_status_write_does_not_mask_the_original_failure(ingested,
                                                                   monkeypatch):
-    """Best-effort means best-effort: if the database is the thing that broke,
-    the caller must still learn what actually failed."""
+    """Best-effort means best-effort: if the database is the thing that broke, the caller must still learn what actually failed."""
     from git_synapse.ingest import pipeline
 
     broken = {"yet": False}
@@ -328,17 +308,10 @@ def test_a_failed_status_write_does_not_mask_the_original_failure(ingested,
     assert "parser fell over" in result.error
 
 
-# ------------------------------------------------------- mining on real pairs
 
 @pytest.fixture(scope="module")
 def mined(ingested, tmp_path_factory):
-    """A repository with a real three-file module plus an unrelated file.
-
-    Three, not two: synchronous label propagation oscillates on a lone edge --
-    each node keeps adopting the other's label -- so a two-file component never
-    settles into a cluster. Real modules are bigger than that, but a fixture has
-    to be too.
-    """
+    """A repository with a real three-file module plus an unrelated file."""
     from git_synapse.ingest import pipeline
 
     root = tmp_path_factory.mktemp("mine")
@@ -364,8 +337,7 @@ def mined(ingested, tmp_path_factory):
 
 
 def test_mining_finds_the_module_the_coupled_files_form(mined):
-    """x, y and z always move together and alone.py never does, so label
-    propagation must put the first three in a cluster and leave the fourth out."""
+    """x, y and z always move together and alone.py never does, so label propagation must put the first three in a cluster and leave the fourth out."""
     from git_synapse.analysis import mining
     from git_synapse.db.orm import models, session_scope
 
@@ -419,11 +391,6 @@ def test_drifting_pairs_can_be_scoped_to_one_repository(ingested):
     assert all(r["repo_id"] == ingested["e2e-alpha"] for r in scoped)
 
 
-# ------------------------------------------- the own-connection call shapes
-#
-# Every rebuild takes an optional connection: the pipeline passes its own so the
-# derived tables land in the same transaction, while the CLI and one-off scripts
-# pass nothing. Only the first shape was ever exercised.
 
 
 def test_scoring_every_repository_covers_every_repository(mined):
@@ -466,8 +433,7 @@ def test_an_author_connection_that_is_already_closed_closes_cleanly(mined):
 
 
 def test_the_file_resolver_knows_paths_a_rename_left_behind(mined):
-    """A path that only exists as an alias must still resolve, or the file gets
-    a second identity and its history splits in two."""
+    """A path that only exists as an alias must still resolve, or the file gets a second identity and its history splits in two."""
     from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest.store import FileResolver
 
@@ -485,8 +451,7 @@ def test_the_file_resolver_knows_paths_a_rename_left_behind(mined):
 
 def test_a_mirror_that_cannot_be_read_does_not_mark_every_file_deleted(mined,
                                                                        monkeypatch):
-    """None means "could not read", not "the tree is empty". Confusing the two
-    would tombstone every file in the repository on one bad git invocation."""
+    """None means "could not read", not "the tree is empty"."""
     import subprocess as sp
 
     from git_synapse.analysis.aggregate import _head_tree_paths
@@ -529,8 +494,7 @@ def test_a_repository_whose_mirror_is_gone_reads_as_unreadable(mined, monkeypatc
 def test_the_declared_dependency_refresh_keeps_what_it_has_when_nothing_changed(
     mined, monkeypatch
 ):
-    """A repository whose manifests did not move must not lose its declared
-    edges -- `declared` is the tier agents are told to trust above all others."""
+    """A repository whose manifests did not move must not lose its declared edges -- `declared` is the tier agents are told to trust above all others."""
     from git_synapse.analysis import depbump
 
     depbump.refresh_declared(force=True)
@@ -542,23 +506,16 @@ def test_the_declared_dependency_refresh_keeps_what_it_has_when_nothing_changed(
 
 
 def test_the_module_graph_is_rebuilt_from_the_mirrors_on_disk(mined):
-    """A monorepo declares its real dependencies in per-module manifests; reading
-    only the root hid 371 internal references across 29 repositories."""
+    """A monorepo declares its real dependencies in per-module manifests; reading only the root hid 371 internal references across 29 repositories."""
     from git_synapse.analysis import depbump
 
     assert depbump.refresh_modules() >= 0
 
 
-# ------------------------------------------------- declared dependencies, for real
 
 @pytest.fixture(scope="module")
 def manifests(ingested, tmp_path_factory):
-    """A monorepo with per-module manifests plus the repository it depends on.
-
-    Reading only the root manifest was a real coverage gap: this organisation's
-    monorepos keep their real dependencies in per-module files, which hid 371
-    internal references across 29 repositories.
-    """
+    """A monorepo with per-module manifests plus the repository it depends on."""
     from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest import pipeline
 
@@ -632,8 +589,7 @@ def test_a_vendored_manifest_is_not_read_as_this_repositorys_dependency(manifest
 
 
 def test_a_second_declared_refresh_keeps_the_edges_it_already_found(manifests):
-    """A repository whose manifests did not move must not lose its declared
-    edges: `declared` is the tier agents are told to trust above all others."""
+    """A repository whose manifests did not move must not lose its declared edges: `declared` is the tier agents are told to trust above all others."""
     from git_synapse.analysis import depbump
 
     first = depbump.refresh_declared(force=True)

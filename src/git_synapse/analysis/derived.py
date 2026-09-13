@@ -1,9 +1,4 @@
-"""Versioned orchestration for materialised analytical results.
-
-Derived tables are deliberately cached for read performance.  This registry is
-the invalidation contract: changing a stage's version automatically rebuilds
-that stage and every stage that depends on it, once, in dependency order.
-"""
+"""Versioned orchestration for materialised analytical results."""
 
 from __future__ import annotations
 
@@ -24,9 +19,6 @@ class Stage:
     depends_on: tuple[str, ...] = ()
 
 
-# Bump a version whenever the stage's calculation or its materialised schema
-# changes.  Dependants are invalidated automatically; callers never need to
-# know which downstream tables are affected.
 STAGES: tuple[Stage, ...] = (
     Stage("aggregate", "2026-09-08.2"),
     Stage("score", "2026-09-08.1", ("aggregate",)),
@@ -107,10 +99,6 @@ def ensure_current(conn: object | None = None) -> list[str]:
     if conn is not None:  # pragma: no cover - exercised through the CLI path
         return _run(conn)
 
-    # Corpus-wide rebuilds can run for a long time.  Keep repository-local
-    # work independently durable, while advancing the stage watermark only
-    # after the complete stage succeeds.  An interrupted stage therefore
-    # resumes safely without rolling back already-finished repositories.
     stored: dict[str, str] = {}
     rebuilt: list[str] = []
     for stage in STAGES:

@@ -1,9 +1,4 @@
-"""Every HTTP route the UI depends on.
-
-Nothing here was covered at all, so a route could 500 for every user and the
-suite would stay green. These assert the contract each view relies on: the
-status, the shape, and that bad input is refused rather than answered.
-"""
+"""Every HTTP route the UI depends on."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -16,9 +11,6 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture(scope="module")
 def client(db):
-    # WEB_ROOT defaults to the container path, so the SPA shell is not mounted
-    # when the suite runs on the host. Point it at the repo's own web/ so the
-    # shell routes are exercised rather than silently skipped.
     import os
     from pathlib import Path
 
@@ -46,7 +38,6 @@ def client(db):
         reset_config_cache()
 
 
-# ------------------------------------------------------------------- meta
 
 def test_health_reports_the_database(client):
     r = client.get("/api/health")
@@ -68,7 +59,6 @@ def test_measures_catalogue_is_complete_and_self_describing(client):
         assert m["key"] and m["label"]
 
 
-# ------------------------------------------------------------------ repos
 
 def test_repos_listing_and_pagination(client):
     body = client.get("/api/repos", params={"limit": 3}).json()
@@ -77,8 +67,7 @@ def test_repos_listing_and_pagination(client):
 
 
 def test_the_tree_route_walks_a_repository_one_level_at_a_time(corpus, client):
-    """The folder page is the whole point of addressing files by path, so this
-    covers the round trip: root, descend, and the file resolving back."""
+    """The folder page is the whole point of addressing files by path, so this covers the round trip: root, descend, and the file resolving back."""
     repos = client.get("/api/repos", params={"limit": 50}).json()["repos"]
     for repo in repos:
         root = client.get(f"/api/repos/{repo['id']}/tree").json()
@@ -109,8 +98,7 @@ def test_the_tree_route_404s_for_a_path_that_is_not_in_the_repository(corpus, cl
 
 
 def test_resolving_a_file_needs_exactly_one_way_to_name_the_repository(client):
-    """Both, or neither, is a caller bug; answering it anyway would silently
-    ignore one of them."""
+    """Both, or neither, is a caller bug; answering it anyway would silently ignore one of them."""
     assert client.get("/api/files/resolve", params={"path": "x"}).status_code == 400
     assert client.get("/api/files/resolve",
                       params={"path": "x", "repo": "a", "repo_id": 1}).status_code == 400
@@ -138,14 +126,12 @@ def test_non_numeric_repo_id_is_refused(client, bad):
 
 
 def test_repo_zero_is_not_treated_as_unset(corpus, client):
-    """`if repo_id:` made 0 mean "no filter" and returned the whole corpus
-    dressed as one repository's data."""
+    """`if repo_id:` made 0 mean "no filter" and returned the whole corpus dressed as one repository's data."""
     scoped = client.get("/api/repos/0/hotspots", params={"limit": 2}).json()
     everything = client.get("/api/hotspots", params={"limit": 2}).json()
     assert scoped != everything
 
 
-# --------------------------------------------------------------- coupling
 
 def test_coupled_partners_are_oriented_and_ranked(corpus, client):
     args = _a_real_file()
@@ -176,8 +162,7 @@ def test_every_offered_measure_actually_works(client, measure):
 
 @pytest.mark.parametrize("measure", ["w_ab", "last_co_change", "not_a_measure", "path"])
 def test_a_measure_the_query_cannot_project_is_refused_not_500(client, measure):
-    """These passed the allowlist and then failed at the database on seven
-    endpoints, returning 500 for a value the code declared valid."""
+    """These passed the allowlist and then failed at the database on seven endpoints, returning 500 for a value the code declared valid."""
     r = client.get("/api/pairs", params={"measure": measure, "limit": 2})
     assert r.status_code == 400, f"{measure} -> {r.status_code}"
 
@@ -192,18 +177,15 @@ def test_out_of_range_limits_are_clamped_or_refused(client, limit):
         assert len(rows) <= 1000
 
 
-# --------------------------------------------------------------- feedback
 
 def test_feedback_status_filter(client):
-    """`status=all` was dropped by the query-string builder, so the filter
-    silently fell back to `open` and showed nothing."""
+    """`status=all` was dropped by the query-string builder, so the filter silently fell back to `open` and showed nothing."""
     everything = client.get("/api/feedback", params={"status": "all"}).json()
     only_open = client.get("/api/feedback", params={"status": "open"}).json()
     assert len(everything["reports"]) >= len(only_open["reports"])
     assert all(r["status"] == "open" for r in only_open["reports"])
 
 
-# -------------------------------------------------------------- the shell
 
 def test_spa_routes_serve_the_shell_so_a_deep_link_survives_refresh(client):
     for path in ("/repos", "/insights", "/measures", "/feedback"):
@@ -213,8 +195,7 @@ def test_spa_routes_serve_the_shell_so_a_deep_link_survives_refresh(client):
 
 
 def test_every_navigable_route_serves_the_shell(client):
-    """Derived from the nav rather than listed, so adding a view to the header
-    without registering its route fails here instead of 404ing for users."""
+    """Derived from the nav rather than listed, so adding a view to the header without registering its route fails here instead of 404ing for users."""
     import re
     from pathlib import Path
 
@@ -233,8 +214,7 @@ def test_a_genuine_typo_still_404s(client):
 
 
 def test_the_shell_stamps_a_current_asset_version(client):
-    """A hand-written `?v=2` never changed, so browsers served cached
-    JavaScript across redeploys and rendered blank views."""
+    """A hand-written `?v=2` never changed, so browsers served cached JavaScript across redeploys and rendered blank views."""
     import re
 
     html = client.get("/").text
@@ -243,7 +223,6 @@ def test_the_shell_stamps_a_current_asset_version(client):
     assert all(v.isdigit() and int(v) > 2 for v in versions)
 
 
-# ------------------------------------------------------- the remaining views
 
 def test_file_detail_endpoints_agree_with_each_other(corpus, client):
     args = _a_real_file()
@@ -278,11 +257,6 @@ def test_pair_detail_and_its_evidence_are_consistent(client):
     evidence = r.json()
     rows = evidence["commits"] if isinstance(evidence, dict) else evidence
     counted = [c for c in rows if c.get("counted", True)]
-    # Two separate requests, and a live refresh can rebuild the pair between
-    # them, so the invariant is asserted rather than exact equality: evidence
-    # that counted can never exceed the joint count it is presented as
-    # explaining. The exact match is checked against a stable snapshot in
-    # tests/test_query.py.
     assert len(counted) <= detail["n_ab"] or len(rows) >= 200, (
         f"{len(counted)} counted commits against a joint count of {detail['n_ab']}"
     )
@@ -341,7 +315,6 @@ def test_refresh_endpoint_refuses_while_a_run_is_active(client):
         holder.__exit__(None, None, None)
 
 
-# --------------------------------------------------- every route, discovered
 
 def _real_ids():
     """Ids that actually exist, so a sweep exercises the query rather than a 404."""
@@ -367,9 +340,6 @@ def _real_ids():
     return ids
 
 
-#: Endpoints whose required query arguments the sweep cannot guess. None means
-#: "cannot be swept generically"; a callable is given the ids and returns the
-#: arguments, so nothing here names a repository that has to pre-exist.
 REQUIRED_QUERY: dict[str, dict | None] = {
     "/api/files/resolve": None,
 }
@@ -398,9 +368,6 @@ def test_every_get_route_answers_with_real_arguments(corpus, admin_client):
     ids = _real_ids()
     checked, skipped, failures = 0, [], []
 
-    # The OpenAPI document is the app's own list of what it serves, so a new
-    # endpoint is swept the moment it exists rather than whenever someone
-    # remembers to add it here.
     schema = client.get("/api/openapi.json").json()
     for path, ops in schema.get("paths", {}).items():
         if "get" not in ops or not path.startswith("/api/"):
@@ -414,8 +381,6 @@ def test_every_get_route_answers_with_real_arguments(corpus, admin_client):
         for p in params:
             concrete = concrete.replace(f"{{{p}}}", str(ids[p]))
 
-        # A few endpoints take required query arguments; give them real ones
-        # rather than letting the sweep report a 422 as a fault.
         extra = REQUIRED_QUERY.get(path, {})
         if path == "/api/files/resolve":
             extra = _a_real_file()
@@ -453,7 +418,6 @@ def test_every_route_refuses_a_nonexistent_id_rather_than_500ing(client, db):
     assert not failures, "\n".join(failures)
 
 
-# --------------------------------------------------------- the guarded routes
 
 def test_health_reports_degraded_rather_than_raising(client, monkeypatch):
     """A health endpoint that 500s tells a load balancer nothing it can act on."""
@@ -498,8 +462,7 @@ def test_resolving_a_report_that_does_not_exist_is_a_404(signed_in):
 
 def test_a_refresh_is_refused_while_a_run_is_already_in_progress(client,
                                                                  monkeypatch):
-    """Two concurrent ingests fetch the same mirrors and redo the same global
-    rebuilds; the advisory lock catches it, but a 409 is the honest answer."""
+    """Two concurrent ingests fetch the same mirrors and redo the same global rebuilds; the advisory lock catches it, but a 409 is the honest answer."""
     import datetime as dt
 
     from git_synapse.api import routes
@@ -550,8 +513,7 @@ def test_the_spa_serves_its_own_routes(client, path):
 @pytest.mark.parametrize("path", ["/definitely-not-a-route",
                                   "/definitely-not-a-route/deeper"])
 def test_a_typo_is_a_404_rather_than_a_silently_rendered_shell(client, path):
-    """A catch-all would render the app shell for every typo, and the failure
-    would surface as a blank page instead of a 404."""
+    """A catch-all would render the app shell for every typo, and the failure would surface as a blank page instead of a 404."""
     assert client.get(path).status_code == 404
 
 
@@ -575,17 +537,10 @@ def test_a_report_can_be_resolved_and_says_so(signed_in, db):
     assert r.json() == {"id": created["id"], "status": "wontfix"}
 
 
-# ---------------------------------------------------------------- accounts
 
 @pytest.fixture()
 def no_accounts(client):
-    """An empty account table, and a signed-in administrator to manage it.
-
-    Adding, re-crediting and deleting a source decides what the deployment
-    scans and what credentials it uses, so those are administrative acts and
-    need somebody to attribute them to -- which means these tests need an admin
-    even on a deployment whose reads are open.
-    """
+    """An empty account table, and a signed-in administrator to manage it."""
     from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest import accounts as _accounts
 
@@ -669,14 +624,11 @@ def test_patching_leaves_unpassed_fields_alone(no_accounts):
     made = no_accounts.post("/api/accounts", json={"login": "kubernetes"}).json()
     patched = no_accounts.patch(f"/api/accounts/{made['id']}", json={"enabled": False}).json()
     assert patched["enabled"] is False
-    # Untouched by the patch, and off by default: a fork's history is its
-    # parent's, so tracking both files every commit twice.
     assert patched["include_forks"] is False
 
 
 def test_resolving_a_url_reads_without_writing(no_accounts, monkeypatch):
-    """The lookup is how somebody finds out whether a thing is there. Writing
-    on a read would mean a typo becomes a tracked source."""
+    """The lookup is how somebody finds out whether a thing is there."""
     from git_synapse.ingest import accounts as acc
 
     monkeypatch.setattr(acc, "resolve_url",
@@ -765,8 +717,7 @@ def test_setting_a_credential_with_no_key_configured_is_422(no_accounts, monkeyp
 
 
 def test_a_resolve_that_names_no_owner_is_a_422(no_accounts, monkeypatch):
-    """An AccountError here is a well-formed URL we cannot act on -- a host
-    with no API asked to be enumerated -- not a malformed one."""
+    """An AccountError here is a well-formed URL we cannot act on -- a host with no API asked to be enumerated -- not a malformed one."""
     from git_synapse.ingest import accounts as acc
     from git_synapse.ingest.accounts import AccountError
 
@@ -830,10 +781,6 @@ def test_a_deleted_account_keeps_its_repositories(no_accounts):
             assert still is not None, "deleting an account must not delete its repositories"
             assert still.account_id is None, "the link clears rather than cascading"
     finally:
-        # This fixture runs against the shared corpus database, so a synthetic
-        # repository left behind is picked up by every later test that reads
-        # `repo` -- one of which dereferences clone_url and fails on the None
-        # this record has.
         with session_scope() as session:
             session.query(models().Repo).filter_by(id=repo_id).delete(synchronize_session=False)
 
@@ -877,9 +824,7 @@ def test_a_run_that_exists_is_returned(client):
 
 
 def test_a_repository_pair_lists_every_bump_not_just_a_count(client, db):
-    """"13 bumps, median lag 41.8 days" is a summary of something the page never
-    showed. This is the something: which version, on what date, and the upstream
-    commit it consumed."""
+    """"13 bumps, median lag 41.8 days" is a summary of something the page never showed."""
     from datetime import UTC, datetime
 
     from git_synapse.db.orm import models, session_scope
@@ -918,16 +863,13 @@ def test_a_repository_pair_lists_every_bump_not_just_a_count(client, db):
 
 
 def test_a_pair_with_no_bumps_returns_an_empty_list_not_an_error(client, db):
-    """A declared dependency that has never moved is a real state, and the page
-    says so rather than showing a failure."""
+    """A declared dependency that has never moved is a real state, and the page says so rather than showing a failure."""
     r = client.get("/api/repos/-1/bumps/-2")
     assert r.status_code == 200 and r.json()["count"] == 0
 
 
 def test_lag_is_a_number_in_json_not_a_string(client, db):
-    """Postgres NUMERIC becomes a Decimal, which serialises as a string -- so a
-    field that looks numeric raises a TypeError the moment anyone does
-    arithmetic on it."""
+    """Postgres NUMERIC becomes a Decimal, which serialises as a string -- so a field that looks numeric raises a TypeError the moment anyone does arithmetic on it."""
     from datetime import UTC, datetime
 
     from git_synapse.db.orm import models, session_scope
@@ -954,9 +896,7 @@ def test_lag_is_a_number_in_json_not_a_string(client, db):
 
 
 def test_the_server_serves_the_shell_for_every_route_the_spa_claims():
-    """The nav covers the tabs; this covers the rest. A route registered in the
-    client but unknown to the server 404s on reload and on a pasted link, which
-    is precisely when a shareable URL is worth having."""
+    """The nav covers the tabs; this covers the rest."""
     import re
     from pathlib import Path
 
@@ -971,8 +911,7 @@ def test_the_server_serves_the_shell_for_every_route_the_spa_claims():
 
 
 def _spa_routes():
-    """The tuple is a local inside the module's `if web root exists` block, so it
-    is read back out of the source rather than imported."""
+    """The tuple is a local inside the module's `if web root exists` block, so it is read back out of the source rather than imported."""
     import ast
     from pathlib import Path
 
@@ -984,7 +923,6 @@ def _spa_routes():
     raise AssertionError("SPA_ROUTES no longer exists in api/main.py")
 
 
-# ---------------------------------------------------------- runtime settings
 
 def test_settings_lists_only_what_may_be_changed(admin_client):
     client = admin_client
@@ -994,8 +932,6 @@ def test_settings_lists_only_what_may_be_changed(admin_client):
     for s in payload["settings"]:
         assert s["value"] and "from_env" in s and "overridden" in s
 
-    # The access policy is not a cron and must not be described as one: a single
-    # writable list had /api/settings reporting "0 * * * *" for dashboard_auth.
     assert set(payload["access"]) == {"dashboard", "mcp"}
     assert all(v in ("required", "open") for v in payload["access"].values())
 
@@ -1029,8 +965,7 @@ def test_an_unknown_setting_is_not_silently_accepted(admin_client):
 
 
 def test_the_token_is_reported_as_present_but_never_returned(client):
-    """The status says whether a credential exists and where it came from. The
-    value must not leave the process: this API is unauthenticated on localhost."""
+    """The status says whether a credential exists and where it came from."""
     status = client.get("/api/config").json()["github_token"]
     assert set(status) == {"present", "source", "editable_here"}
     assert status["source"] in {"file", "environment", "none"}
@@ -1042,8 +977,7 @@ def test_an_unknown_call_id_is_a_404(client):
 
 
 def test_one_call_can_be_opened_in_full(client, settled_calls):
-    """The drill-down's last rung: a row in the list, then exactly what that
-    call was asked and exactly what it returned."""
+    """The drill-down's last rung: a row in the list, then exactly what that call was asked and exactly what it returned."""
     from git_synapse.analysis import calls
 
     client.get("/api/overview")
@@ -1059,14 +993,9 @@ def test_one_call_can_be_opened_in_full(client, settled_calls):
 
 
 def test_the_api_records_its_own_traffic(client, settled_calls):
-    """The whole point: a request served leaves a row saying what was asked and
-    what came back. The route template is recorded, not the concrete path, so a
-    thousand repositories are one row in a ranking."""
+    """The whole point: a request served leaves a row saying what was asked and what came back."""
     from git_synapse.analysis import calls
 
-    # Marked with a value nothing else in the suite sends. Filtering by route
-    # alone is not enough: other tests call /api/repos too, so "the newest row
-    # for this route" is whichever request happened to land last.
     probe = "zz-probe-not-a-real-repo"
     client.get("/api/repos", params={"limit": 1, "search": probe})
 
@@ -1085,8 +1014,7 @@ def test_the_api_records_its_own_traffic(client, settled_calls):
 
 
 def test_reading_the_log_does_not_write_to_the_log(client, settled_calls):
-    """Otherwise opening the activity page generates the traffic it displays,
-    and the page can never be quiet."""
+    """Otherwise opening the activity page generates the traffic it displays, and the page can never be quiet."""
     from git_synapse.analysis import calls
 
     client.get("/api/calls", params={"limit": 1})
@@ -1113,8 +1041,7 @@ def test_a_failing_request_is_recorded_as_an_error(client, settled_calls):
     (b'{"count": 4}', None),
 ])
 def test_a_reply_is_decoded_for_the_log_whatever_shape_it_is(body, expected_rows):
-    """The log records what came back, and replies are not all row lists: the
-    shell is HTML, an error is a bare object, some tools return arrays."""
+    """The log records what came back, and replies are not all row lists: the shell is HTML, an error is a bare object, some tools return arrays."""
     import git_synapse.api.main as api_main
 
     parsed, rows = api_main._decode(body)
@@ -1139,11 +1066,9 @@ def test_the_shape_endpoint_serves_every_distribution(client):
     }
 
 
-# ------------------------------------------------------------------ the door
 
 def test_the_api_is_open_until_somebody_has_an_account(client):
-    """A fresh deployment must be reachable, or the screen that creates the
-    first administrator is itself behind a sign-in."""
+    """A fresh deployment must be reachable, or the screen that creates the first administrator is itself behind a sign-in."""
     from git_synapse import auth
 
     assert auth.count_users() == 0, "this test needs a deployment with no users"
@@ -1187,8 +1112,7 @@ def test_setup_creates_the_first_administrator_once(client):
 
 
 def test_setup_refuses_a_caller_who_does_not_hold_the_token(client):
-    """The gap this closes: between a migrated database and a claimed account,
-    the setup screen is reachable by anyone who reaches the port."""
+    """The gap this closes: between a migrated database and a claimed account, the setup screen is reachable by anyone who reaches the port."""
     from git_synapse import auth
 
     body = {"email": "pytest-stranger@example.com", "name": "Stranger",
@@ -1210,8 +1134,7 @@ def test_setup_refuses_a_caller_who_does_not_hold_the_token(client):
 
 
 def test_the_setup_token_is_stable_and_survives_a_restart(client):
-    """Four workers on a cold database must agree, or three of them print a
-    token that will not work."""
+    """Four workers on a cold database must agree, or three of them print a token that will not work."""
     from git_synapse import auth
 
     try:
@@ -1241,9 +1164,7 @@ def test_guessing_the_setup_token_is_rate_limited(client):
 
 
 def test_the_console_prints_the_token_exactly_when_it_is_useful(client, monkeypatch, caplog):
-    """The only channel the token has. If this is silent on a fresh deployment
-    nobody can claim the account; if it speaks on a claimed one it is repeating
-    a dead secret into the log at every restart."""
+    """The only channel the token has."""
     import logging
 
     from git_synapse import auth, config
@@ -1287,8 +1208,7 @@ def test_the_console_prints_the_token_exactly_when_it_is_useful(client, monkeypa
 
 
 def test_an_environment_supplied_token_is_used_verbatim(client, monkeypatch):
-    """An automated deployment claims the account with a value it already has,
-    without anyone reading a log."""
+    """An automated deployment claims the account with a value it already has, without anyone reading a log."""
     from git_synapse import auth, config
 
     monkeypatch.setenv("ADMIN_SETUP_TOKEN", "a-token-from-the-secret-store")
@@ -1350,8 +1270,7 @@ def test_a_bearer_token_is_the_person_who_made_it(client):
 
 
 def test_an_open_dashboard_still_needs_an_account_to_administer(admin_client):
-    """Switching sign-in off makes the data readable by anyone who can reach
-    the address. It must not make the deployment administrable by them."""
+    """Switching sign-in off makes the data readable by anyone who can reach the address."""
     from git_synapse.analysis import settings
 
     anon = admin_client.__class__(admin_client.app)  # a client with no cookies
@@ -1367,8 +1286,7 @@ def test_an_open_dashboard_still_needs_an_account_to_administer(admin_client):
 
 
 def test_the_last_administrator_cannot_be_removed_or_demoted(admin_client):
-    """Otherwise the deployment has nobody who can add a person, and no way
-    back except the database."""
+    """Otherwise the deployment has nobody who can add a person, and no way back except the database."""
     me = admin_client.get("/api/auth/me").json()["user"]
     assert admin_client.patch(f"/api/users/{me['id']}",
                               json={"role": "member"}).status_code == 409
@@ -1401,8 +1319,7 @@ def test_the_access_mode_endpoint_validates_and_clears(admin_client):
 
 
 def test_setup_refuses_what_it_cannot_store(client):
-    """Order matters here: a valid attempt creates the first administrator and
-    every later attempt is then a 409, so the invalid cases go first."""
+    """Order matters here: a valid attempt creates the first administrator and every later attempt is then a 409, so the invalid cases go first."""
     from git_synapse import auth
 
     token = auth.setup_token()
@@ -1518,8 +1435,7 @@ def test_promoting_and_removing_a_second_administrator_is_allowed(admin_client):
 
 
 def test_repeated_wrong_passwords_answer_429_not_401(client):
-    """429 says "wait", 401 says "wrong". Answering 401 while refusing to look
-    at the credentials would be a lie the client acts on."""
+    """429 says "wait", 401 says "wrong"."""
     from git_synapse import auth
 
     user = auth.create_user("pytest-rate@example.com", "R", "a-sufficiently-long-pass")
@@ -1538,13 +1454,9 @@ def test_repeated_wrong_passwords_answer_429_not_401(client):
         client.cookies.clear()
 
 
-# ------------------------------------------------ what the call log may hold
 
 def test_a_minted_token_never_reaches_the_call_log(signed_in, db, settled_calls):
-    """`create_token` promises the secret is stored only as a hash. The call
-    log recorded every reply verbatim, and `/api/calls/{id}` handed it back --
-    so two requests turned any signed-in member into whoever last minted a
-    token. Four live secrets were sitting in the log when this was found."""
+    """`create_token` promises the secret is stored only as a hash."""
     from datetime import UTC, datetime, timedelta
 
     from git_synapse.db.orm import models, session_scope
@@ -1555,8 +1467,6 @@ def test_a_minted_token_never_reaches_the_call_log(signed_in, db, settled_calls)
     secret = made.json()["token"]
     assert secret.startswith("gss_") and len(secret) > 20
 
-    # Absence cannot be waited for, so a later request that IS logged acts as
-    # the barrier: once its row has landed, anything queued before it has too.
     client.get("/api/overview")
     cutoff = datetime.now(UTC) - timedelta(minutes=1)
     settled_calls(lambda: _recent_call_logs(cutoff, "/api/overview"))
@@ -1565,8 +1475,6 @@ def test_a_minted_token_never_reaches_the_call_log(signed_in, db, settled_calls)
         rows = session.query(models().CallLog).filter(models().CallLog.at >= cutoff).all()
     assert all(secret not in str(row.result_preview) for row in rows), "the secret reached the call log"
 
-    # And no auth reply at all is recorded, so this cannot regress by another
-    # route -- a future endpoint under /api/auth is covered by construction.
     with session_scope() as session:
         auth_rows = session.query(models().CallLog).filter(
             models().CallLog.name.like("/api/auth/%"), models().CallLog.at >= cutoff
@@ -1588,9 +1496,7 @@ def _recent_call_logs(cutoff: datetime, name: str) -> list[object]:
 
 
 def test_managing_a_source_needs_an_administrator(client, db):
-    """Adding, re-crediting and deleting a source decides what the deployment
-    scans and with whose credentials. Eight handlers had no check at all, so a
-    member could delete an admin's source and get a 200."""
+    """Adding, re-crediting and deleting a source decides what the deployment scans and with whose credentials."""
     from git_synapse import auth
     from git_synapse.ingest import accounts
 

@@ -6,21 +6,13 @@ import os
 
 import pytest
 
-# Point the integration tests at the compose stack's published port unless the
-# environment already says otherwise.
 os.environ.setdefault("POSTGRES_HOST", "127.0.0.1")
 os.environ.setdefault("POSTGRES_PORT", "55432")
 
 
 @pytest.fixture(scope="module")
 def scratch_db(db):
-    """Use the configured ORM database for isolated run-lifecycle tests.
-
-    Database creation is deployment work, not an application query.  The test
-    environment supplies a dedicated database through ``POSTGRES_DB``; this
-    fixture only applies the declarative schema and never opens a driver
-    connection or executes SQL text.
-    """
+    """Use the configured ORM database for isolated run-lifecycle tests."""
     from git_synapse.config import get_config, reset_config_cache
     from git_synapse.db.engine import apply_schema, close_pool
 
@@ -31,8 +23,6 @@ def scratch_db(db):
     reset_config_cache()
     close_pool()
     apply_schema()
-    # The dedicated test database can survive an interrupted run. Reset auth
-    # rows so API tests always begin in first-run state.
     from git_synapse.db.orm import models, session_scope
     with session_scope() as session:
         for model in (models().UserSession, models().ApiToken, models().LoginAttempt):
@@ -89,11 +79,6 @@ def db():
         reset_config_cache()
 
 
-# --------------------------------------------------------------- corpus
-# A real, tiny corpus: two git repositories, ingested and put through every
-# derived stage. Tests that need data used to read whatever the developer's
-# database happened to hold, which meant they failed outright on a fresh one
-# instead of testing anything.
 
 import subprocess  # noqa: E402
 
@@ -204,13 +189,7 @@ def corpus(scratch_db, tmp_path_factory):
 
 @pytest.fixture
 def settled_calls():
-    """Wait until queued calls have reached the database.
-
-    Recording is asynchronous by design: a caller hands a row to a queue and a
-    daemon thread writes it. A test that flushes by hand races that thread and
-    finds an empty queue, so it waits for the row instead of assuming which of
-    the two got there first.
-    """
+    """Wait until queued calls have reached the database."""
     import time
 
     from git_synapse.analysis import calls
@@ -230,12 +209,7 @@ def settled_calls():
 
 @pytest.fixture
 def admin_client(client):
-    """A signed-in administrator, removed again afterwards.
-
-    Creating any user flips a deployment from open to sign-in-required, so this
-    has to clean up: leaving the account behind would put a door in front of
-    every later test in the session, which none of them know about.
-    """
+    """A signed-in administrator, removed again afterwards."""
     from uuid import uuid4
 
     from git_synapse import auth

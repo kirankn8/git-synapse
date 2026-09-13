@@ -1,17 +1,4 @@
-"""Tests for the cross-repository, lagged, prediction and mining layers.
-
-The properties under test are the ones that were actually got wrong during
-development, each of which produced plausible-looking but wrong numbers:
-
-* single-repo change sets must be retained, or the contingency table loses its
-  ``b`` and ``c`` cells and every score inflates toward 1.0;
-* the lagged table must be genuinely directional, or the whole construction is
-  pointless;
-* the time origin must survive a corrupt commit date, which once stretched the
-  axis from 2,200 bins to 20,687 and inflated ``N`` tenfold;
-* impact rows must never mix the validated ensemble score with the unvalidated
-  discovery score in one comparable column.
-"""
+"""Tests for the cross-repository, lagged, prediction and mining layers."""
 
 from __future__ import annotations
 
@@ -53,16 +40,10 @@ def _commit(sha_seed: int, subject: str, when: datetime, paths: list[str],
     )
 
 
-# ------------------------------------------------------------------ predict
 
 
 def test_discovery_and_ensemble_scores_are_kept_separate(db):
-    """A row must record which score it was ranked by.
-
-    The ensemble is validated only inside the declared candidate set. Applying it
-    globally ranked merely-busy repositories above real dependencies, so the two
-    scores must never be presented as one comparable column.
-    """
+    """A row must record which score it was ranked by."""
     with session_scope() as session:
         rows = session.query(models().RepoImpact).limit(200).all()
     if not rows:
@@ -73,12 +54,7 @@ def test_discovery_and_ensemble_scores_are_kept_separate(db):
 
 
 def test_module_count_uses_the_composite_key(db):
-    """A module is (repo_id, cluster_id), not cluster_id alone.
-
-    Label propagation numbers clusters from zero inside each repository, so
-    counting ``DISTINCT cluster_id`` across the corpus collapsed 4,394 modules
-    into 559 on the overview endpoint.
-    """
+    """A module is (repo_id, cluster_id), not cluster_id alone."""
     with session_scope() as session:
         Cluster = models().FileCluster
         naive = session.query(Cluster.cluster_id).distinct().count()
@@ -87,21 +63,11 @@ def test_module_count_uses_the_composite_key(db):
         pytest.skip("no clusters present")
     assert correct >= naive, "composite count must not be smaller"
     if naive < correct:
-        # This is the normal case once more than one repo has clusters, and it
-        # is exactly why the naive count is wrong.
         assert correct > 0
 
 
 def test_clone_never_destroys_an_existing_mirror_on_failure(tmp_path):
-    """A failed clone must leave the previous mirror intact.
-
-    This is the regression for the worst incident so far: an expired token made
-    every fetch fail, `sync_mirror` treated that as a corrupt mirror and fell
-    back to a fresh clone, and `clone_mirror` removed the existing directory
-    before attempting it. 213 of 272 working mirrors were deleted and not
-    replaced. A mirror costs minutes to rebuild, so it must never be destroyed on
-    the strength of an operation that has not completed.
-    """
+    """A failed clone must leave the previous mirror intact."""
     from git_synapse.ingest import gitops
 
     mirror = tmp_path / "existing.git"
@@ -113,8 +79,6 @@ def test_clone_never_destroys_an_existing_mirror_on_failure(tmp_path):
     from git_synapse.ingest.gitops import GitError
 
     with pytest.raises(GitError):
-        # A bogus local path fails immediately; an unresolvable URL costs the
-        # full network retry budget and made this the slowest test in the suite.
         gitops.clone_mirror(
             str(tmp_path / "definitely-not-a-repo.git"), mirror, blobless=True
         )
@@ -182,12 +146,7 @@ def test_coupled_files_exposes_currency_fields(db):
 
 
 def test_module_context_resolves_the_owning_module(db):
-    """A file must resolve to its deepest matching module, not the root.
-
-    Cross-repo analysis correctly finds no upstream for a monorepo whose internal
-    references all point at itself, so the module graph is the only structural
-    prior available there -- and it was previously discarded as a self-reference.
-    """
+    """A file must resolve to its deepest matching module, not the root."""
     from git_synapse.analysis.query import module_context
 
     with session_scope() as session:
@@ -234,12 +193,7 @@ def test_module_context_is_honest_about_single_module_repos(db):
 
 
 def test_partner_marginal_is_the_partners_own_count(db):
-    """`n_other` must be the partner's change count, not the queried file's.
-
-    The union flips confidence but passed the marginals through in storage order,
-    so every partner stored on the B side reported the queried file's own total --
-    inflating it toward whatever hotspot was asked about.
-    """
+    """`n_other` must be the partner's change count, not the queried file's."""
     from git_synapse.analysis.query import coupled_files, get_file, resolve_file
 
     target = resolve_file("acme/runtime", "go.mod")
@@ -314,13 +268,7 @@ def test_pair_detail_answers_in_the_callers_argument_order(db):
 
 
 def test_directional_measure_ranks_outward_from_the_file_asked_about(db):
-    """P(B|A) must rank by the probability the *partner* changes.
-
-    The pair table stores each pair once, so half a file's partners are stored
-    with it on the B side. Ranking on the raw column sorted those by the reverse
-    probability -- putting a 17% partner above a 57% one, while the displayed
-    column showed the correct value.
-    """
+    """P(B|A) must rank by the probability the *partner* changes."""
     from git_synapse.analysis.query import coupled_files, resolve_file
 
     target = resolve_file("acme/platform", "gateway/internal/app/placement_test.go")
@@ -338,12 +286,7 @@ def test_directional_measure_ranks_outward_from_the_file_asked_about(db):
 
 
 def test_staleness_outranks_trend_in_currency():
-    """A year-old pair must read as stale even when it carries a trend label.
-
-    The drift window is wider than the staleness threshold, so returning the
-    trend first made the stale branch unreachable for thousands of pairs and two
-    partners of the same file at identical recency reported opposite verdicts.
-    """
+    """A year-old pair must read as stale even when it carries a trend label."""
     from git_synapse.mcp.server import _describe_currency
 
     for trend in ("emerging", "decaying", None):
@@ -408,11 +351,7 @@ def test_feedback_reopen_drops_the_resolution_that_closed_it(db):
 
 
 def test_feedback_without_context_does_not_collapse(db):
-    """With no tool, repo, path or expectation there is no identity to dedup on.
-
-    Fingerprinting those reports on context alone made every suggestion the same
-    row, silently discarding all but the first.
-    """
+    """With no tool, repo, path or expectation there is no identity to dedup on."""
     from git_synapse.analysis.query import record_feedback
     from git_synapse.db.orm import models, session_scope
 
@@ -439,11 +378,7 @@ def test_feedback_rejects_opinions(db):
 
 
 def test_classifier_does_not_suppress_packages_merely_named_after_tooling():
-    """`openapi` and `swagger` are real package names in Kubernetes-derived code.
-
-    Matching them as directory names suppressed hand-written source; the
-    generated artefacts are caught by filename instead.
-    """
+    """`openapi` and `swagger` are real package names in Kubernetes-derived code."""
     from git_synapse.mcp.server import _classify_partner as classify
 
     for path in (
@@ -479,8 +414,6 @@ def test_all_discovery_result_says_so_before_the_scores(db):
     if name is None:
         pytest.skip("no all-discovery repository")
 
-    # Opting in is what surfaces them; the default withholds. Both must say
-    # plainly that nothing in the set carries validated evidence.
     out = server.upstream_repos(repo=name, limit=5, include_discovery=True)
     assert "NONE" in out["guidance"]
     assert "not a probability" in out["guidance"]
@@ -491,11 +424,7 @@ def test_all_discovery_result_says_so_before_the_scores(db):
 
 
 def test_coupled_directories_marks_nesting_as_arithmetic(db):
-    """A directory's parent scores 1.0 by construction, not by discovery.
-
-    Every change to a child is a change to its parent, so the nesting relation
-    has to be labelled or the top of the list reads as a finding.
-    """
+    """A directory's parent scores 1.0 by construction, not by discovery."""
     from git_synapse.mcp import server
 
     with session_scope() as session:
@@ -539,13 +468,7 @@ def test_coupled_directories_accepts_a_file_path(db):
 
 
 def test_token_file_is_read_fresh_and_validated(tmp_path, monkeypatch):
-    """The credential must not be frozen at process start, nor half-read.
-
-    `gh` here is a shell function wrapping bulwark, so the containers cannot
-    reissue for themselves; the host rotates a file they read on every use. A
-    torn read must never be sent to GitHub, because the 401 it earns is
-    indistinguishable from an expired token.
-    """
+    """The credential must not be frozen at process start, nor half-read."""
     import dataclasses
 
     from git_synapse.config import ProviderConfig
@@ -570,12 +493,7 @@ def test_token_file_is_read_fresh_and_validated(tmp_path, monkeypatch):
 
 
 def test_transient_git_failures_do_not_trigger_a_reclone():
-    """A network failure says nothing about the mirror, which is still good.
-
-    Re-cloning on a fetch failure destroyed 213 working mirrors when a token
-    expired, and during a later outage spent ten minutes per repository failing
-    to replace mirrors that were fine.
-    """
+    """A network failure says nothing about the mirror, which is still good."""
     from git_synapse.ingest.gitops import is_permanent_error, is_transient_error
 
     outage = (
@@ -595,12 +513,7 @@ def test_transient_git_failures_do_not_trigger_a_reclone():
 
 
 def test_github_client_sends_the_live_token(tmp_path):
-    """An unauthenticated request returns HTTP 200 and only public repositories.
-
-    The credential moved to a file the host rotates, but the client still read
-    the frozen environment copy. With that empty it sent no Authorization header
-    and discovery silently returned 59 of 272 repositories.
-    """
+    """An unauthenticated request returns HTTP 200 and only public repositories."""
     import dataclasses
 
     from git_synapse.config import ProviderConfig
@@ -617,12 +530,7 @@ def test_github_client_sends_the_live_token(tmp_path):
 
 
 def test_thin_support_is_withheld_not_merely_labelled():
-    """A perfect score resting on two commits outranks everything real.
-
-    Observed sending a reviewer at four unrelated files: 1.0 is arithmetic on a
-    pair that changed twice and never apart, not evidence. A label only helps a
-    reader who is already sceptical, so these are withheld.
-    """
+    """A perfect score resting on two commits outranks everything real."""
     from git_synapse.mcp.server import MIN_REPORTABLE_SUPPORT, _classify_partner
 
     own = "pkg/init/init.go"
@@ -653,12 +561,7 @@ def test_discovery_upstream_is_withheld_unless_requested(db):
 
 
 def test_ingest_walks_only_the_shipped_branch():
-    """Coupling is a claim about code that shipped.
-
-    A quarter of this corpus exists solely on branches that never merged, and a
-    branch that deletes a file the mainline still has produced false statements
-    about HEAD.
-    """
+    """Coupling is a claim about code that shipped."""
     import inspect
 
     from git_synapse.ingest.parser import iter_commits
@@ -668,17 +571,10 @@ def test_ingest_walks_only_the_shipped_branch():
 
 
 def test_feedback_feeds_no_analytical_table(db):
-    """Nothing that produces a score may read from the feedback log.
-
-    This is the boundary that keeps agents out of the coupling data: if a future
-    change joins feedback into an aggregate, the tool would start measuring its
-    own past advice rather than the codebase.
-    """
+    """Nothing that produces a score may read from the feedback log."""
     import pathlib
 
     src = pathlib.Path(__file__).resolve().parents[1] / "src" / "git_synapse" / "analysis"
-    # query.py is excluded: the UI must be able to display the log. What must
-    # never happen is a module that *computes a score* reading from it.
     analytical = ("aggregate.py", "score.py", "predict.py", "mining.py",
                   "depbump.py", "manifests.py", "backtest.py")
     offenders = [n for n in analytical if "feedback" in (src / n).read_text()]

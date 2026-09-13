@@ -1,10 +1,4 @@
-"""Every in-app link must point at a route that exists.
-
-A commit that renamed the routes left eleven links behind pointing at the old
-addresses. All of them 404'd, and the suite stayed green because the smoke test
-renders routes without ever following a link. This closes that gap with string
-work alone -- no browser, no server, so a rename is caught immediately.
-"""
+"""Every in-app link must point at a route that exists."""
 from __future__ import annotations
 
 import ast
@@ -32,13 +26,7 @@ def _routes() -> list[re.Pattern[str]]:
 
 
 def _fill(template: str) -> str:
-    """Replace each `${...}` hole with what it can stand for in a path.
-
-    Holes nest -- a ternary inside a template inside a hole -- so they are
-    matched by counting braces rather than with a regex. A hole that follows a
-    slash is one segment; one that does not is a suffix or a query fragment and
-    contributes nothing a route can be matched against.
-    """
+    """Replace each `${...}` hole with what it can stand for in a path."""
     out, i = [], 0
     while i < len(template):
         if template.startswith("${", i):
@@ -49,8 +37,6 @@ def _fill(template: str) -> str:
             inner = template[i + 2:j - 1]
             after_slash = bool(out) and out[-1].endswith("/")
             if after_slash:
-                # A path variable carries slashes of its own; anything else is
-                # exactly one segment.
                 out.append("seg/seg" if "path" in inner else "seg")
             i = j
         else:
@@ -87,8 +73,7 @@ def test_every_nav_link_matches_a_registered_route():
 
 
 def test_the_server_serves_every_top_level_route_the_client_claims():
-    """A client route the server does not know 404s on reload and on a pasted
-    link -- exactly when a shareable URL earns its keep."""
+    """A client route the server does not know 404s on reload and on a pasted link -- exactly when a shareable URL earns its keep."""
     claimed = {p.split("/")[1] for p in re.findall(r"^on\('(/[^']+)'", APP.read_text(), re.MULTILINE)}
     claimed.discard("")
     for node in ast.walk(ast.parse(MAIN.read_text())):
@@ -101,10 +86,7 @@ def test_the_server_serves_every_top_level_route_the_client_claims():
 
 
 def test_script_hidden_elements_are_really_hidden():
-    """`el.hidden = true` only sets an attribute. The browser's [hidden] rule is
-    display:none, which any author `display` on the same element beats -- the
-    measure bar is display:flex, so hiding it changed nothing on screen while
-    every assertion on the property passed. One global rule settles it."""
+    """`el.hidden = true` only sets an attribute."""
     assert re.search(r"\[hidden\]\s*\{[^}]*display:\s*none\s*!important", CSS.read_text()), \
         "style.css must force [hidden] to display:none, or scripted hiding is a no-op"
 

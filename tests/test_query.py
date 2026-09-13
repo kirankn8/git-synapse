@@ -1,8 +1,4 @@
-"""The read layer every surface goes through.
-
-If a function here returns the wrong shape or silently drops a filter, the API,
-the MCP tools, the CLI and the UI are all wrong at once and none of them errors.
-"""
+"""The read layer every surface goes through."""
 from __future__ import annotations
 
 import pytest
@@ -16,7 +12,6 @@ def _first(model, **filters):
     with session_scope() as session:
         return session.query(model).filter_by(**filters).first()
 
-# ------------------------------------------------------------- resolution
 
 def test_resolve_file_finds_a_real_file_and_rejects_a_missing_one(db):
     with session_scope() as session:
@@ -35,7 +30,6 @@ def test_get_file_and_get_repo_return_none_for_unknown_ids(db):
     assert q.get_repo(999999999) is None
 
 
-# ---------------------------------------------------------------- listings
 
 @pytest.mark.parametrize("limit", [1, 5, 50])
 def test_list_repos_respects_its_limit(db, limit):
@@ -61,7 +55,6 @@ def test_an_unknown_sort_key_falls_back_rather_than_raising(db):
     assert q.list_repos(limit=5, order_by="'; DROP TABLE repo; --") is not None
 
 
-# ------------------------------------------------------------- search
 
 @pytest.mark.parametrize("term", ["go.mod", "%", "_", "a%_b", "'", "日本"])
 def test_search_files_survives_metacharacters_and_unicode(db, term):
@@ -75,7 +68,6 @@ def test_search_files_scoped_to_a_repo_stays_in_it(corpus):
     assert all(r["repo_id"] == row.id for r in rows)
 
 
-# ------------------------------------------------------------- coupling
 
 def test_coupled_files_min_support_is_a_floor(db):
     with session_scope() as session:
@@ -115,9 +107,6 @@ def test_co_change_commits_are_the_evidence_behind_the_score(db):
         row = session.query(models().FilePairMetric).filter(models().FilePairMetric.n_ab > 3).first()
     if row is None:
         pytest.skip("no supported pair")
-    # Both reads must see the same snapshot: a live refresh rebuilding this
-    # pair between them would change n_ab underneath the comparison, which made
-    # this fail about one run in five.
     with session_scope() as session:
         Change = models().CommitFile
         Commit = models().Commit
@@ -132,16 +121,12 @@ def test_co_change_commits_are_the_evidence_behind_the_score(db):
                    )
                    .all()]
     assert commits and all(c["sha"] for c in commits)
-    # A commit above the fan-out cap changed both files but contributed to no
-    # statistic; the evidence list marks it rather than quietly disagreeing
-    # with the score it is presented as explaining.
     counted = [c for c in commits if c["counted"]]
     assert len(counted) == row.n_ab, (
         f"{len(counted)} counted commits against a joint count of {row.n_ab}"
     )
 
 
-# ------------------------------------------------------------- aggregates
 
 def test_overview_counts_are_non_negative_integers(db):
     ov = q.overview()
@@ -168,8 +153,6 @@ def test_directories_listing_is_scoped(db):
         pytest.skip("no directories")
     rows = q.directories(row.repo_id, limit=10)
     assert rows
-    # The rows carry no repo_id, so confirm the scoping by checking every id
-    # really belongs to the repository that was asked for.
     ids = [r["id"] for r in rows]
     with session_scope() as session:
         leaked = session.query(models().Directory).filter(
@@ -179,8 +162,7 @@ def test_directories_listing_is_scoped(db):
 
 
 def test_the_tree_returns_one_level_and_nothing_below_it(corpus, db):
-    """Browsing descends a level at a time. A subdirectory two levels down
-    appearing at the root would make the folder page a flat dump."""
+    """Browsing descends a level at a time."""
     with session_scope() as session:
         row = session.query(models().Directory.repo_id).filter(models().Directory.depth >= 2).first()
     if row is None:
@@ -202,8 +184,7 @@ def test_the_tree_returns_one_level_and_nothing_below_it(corpus, db):
 
 
 def test_the_tree_reports_a_path_that_names_nothing(corpus, db):
-    """Distinguished from an empty directory, so the route can 404 rather than
-    render a folder page for a path that was never in the repository."""
+    """Distinguished from an empty directory, so the route can 404 rather than render a folder page for a path that was never in the repository."""
     row = _first(models().Repo)
     if row is None:
         pytest.skip("no repositories")
@@ -213,8 +194,7 @@ def test_the_tree_reports_a_path_that_names_nothing(corpus, db):
 
 
 def test_a_file_resolves_by_repository_id_as_well_as_by_name(corpus, db):
-    """The UI addresses files by path under a repository id, because ids
-    renumber on a re-ingest and a link keyed on one quietly changes meaning."""
+    """The UI addresses files by path under a repository id, because ids renumber on a re-ingest and a link keyed on one quietly changes meaning."""
     with session_scope() as session:
         row = session.query(models().File.repo_id, models().Repo.full_name, models().File.path).join(
             models().Repo, models().Repo.id == models().File.repo_id
@@ -228,10 +208,7 @@ def test_a_file_resolves_by_repository_id_as_well_as_by_name(corpus, db):
 
 
 def test_coupled_directories_excludes_containment(corpus, db):
-    """A directory changes when any file beneath it changes, so an ancestor
-    co-changes with its descendant by definition -- src/com scored 1.000
-    against src/com/google on every measure. That is containment reported as
-    coupling, and it crowded out the real partners."""
+    """A directory changes when any file beneath it changes, so an ancestor co-changes with its descendant by definition -- src/com scored 1.000 against src/com/google on every measure."""
     with session_scope() as session:
         row = session.query(models().Directory).filter(
             models().Directory.depth >= 2, models().Directory.change_count > 0
@@ -261,7 +238,6 @@ def test_measure_catalog_is_self_describing(db):
     assert all(m["key"] and m["label"] for m in cat)
 
 
-# ------------------------------------------------------------- cross-repo
 
 def test_recent_runs_and_run_detail(db):
     runs = q.recent_runs(limit=3)
@@ -271,11 +247,9 @@ def test_recent_runs_and_run_detail(db):
     assert q.run_detail(999999999) is None
 
 
-# ------------------------------------------------------- the optional filters
 
 def test_repo_listing_filters_by_language_and_status(db):
-    """Each filter is a separate clause; an unused one that is silently wrong
-    only shows up when someone finally uses it."""
+    """Each filter is a separate clause; an unused one that is silently wrong only shows up when someone finally uses it."""
     from git_synapse.analysis import query as q
 
     by_status = q.list_repos(status="ready", limit=10)
@@ -298,8 +272,7 @@ def test_file_search_filters_by_extension(db):
 
 
 def test_coupled_files_min_score_filters_in_both_orientations(db):
-    """The floor is applied inside each branch of the union, so a pair stored
-    the other way round must be filtered identically."""
+    """The floor is applied inside each branch of the union, so a pair stored the other way round must be filtered identically."""
     from git_synapse.analysis import query as q
 
     with session_scope() as session:
@@ -343,11 +316,9 @@ def test_module_context_normalises_a_leading_slash_or_dot(db):
         assert q.module_context(row.repo_id, variant) == plain, variant
 
 
-# --------------------------------------------------- filters and edge branches
 
 def test_n_ab_is_accepted_as_an_order_even_though_it_is_not_a_measure(db):
-    """Seven endpoints order by raw support; their CTEs do not select a measure
-    column, so rejecting the key would break them."""
+    """Seven endpoints order by raw support; their CTEs do not select a measure column, so rejecting the key would break them."""
     assert q._safe_order("n_ab") == "n_ab"
 
 
@@ -365,8 +336,7 @@ def test_list_repos_accepts_every_filter_combination(db, kwargs):
 
 
 def test_the_coupling_graph_can_be_centred_on_one_file(db):
-    """The product question is "given I am changing THIS", so the centred graph
-    is the one that gets asked for."""
+    """The product question is "given I am changing THIS", so the centred graph is the one that gets asked for."""
     with session_scope() as session:
         row = session.query(models().FilePairMetric).filter(
             models().FilePairMetric.n_ab > 3
@@ -395,8 +365,7 @@ def test_the_coupling_graph_honours_a_score_floor(db):
                                   "/gateway/main.go", "  gateway/main.go  "])
 def test_module_ownership_is_found_however_the_path_is_written(db, monkeypatch,
                                                                path):
-    """An agent pastes a path from a diff, a log or a URL; a leading ./ or / must
-    not silently make the file belong to no module."""
+    """An agent pastes a path from a diff, a log or a URL; a leading ./ or / must not silently make the file belong to no module."""
     monkeypatch.setattr(q, "_module_rows", lambda *_a, **_k: [
         {"consumer_module": "gateway", "dep_module": "core"},
         {"consumer_module": "", "dep_module": "gateway"},
@@ -426,8 +395,7 @@ def test_resolving_feedback_refuses_an_unknown_status(db, status):
 
 
 def test_the_corpus_shape_returns_every_distribution_the_landing_page_draws(corpus, db):
-    """Seven aggregates in one call rather than seven calls, because this is the
-    most expensive read the landing page makes."""
+    """Seven aggregates in one call rather than seven calls, because this is the most expensive read the landing page makes."""
     shape = q.corpus_shape()
     assert set(shape) == {
         "commits_by_year", "pair_support", "repo_sizes", "languages",
@@ -440,9 +408,7 @@ def test_the_corpus_shape_returns_every_distribution_the_landing_page_draws(corp
 
 
 def test_adoption_buckets_are_numbered_from_one(corpus, db):
-    """width_bucket numbers from 1: bucket 1 is the first band, not the second.
-    Labelling these from zero shifted every bar one band later and reported "0%
-    adopted within two months" for a corpus where most land inside it."""
+    """width_bucket numbers from 1: bucket 1 is the first band, not the second."""
     rows = q.corpus_shape()["adoption_days"]
     if not rows:
         pytest.skip("no resolved bumps")
@@ -459,8 +425,7 @@ def test_adoption_buckets_are_numbered_from_one(corpus, db):
 
 
 def test_distribution_buckets_are_capped_so_the_tail_cannot_dominate(corpus, db):
-    """The tails run to thousands; the question is only ever how much sits at
-    the thin end."""
+    """The tails run to thousands; the question is only ever how much sits at the thin end."""
     shape = q.corpus_shape()
     assert all(r["support"] <= 10 for r in shape["pair_support"])
     assert all(r["files"] <= 12 for r in shape["commit_width"])
@@ -468,8 +433,7 @@ def test_distribution_buckets_are_capped_so_the_tail_cannot_dominate(corpus, db)
 
 
 def test_repo_recency_buckets_every_repository_exactly_once(corpus, db):
-    """A repository nobody has touched in a year still contributes history, but
-    that history no longer describes the code -- so the count has to be right."""
+    """A repository nobody has touched in a year still contributes history, but that history no longer describes the code -- so the count has to be right."""
     rows = q.corpus_shape()["repo_recency"]
     with session_scope() as session:
         total = session.query(models().Repo).count()
@@ -479,9 +443,7 @@ def test_repo_recency_buckets_every_repository_exactly_once(corpus, db):
 
 
 def test_a_search_term_is_matched_literally_not_as_a_pattern(corpus, db):
-    """`%` and `_` are wildcards to LIKE, so a term carrying either searched
-    for something else: `test_helper` matched `testXhelper`, and a lone `_`
-    matched every row in the table."""
+    """`%` and `_` are wildcards to LIKE, so a term carrying either searched for something else: `test_helper` matched `testXhelper`, and a lone `_` matched every row in the table."""
     every = q.search_files(limit=5)
     if not every:
         pytest.skip("no files")
@@ -491,8 +453,6 @@ def test_a_search_term_is_matched_literally_not_as_a_pattern(corpus, db):
     assert all("_" in row["path"] for row in lone), \
         "an underscore must match an underscore, not any character"
 
-    # Two literal characters with a wildcard between them must find nothing
-    # unless a path really contains the percent sign.
     assert not [r for r in q.search_files("READ%ME", limit=50)
                 if "READ%ME" not in r["path"].upper()]
 
@@ -506,10 +466,7 @@ def test_a_repository_search_escapes_the_same_way(corpus, db):
 
 
 def test_a_paused_source_drops_out_of_the_corpus_wide_list(db):
-    """Pausing means these are not being refreshed and their numbers are not
-    moving. Left in, a source that had enumerated 8,105 repositories ranks
-    ahead of the whole corpus by count, every row opening a page with no
-    history behind it."""
+    """Pausing means these are not being refreshed and their numbers are not moving."""
     from git_synapse.analysis import query as q
     from git_synapse.ingest import accounts
 
@@ -524,8 +481,6 @@ def test_a_paused_source_drops_out_of_the_corpus_wide_list(db):
         names = {r["full_name"] for r in q.list_repos(limit=1000)}
         assert "paused-src/r" not in names
 
-        # Asked for by name it is still there: having opened that source, its
-        # repositories are exactly what the reader came for.
         scoped = {r["full_name"] for r in q.list_repos(account_id=src["id"], limit=1000)}
         assert "paused-src/r" in scoped
 
@@ -541,11 +496,7 @@ def test_a_paused_source_drops_out_of_the_corpus_wide_list(db):
 
 
 def test_the_same_history_stored_twice_is_detected(db):
-    """Two addresses are not two repositories. A project moved to a subgroup, a
-    mirror kept in sync, a fork the API declines to declare -- GitLab lists
-    `veloren/veloren` and `veloren/dev/veloren` as separate projects with
-    separate ids and a byte-identical history. Nothing about either row is
-    wrong on its own; every corpus-wide total is."""
+    """Two addresses are not two repositories."""
     from git_synapse.analysis import query as q
     sha = "f" * 40
     ids = []
@@ -578,8 +529,7 @@ def test_the_same_history_stored_twice_is_detected(db):
 
 
 def test_repositories_with_no_history_are_not_called_duplicates(db):
-    """Every never-ingested repository has a NULL head and a zero count. They
-    would otherwise all collide with each other."""
+    """Every never-ingested repository has a NULL head and a zero count."""
     from git_synapse.analysis import query as q
     ids = []
     for path in ("empty/a", "empty/b"):

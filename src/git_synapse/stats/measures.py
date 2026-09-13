@@ -1,29 +1,4 @@
-"""The 31 association measures, each a pure function of a 2x2 contingency table.
-
-Design notes
-------------
-Every measure takes a :class:`~git_synapse.stats.contingency.Contingency` and returns
-a ``float64`` numpy array of the same shape. They are pure, vectorised and free
-of database or I/O concerns, which makes them trivially unit-testable against
-hand-computed values (see ``tests/test_measures.py``).
-
-The measures fall into families that behave very differently, and picking the
-right one matters more than computing all of them:
-
-* **Similarity / overlap** (Jaccard, Dice, Ochiai, Simpson, ...) -- bounded,
-  intuitive, but blind to how surprising an overlap is.
-* **Information theoretic** (MI, PMI, NPMI, PPMI) -- measure surprise, but PMI
-  is notoriously biased toward rare items; NPMI exists to fix exactly that.
-* **Significance tests** (chi-square, G², t-score, z-score, Poisson,
-  hypergeometric) -- answer "is this real?" rather than "is this strong?".
-* **Correlation** (phi, Cramer's V, Yule's Q/Y, Michael) -- signed, so they can
-  express *negative* coupling (files that systematically do NOT change together).
-* **Matching coefficients** (Sokal-Michener, Rogers-Tanimoto, Hamann, Faith,
-  Russell-Rao) -- these count joint *absence* ``d`` as evidence. For commit data
-  ``d`` is enormous (almost no commit touches any given file), so these
-  saturate near 1.0 and are of limited use on their own. They are included for
-  completeness and flagged as such in the registry.
-"""
+"""The 31 association measures, each a pure function of a 2x2 contingency table."""
 
 from __future__ import annotations
 
@@ -33,190 +8,84 @@ from scipy import stats as sp_stats
 
 from git_synapse.stats.contingency import Contingency, safe_div, xlog2y, xlogy
 
-# Significance measures are reported as -log10(p) so that "bigger is stronger"
-# holds uniformly across every measure in the registry. The cap exists only to
-# turn an infinity into a number a DOUBLE PRECISION column and a table cell can
-# hold -- it is not the working range. At 300 it was: a repository of ten
-# million commits produces tails past 200,000, and every pair beyond 300 shared
-# one value, so the two measures stopped ordering anything exactly where their
-# evidence was strongest.
 MAX_NEG_LOG10_P = 1e6
 
 
-# --------------------------------------------------------------------------
-# Similarity / overlap family
-# --------------------------------------------------------------------------
 
 
 def jaccard(t: Contingency) -> np.ndarray:
-    """Jaccard index: intersection over union, ``a / (a + b + c)``.
-
-    Range [0, 1]. Ignores joint absence entirely, which is the right call for
-    commit data. Penalises pairs where one file changes far more often than the
-    other, so a small utility file coupled to a churny one scores low.
-    """
+    """Jaccard index: intersection over union, ``a / (a + b + c)``."""
     return safe_div(t.a, t.a + t.b + t.c)
 
 
 def dice(t: Contingency) -> np.ndarray:
-    """Dice coefficient: ``2a / (2a + b + c)``.
-
-    Range [0, 1]. Weights the intersection twice, so it is systematically more
-    generous than Jaccard (the two are monotonically related and always rank
-    pairs identically -- Dice just spreads the scores differently).
-    """
+    """Dice coefficient: ``2a / (2a + b + c)``."""
     return safe_div(2.0 * t.a, 2.0 * t.a + t.b + t.c)
 
 
 def sorensen(t: Contingency) -> np.ndarray:
-    """Sorensen index -- mathematically identical to :func:`dice`.
-
-    Kept as its own entry because the user's specification lists both, and
-    because the two names dominate different literatures (Sorensen in ecology,
-    Dice in information retrieval). Any divergence between this and ``dice``
-    would be a bug.
-    """
+    """Sorensen index -- mathematically identical to :func:`dice`."""
     return dice(t)
 
 
 def ochiai(t: Contingency) -> np.ndarray:
-    """Ochiai coefficient: ``a / sqrt(n_a * n_b)``.
-
-    The geometric mean of the two conditional probabilities P(A|B) and P(B|A),
-    and identical to cosine similarity on binary vectors. Range [0, 1]. More
-    robust than Jaccard when the two marginals are very unbalanced.
-    """
+    """Ochiai coefficient: ``a / sqrt(n_a * n_b)``."""
     return safe_div(t.a, np.sqrt(t.n_a * t.n_b))
 
 
 def simpson(t: Contingency) -> np.ndarray:
-    """Simpson / overlap coefficient: ``a / min(n_a, n_b)``.
-
-    Range [0, 1]. Reaches 1.0 whenever the rarer file *always* co-occurs with
-    the commoner one, regardless of how common the latter is. Excellent for
-    finding "X is never touched without Y" containment relationships, but it
-    must be read alongside a significance measure or it will surface every
-    file that has only ever appeared once.
-    """
+    """Simpson / overlap coefficient: ``a / min(n_a, n_b)``."""
     return safe_div(t.a, np.minimum(t.n_a, t.n_b))
 
 
 def braun_blanquet(t: Contingency) -> np.ndarray:
-    """Braun-Blanquet: ``a / max(n_a, n_b)``.
-
-    The conservative mirror of Simpson. Range [0, 1]. Only scores high when the
-    co-occurrence is large relative to the *more* frequent item, so it is much
-    harder to fool with rare files.
-    """
+    """Braun-Blanquet: ``a / max(n_a, n_b)``."""
     return safe_div(t.a, np.maximum(t.n_a, t.n_b))
 
 
 def kulczynski(t: Contingency) -> np.ndarray:
-    """Kulczynski measure: arithmetic mean of ``P(A|B)`` and ``P(B|A)``.
-
-    ``(a/n_a + a/n_b) / 2``. Range [0, 1]. Sits between Simpson and
-    Braun-Blanquet, and unlike Ochiai it is dominated by the larger of the two
-    conditionals rather than balanced between them.
-    """
+    """Kulczynski measure: arithmetic mean of ``P(A|B)`` and ``P(B|A)``."""
     return 0.5 * (safe_div(t.a, t.n_a) + safe_div(t.a, t.n_b))
 
 
 def fager(t: Contingency) -> np.ndarray:
-    """Fager's index: Ochiai minus a small-sample penalty.
-
-    ``a / sqrt(n_a * n_b) - 1 / (2 * sqrt(max(n_a, n_b)))``.
-
-    The correction is in the *commoner* of the two items, as Fager and McGowan
-    define it -- so it shrinks as the busier partner accumulates changes, and is
-    flat in the rarer one. That is worth stating plainly because it is easy to
-    assume the opposite: a pair seen exactly once together, where both files
-    have changed only once, scores 0.5, which beats a pair seen five times out
-    of ten. The penalty bounds the optimism of a small sample; it does not
-    replace a support filter.
-
-    Where no association is possible at all -- one of the items never changed,
-    so ``n_a`` or ``n_b`` is zero -- the result is 0, as it is for every other
-    similarity measure here. Subtracting the penalty from an undefined
-    similarity previously produced a bare negative score (-0.5 at its worst)
-    for a pair with no shared evidence whatsoever.
-    """
+    """Fager's index: Ochiai minus a small-sample penalty."""
     possible = np.minimum(t.n_a, t.n_b) > 0
     score = ochiai(t) - safe_div(1.0, 2.0 * np.sqrt(np.maximum(t.n_a, t.n_b)))
     return np.where(possible, score, 0.0)
 
 
-# --------------------------------------------------------------------------
-# Matching-coefficient family (these count joint absence ``d``)
-# --------------------------------------------------------------------------
 
 
 def russell_rao(t: Contingency) -> np.ndarray:
-    """Russell-Rao: ``a / N``.
-
-    The raw joint probability. Range [0, 1] but in practice microscopic for
-    commit data, since any given file pair appears in a vanishing fraction of
-    all commits. Useful as a support/frequency signal, not as a strength one.
-    """
+    """Russell-Rao: ``a / N``."""
     return safe_div(t.a, t.n)
 
 
 def sokal_michener(t: Contingency) -> np.ndarray:
-    """Sokal-Michener simple matching: ``(a + d) / N``.
-
-    Counts agreement of both kinds -- both files present, or both absent. For
-    sparse commit data ``d`` dominates so this sits just below 1.0 for nearly
-    every pair. Included for completeness; see the module docstring.
-    """
+    """Sokal-Michener simple matching: ``(a + d) / N``."""
     return safe_div(t.a + t.d, t.n)
 
 
 def rogers_tanimoto(t: Contingency) -> np.ndarray:
-    """Rogers-Tanimoto: ``(a + d) / (a + d + 2(b + c))``.
-
-    Simple matching with mismatches weighted double. Range [0, 1]. Shares the
-    joint-absence saturation problem but discriminates slightly better than
-    Sokal-Michener because the disagreement term is amplified.
-    """
+    """Rogers-Tanimoto: ``(a + d) / (a + d + 2(b + c))``."""
     return safe_div(t.a + t.d, t.a + t.d + 2.0 * (t.b + t.c))
 
 
 def hamann(t: Contingency) -> np.ndarray:
-    """Hamann similarity: ``((a + d) - (b + c)) / N``.
-
-    Range [-1, 1]. Agreements minus disagreements. Equivalent to
-    ``2 * sokal_michener - 1``, so it carries the same information on a signed
-    scale.
-    """
+    """Hamann similarity: ``((a + d) - (b + c)) / N``."""
     return safe_div((t.a + t.d) - (t.b + t.c), t.n)
 
 
 def faith(t: Contingency) -> np.ndarray:
-    """Faith similarity: ``(a + 0.5 * d) / N``.
-
-    Range [0, 1]. Treats joint absence as half as informative as joint
-    presence -- an asymmetric compromise between Jaccard (which ignores ``d``)
-    and simple matching (which fully counts it).
-    """
+    """Faith similarity: ``(a + 0.5 * d) / N``."""
     return safe_div(t.a + 0.5 * t.d, t.n)
 
 
-# --------------------------------------------------------------------------
-# Information-theoretic family
-# --------------------------------------------------------------------------
 
 
 def pmi(t: Contingency) -> np.ndarray:
-    """Pointwise mutual information, in bits: ``log2(a*N / (n_a * n_b))``.
-
-    Zero means the pair co-occurs exactly as often as chance predicts, positive
-    means more often, negative means less. Unbounded in both directions and
-    strongly biased toward rare items: a pair of files each seen once, together,
-    attains the maximum possible PMI on no evidence at all. Always pair it with
-    a support threshold or with :func:`npmi`.
-
-    Returns 0 where ``a == 0`` (undefined in the limit, but 0 is the
-    conventional and useful choice for ranking).
-    """
+    """Pointwise mutual information, in bits: ``log2(a*N / (n_a * n_b))``."""
     ratio = safe_div(t.a * t.n, t.n_a * t.n_b)
     out = np.zeros_like(ratio)
     ok = ratio > 0
@@ -225,23 +94,7 @@ def pmi(t: Contingency) -> np.ndarray:
 
 
 def npmi(t: Contingency) -> np.ndarray:
-    """Normalised PMI: ``pmi / -log2(a / N)``.
-
-    Bounded to [-1, 1], where 1 means perfect co-occurrence, 0 means
-    independence and -1 means the two never co-occur. The normalisation
-    directly cancels PMI's rare-item bias, which makes NPMI the best
-    general-purpose ranking measure in this registry for change coupling.
-
-    Two limits are handled explicitly because the ratio is 0/0 at both:
-
-    * ``a == 0`` -- the pair never co-occurs. PMI diverges to -inf while the
-      denominator also diverges, and the limit of the ratio is exactly -1.
-      This is Bouma's convention and it matters here: without it, "never
-      change together" and "change together exactly as often as chance"
-      would both score 0 and become indistinguishable.
-    * ``a == N`` -- both files appear in every single commit, so they always
-      co-occur and the limit is +1. Degenerate, but bounded.
-    """
+    """Normalised PMI: ``pmi / -log2(a / N)``."""
     p_ab = safe_div(t.a, t.n)
     denom = np.zeros_like(p_ab)
     interior = (p_ab > 0) & (p_ab < 1)
@@ -261,28 +114,12 @@ def npmi(t: Contingency) -> np.ndarray:
 
 
 def ppmi(t: Contingency) -> np.ndarray:
-    """Positive PMI: ``max(pmi, 0)``.
-
-    Discards negative associations. Standard practice when the scores feed a
-    vector space or embedding, because negative PMI is estimated from the
-    sparsest part of the table and is mostly noise.
-    """
+    """Positive PMI: ``max(pmi, 0)``."""
     return np.maximum(pmi(t), 0.0)
 
 
 def mutual_information(t: Contingency) -> np.ndarray:
-    """Mutual information of the full 2x2 table, in bits.
-
-    Unlike PMI (which scores a single cell) this sums over all four cells,
-    weighting each by its own probability::
-
-        MI = sum_ij p_ij * log2(p_ij / (p_i. * p_.j))
-
-    Range [0, 1] bits for a 2x2 table. Always non-negative, so it measures how
-    much knowing about one file tells you about the other *in either direction*
-    -- it cannot distinguish positive from negative coupling. Read it with
-    :func:`phi` to recover the sign.
-    """
+    """Mutual information of the full 2x2 table, in bits."""
     n = t.n
     cells = (t.a, t.b, t.c, t.d)
     row = (t.n_a, t.n_a, t.n - t.n_a, t.n - t.n_a)
@@ -296,40 +133,17 @@ def mutual_information(t: Contingency) -> np.ndarray:
     return np.maximum(total, 0.0)
 
 
-# --------------------------------------------------------------------------
-# Significance-test family
-# --------------------------------------------------------------------------
 
 
 def chi_square(t: Contingency) -> np.ndarray:
-    """Pearson's chi-square for a 2x2 table.
-
-    Uses the closed form ``N(ad - bc)^2 / (n_a * n_b * (c+d) * (b+d))``.
-    Unsigned and unbounded above; roughly ``N * phi^2``. Scales with sample
-    size, so a huge chi-square on a huge repository is not directly comparable
-    to one from a small repository -- use :func:`phi` or :func:`cramers_v` when
-    comparing across repos.
-
-    Unreliable when expected cell counts drop below ~5, which is exactly the
-    regime most file pairs live in. :func:`log_likelihood_ratio` is the better
-    choice there.
-    """
+    """Pearson's chi-square for a 2x2 table."""
     num = t.n * np.square(t.a * t.d - t.b * t.c)
     den = t.n_a * t.n_b * (t.c + t.d) * (t.b + t.d)
     return safe_div(num, den)
 
 
 def log_likelihood_ratio(t: Contingency) -> np.ndarray:
-    """Log-likelihood ratio G², ``2 * sum O * ln(O / E)`` over all four cells.
-
-    The measure of choice for rare events and small samples, where the
-    chi-square approximation breaks down. Dunning's classic result is that G²
-    stays well-behaved when expected counts fall below 5, which covers most
-    file pairs in a repository.
-
-    Unsigned and unbounded above. Asymptotically chi-square with 1 df, so
-    G² > 10.83 corresponds to p < 0.001.
-    """
+    """Log-likelihood ratio G², ``2 * sum O * ln(O / E)`` over all four cells."""
     n = t.n
     cells = (t.a, t.b, t.c, t.d)
     row = (t.n_a, t.n_a, t.n - t.n_a, t.n - t.n_a)
@@ -343,64 +157,20 @@ def log_likelihood_ratio(t: Contingency) -> np.ndarray:
 
 
 def t_score(t: Contingency) -> np.ndarray:
-    """T-score: ``(a - E) / sqrt(a)`` where ``E = n_a * n_b / N``.
-
-    Measures confidence that the co-occurrence is not chance. Dominated by
-    frequency -- high-frequency pairs win even at modest effect size -- which
-    makes it a good complement to PMI's opposite bias. Values above ~2 are
-    conventionally treated as significant.
-
-    The denominator is floored at 1 rather than left to divide by zero. With
-    ``a = 0`` the true value diverges to -inf, and a plain guard returning the
-    fill value put it at exactly 0.0 -- the *neutral* score. A pair that has
-    never once co-occurred was therefore reported as "exactly chance", and
-    ranked above every pair that merely co-occurred less often than expected.
-    Flooring gives ``-E``, which keeps the ordering the measure exists for: the
-    more a never-seen pair was expected, the worse it scores.
-
-    Pairs with ``a = 0`` are not stored -- ``MIN_PAIR_SUPPORT`` is at least 1 --
-    so this changes no materialised number. It matters to anyone calling the
-    library directly, and to the invariant that only an independent table
-    scores neutral.
-    """
+    """T-score: ``(a - E) / sqrt(a)`` where ``E = n_a * n_b / N``."""
     return safe_div(t.a - t.expected, np.sqrt(np.maximum(t.a, 1.0)))
 
 
 def z_score(t: Contingency) -> np.ndarray:
-    """Z-score: ``(a - E) / sqrt(E)``.
-
-    Standardises the deviation from expectation against the standard deviation
-    of a Poisson variable with mean E. More sensitive to rare pairs than
-    :func:`t_score` because the denominator uses expected rather than observed
-    frequency.
-    """
+    """Z-score: ``(a - E) / sqrt(E)``."""
     return safe_div(t.a - t.expected, np.sqrt(t.expected))
 
 
 def poisson_significance(t: Contingency) -> np.ndarray:
-    """Poisson tail significance, reported as ``-log10 P(X >= a)``.
-
-    Models co-occurrence counts as Poisson with rate ``E = n_a * n_b / N``,
-    which is the natural null when commits mix files independently at random.
-    Higher means less likely under chance. Computed in log space, so the tail
-    keeps ordering pairs far past the point where the probability itself
-    underflows to zero; ``MAX_NEG_LOG10_P`` is the last resort, not the working
-    range.
-
-    Better calibrated than :func:`z_score` for small expected counts, since it
-    uses the actual discrete distribution rather than a normal approximation.
-    """
+    """Poisson tail significance, reported as ``-log10 P(X >= a)``."""
     lam = np.maximum(t.expected, 1e-12)
     with np.errstate(divide="ignore", invalid="ignore"):
-        # In log space. `sf` underflows to exactly 0 well inside the range a
-        # real repository reaches, and every pair past that point then shares
-        # one saturated value -- which is the ordering this measure exists to
-        # provide, gone precisely where the evidence is strongest.
         log_sf = sp_stats.poisson.logsf(t.a - 1, lam)
-        # scipy's own logsf underflows too, at around a = 10^5. Far out in the
-        # tail the sum P(X >= a) is dominated by its first term, so ln P(X = a)
-        # is both a lower bound and asymptotically the answer -- and unlike -inf
-        # it still orders one pair against another.
         a = np.asarray(t.a, dtype=np.float64)
         log_pmf = -lam + a * np.log(lam) - sp_special.gammaln(a + 1.0)
         log_sf = np.where(np.isfinite(log_sf), log_sf, log_pmf)
@@ -408,139 +178,63 @@ def poisson_significance(t: Contingency) -> np.ndarray:
 
 
 def hypergeometric_significance(t: Contingency) -> np.ndarray:
-    """Hypergeometric (Fisher exact, right tail), as ``-log10 P(X >= a)``.
-
-    The exact probability of seeing at least ``a`` co-occurrences when drawing
-    ``n_a`` commits from ``N`` without replacement, of which ``n_b`` contain
-    the other file. This is the most statistically rigorous measure in the
-    registry -- it makes no asymptotic approximation at all -- and correspondingly
-    the most expensive to compute.
-
-    Use it to confirm the pairs that cheaper measures surfaced, rather than as
-    the primary ranking pass over millions of pairs.
-    """
+    """Hypergeometric (Fisher exact, right tail), as ``-log10 P(X >= a)``."""
     with np.errstate(divide="ignore", invalid="ignore"):
         log_sf = sp_stats.hypergeom.logsf(t.a - 1, t.n, t.n_a, t.n_b)
     return _neg_log10_from_log(log_sf)
 
 
 def _neg_log10_from_log(log_p: np.ndarray) -> np.ndarray:
-    """``-log10(p)`` from ``ln(p)``, which is how the tails are computed.
-
-    Taking the survival function directly loses the tail: it underflows to
-    exactly 0.0 at around p = 1e-308, and a corpus of any size has many pairs
-    past that. Every one of them then reports the same clamped number, so the
-    two significance measures stop ordering anything at exactly the point they
-    are most confident. ``logsf`` has no such floor -- ln(p) = -5000 is an
-    ordinary float -- so the conversion happens once, here.
-
-    A -inf (p underflowed even in log space) becomes the cap rather than an
-    infinity, since the column is a double and the UI has to print it.
-    """
+    """``-log10(p)`` from ``ln(p)``, which is how the tails are computed."""
     log_p = np.asarray(log_p, dtype=np.float64)
     out = np.where(np.isnan(log_p), 0.0, -log_p / np.log(10.0))
-    # `+ 0.0` normalises the sign bit: -0.0 is what ln(p) = 0 produces, and it
-    # reaches the database and the UI as "-0".
     return np.clip(out, 0.0, MAX_NEG_LOG10_P) + 0.0
 
 
-# --------------------------------------------------------------------------
-# Correlation family (signed -- these can express negative coupling)
-# --------------------------------------------------------------------------
 
 
 def phi(t: Contingency) -> np.ndarray:
-    """Phi coefficient: Pearson correlation between two binary variables.
-
-    ``(ad - bc) / sqrt(n_a * n_b * (c+d) * (b+d))``. Range [-1, 1].
-
-    The signed counterpart to chi-square (``phi^2 = chi2 / N``), and the most
-    directly interpretable correlation here: negative values mean the two files
-    actively avoid each other, which is real signal about module boundaries.
-    """
+    """Phi coefficient: Pearson correlation between two binary variables."""
     num = t.a * t.d - t.b * t.c
     den = np.sqrt(t.n_a * t.n_b * (t.c + t.d) * (t.b + t.d))
     return safe_div(num, den)
 
 
 def cramers_v(t: Contingency) -> np.ndarray:
-    """Cramer's V: ``sqrt(chi2 / (N * min(rows-1, cols-1)))``.
-
-    For a 2x2 table ``min(r-1, c-1) == 1``, so this reduces exactly to
-    ``|phi|``. It is retained under its own name because it is the measure that
-    generalises to the larger contingency tables used by the directory-level
-    rollups, where the reduction no longer holds.
-    """
+    """Cramer's V: ``sqrt(chi2 / (N * min(rows-1, cols-1)))``."""
     return np.sqrt(np.clip(safe_div(chi_square(t), t.n), 0.0, None))
 
 
 def yules_q(t: Contingency) -> np.ndarray:
-    """Yule's Q: ``(ad - bc) / (ad + bc)``. Range [-1, 1].
-
-    Reaches +/-1 whenever any single cell is zero, which makes it very eager --
-    a pair that has never once appeared apart scores a perfect 1.0 on two
-    observations. Effective at separating sign and direction, poor at
-    expressing confidence.
-    """
+    """Yule's Q: ``(ad - bc) / (ad + bc)``. Range [-1, 1]."""
     ad = t.a * t.d
     bc = t.b * t.c
     return safe_div(ad - bc, ad + bc)
 
 
 def yules_y(t: Contingency) -> np.ndarray:
-    """Yule's Y, the coefficient of colligation.
-
-    ``(sqrt(ad) - sqrt(bc)) / (sqrt(ad) + sqrt(bc))``. Range [-1, 1].
-
-    A square-root-damped variant of :func:`yules_q` that is less prone to
-    saturating at the extremes, so it discriminates better among strongly
-    coupled pairs.
-    """
+    """Yule's Y, the coefficient of colligation."""
     ad = np.sqrt(np.clip(t.a * t.d, 0.0, None))
     bc = np.sqrt(np.clip(t.b * t.c, 0.0, None))
     return safe_div(ad - bc, ad + bc)
 
 
 def michael(t: Contingency) -> np.ndarray:
-    """Michael's measure: ``4(ad - bc) / ((a + d)^2 + (b + c)^2)``.
-
-    Range [-1, 1]. A non-linear rescaling of the same ``ad - bc`` numerator
-    that drives phi and Yule's Q, but normalised by squared sums rather than a
-    product of marginals. Because ``d`` appears in the denominator it behaves
-    like the matching coefficients on sparse data and compresses toward zero.
-    """
+    """Michael's measure: ``4(ad - bc) / ((a + d)^2 + (b + c)^2)``."""
     num = 4.0 * (t.a * t.d - t.b * t.c)
     den = np.square(t.a + t.d) + np.square(t.b + t.c)
     return safe_div(num, den)
 
 
-# --------------------------------------------------------------------------
-# Probability / lift family
-# --------------------------------------------------------------------------
 
 
 def association_strength(t: Contingency) -> np.ndarray:
-    """Association strength (a.k.a. lift, or probabilistic affinity).
-
-    ``a * N / (n_a * n_b)`` -- observed co-occurrence divided by what
-    independence predicts. 1.0 means exactly chance, 2.0 means twice as often
-    as chance, 0.0 means never together.
-
-    This is the multiplicative sibling of PMI (``pmi == log2(association
-    strength)``) and inherits the same rare-item bias, but its unlogged scale
-    is far easier to explain to a human: "these files change together 14x more
-    often than chance".
-    """
+    """Association strength (a.k.a. lift, or probabilistic affinity)."""
     return safe_div(t.a * t.n, t.n_a * t.n_b)
 
 
 def confidence_ab(t: Contingency) -> np.ndarray:
-    """``P(B | A) = a / n_a`` -- the directional conditional probability.
-
-    Not one of the 29 symmetric measures, but the single most actionable number
-    for an agent: "when you touch A, B also changes 80% of the time". Asymmetric
-    by construction, so A->B and B->A differ.
-    """
+    """``P(B | A) = a / n_a`` -- the directional conditional probability."""
     return safe_div(t.a, t.n_a)
 
 

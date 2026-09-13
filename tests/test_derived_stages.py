@@ -1,11 +1,4 @@
-"""Every derived stage, over a synthetic corpus with a planted answer.
-
-The stages compose: aggregate feeds score, change sets feed cross-repo pairs,
-lagged feeds impact, mining reads the pairs. A unit test on any one of them
-misses the failure that actually happens -- a stage that stops writing a column
-another stage reads. This runs all of them against repositories whose
-relationships are known in advance.
-"""
+"""Every derived stage, over a synthetic corpus with a planted answer."""
 from __future__ import annotations
 
 import pytest
@@ -52,12 +45,7 @@ def test_mining_produces_clusters_and_risk_without_impossible_values(corpus):
 
 
 def test_a_full_run_through_run_ingest_drives_every_stage(corpus, monkeypatch):
-    """`run_ingest` is the entrypoint the scheduler and the CLI both use.
-
-    Everything below it is covered piecewise; this exercises the orchestration
-    itself -- credential check, lock, per-repo fan-out, the global stages, and
-    the run row -- against repositories already on disk.
-    """
+    """`run_ingest` is the entrypoint the scheduler and the CLI both use."""
     from git_synapse.ingest import pipeline
     from git_synapse.ingest.github import RepoRecord
 
@@ -83,8 +71,7 @@ def test_a_full_run_through_run_ingest_drives_every_stage(corpus, monkeypatch):
 
 
 def test_a_run_aborts_cleanly_when_the_credential_is_rejected(corpus, monkeypatch):
-    """It must fail the whole run before touching a mirror, not let every
-    repository fail individually and re-clone on the way."""
+    """It must fail the whole run before touching a mirror, not let every repository fail individually and re-clone on the way."""
     from git_synapse.ingest import pipeline
     from git_synapse.ingest.pipeline import AuthError
 

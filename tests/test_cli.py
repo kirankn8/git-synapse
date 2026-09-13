@@ -64,12 +64,10 @@ def test_reset_does_not_wipe_anything_without_confirmation(db):
     assert r.exit_code != 0 or "abort" in r.stdout.lower() or "cancel" in r.stdout.lower()
 
 
-# ---------------------------------------------------- commands that compute
 
 
 def test_reset_requires_an_explicit_yes(scratch_db):
-    """`reset` drops every ingested row. Nothing but an explicit flag may run
-    it, because the mistake is unrecoverable without a full re-ingest."""
+    """`reset` drops every ingested row."""
     from git_synapse.db.orm import models, session_scope
 
     with session_scope() as session:
@@ -87,17 +85,14 @@ def test_reset_requires_an_explicit_yes(scratch_db):
 
 
 def test_reset_advertises_the_flag_it_requires(scratch_db):
-    """The destructive half is deliberately not executed here: running it would
-    wipe the scratch database other modules' fixtures depend on. What matters is
-    that it refuses by default and says how to mean it."""
+    """The destructive half is deliberately not executed here: running it would wipe the scratch database other modules' fixtures depend on."""
     r = runner.invoke(app, ["reset", "--help"])
     assert r.exit_code == 0
     assert "--yes" in r.stdout
 
 
 def test_reset_with_yes_truncates_only_the_atom_tables(monkeypatch):
-    """Runs against a recording stub: pointing this at the real database would
-    delete every ingested commit, which is exactly what it is meant to do."""
+    """Runs against a recording stub: pointing this at the real database would delete every ingested commit, which is exactly what it is meant to do."""
     deleted = []
     selected = []
 
@@ -156,8 +151,7 @@ def _account(**over):
 
 
 def test_account_list_spells_out_each_filter(db, monkeypatch):
-    """The filters decide what gets scanned, so a row that does not show them
-    hides the reason a repository was skipped."""
+    """The filters decide what gets scanned, so a row that does not show them hides the reason a repository was skipped."""
     from git_synapse.ingest import accounts
 
     monkeypatch.setattr(accounts, "list_accounts", lambda *a, **k: [
@@ -172,8 +166,7 @@ def test_account_list_spells_out_each_filter(db, monkeypatch):
 
 
 def test_an_allowlist_is_shown_instead_of_the_other_filters(db, monkeypatch):
-    """An allowlist overrides every other filter, so listing them beside it
-    would describe rules that are not being applied."""
+    """An allowlist overrides every other filter, so listing them beside it would describe rules that are not being applied."""
     from git_synapse.ingest import accounts
 
     monkeypatch.setattr(accounts, "list_accounts", lambda *a, **k: [
@@ -208,8 +201,7 @@ def test_enabling_an_unknown_account_fails_cleanly(db, monkeypatch):
 
 
 def test_removing_an_unknown_account_fails_cleanly(db, monkeypatch):
-    """It reports absence by returning falsy rather than raising, so the caller
-    has to check the value -- a bare call would look like success."""
+    """It reports absence by returning falsy rather than raising, so the caller has to check the value -- a bare call would look like success."""
     from git_synapse.ingest import accounts
 
     monkeypatch.setattr(accounts, "remove_account", lambda *a, **k: False)
@@ -228,8 +220,7 @@ def test_removing_a_known_account_keeps_its_repositories(db, monkeypatch):
 
 
 def test_adding_an_account_says_what_to_run_next(db, monkeypatch):
-    """Adding one scans nothing by itself, and leaving that unsaid reads as a
-    silent failure."""
+    """Adding one scans nothing by itself, and leaving that unsaid reads as a silent failure."""
     from git_synapse.ingest import accounts
 
     row = _account(login="fresh")
@@ -256,8 +247,7 @@ def test_enabling_an_account_shows_its_new_state(db, monkeypatch):
 
 
 def test_reset_deletes_every_ingested_class_but_leaves_the_schema(monkeypatch):
-    """Driven through a fake session on purpose: the real command empties the
-    database, and this suite shares one with every other test in the run."""
+    """Driven through a fake session on purpose: the real command empties the database, and this suite shares one with every other test in the run."""
     from contextlib import contextmanager
 
     deleted = []

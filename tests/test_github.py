@@ -1,10 +1,4 @@
-"""The GitHub client, exercised at its HTTP boundary.
-
-A mocked transport is right here and nowhere else: this is the one place the
-code genuinely talks to a remote service, and the failures worth pinning are
-protocol-level -- pagination that stops early, a 200 that is not a list, an
-unauthenticated request that returns fewer repositories than exist.
-"""
+"""The GitHub client, exercised at its HTTP boundary."""
 from __future__ import annotations
 
 import httpx
@@ -18,8 +12,6 @@ def _repo_payload(i: int, **over):
     payload = {
         "id": 1000 + i, "name": f"repo{i}", "full_name": f"acme/repo{i}",
         "owner": {"login": "acme"},
-        # A real github.com clone URL, because the host is now load-bearing: a
-        # token is embedded only when the URL's host is the record's host.
         "clone_url": f"https://github.com/acme/repo{i}.git",
         "ssh_url": f"git@github.com:acme/repo{i}.git", "default_branch": "main",
         "size": 100, "archived": False, "fork": False, "disabled": False,
@@ -33,12 +25,7 @@ def _repo_payload(i: int, **over):
 
 
 def _github_credential(**over):
-    """The real GitHub credential shape, with the field under test replaced.
-
-    Built from ProviderConfig rather than by hand so these keep testing what a
-    deployment actually gets -- the endpoint and the prefixes that reject a
-    half-written token file included.
-    """
+    """The real GitHub credential shape, with the field under test replaced."""
     import dataclasses
 
     return dataclasses.replace(ProviderConfig().github, **over)
@@ -55,11 +42,9 @@ def _client(handler, token="ghu_" + "t" * 36):
     return c
 
 
-# --------------------------------------------------------------- auth header
 
 def test_the_live_token_reaches_the_authorization_header(tmp_path):
-    """An unauthenticated request returns HTTP 200 and only public repositories
-    -- 59 of 272 -- which discovery then accepted as the whole org."""
+    """An unauthenticated request returns HTTP 200 and only public repositories -- 59 of 272 -- which discovery then accepted as the whole org."""
     token_file = tmp_path / "tok"
     token_file.write_text("ghu_" + "f" * 36)
     cfg = _github_credential(token="", token_file=str(token_file))
@@ -73,7 +58,6 @@ def test_no_token_means_no_authorization_header():
         assert "Authorization" not in c._client.headers
 
 
-# ---------------------------------------------------------------- pagination
 
 def test_pagination_walks_every_page():
     pages = {1: [_repo_payload(i) for i in range(100)],
@@ -100,10 +84,7 @@ def test_a_short_first_page_ends_the_walk():
 
 
 def test_an_http_error_raises_rather_than_returning_a_partial_list(monkeypatch):
-    """A truncated listing accepted as complete is how the corpus silently
-    shrank to a fifth of itself."""
-    # The client retries a 5xx with backoff, which is right in production and
-    # pointless here; the assertion is about what it does once it gives up.
+    """A truncated listing accepted as complete is how the corpus silently shrank to a fifth of itself."""
     monkeypatch.setattr("git_synapse.ingest.github.time.sleep", lambda _s: None)
 
     def handler(request):
@@ -124,7 +105,6 @@ def test_a_non_list_body_does_not_become_repositories():
         assert c.list_org_repos("acme") == []
 
 
-# -------------------------------------------------------------- record shape
 
 def test_record_is_built_from_the_api_payload():
     r = RepoRecord.from_api(_repo_payload(1, size=4096, language="Python"))
@@ -141,15 +121,12 @@ def test_authed_clone_url_embeds_the_token_and_leaves_no_trace_without_one():
 
 
 def test_a_token_is_only_embedded_on_the_host_that_issued_it():
-    """Otherwise the deployment-wide GitHub token is handed to whatever server
-    a self-hosted repository happens to live on."""
+    """Otherwise the deployment-wide GitHub token is handed to whatever server a self-hosted repository happens to live on."""
     import dataclasses
 
     gh = RepoRecord.from_api(_repo_payload(1))
     assert "ghu_abc@" in gh.authed_clone_url("ghu_abc")
 
-    # Same provider, different host: a GitHub Enterprise clone URL under a
-    # record whose token belongs to github.com.
     elsewhere = dataclasses.replace(gh, clone_url="https://ghe.corp/o/r.git")
     assert elsewhere.authed_clone_url("ghu_abc") == "https://ghe.corp/o/r.git"
 
@@ -172,14 +149,9 @@ def test_each_host_gets_the_clone_username_it_expects():
     assert bb.authed_clone_url("bb_x").startswith("https://x-token-auth:bb_x@")
 
 
-# ------------------------------------------------------------------ filters
 
 def test_archived_and_forked_repositories_follow_configuration():
-    """A fork whose parent is nowhere in the corpus duplicates nothing.
-
-    The archived repository is dropped outright; the fork is not, because
-    ``acme/upstream`` is neither in this listing nor already tracked.
-    """
+    """A fork whose parent is nowhere in the corpus duplicates nothing."""
     records = [
         RepoRecord.from_api(_repo_payload(1)),
         RepoRecord.from_api(_repo_payload(2, archived=True)),
@@ -194,15 +166,9 @@ def test_archived_and_forked_repositories_follow_configuration():
 
 
 def test_a_fork_is_dropped_only_when_its_parent_is_also_here():
-    """The duplication is the harm, so the parent's presence is the question.
-
-    Storing a fork beside its parent puts the same commits in twice and lets
-    one project's history be counted as two projects agreeing.
-    """
+    """The duplication is the harm, so the parent's presence is the question."""
     cfg = SelectionConfig(include_forks=False)
 
-    # Parent arriving in the same listing: an org that owns a project and a
-    # fork of it hands us both at once.
     same_listing = [
         RepoRecord.from_api(_repo_payload(1)),
         RepoRecord.from_api(_repo_payload(2, fork=True,
@@ -220,8 +186,7 @@ def test_a_fork_is_dropped_only_when_its_parent_is_also_here():
 
 
 def test_the_parent_is_fetched_per_repository_because_listings_omit_it():
-    """GitHub's list endpoints return the minimal repository representation,
-    which carries `fork` but not `parent`. One request per fork closes that."""
+    """GitHub's list endpoints return the minimal repository representation, which carries `fork` but not `parent`."""
     asked = []
 
     def handler(request):
@@ -243,12 +208,7 @@ def test_a_repository_with_no_parent_reports_an_empty_one():
 
 
 def test_a_failed_parent_lookup_is_empty_rather_than_fatal():
-    """The caller keeps a fork it cannot place, so a refusal here must not be
-    an exception that aborts discovery of the whole organisation.
-
-    404 is the realistic failure: a repository renamed between the listing and
-    this request, or one the token may list but not read.
-    """
+    """The caller keeps a fork it cannot place, so a refusal here must not be an exception that aborts discovery of the whole organisation."""
     def handler(request):
         return httpx.Response(404, json={"message": "Not Found"})
 
@@ -257,12 +217,7 @@ def test_a_failed_parent_lookup_is_empty_rather_than_fatal():
 
 
 def test_a_fork_whose_parent_could_not_be_established_is_kept():
-    """An empty parent means "not established", never "no parent".
-
-    GitHub answers `parent` only on a per-repository request, so a failed or
-    skipped one leaves it blank. Discarding real history on a failed request
-    would lose a codebase somebody works in, and say nothing about why.
-    """
+    """An empty parent means "not established", never "no parent"."""
     unplaced = [RepoRecord.from_api(_repo_payload(9, fork=True))]
     assert unplaced[0].parent_full_name == ""
     kept = select_repos(unplaced, SelectionConfig(include_forks=False),
@@ -276,7 +231,6 @@ def test_an_explicit_allowlist_overrides_every_other_filter():
     assert [r.name for r in select_repos(records, cfg)] == ["repo2"]
 
 
-# ------------------------------------------------------- retry and limits
 
 def test_a_transient_5xx_is_retried_and_then_succeeds(monkeypatch):
     monkeypatch.setattr("git_synapse.ingest.github.time.sleep", lambda _s: None)
@@ -360,7 +314,6 @@ def test_fetch_languages_degrades_to_empty_rather_than_failing(monkeypatch):
         assert c.fetch_languages("acme/x") == {}
 
 
-# ------------------------------------------------------------- the repo filters
 
 def _record(name, **flags):
     return RepoRecord(github_id=hash(name) % 10**6, owner="acme", name=name,
@@ -369,8 +322,7 @@ def _record(name, **flags):
 
 
 def test_a_disabled_repository_is_never_included():
-    """GitHub disables a repository when it is over quota or under review; there
-    is nothing to clone."""
+    """GitHub disables a repository when it is over quota or under review; there is nothing to clone."""
     from git_synapse.config import SelectionConfig
     from git_synapse.ingest.github import select_repos
 
@@ -392,8 +344,7 @@ def test_skip_repos_matches_a_bare_name_or_a_full_name():
 
 
 def test_a_disabled_repository_is_never_selected():
-    """A disabled repository cannot be cloned at all, so selecting it turns one
-    upstream state into a run-long sequence of failures."""
+    """A disabled repository cannot be cloned at all, so selecting it turns one upstream state into a run-long sequence of failures."""
     from git_synapse.config import SelectionConfig
     from git_synapse.ingest.github import RepoRecord, select_repos
 
@@ -406,8 +357,7 @@ def test_a_disabled_repository_is_never_selected():
 
 
 def test_a_private_repository_is_excluded_unless_asked_for():
-    """Cloning it needs a credential, so selecting it when private access was
-    not requested turns one setting into a clone failure."""
+    """Cloning it needs a credential, so selecting it when private access was not requested turns one setting into a clone failure."""
     from git_synapse.config import SelectionConfig
     from git_synapse.ingest.github import RepoRecord, select_repos
 
@@ -421,9 +371,7 @@ def test_a_private_repository_is_excluded_unless_asked_for():
 
 
 def test_giving_up_reports_what_the_host_actually_said(monkeypatch):
-    """`failed after 5 attempts: None` was the message a reader got for a rate
-    limit -- last_error is only set by transport errors, so the status and the
-    host's own sentence, the two useful things, were both dropped."""
+    """`failed after 5 attempts: None` was the message a reader got for a rate limit -- last_error is only set by transport errors, so the status and the host's own sentence, the two useful things, were both dropped."""
     import httpx
 
     from git_synapse.ingest.github import GitHubClient

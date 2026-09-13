@@ -1,10 +1,4 @@
-"""The orgs and users whose repositories get discovered.
-
-Onboarding an account is a database write, not a redeploy. Each account carries
-its own include/exclude filters because the reason to skip forks in one org
-rarely applies to the next, and the environment variables that used to carry
-them globally are seeded here once and then ignored.
-"""
+"""The orgs and users whose repositories get discovered."""
 
 from __future__ import annotations
 
@@ -19,15 +13,9 @@ from git_synapse.db.orm import models, session_scope
 
 log = logging.getLogger(__name__)
 
-#: GitHub logins: alphanumeric with single hyphens, 39 characters at most.
-#: Validated here so a typo fails at the API boundary with a clear message
-#: rather than as a puzzling 404 from discovery an hour later.
+# GitHub login: alphanumeric with single hyphens, at most 39 characters.
 _LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$")
 
-#: How a source is enumerated. 'org' and 'user' are GitHub's two endpoints;
-#: 'group' and 'workspace' are GitLab's and Bitbucket's names for the same
-#: thing; 'repo' enumerates nothing and holds exactly the repositories named in
-#: its allowlist.
 KINDS = ("org", "user", "group", "workspace", "repo")
 
 #: Columns a caller may set. Anything else is bookkeeping this module owns.
@@ -69,11 +57,7 @@ def _account_dict(account: Any, session: Any) -> dict:
 
 
 def validate_login(login: str) -> str:
-    """Return the trimmed login, or raise if no host could own that name.
-
-    GitLab groups nest -- `gitlab-org/security` is one owner -- so a slash is
-    allowed and each segment is checked on its own.
-    """
+    """Return the trimmed login, or raise if no host could own that name."""
     value = (login or "").strip().strip("/")
     if value and "/" in value:
         for segment in value.split("/"):
@@ -122,12 +106,7 @@ def get_account(account_id: int) -> dict | None:
 
 
 def find_by_login(login: str, host: str | None = None) -> dict | None:
-    """One source by login on a host, matched case-insensitively.
-
-    The host is part of the lookup because the same login exists on more than
-    one: an internal GitLab group commonly carries the company's GitHub org
-    name, and they are two different places.
-    """
+    """One source by login on a host, matched case-insensitively."""
     with session_scope() as session:
         Account = models().Account
         for row in session.query(Account).all():
@@ -209,12 +188,7 @@ def update_account(account_id: int, **fields: Any) -> dict:
 
 
 def remove_account(account_id: int) -> bool:
-    """Delete an account. Its repositories and their history are kept.
-
-    The mined statistics are the expensive part and remain valid whether or not
-    the account that discovered them is still listed, so the foreign key clears
-    rather than cascades. Repositories simply stop being refreshed.
-    """
+    """Delete an account. Its repositories and their history are kept."""
     with session_scope() as session:
         row = session.get(models().Account, account_id)
         if row is None:
@@ -227,13 +201,7 @@ def remove_account(account_id: int) -> bool:
 
 def record_discovery(account_id: int, repo_count: int | None = None,
                      error: str | None = None) -> None:
-    """Stamp the outcome of a discovery pass so the UI can show what happened.
-
-    ``repo_count`` of None leaves the count alone, which is what a *failure*
-    means: the listing did not come back, so nothing is known about how many
-    repositories the source has -- and they certainly did not disappear.
-    Writing 0 there had `google` reporting no repositories while owning 122.
-    """
+    """Stamp the outcome of a discovery pass so the UI can show what happened."""
     with session_scope() as session:
         row = session.get(models().Account, account_id)
         if row is None:
@@ -248,14 +216,7 @@ def record_discovery(account_id: int, repo_count: int | None = None,
 
 
 def refresh_repo_counts() -> None:
-    """Set every source's count from the repositories that actually exist.
-
-    Discovery records what it *selected*, which is written before the upsert
-    and therefore before anything is durable: a run that aborts between the two
-    -- the shrink guard does exactly that -- leaves a source claiming
-    repositories no row backs. Counting the rows afterwards is the only figure
-    that cannot drift from what a reader can click on.
-    """
+    """Set every source's count from the repositories that actually exist."""
     with session_scope() as session:
         Account, Repo = models().Account, models().Repo
         for account in session.query(Account).all():
@@ -266,13 +227,7 @@ def refresh_repo_counts() -> None:
 
 
 def config_for(account: dict) -> SelectionConfig:
-    """What this account takes, as `select_repos` wants it.
-
-    Every value comes from the row, which always has all of them: the columns
-    are NOT NULL with defaults, and `_account_dict` serialises the full set.
-    Nothing host-shaped is returned -- the endpoint and the credential travel
-    with the `Source`, because this account may not be a GitHub one.
-    """
+    """What this account takes, as `select_repos` wants it."""
     return SelectionConfig(
         include_private=account["include_private"],
         include_forks=account["include_forks"],
@@ -302,12 +257,7 @@ def _is_missing(exc: Exception) -> bool:
 
 
 def _not_found_message(source: Any) -> str:
-    """A 404 on a private repository is indistinguishable from one that does
-    not exist -- deliberately, so an outsider cannot enumerate what is there.
-
-    Which means we cannot tell the reader which it is, and must not guess. Both
-    possibilities, and the one thing that separates them, is the whole answer.
-    """
+    """A 404 on a private repository is indistinguishable from one that does not exist -- deliberately, so an outsider cannot enumerate what is there."""
 
     want = _CREDENTIAL_FOR.get(source.provider)
     if want and not get_config().providers.token_for(source.provider):
@@ -326,12 +276,7 @@ def _not_found_message(source: Any) -> str:
 
 
 def _budget_note(source: Any) -> str:
-    """How much budget is left and when it comes back, where the host says.
-
-    GitHub's `/rate_limit` is itself exempt from the rate limit, so asking is
-    free -- and "resets in 12 minutes" is something a reader can act on, while
-    "rate limited" leaves them guessing whether to wait a minute or an hour.
-    """
+    """How much budget is left and when it comes back, where the host says."""
     if source.provider != "github":
         return ""
     try:
@@ -349,13 +294,7 @@ def _budget_note(source: Any) -> str:
 
 
 def _rate_limit_message(source: Any) -> str:
-    """Why the host refused, in terms of the thing the reader can change.
-
-    "Rate limited" alone sends someone to wait it out. Anonymous GitHub allows
-    sixty requests an hour, which one listing of a large organisation can
-    exhaust, and the fix there is a token rather than patience -- so say which
-    of the two situations this is, and when waiting would actually work.
-    """
+    """Why the host refused, in terms of the thing the reader can change."""
 
     if source.provider == "github" and not get_config().providers.token_for("github"):
         return (
@@ -375,12 +314,7 @@ def _rate_limit_message(source: Any) -> str:
 
 
 def set_credential(account_id: int, token: str | None) -> dict | None:
-    """Store or clear one source's access token.
-
-    The plaintext is never written and never read back out of here: callers get
-    the hint, which is enough to recognise a token and useless for anything
-    else.
-    """
+    """Store or clear one source's access token."""
     from git_synapse import vault
 
     with session_scope() as session:
@@ -393,12 +327,7 @@ def set_credential(account_id: int, token: str | None) -> dict | None:
 
 
 def credential_for(account: dict | None) -> str:
-    """The token to use for this source: its own, else the environment's.
-
-    A source that carries one overrides the deployment-wide credential, which
-    is the point -- one organisation's read-only token has no business being
-    the one used against another's private repositories.
-    """
+    """The token to use for this source: its own, else the environment's."""
     from git_synapse import vault
 
     if not account:
@@ -406,14 +335,6 @@ def credential_for(account: dict | None) -> str:
     return vault.open_(account.get("credential"))
 
 
-#: Owner listings, kept briefly so that looking the same one up twice does not
-#: spend the budget twice. The window is short because it exists to cover one
-#: person's back-and-forth -- paste, look, adjust, look again -- not to serve
-#: stale data: on an anonymous GitHub, three glances at an organisation is
-#: three of the sixty requests available that hour.
-#:
-#: Only listings are cached. A single repository costs one request, which is
-#: cheap enough that a stale answer would be the worse trade.
 _LISTINGS: dict[tuple[str, str], tuple[float, dict]] = {}
 LISTING_TTL_SECONDS = 300
 
@@ -430,45 +351,15 @@ def _cached_listing(key: tuple[str, str]) -> dict | None:
 
 
 def resolve_url(url: str, limit: int = 300, token: str = "", page: int = 1) -> dict:
-    """Work out what a pasted URL is, and what could be tracked from it.
-
-    This is what makes adding something one field instead of six. The caller
-    hands over whatever was in their clipboard and gets back either
-
-    * ``kind="repo"`` -- a single repository, already fetched, ready to confirm;
-      or
-    * ``kind="owner"`` -- an owner and the repositories under it, for a person
-      to choose from.
-
-    A repository URL costs one request. It deliberately does *not* enumerate
-    the owner: pasting one repository from an organisation of 8,296 is a
-    question about one repository, and answering it by paging through
-    eighty-three listings would be the slowest possible way to say yes.
-
-    An owner comes back **one page at a time**. Every host caps a listing at a
-    hundred, so 8,296 repositories is 83 requests and roughly twenty-five
-    seconds -- which as a single blocking call is twenty-five seconds of blank
-    screen. The caller draws the first hundred immediately and asks for the
-    next while the reader is already reading.
-    """
+    """Work out what a pasted URL is, and what could be tracked from it."""
     from git_synapse.ingest import providers, sources
 
     source = sources.parse(url)
     existing = find_by_login(source.owner, source.host)
-    # A token the caller is holding but has not committed to yet: the point of
-    # the lookup is to find out whether it works before anything is written.
     secret = token.strip() or credential_for(_with_credential(existing))
 
     def _key(record: Any) -> str:
-        """What to put in the allowlist, and what the picker selects on.
-
-        The repository's path *relative to the owner*, which is its `name`
-        everywhere except GitLab, where groups nest: `gitlab-org` contains both
-        `gitlab-org/gitlab-runner` and `gitlab-org/ci-cd/gitlab-runner`, two
-        different projects with the same name. Keying on the name alone ticks
-        both boxes for one choice and puts one entry in the allowlist that then
-        matches both.
-        """
+        """What to put in the allowlist, and what the picker selects on."""
         prefix = f"{source.owner}/"
         full = record.full_name or f"{record.owner}/{record.name}"
         return full[len(prefix):] if full.startswith(prefix) else record.name
@@ -486,11 +377,6 @@ def resolve_url(url: str, limit: int = 300, token: str = "", page: int = 1) -> d
             "is_private": record.is_private,
             "size_kb": record.disk_usage_kb,
             "html_url": record.html_url,
-            # What the picker should tick on arrival. Forks and archived
-            # repositories are offered but not pre-selected: a fork's history is
-            # its parent's, and an archive cannot change again, so both are
-            # usually noise -- but "usually" is not "never", which is why they
-            # are shown at all rather than filtered away.
             "suggested": not (record.is_fork or record.is_archived),
             "already_tracked": bool(
                 existing and _key(record) in (existing.get("only_repos") or [])
@@ -505,8 +391,6 @@ def resolve_url(url: str, limit: int = 300, token: str = "", page: int = 1) -> d
         "web_url": source.web_url,
         "has_api": source.has_api,
         "existing_account_id": existing["id"] if existing else None,
-        # An owner already tracked wholesale has nothing to choose: everything
-        # under it is in scope, including repositories created tomorrow.
         "tracks_everything": bool(existing and not (existing.get("only_repos") or [])),
     }
 
@@ -523,8 +407,6 @@ def resolve_url(url: str, limit: int = 300, token: str = "", page: int = 1) -> d
         return {**base, "kind": "repo", "repos": [_repo(record)], "total": 1,
                 "truncated": False}
 
-    # A token changes what is visible, so it must not read another caller's
-    # anonymous answer.
     cache_key = (source.host, source.owner.lower(), page) if not secret else None
     if cache_key is not None:
         cached = _cached_listing(cache_key)
@@ -542,10 +424,6 @@ def resolve_url(url: str, limit: int = 300, token: str = "", page: int = 1) -> d
         except Exception as exc:
             if not _is_rate_limited(exc):
                 raise
-            # Not a dead end. Choosing from a list is one way to answer this
-            # question; tracking the whole owner is the other, and that needs
-            # no list at all -- so say what happened and offer the door that
-            # is still open rather than refusing outright.
             log.info("could not list %s: %s", source.owner, exc)
             return {
                 **base, "kind": "owner", "repos": [], "total": None,
@@ -558,9 +436,6 @@ def resolve_url(url: str, limit: int = 300, token: str = "", page: int = 1) -> d
         **base,
         "kind": "owner",
         "repos": [_repo(r) for r in records],
-        # What the owner actually has, where the host says so. Unknown stays
-        # unknown: reporting how many we have fetched as the total would state
-        # our own progress as a fact about somebody else's organisation.
         "total": found.total,
         "page": page,
         "has_more": found.has_more,
@@ -582,14 +457,7 @@ def _with_credential(account: dict | None) -> dict | None:
 
 def add_from_url(url: str, repos: list[str] | None = None,
                  token: str = "", **fields: Any) -> dict:
-    """Track something a person pasted.
-
-    ``repos`` names what to track; an empty list means everything under the
-    owner, now and in future, which is the one case an allowlist cannot
-    express. Adding to a source that already exists extends its allowlist
-    rather than failing, because pasting a second repository from the same
-    owner is obviously an addition and not a mistake.
-    """
+    """Track something a person pasted."""
     from git_synapse.ingest import sources
 
     source = sources.parse(url)
@@ -618,11 +486,6 @@ def add_from_url(url: str, repos: list[str] | None = None,
         host=source.host,
         api_url=fields.get("api_url") or source.api_url,
         only_repos=wanted,
-        # Filters only bite when nothing was named. An allowlist is already an
-        # explicit answer -- `_discover_account` fetches those by name and
-        # never runs them through `select_repos` -- so these describe the
-        # whole-owner case alone: no forks, because a fork's history is its
-        # parent's, and everything else the credential can see.
         include_forks=False,
         include_archived=True,
         include_private=True,

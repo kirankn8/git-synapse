@@ -1,21 +1,4 @@
-"""MCP server: exposes change-coupling intelligence to coding agents.
-
-This is the interface the project exists for. An agent about to edit a file asks
-``coupled_files`` and gets back the files that history says must usually change
-with it, ranked by a statistically defensible measure and accompanied by the
-evidence -- co-change counts, conditional probabilities and significance.
-
-Two transports:
-
-* **stdio** -- for agents that launch the server as a subprocess, which is how
-  Claude Code and most desktop clients connect.
-* **streamable-http** -- for the containerised deployment, where the server is a
-  long-lived service that several agents share.
-
-Every tool returns plain JSON-serialisable dicts. Relationship tools default to
-compact evidence cards; their full metric breakdown is opt-in with
-``detail=True``.
-"""
+"""MCP server: exposes change-coupling intelligence to coding agents."""
 
 from __future__ import annotations
 
@@ -114,13 +97,7 @@ def _error_text(payload: Any) -> str:
 
 
 class _RecordingServer(MCPServer):
-    """An MCP server that records what was called and what it returned.
-
-    Overriding the one dispatch point rather than decorating fourteen tools:
-    a tool added later is recorded without anyone remembering to, which is the
-    only way this stays true. Recording is best-effort and never changes what
-    the caller gets back -- a telemetry failure must not become a tool failure.
-    """
+    """An MCP server that records what was called and what it returned."""
 
     async def call_tool(self, name, arguments, context=None):
         started = time.monotonic()
@@ -131,15 +108,9 @@ class _RecordingServer(MCPServer):
                          duration_ms=int((time.monotonic() - started) * 1000),
                          error=f"{type(exc).__name__}: {exc}")
             raise
-        # structured_content is populated only when a tool declares an output
-        # schema; every other reply arrives as text blocks, which is what the
-        # agent actually reads. Fall back to those so the log records what was
-        # returned rather than a null.
         payload = getattr(result, "structured_content", None)
         if payload is None:
             payload = _text_of(result)
-        # A tool that returns {"error": ...} succeeded at the protocol level and
-        # failed at the only level a reader cares about. Count it as an error.
         failed = bool(getattr(result, "is_error", False)) or (
             isinstance(payload, dict) and "error" in payload)
         calls.record(
@@ -166,19 +137,9 @@ def _round(value: Any, places: int = 4) -> Any:
     return round(value, places) if isinstance(value, float) else value
 
 
-#: A pair whose last co-change is older than this is reported as stale. Roughly
-#: two release cycles here: long enough that an active relationship will have
-#: fired at least once, short enough to catch a refactor that finished last year.
 STALE_AFTER_DAYS = 270
 
 
-#: Directory names that hold machine-written or third-party code. Matched as
-#: whole path segments: a substring test flagged `pkg/genetics/` as generated and
-#: missed a top-level `vendor/`, both of which matter.
-#: `swagger` and `openapi` are deliberately absent: they are real package names
-#: in Kubernetes-derived code (apiserver/pkg/endpoints/openapi/openapi.go is
-#: hand-written), and the generated artefacts they produce are already caught by
-#: filename below. Suppressing a real file is the expensive error.
 _GENERATED_DIRS = frozenset(
     {"gen", "generated", "vendor", "node_modules", "mocks", ".gen", "dist",
      "__generated__"}
@@ -196,24 +157,12 @@ _LOCKFILES = frozenset(
      "poetry.lock", "Gemfile.lock", "composer.lock"}
 )
 
-#: Below this many co-changes the interval around a probability is wider than
-#: the probability, so quoting a percentage implies precision that is not there.
-#: A pair that co-changed twice and never apart scores 1.0 and sorts above
-#: everything real -- observed sending a reviewer at four unrelated files. These
-#: are withheld by default rather than labelled, because a label only works on a
-#: reader who is already sceptical.
 THIN_SUPPORT = 5
 MIN_REPORTABLE_SUPPORT = 3
 
 
 def _classify_partner(path: str, own_path: str, n_ab: int) -> tuple[list[str], bool]:
-    """Label a partner, and say whether it is worth the reader's attention.
-
-    Ranking without judging pushed the filtering onto the reader: results padded
-    with 5% generated swagger files and the caller's own test file, which the
-    caller already knows about. Returns the labels and whether the row carries
-    information beyond what the caller can see for themselves.
-    """
+    """Label a partner, and say whether it is worth the reader's attention."""
     labels: list[str] = []
     segments = path.split("/")
     base = segments[-1]
@@ -237,9 +186,6 @@ def _classify_partner(path: str, own_path: str, n_ab: int) -> tuple[list[str], b
     if n_ab < THIN_SUPPORT:
         labels.append("thin_support")
 
-    # A sibling variant: same filename, different parent. This is where the tool
-    # genuinely discovers rather than confirms -- an amd/nvidia pair, a per-cloud
-    # or per-arch copy that must be edited in lockstep.
     own_dir, _, own_base = own_path.rpartition("/")
     p_dir, _, p_base = path.rpartition("/")
     if own_base and own_base == p_base and own_dir != p_dir:
@@ -254,27 +200,13 @@ def _classify_partner(path: str, own_path: str, n_ab: int) -> tuple[list[str], b
 def _describe_currency(
     days: int | None, trend: str | None, deleted: bool = False
 ) -> str | None:
-    """Say whether a coupling still appears to hold.
-
-    A lifetime score is silent about currency: a pair that co-changed forty times
-    and stopped two years ago outranks one that co-changed eight times last month.
-
-    Deletion is checked first and stated most loudly, because it is both the
-    strongest signal and the one age misses. A file removed in a refactor keeps
-    every co-change it ever had, and its coupling can be recent -- the case that
-    prompted this returned a partner deleted 50 days ago whose last co-change was
-    also 50 days ago, so no age threshold would have caught it. There are 38,716
-    such partners in this corpus, and an agent cannot edit any of them.
-    """
+    """Say whether a coupling still appears to hold."""
     if deleted:
         return (
             "DELETED -- this file no longer exists at HEAD. The coupling is "
             "historical; do not try to edit it. If the behaviour moved, find "
             "where it moved to."
         )
-    # Age outranks trend. The drift window is wider than the staleness threshold,
-    # so a pair can carry a trend label while its last co-change is a year old;
-    # returning the label first made the stale branch unreachable for those.
     if days is not None and days > STALE_AFTER_DAYS:
         return (
             f"STALE -- last co-changed {days} days ago; treat as historical, "
@@ -298,10 +230,6 @@ def _describe_confidence(confidence: float | None, n_ab: int) -> str:
     pct = f"{confidence:.0%}"
     if n_ab < MIN_REPORTABLE_SUPPORT:
         return f"{pct} of the time, but on only {n_ab} shared commits -- weak evidence"
-    # The same percentage means different things at different support. 90% of
-    # three commits and 90% of three hundred read identically before this, which
-    # is the overconfidence that sent a reviewer at files their own reading had
-    # already ruled out.
     hedge = f" (on {n_ab} shared commits, so treat as provisional)" if n_ab < THIN_SUPPORT else ""
     if confidence >= 0.7:
         verdict = "very likely needs updating too" if not hedge else "may need updating too"
@@ -312,13 +240,7 @@ def _describe_confidence(confidence: float | None, n_ab: int) -> str:
 
 
 def _evidence_card(partner: dict, labels: list[str], informative: bool) -> dict:
-    """Summarise all available signals without making one metric canonical.
-
-    The ranking metrics answer different questions, so exposing one of them as
-    *the* score makes the MCP client choose a metric before it knows the task.
-    This card instead reports the quality of the combined evidence and leaves
-    the individual measures available through ``detail=True``.
-    """
+    """Summarise all available signals without making one metric canonical."""
     support = int(partner.get("n_ab") or 0)
     days = partner.get("days_since_co_change")
     signals = []
@@ -394,24 +316,7 @@ def coupled_files(
     min_support: int = 2,
     detail: bool = False,
 ) -> dict:
-    """Rank a file's historical change partners.
-
-    Args:
-        repo: repository name, either ``name`` or ``owner/name``.
-        path: file path relative to the repository root. Renamed paths resolve
-            through the alias table, so an old path still works.
-        measure: optional metric for the explicit detail view. Compact mode is
-            metric-neutral and orders candidates by combined evidence quality.
-        limit: maximum partners to return.
-        min_support: ignore partners sharing fewer than this many commits. Raise
-            it to suppress coincidental pairs.
-        detail: include every calculated metric and statistical interpretation.
-            The default is a compact evidence card for each partner.
-
-    Returns:
-        The resolved file, and a ranked list of partners with their scores,
-        conditional probabilities and an interpretation of each.
-    """
+    """Rank a file's historical change partners."""
     target = q.resolve_file(repo, path)
     if target is None:
         return {
@@ -426,9 +331,6 @@ def coupled_files(
         except KeyError as exc:
             return {"error": str(exc)}
 
-    # Compact mode fetches by support only before applying the metric-neutral
-    # evidence ordering. A selected metric must not decide which partners are
-    # eligible to be shown unless the caller explicitly asks for detail.
     query_measure = spec.key if spec is not None else "n_ab"
     partners = q.coupled_files(target["id"], query_measure, max(limit * 4, 50), min_support)
 
@@ -520,14 +422,7 @@ def coupled_files(
     ),
 )
 def explain_pair(repo: str, path_a: str, path_b: str, commit_limit: int = 8) -> dict:
-    """Produce the complete evidence for one coupling relationship.
-
-    Args:
-        repo: repository name.
-        path_a: first file path.
-        path_b: second file path.
-        commit_limit: how many shared commits to include as evidence.
-    """
+    """Produce the complete evidence for one coupling relationship."""
     a = q.resolve_file(repo, path_a)
     b = q.resolve_file(repo, path_b)
     if a is None or b is None:
@@ -600,12 +495,7 @@ def explain_pair(repo: str, path_a: str, path_b: str, commit_limit: int = 8) -> 
     ),
 )
 def upstream_repos(repo: str, limit: int = 12) -> dict:
-    """List upstream repositories, strongest evidence first.
-
-    Args:
-        repo: repository name you are editing.
-        limit: maximum results.
-    """
+    """List upstream repositories, strongest evidence first."""
     target = _resolve_repo(repo)
     if target is None:
         return {"error": f"no repository matching {repo!r}"}
@@ -628,13 +518,7 @@ def upstream_repos(repo: str, limit: int = 12) -> dict:
     ),
 )
 def impact_of_change(repo: str, limit: int = 12, declared_only: bool = False) -> dict:
-    """List downstream repositories affected by a change here.
-
-    Args:
-        repo: repository being changed.
-        limit: maximum results.
-        declared_only: restrict to declared dependencies, the highest-confidence tier.
-    """
+    """List downstream repositories affected by a change here."""
     target = _resolve_repo(repo)
     if target is None:
         return {"error": f"no repository matching {repo!r}"}
@@ -658,15 +542,7 @@ def impact_of_change(repo: str, limit: int = 12, declared_only: bool = False) ->
 def coupling_chain(
     repo: str, direction: str = "downstream", max_depth: int = 3, limit: int = 12
 ) -> dict:
-    """Trace coupling chains outward from or inward to a repository.
-
-    Args:
-        repo: repository to start from.
-        direction: ``downstream`` for what this affects, ``upstream`` for where a
-            change here may originate.
-        max_depth: maximum hops; 2 gives A -> B -> C.
-        limit: maximum chains.
-    """
+    """Trace coupling chains outward from or inward to a repository."""
     target = _resolve_repo(repo)
     if target is None:
         return {"error": f"no repository matching {repo!r}"}
@@ -676,10 +552,6 @@ def coupling_chain(
     rows = fn(target["id"], max_depth=max_depth, min_score=0.3, limit=limit)
 
     arrow = " <- " if upstream else " -> "
-    # An empty result has two very different meanings and used to render as the
-    # same bare []. Traversal follows validated edges only, so a repository that
-    # declares no internal dependencies has nothing to walk -- that is "there was
-    # nothing to search", not "I searched and found nothing".
     explanation = None
     if not rows:
         counts = q.impact_edge_counts(target["id"], upstream)
@@ -758,10 +630,6 @@ def explain_repo_pair(repo_a: str, repo_b: str) -> dict:
             }
             for r in bumps
         ],
-        # The prose is what a model quotes, so it must not claim more than the
-        # structured fields beside it. This branch tested the bump count alone
-        # and so reported a bump-backed pair as "declares", promoting it to the
-        # top evidence tier on the strength of nothing.
         "interpretation": _describe_repo_pair(a, b, declared, impact),
     }
 
@@ -785,14 +653,7 @@ def _describe_repo_pair(a: dict, b: dict, declared: str | None, impact: dict | N
 
 
 def _resolve_repo(name: str) -> dict | None:
-    """Resolve a repository by exact name, then by unambiguous suffix.
-
-    A substring match is deliberately not a resolution. Falling back to the first
-    of them meant a typo answered confidently about a different repository --
-    "telem" resolved to telemetry, "contr" to contracts, and an empty string to whichever
-    repository happened to have the most commits, complete with evidence tiers
-    and nothing marking it as a guess.
-    """
+    """Resolve a repository by exact name, then by unambiguous suffix."""
     if not (name or "").strip():
         return None
     key = name.strip().lower()
@@ -808,11 +669,7 @@ def _resolve_repo(name: str) -> dict | None:
 
 
 def _evidence_guidance(rows: list[dict], direction: str) -> str:
-    """State the composition of the result before the reader reads the scores.
-
-    The score mixes both tiers, so it cannot say which evidence a row rests on.
-    That has to be stated, not left to be inferred from a number.
-    """
+    """State the composition of the result before the reader reads the scores."""
     if not rows:
         return f"No {direction} edges recorded for this repository."
     declared = sum(1 for r in rows if r["is_declared"])
@@ -830,8 +687,6 @@ def _impact_row(row: dict, name: str) -> dict:
     if row["is_declared"]:
         tier, note = "declared", "declared dependency; measured AUC 0.88 in sample"
     else:
-        # Unreachable by construction -- an edge with neither is never written --
-        # but stated rather than assumed, so a stale row is legible.
         tier, note = ("bump-backed", "observed manifest bumps; ground truth") \
             if row["has_bump_history"] else ("none", "no evidence recorded")
     return {
@@ -866,16 +721,7 @@ def coupled_directories(
     measure: str = DEFAULT_MEASURE,
     detail: bool = False,
 ) -> dict:
-    """Directories that historically change together with this one.
-
-    Args:
-        repo: repository name.
-        path: a directory path, or a file path whose directory is used.
-        limit: maximum partners.
-        measure: ranking measure.
-        detail: include the selected metric and per-partner scores. The default
-            returns compact evidence cards.
-    """
+    """Directories that historically change together with this one."""
     target = _resolve_repo(repo)
     if target is None:
         return {"error": f"no repository matching {repo!r}"}
@@ -883,8 +729,6 @@ def coupled_directories(
     cleaned = (path or "").strip().strip("/")
     row = q.directory_by_path(target["id"], cleaned)
     if row is None:
-        # Accept a file path and use its directory, which is what a caller
-        # editing a file will naturally pass.
         f = q.resolve_file(target["full_name"], path)
         if f is not None:
             row = q.directory_by_path(target["id"], f["dir_path"])
@@ -899,9 +743,6 @@ def coupled_directories(
     except KeyError as exc:
         return {"error": str(exc)}
 
-    # Ancestors and descendants are excluded by the query: a parent changes
-    # whenever its child does, so it scores 1.000 by construction. What comes
-    # back is only directories that could have moved independently and did not.
     partners = q.coupled_directories(row["id"], spec.key, max(limit * 4, 50))
     shaped = []
     own_path = row["path"] or ""
@@ -970,18 +811,11 @@ def coupled_directories(
     ),
 )
 def module_context(repo: str, path: str) -> dict:
-    """Resolve a file to its module and give both directions of the graph.
-
-    Args:
-        repo: repository name.
-        path: file path relative to the repository root.
-    """
+    """Resolve a file to its module and give both directions of the graph."""
     target = _resolve_repo(repo)
     if target is None:
         return {"error": f"no repository matching {repo!r}"}
 
-    # Every other path-taking tool rejects an unknown path. This one answered
-    # "it is a leaf", which an agent reads as "nothing depends on this".
     if q.resolve_file(target["full_name"], path) is None:
         return {
             "error": f"no file {path!r} found in repository {target['full_name']!r}",
@@ -1036,14 +870,7 @@ def module_context(repo: str, path: str) -> dict:
 def search_files(
     term: str, repo: str | None = None, limit: int = 20, min_changes: int = 0
 ) -> dict:
-    """Locate files whose path contains ``term``.
-
-    Args:
-        term: substring to match against the full path.
-        repo: restrict to one repository.
-        limit: maximum results.
-        min_changes: ignore files changed fewer than this many times.
-    """
+    """Locate files whose path contains ``term``."""
     repo_id = None
     if repo:
         matches = q.list_repos(search=repo, limit=5)
@@ -1198,25 +1025,7 @@ def report_gap(
     expected: str | None = None,
     observed: str | None = None,
 ) -> dict:
-    """File a defect against Git Synapse.
-
-    Args:
-        kind: one of ``missing_data``, ``wrong_data``, ``stale_data``,
-            ``tool_error``, ``coverage_gap``, ``suggestion``.
-        detail: what is wrong, concretely enough to reproduce. Required.
-        severity: ``low``, ``medium`` or ``high``. High means it would mislead
-            someone into a wrong change.
-        tool: the Git Synapse tool involved, if any.
-        repo: repository the problem concerns.
-        path: file path the problem concerns.
-        expected: what the repository or history actually shows.
-        observed: what Git Synapse returned instead.
-
-    Returns:
-        The report id and how many times this same defect has been seen. A
-        repeat increments the count rather than creating a duplicate, so the
-        count is a priority signal.
-    """
+    """File a defect against Git Synapse."""
     try:
         result = q.record_feedback(
             kind=kind,
@@ -1257,15 +1066,7 @@ def report_gap(
     ),
 )
 def list_measures() -> dict:
-    """Return the measure catalogue, with what each one measured.
-
-    No measure is recommended. Which question you want asked depends on what you
-    are doing, and only you know that: predicting what else must change is a
-    different question from finding out what a codebase is shaped like. What is
-    reported instead is how each fared at the first of those, next to what the
-    same corpus yields with no history at all -- so a measure that does worse
-    than looking at the file's test is visible as such.
-    """
+    """Return the measure catalogue, with what each one measured."""
     return {
         "default": DEFAULT_MEASURE,
         "measured_on": MEASURED_ON,
@@ -1299,13 +1100,7 @@ def tool_names() -> list[str]:
 
 
 def _publish_tool_inventory() -> None:
-    """Record what this server offers, so the UI can show never-called tools.
-
-    Written by the MCP process rather than read by the API, which would mean the
-    API importing this module to answer a question about a different container.
-    A tool nobody calls is the interesting case -- without the inventory the
-    activity page shows two tools and implies there are two.
-    """
+    """Record what this server offers, so the UI can show never-called tools."""
     from git_synapse.db.engine import set_watermark
 
     try:
@@ -1316,36 +1111,19 @@ def _publish_tool_inventory() -> None:
 
 
 def _serve(app, host: str, port: int) -> None:
-    """Run the ASGI app. Separated so `main` can be tested without one starting.
-
-    The http path used to go through `server.run`, which every entrypoint test
-    patched. Calling uvicorn inline instead left those tests waiting on a real
-    server that never returns -- a hang, not a failure, which is far harder to
-    read: the suite simply stopped at 45%.
-    """
+    """Run the ASGI app. Separated so `main` can be tested without one starting."""
     import uvicorn
 
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 def _guarded_app(host: str, transport: str = "http"):
-    """The MCP app, behind a token when this deployment asks for one.
-
-    Wrapping the ASGI app rather than calling `server.run` is what makes the
-    administrator's switch mean something here: without it the setting would be
-    a control that changes nothing, which is worse than not offering it.
-
-    The mode is read per request, so turning it on applies to the next call
-    rather than the next restart.
-    """
+    """The MCP app, behind a token when this deployment asks for one."""
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
 
     from git_synapse import auth
 
-    # `host` is not decoration: it configures the transport's allowed-Host
-    # check. Omitted, every request from anywhere but localhost came back 421,
-    # which reads as a protocol fault rather than a rejected Host header.
     app = (server.sse_app(host=host) if transport == "sse"
            else server.streamable_http_app(host=host))
 
@@ -1392,8 +1170,6 @@ def main(argv: list[str] | None = None) -> int:
     _publish_tool_inventory()
 
     if args.transport == "stdio":
-        # A subprocess on the caller's own machine: they already have whatever
-        # access the token would grant, so a token here protects nothing.
         log.info("git-synapse mcp server on stdio")
         server.run(transport="stdio")
     elif args.transport == "sse":

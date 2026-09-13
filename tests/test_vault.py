@@ -1,10 +1,4 @@
-"""The one secret that has to be readable again.
-
-Everything else this system stores is a hash. An access token cannot be,
-because `git clone` needs the actual characters -- so the guarantee drops from
-"a dump yields nothing" to "a dump alone yields nothing", and these tests pin
-down that the weaker guarantee is at least honoured exactly.
-"""
+"""The one secret that has to be readable again."""
 from __future__ import annotations
 
 import pytest
@@ -25,8 +19,7 @@ def test_a_sealed_token_comes_back_and_the_ciphertext_does_not_contain_it(keyed)
 
 
 def test_the_same_token_seals_differently_every_time(keyed):
-    """Fernet carries a random IV. Identical ciphertexts would tell anyone with
-    the table which two sources share a credential."""
+    """Fernet carries a random IV."""
     assert vault.seal(keyed) != vault.seal(keyed)
 
 
@@ -39,8 +32,7 @@ def test_a_real_fernet_key_is_used_as_given(monkeypatch):
 
 
 def test_without_a_key_nothing_can_be_stored(monkeypatch):
-    """The feature is opt-in, and the failure is a refusal rather than a
-    plaintext write."""
+    """The feature is opt-in, and the failure is a refusal rather than a plaintext write."""
     monkeypatch.delenv(vault.ENV_KEY, raising=False)
     assert vault.available() is False
     with pytest.raises(vault.VaultError, match=vault.ENV_KEY):
@@ -54,8 +46,7 @@ def test_seal_refuses_an_empty_secret(keyed):
 
 @pytest.mark.parametrize("stored", [None, "", "not-ciphertext", "gAAAAABtruncated"])
 def test_anything_unreadable_opens_as_empty_rather_than_raising(keyed, stored):
-    """A rotated key or a row from another deployment must not take a discovery
-    run down: the caller's fallback is the environment credential, which works."""
+    """A rotated key or a row from another deployment must not take a discovery run down: the caller's fallback is the environment credential, which works."""
     assert vault.open_(stored) == ""
 
 

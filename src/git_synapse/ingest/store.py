@@ -1,11 +1,4 @@
-"""ORM persistence for parsed Git history.
-
-The loader keeps the same identity rules as the original implementation:
-renames preserve a file id, aliases remain searchable, and re-ingesting a SHA
-is idempotent.  All writes are ordinary SQLAlchemy ORM operations in the
-caller-owned transaction; there are no driver connections, cursors, temp
-tables, or SQL bulk-loader shortcuts.
-"""
+"""ORM persistence for parsed Git history."""
 
 from __future__ import annotations
 

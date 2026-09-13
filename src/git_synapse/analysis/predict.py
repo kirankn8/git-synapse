@@ -30,9 +30,6 @@ def _as_dict(row: object) -> dict:
 
 def _input_fingerprint(conn: object) -> str:
     Dependency, Bump = models().RepoDependency, models().DepBump
-    # The caller may have appended dependency/bump rows in the same
-    # autoflush-disabled transaction. Fingerprinting must include those writes
-    # before deciding whether a rebuild can be skipped.
     conn.flush()
     dependencies = conn.query(Dependency).order_by(
         Dependency.consumer_repo_id, Dependency.dep_name, Dependency.manifest,

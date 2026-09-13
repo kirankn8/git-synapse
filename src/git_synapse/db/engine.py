@@ -46,9 +46,6 @@ def wait_for_database(timeout_s: float = 120.0, interval_s: float = 1.0) -> None
         attempt += 1
         try:
             with session_scope() as session:
-                # Opening an ORM session/connection is enough to verify that
-                # PostgreSQL accepts connections. Schema queries belong to
-                # apply_schema(), which runs immediately after this probe.
                 session.connection()
             log.info("database reachable after %d attempt(s)", attempt)
             return

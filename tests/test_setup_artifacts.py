@@ -59,14 +59,7 @@ def _requirement_names(lines: list[str]) -> set[str]:
 
 
 def test_the_two_dependency_lists_name_the_same_distributions() -> None:
-    """requirements.txt builds the image; pyproject.toml builds the package.
-
-    Both exist for a reason -- the Dockerfile installs requirements.txt first so
-    that editing a source file does not invalidate the pip layer -- but a
-    distribution in only one of them is installed for only some of the ways this
-    is run. `cryptography` reaching the image but not the wheel gives a `pip
-    install` whose Sources page cannot store a token, and nothing says why.
-    """
+    """requirements.txt builds the image; pyproject.toml builds the package."""
     requirements = _requirement_names(
         (ROOT / "requirements.txt").read_text().splitlines()
     )

@@ -1,23 +1,13 @@
-"""Impact prediction and the mining layer.
-
-Both publish claims an agent acts on -- "this repo is upstream of yours", "these
-files form a module", "this pair is decaying". A wrong answer here is not a
-crash; it reads as a finding.
-"""
+"""Impact prediction and the mining layer."""
 from __future__ import annotations
 
 import pytest
 
 from git_synapse.analysis import mining, predict
 
-# ------------------------------------------------------- rank normalisation
-
-
-# ------------------------------------------------------------ impact tiers
 
 def test_impact_and_upstream_are_exact_inverses(db):
-    """If A is upstream of B then B must be downstream of A, or the two tools
-    contradict each other about the same edge."""
+    """If A is upstream of B then B must be downstream of A, or the two tools contradict each other about the same edge."""
     from git_synapse.db.orm import models, session_scope
 
     with session_scope() as session:
@@ -85,11 +75,9 @@ def test_chains_never_revisit_a_repository(db):
             assert chain["depth"] >= 2, "a chain must be more than one hop"
 
 
-# ----------------------------------------------------------------- mining
 
 def test_cross_directory_modules_span_more_than_one_directory(db):
-    """The whole point of the label-propagation clusters is finding modules the
-    directory tree does not show."""
+    """The whole point of the label-propagation clusters is finding modules the directory tree does not show."""
     from git_synapse.db.orm import models, session_scope
 
     with session_scope() as session:
@@ -123,16 +111,10 @@ def test_mining_readers_on_an_unknown_repo_return_empty(db, repo_id):
 
 
 
-# --------------------------------------------- impact rebuild on a known corpus
 
 @pytest.fixture()
 def impact_corpus(scratch_db):
-    """Three repositories wired by declared dependencies and bump history.
-
-    The graph is what repositories say about each other, so the fixture states
-    it the same way: a manifest row in `repo_dependency`, and version changes in
-    `dep_bump`.
-    """
+    """Three repositories wired by declared dependencies and bump history."""
     from datetime import UTC, datetime, timedelta
 
     from git_synapse.analysis import predict
@@ -152,8 +134,6 @@ def impact_corpus(scratch_db):
             conn.flush()
             ids[name] = row.id
 
-        # packager declares signer and has bumped it; runtime declares packager
-        # but has never moved it.
         for consumer, dep in (("packager", "signer"), ("runtime", "packager")):
             conn.add(models().RepoDependency(
                 consumer_repo_id=ids[consumer], dep_repo_id=ids[dep],
@@ -255,16 +235,10 @@ def test_a_rebuild_can_run_inside_a_callers_transaction(impact_corpus):
         assert predict.rebuild(conn, force=True).rows_written > 0
 
 
-# ------------------------------------- rankings do not spend slots on the dead
 
 @pytest.fixture
 def dead_file(db):
-    """A repository of our own holding one file deleted at HEAD.
-
-    Its own repository, not whichever one happens to exist: a test that borrows
-    another test's data passes or fails on the order they run in, which is the
-    flake this suite has been bitten by before.
-    """
+    """A repository of our own holding one file deleted at HEAD."""
     from git_synapse.db.orm import models, session_scope
 
     with session_scope() as session:
@@ -290,8 +264,7 @@ def dead_file(db):
 
 
 def test_hotspots_leave_out_files_that_no_longer_exist(dead_file):
-    """A ranking says "look here". A file deleted at HEAD is not somewhere
-    anyone can look, and each one spends a slot the reader came for."""
+    """A ranking says "look here"."""
     from git_synapse.analysis import query as q
 
     repo_id, fid = dead_file
@@ -303,8 +276,7 @@ def test_hotspots_leave_out_files_that_no_longer_exist(dead_file):
 
 
 def test_risk_leaves_out_files_that_no_longer_exist(dead_file):
-    """Risk answers "what happens if I change this, and who understands it" --
-    a question that cannot be asked of a file that is gone."""
+    """Risk answers "what happens if I change this, and who understands it" -- a question that cannot be asked of a file that is gone."""
     from git_synapse.analysis import mining
     from git_synapse.db.orm import models, session_scope
 
@@ -323,9 +295,7 @@ def test_risk_leaves_out_files_that_no_longer_exist(dead_file):
 
 
 def test_a_coupling_query_still_reports_a_deleted_partner(db):
-    """The opposite judgement, and deliberately so: the reader asked about one
-    specific file, the coupling is a historical fact, and the answer labels it
-    rather than hiding it."""
+    """The opposite judgement, and deliberately so: the reader asked about one specific file, the coupling is a historical fact, and the answer labels it rather than hiding it."""
     from git_synapse.analysis import query as q
     from git_synapse.db.orm import models, session_scope
 
@@ -343,14 +313,7 @@ def test_a_coupling_query_still_reports_a_deleted_partner(db):
 
 
 def test_label_propagation_does_not_allocate_a_node_by_node_matrix():
-    """The sweep used to key a bincount on `node * n + label`, which needs
-    `minlength = n*n` -- a dense float64 matrix, reallocated every round, that
-    grows with the *square* of the repository. wireshark's 7,007 coupled files
-    made that 396MB a round; the sparse sweep does the same work in 25MB.
-
-    Only the (node, label) pairs that actually occur can carry weight, and
-    there are at most 2E of those.
-    """
+    """The sweep used to key a bincount on `node * n + label`, which needs `minlength = n*n` -- a dense float64 matrix, reallocated every round, that grows with the *square* of the repository."""
     import contextlib
     import tracemalloc
 
@@ -403,7 +366,6 @@ def test_label_propagation_does_not_allocate_a_node_by_node_matrix():
         f"{dense_would_be / 1e6:.0f}MB dense matrix this replaced")
 
 
-# ------------------------------------------------------------ npmi, directly
 
 @pytest.mark.parametrize("joint,left,right,population", [
     (0, 5, 5, 10),   # a pair that never co-occurred
@@ -414,14 +376,12 @@ def test_label_propagation_does_not_allocate_a_node_by_node_matrix():
 def test_npmi_is_undefined_rather_than_zero_when_a_count_is_missing(
     joint, left, right, population,
 ):
-    """None and 0.0 mean different things here: "no evidence" against "evidence
-    of independence". Returning 0.0 for both would rank them together."""
+    """None and 0.0 mean different things here: "no evidence" against "evidence of independence"."""
     assert mining._npmi(joint, left, right, population) is None
 
 
 def test_npmi_is_one_when_two_files_always_move_together():
-    """Perfect association is the top of the scale, and the denominator is zero
-    there -- computing it would divide by zero rather than say 1.0."""
+    """Perfect association is the top of the scale, and the denominator is zero there -- computing it would divide by zero rather than say 1.0."""
     assert mining._npmi(4, 4, 4, 4) == 1.0
     assert mining._npmi(5, 5, 5, 4) == 1.0
 
@@ -433,24 +393,15 @@ def test_npmi_is_bounded_and_ordered_by_how_exclusive_the_pairing_is():
     assert tight > loose
 
 
-# --------------------------------------------- drift, clusters and their readers
 
 @pytest.fixture()
 def drift_corpus(db):
-    """One repository whose two files move together in both time windows.
-
-    A pair needs at least two co-changes on each side of the boundary before it
-    is scored, so the fixture supplies exactly that: two recent commits and two
-    old ones, each touching both files.
-    """
+    """One repository whose two files move together in both time windows."""
     from datetime import UTC, datetime, timedelta
     from uuid import uuid4
 
     from git_synapse.db.orm import models, session_scope
 
-    # Additive: this database is shared with every other test in the run, and
-    # several of them skip when the corpus lacks a shape they need. Clearing
-    # the tables to get a clean slate takes that shape away from them.
     tag = uuid4().hex[:8]
     with session_scope() as conn:
         repo = models().Repo(github_id=abs(hash(tag)) % 10**8, owner="acme",
@@ -490,8 +441,7 @@ def drift_corpus(db):
 
 
 def test_a_pair_seen_in_both_windows_is_scored_for_drift(drift_corpus):
-    """Both npmi values and their delta come out of `_rebuild_drift`; a pair
-    present in only one window is not evidence of a trend either way."""
+    """Both npmi values and their delta come out of `_rebuild_drift`; a pair present in only one window is not evidence of a trend either way."""
     from git_synapse.db.orm import models, session_scope
 
     with session_scope() as session:
@@ -508,8 +458,7 @@ def test_a_pair_seen_in_both_windows_is_scored_for_drift(drift_corpus):
 
 
 def test_drifting_pairs_names_both_files_and_their_repository(drift_corpus):
-    """The reader joins the pair back to paths and a repo name, because a row of
-    two integers is not something anybody can act on."""
+    """The reader joins the pair back to paths and a repo name, because a row of two integers is not something anybody can act on."""
     from git_synapse.db.orm import models, session_scope
 
     a, b = sorted(drift_corpus["file_ids"])
@@ -527,8 +476,7 @@ def test_drifting_pairs_names_both_files_and_their_repository(drift_corpus):
 
 
 def test_a_drifting_pair_whose_file_was_deleted_is_hidden_unless_asked_for(drift_corpus):
-    """Recommending a file that no longer exists is worse than recommending
-    nothing, so deleted partners are dropped by default."""
+    """Recommending a file that no longer exists is worse than recommending nothing, so deleted partners are dropped by default."""
     from git_synapse.db.orm import models, session_scope
 
     a, b = sorted(drift_corpus["file_ids"])
@@ -546,8 +494,7 @@ def test_a_drifting_pair_whose_file_was_deleted_is_hidden_unless_asked_for(drift
 
 
 def test_cross_directory_modules_report_the_directories_they_span(drift_corpus):
-    """The point of the cluster is that it crosses a directory boundary: files
-    that move together while living apart are what a newcomer cannot see."""
+    """The point of the cluster is that it crosses a directory boundary: files that move together while living apart are what a newcomer cannot see."""
     from git_synapse.db.orm import models, session_scope
 
     with session_scope() as session:
@@ -565,12 +512,9 @@ def test_cross_directory_modules_report_the_directories_they_span(drift_corpus):
     assert set(rows[0]["sample_files"]) == {"src/a.py", "docs/b.md"}
 
 
-# ------------------------------------------- query readers over a known corpus
 
 def test_a_minimum_score_drops_partners_beneath_it(drift_corpus):
-    """`min_score` is the caller saying "below this is not worth my attention",
-    so a partner under the bar is absent rather than present with a low number.
-    """
+    """`min_score` is the caller saying "below this is not worth my attention", so a partner under the bar is absent rather than present with a low number."""
     from git_synapse.analysis import query
     from git_synapse.db.orm import models, session_scope
 
@@ -586,8 +530,7 @@ def test_a_minimum_score_drops_partners_beneath_it(drift_corpus):
 
 
 def test_an_impact_edge_and_its_declaration_can_be_read_back_singly(impact_corpus):
-    """The UI asks about one edge at a time when somebody clicks it; fetching
-    the whole graph to answer that would be the wrong shape entirely."""
+    """The UI asks about one edge at a time when somebody clicks it; fetching the whole graph to answer that would be the wrong shape entirely."""
     from git_synapse.analysis import query
 
     signer, packager = impact_corpus["signer"], impact_corpus["packager"]
@@ -604,8 +547,7 @@ def test_an_impact_edge_and_its_declaration_can_be_read_back_singly(impact_corpu
 
 
 def test_repo_dependencies_names_the_repository_behind_each_declaration(impact_corpus):
-    """A manifest line is a string; the useful answer is which tracked
-    repository it resolves to, so the reader joins it back."""
+    """A manifest line is a string; the useful answer is which tracked repository it resolves to, so the reader joins it back."""
     from git_synapse.analysis import query
 
     result = query.repo_dependencies(impact_corpus["packager"])
@@ -614,8 +556,7 @@ def test_repo_dependencies_names_the_repository_behind_each_declaration(impact_c
 
 
 def test_declared_only_hides_an_edge_that_no_manifest_states(impact_corpus):
-    """A bump-only edge is real evidence but not a declaration, so a caller
-    asking for declarations must not be handed one."""
+    """A bump-only edge is real evidence but not a declaration, so a caller asking for declarations must not be handed one."""
     from git_synapse.analysis import predict
     from git_synapse.db.orm import models, session_scope
 
@@ -633,8 +574,7 @@ def test_declared_only_hides_an_edge_that_no_manifest_states(impact_corpus):
 
 
 def test_a_cycle_in_the_graph_does_not_walk_forever(impact_corpus):
-    """Two repositories that each declare the other are a real shape, and a
-    chain walker that revisits a node on the path never terminates."""
+    """Two repositories that each declare the other are a real shape, and a chain walker that revisits a node on the path never terminates."""
     from git_synapse.analysis import predict
     from git_synapse.db.orm import models, session_scope
 
@@ -651,6 +591,4 @@ def test_a_cycle_in_the_graph_does_not_walk_forever(impact_corpus):
     for chain in chains:
         assert len(chain["path"]) == len(set(chain["path"])), chain["path"]
 
-    # A chain is at least two hops, so a depth of one stops the walk before it
-    # has anything to report -- the bound is enforced, not merely advertised.
     assert predict.impact_chains(signer, max_depth=1, min_score=0.1) == []

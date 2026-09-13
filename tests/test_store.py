@@ -1,9 +1,4 @@
-"""Integration tests for the ingest loader.
-
-These run against a real Postgres because the behaviour under test -- batched
-ORM writes, identity preservation, rename identity and idempotent re-ingest --
-is defined by the database, not by Python. Mocking it would test nothing.
-"""
+"""Integration tests for the ingest loader."""
 
 from __future__ import annotations
 
@@ -76,13 +71,7 @@ def test_loads_commits_and_files(temp_repo):
 
 
 def test_survives_the_flush_boundary(temp_repo):
-    """Rows written after the first flush must not be lost.
-
-    The loader batches into ``COMMIT_FLUSH_SIZE`` chunks. An earlier refactor
-    rebound the row lists inside ``flush()`` while an inner scope still held the
-    old objects, which silently dropped every commit after the first batch. This
-    test crosses the boundary twice so that regression cannot return.
-    """
+    """Rows written after the first flush must not be lost."""
     total = COMMIT_FLUSH_SIZE * 2 + 17
     commits = (make_commit(i, [f"pkg/mod_{i % 50}.py", "shared.py"]) for i in range(total))
     with session_scope() as conn:
@@ -182,13 +171,7 @@ def test_duplicate_paths_within_one_commit_are_collapsed(temp_repo):
 
 
 def test_rename_onto_an_occupied_path_does_not_cross_identities(temp_repo):
-    """A rename whose destination another file already holds must not be carried.
-
-    flush() guards its mutation against violating the unique index, so the row kept
-    its old path while the in-memory map pointed the new path at it. Every later
-    commit to that path landed on the wrong file, and the file that genuinely
-    lived there sat frozen -- 10,586 rows across 55 repositories.
-    """
+    """A rename whose destination another file already holds must not be carried."""
     repo_id = temp_repo
 
     both = make_commit(1, ["old.txt", "new.txt"])
@@ -215,12 +198,7 @@ def test_rename_onto_an_occupied_path_does_not_cross_identities(temp_repo):
 
 
 def test_empty_repository_reads_as_no_commits_not_an_error(tmp_path):
-    """A repository with no commits has no HEAD to resolve.
-
-    `git log --all` returned nothing and exited 0; scoping the walk to the
-    default branch made git fail with "Needed a single revision" and turned
-    three empty repositories into hard ingest failures.
-    """
+    """A repository with no commits has no HEAD to resolve."""
     import subprocess
 
     from git_synapse.ingest.parser import iter_commits
@@ -232,9 +210,7 @@ def test_empty_repository_reads_as_no_commits_not_an_error(tmp_path):
 
 
 def test_a_refresh_does_not_blank_the_metadata_discovery_collected(db):
-    """`load_repo_records` rebuilds a record from the database and hands it
-    straight back to `upsert_repo`. When it read only the columns the pipeline
-    needed, every ingest wiped language, description, topics and stars."""
+    """`load_repo_records` rebuilds a record from the database and hands it straight back to `upsert_repo`."""
     from git_synapse.db.orm import session_scope
     from git_synapse.ingest.pipeline import load_repo_records
 
@@ -263,8 +239,7 @@ def test_a_refresh_does_not_blank_the_metadata_discovery_collected(db):
 
 
 def test_tags_are_indexed_and_resolved_to_their_commit(db):
-    """The tag loader was unreachable while mirrors excluded tags, so nothing
-    exercised it: the first real tag must be persisted and resolved by the ORM."""
+    """The tag loader was unreachable while mirrors excluded tags, so nothing exercised it: the first real tag must be persisted and resolved by the ORM."""
     from git_synapse.db.orm import session_scope
     from git_synapse.ingest.gitops import Tag
     from git_synapse.ingest.store import load_tags
@@ -274,8 +249,6 @@ def test_tags_are_indexed_and_resolved_to_their_commit(db):
     with session_scope() as conn:
         repo_id = upsert_repo(record, conn)
         load_commits(repo_id, [make_commit(0, ["a.py"])], conn)
-        # Read through the same connection: the commits are not committed yet,
-        # and the query helper checks out a different one from the pool.
         sha = conn.query(models().Commit).filter_by(repo_id=repo_id).one().sha
         written = load_tags(repo_id, [
             Tag(name="v1.0.0", commit_sha=sha, tagged_at=BASE, annotated=False),
@@ -301,10 +274,7 @@ def test_tags_are_indexed_and_resolved_to_their_commit(db):
 
 
 def test_a_record_from_a_host_with_no_api_cannot_blank_what_one_collected(db):
-    """GitProvider knows nothing about stars, forks or visibility and says so
-    by leaving the defaults. Writing those over what an API run collected is
-    destruction dressed as an update -- it zeroed the stars on all 164
-    repositories once, and language only survived because it is COALESCEd."""
+    """GitProvider knows nothing about stars, forks or visibility and says so by leaving the defaults."""
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.store import upsert_repo
 
@@ -356,12 +326,9 @@ def test_a_real_api_record_still_updates_those_fields(db):
         session.delete(row)
 
 
-# ---------------------------------------------------- author identity, in place
 
 def test_an_author_seen_again_gains_a_display_name_and_keeps_the_old_one(db):
-    """One person commits as "j.doe" and later as "Jane Doe" from the same
-    address. The row is the same person: the name fills in, and both spellings
-    are remembered rather than one overwriting the other."""
+    """One person commits as "j.doe" and later as "Jane Doe" from the same address."""
     from uuid import uuid4
 
     from git_synapse.ingest.store import AuthorCache
@@ -392,8 +359,7 @@ def test_an_author_seen_again_gains_a_display_name_and_keeps_the_old_one(db):
 
 
 def test_a_rename_onto_a_file_that_vanished_is_skipped(db):
-    """The rename is applied at flush time, by which point the row it names can
-    have been deleted -- an unreachable-commit sweep runs in the same pass."""
+    """The rename is applied at flush time, by which point the row it names can have been deleted -- an unreachable-commit sweep runs in the same pass."""
     from git_synapse.ingest.store import FileResolver
 
     with session_scope() as session:

@@ -1,14 +1,4 @@
-"""Who may read this dashboard, and how that is proven.
-
-Everything the dashboard shows is derived from public repositories, but the
-deployment is not public: it says which repositories an organisation tracks,
-where its coupling is weakest, and which files one person alone understands.
-So the UI is behind a sign-in.
-
-Passwords are hashed with :func:`hashlib.scrypt`, which is memory-hard and in
-the standard library; sessions are random tokens compared in constant time.
-Database persistence uses the shared SQLAlchemy ORM session layer.
-"""
+"""Who may read this dashboard, and how that is proven."""
 from __future__ import annotations
 
 import base64
@@ -24,35 +14,19 @@ from git_synapse.db.orm import models, session_scope
 
 log = logging.getLogger(__name__)
 
-#: scrypt cost. 2**15 * 8 * 128 bytes is 32MB per hash, which is a fraction of
-#: a second here and expensive in bulk for anyone with the table.
+# scrypt cost: N=2**15, r=8, p=1 is about 32MB per hash.
 _N, _R, _P, _DKLEN = 2**15, 8, 1, 32
 _MAXMEM = 64 * 1024 * 1024
 
-#: How long a session lasts without being used. Long enough not to interrupt a
-#: working day, short enough that a forgotten browser is not a standing key.
 SESSION_DAYS = 14
 
 ROLES = ("admin", "member")
 
-#: Deliberately permissive: the point is to catch a typo, not to adjudicate
-#: RFC 5322. Anything stricter rejects addresses that genuinely exist.
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-#: Twelve, not eight. This is a shared dashboard on an internal network, where
-#: the realistic attack is someone reusing a password, not a brute-force run.
 MIN_PASSWORD = 12
 
 
-#: Wrong passwords allowed before an address is made to wait, and how long the
-#: window is. scrypt already costs about 70ms an attempt, which throttles one
-#: attacker on one thread; it does nothing about a thousand in parallel.
-#:
-#: Counted per address rather than per client, which is the deliberate trade:
-#: an attacker cannot spread attempts across addresses to keep working on one,
-#: but can lock a colleague out for fifteen minutes by guessing at their
-#: address. On an internal dashboard that is an annoyance; on a public one it
-#: would want a per-client budget as well.
 MAX_FAILURES = 10
 LOCKOUT_MINUTES = 15
 
@@ -62,22 +36,16 @@ class AuthError(Exception):
 
 
 class TooManyAttempts(AuthError):
-    """Refused for now, not refused outright. Distinguished so the API can
-    answer 429 rather than 401: the credentials were never examined."""
+    """Refused for now, not refused outright."""
 
 
 class SetupAlreadyClaimed(AuthError):
     """The first administrator was created while this request was waiting."""
 
 
-# ----------------------------------------------------------------- passwords
 
 def hash_password(password: str) -> str:
-    """Hash a password, with its parameters recorded alongside it.
-
-    Storing n, r and p means they can be raised later without invalidating
-    every existing password: an old hash still verifies under its own cost.
-    """
+    """Hash a password, with its parameters recorded alongside it."""
     if len(password) < MIN_PASSWORD:
         raise AuthError(f"password must be at least {MIN_PASSWORD} characters")
     salt = secrets.token_bytes(16)
@@ -104,7 +72,6 @@ def verify_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(digest, base64.b64decode(hash_b64))
 
 
-# --------------------------------------------------------------------- users
 
 def _row(user: dict | None) -> dict | None:
     """A user as the API returns it. Never the hash, on any path."""
@@ -209,8 +176,6 @@ def update_user(user_id: int, **fields: Any) -> dict | None:
                 setattr(user, key, value)
         row = ({column.name: getattr(user, column.name) for column in user.__table__.columns}
                if user else None)
-    # A password change or a deactivation must end the sessions it was meant to
-    # stop; leaving them alive makes both changes advisory.
     if row is not None and (fields.get("password") or fields.get("is_active") is False):
         revoke_all(user_id)
     return _row(row)
@@ -226,8 +191,7 @@ def delete_user(user_id: int) -> bool:
 
 
 def admin_count(exclude: int | None = None) -> int:
-    """Active administrators, optionally ignoring one. Used to refuse the
-    change that would leave the deployment with nobody able to add a person."""
+    """Active administrators, optionally ignoring one."""
     with session_scope() as session:
         User = models().AppUser
         return sum(1 for user in session.query(User).all()
@@ -235,7 +199,6 @@ def admin_count(exclude: int | None = None) -> int:
                    (exclude is None or user.id != exclude))
 
 
-# ------------------------------------------------------------------ sessions
 
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
@@ -261,15 +224,8 @@ def prune_login_attempts() -> int:
 
 
 def sign_in(email: str, password: str, user_agent: str | None = None) -> tuple[str, dict]:
-    """Verify credentials and open a session. Returns (token, user).
-
-    The same message for an unknown address and a wrong password, and the hash
-    is computed either way: a faster "no such user" tells an attacker which
-    addresses are real.
-    """
+    """Verify credentials and open a session. Returns (token, user)."""
     if recent_failures(email) >= MAX_FAILURES:
-        # Counted per address, not per connection: an attacker picks the
-        # address, and cannot pick a different one to keep attacking this one.
         raise TooManyAttempts(
             f"too many failed attempts; try again in {LOCKOUT_MINUTES} minutes")
 
@@ -296,8 +252,6 @@ def sign_in(email: str, password: str, user_agent: str | None = None) -> tuple[s
         row = session.get(User, user["id"])
         if row is not None:
             row.last_login_at = datetime.now(UTC)
-    # A success clears the record: the person proved it was them, and a stale
-    # count would lock them out on their next typo.
     with session_scope() as session:
         Attempt = models().LoginAttempt
         for row in session.query(Attempt).all():
@@ -306,8 +260,7 @@ def sign_in(email: str, password: str, user_agent: str | None = None) -> tuple[s
     return token, _row(user)
 
 
-#: A real hash of a value nobody knows, so an unknown address costs the same
-#: scrypt work as a known one.
+# Checked against unknown emails so both paths cost the same scrypt work.
 _DUMMY_HASH = hash_password(secrets.token_urlsafe(24))
 
 
@@ -344,19 +297,13 @@ def revoke_all(user_id: int) -> int:
         return len(rows)
 
 
-# -------------------------------------------------------------- api tokens
 
 #: Recognisable in a log or a paste, and greppable in a leaked file.
 TOKEN_PREFIX = "gss_"  # noqa: S105 - a prefix, not a secret
 
 
 def create_token(user_id: int, name: str, days: int | None = None) -> tuple[str, dict]:
-    """Mint a personal token. Returns (secret, row); the secret is not stored.
-
-    Anyone may hold one: a token carries the identity and role of the person who
-    made it, so it can do exactly what they can do and nothing more, and it dies
-    with their account.
-    """
+    """Mint a personal token. Returns (secret, row); the secret is not stored."""
     name = (name or "").strip()
     if not name:
         raise AuthError("give the token a name, so it can be told from the others")
@@ -412,32 +359,14 @@ def token_user(secret: str | None) -> dict | None:
         return _row(row_dict)
 
 
-# --------------------------------------------------------------- first admin
 
-#: Where the minted token lives. Not routed through `analysis.settings`, whose
-#: WRITABLE list is the set of things an administrator may change from the UI;
-#: this is neither settable nor readable there.
 _SETUP_KEY = "setup:token"
 
-#: The sentinel the failed-token attempts are counted against. `_EMAIL` demands
-#: an `@` and a dot, so no real address can ever collide with this one and no
-#: person can be locked out by someone hammering setup.
 _SETUP_PRINCIPAL = "setup"
 
 
 def setup_token() -> str:
-    """The token that must be presented to create the first administrator.
-
-    `ADMIN_SETUP_TOKEN` wins when set, so an automated deployment can put a
-    known value in place and claim the account without reading a log. Otherwise
-    one is minted here and stored, because the alternatives are worse: deriving
-    it from anything already in the deployment makes it guessable from that
-    thing, and generating it per process gives every worker a different answer.
-
-    The unique row is the arbitration. Four workers racing on a cold database all
-    attempt it, exactly one row survives, and the ORM lookup that follows returns
-    that row to all four.
-    """
+    """The token that must be presented to create the first administrator."""
     from git_synapse.config import get_config
 
     configured = get_config().server.admin_setup_token
@@ -455,21 +384,14 @@ def setup_token() -> str:
 
 
 def setup_token_is_minted() -> bool:
-    """Whether the token was generated here, rather than supplied. The console
-    needs to say where to find it, and the two answers differ."""
+    """Whether the token was generated here, rather than supplied."""
     from git_synapse.config import get_config
 
     return not get_config().server.admin_setup_token
 
 
 def check_setup_token(supplied: str) -> None:
-    """Raise unless `supplied` is the setup token.
-
-    Rate-limited like a password. A 32-byte token is not going to fall to
-    guessing, but the endpoint is reachable during the one window in the
-    deployment's life when nothing is signed in, and an unbounded loop against
-    it is free noise in the log at best.
-    """
+    """Raise unless `supplied` is the setup token."""
     if recent_failures(_SETUP_PRINCIPAL) >= MAX_FAILURES:
         raise TooManyAttempts(
             f"too many failed attempts; try again in {LOCKOUT_MINUTES} minutes")
@@ -480,9 +402,7 @@ def check_setup_token(supplied: str) -> None:
 
 
 def clear_setup_token() -> None:
-    """Drop it once it has been used. It authorises exactly one thing, and that
-    thing has now happened; leaving the value in the table is a standing secret
-    that nothing will ever check again."""
+    """Drop it once it has been used."""
     with session_scope() as session:
         Meta = models().Meta
         row = session.query(Meta).filter_by(key=_SETUP_KEY).one_or_none()
@@ -502,12 +422,7 @@ def claim_first_admin(
     configured = get_config().server.admin_setup_token
     token = secrets.token_urlsafe(32)
     with session_scope() as session:
-        # A transaction-scoped lock closes the check-then-insert race between
-        # two first-run requests.  The lock is deliberately held through the
-        # account, session, and setup-secret writes.
         User, Meta, UserSession = models().AppUser, models().Meta, models().UserSession
-        # The canonical schema row exists after bootstrap; locking it through
-        # the ORM serializes first-admin claims without SQL functions.
         lock_row = session.query(Meta).filter_by(key="schema_version").with_for_update().one_or_none()
         if lock_row is None:
             lock_row = Meta(key="schema_version", value=0)
@@ -541,26 +456,15 @@ def claim_first_admin(
         return token, user
 
 
-# ------------------------------------------------------------- access policy
 
-#: What a deployment requires of a caller. `open` is the behaviour before any
-#: of this existed, kept because a laptop demo and a shared internal dashboard
-#: are different things and only the person running it knows which this is.
 ACCESS_MODES = ("required", "open")
 
 
 def access_mode(surface: str) -> str:
-    """Whether `dashboard` or `mcp` currently requires a caller to identify.
-
-    Read live from the database on every request rather than cached: an
-    administrator turning sign-in on expects it to take effect now, not at the
-    next restart.
-    """
+    """Whether `dashboard` or `mcp` currently requires a caller to identify."""
     from git_synapse.analysis import settings
 
     if count_users() == 0:
-        # Nothing to sign in as yet. Requiring it here would lock the first
-        # administrator out of the screen that creates them.
         return "open"
     value = settings.effective(f"{surface}_auth", "required")
     return value if value in ACCESS_MODES else "required"

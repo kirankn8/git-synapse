@@ -1,10 +1,4 @@
-"""Repository discovery: enumerate an org's repos and capture the full record.
-
-Everything GitHub returns about a repository is persisted -- named columns for
-the fields the UI filters and sorts on, plus the untouched JSON payload in
-``repo.raw_github`` so that a field nobody thought to model today is still
-available tomorrow without a re-crawl.
-"""
+"""Repository discovery: enumerate an org's repos and capture the full record."""
 
 from __future__ import annotations
 
@@ -28,26 +22,12 @@ MAX_RETRIES = 5
 
 @dataclass
 class RepoRecord:
-    """A repository as discovered from a host.
-
-    Mirrors the named columns of the ``repo`` table; ``raw`` carries the
-    complete API payload. Named for GitHub because that is the shape it grew
-    from, and every other provider maps onto it -- the fields a host cannot
-    answer stay at their defaults rather than being guessed, since a filter
-    downstream will act on whatever is here.
-
-    ``github_id`` is None for anything not from GitHub, including a repository
-    cloned from a host with no API at all. Identity comes from the host and the
-    full name, not from a number one provider happens to mint.
-    """
+    """A repository as discovered from a host."""
 
     github_id: int | None
     owner: str
     name: str
     full_name: str
-    #: Which host, and which client spoke to it. Together with ``full_name``
-    #: this is the repository's identity: `owner/name` is unique on a host and
-    #: nowhere wider.
     provider: str = "github"
     host: str = "github.com"
     description: str | None = None
@@ -63,10 +43,6 @@ class RepoRecord:
     visibility: str | None = None
     is_private: bool = False
     is_fork: bool = False
-    #: The repository this one was forked from, ``owner/name`` on the same
-    #: host. Empty when this is not a fork, and when the host was asked and
-    #: would not say -- the two are not distinguished because neither is a
-    #: reason to drop the repository.
     parent_full_name: str = ""
     is_archived: bool = False
     is_template: bool = False
@@ -118,9 +94,6 @@ class RepoRecord:
             raw=payload,
         )
 
-    #: The username each host expects beside a token in an https clone URL.
-    #: GitHub ignores it, GitLab requires this exact word, Bitbucket takes the
-    #: account name -- so a token cloned with the wrong one simply 401s.
     _CLONE_USER = {
         "github": "x-access-token",
         "gitlab": "oauth2",
@@ -128,17 +101,7 @@ class RepoRecord:
     }
 
     def authed_clone_url(self, token: str) -> str:
-        """Clone URL with the token embedded, so private repos fetch without a prompt.
-
-        The token never reaches disk: git is invoked with this URL in argv only
-        for the initial clone, and the remote stored in the mirror is rewritten
-        to the plain URL by :mod:`git_synapse.ingest.gitops`.
-
-        A token is only ever embedded in a URL on the host that issued it. The
-        deployment-wide GITHUB_TOKEN reaching a self-hosted GitLab would hand
-        that server a live GitHub credential, which is the kind of leak nobody
-        goes looking for.
-        """
+        """Clone URL with the token embedded, so private repos fetch without a prompt."""
         base = self.clone_url or f"https://github.com/{self.full_name}.git"
         user = self._CLONE_USER.get(self.provider)
         if not token or not user or not base.startswith("https://"):
@@ -165,13 +128,7 @@ class GitHubClient:
 
     def __init__(self, cfg: HostCredential | None = None, timeout: float = 30.0,
                  patient: bool = True) -> None:
-        """`patient` decides what a rate limit means.
-
-        An ingest run has all night and should wait one out. A request a person
-        is watching has seconds, and sleeping 60s inside the handler turns a
-        rate limit into a hang with no explanation -- so the impatient client
-        raises instead, and the caller says what happened.
-        """
+        """`patient` decides what a rate limit means."""
         self.patient = patient
         self.cfg = cfg or get_config().providers.github
         headers = {
@@ -179,10 +136,6 @@ class GitHubClient:
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "git-synapse-change-coupling/1.0",
         }
-        # current_token() rather than cfg.token: the credential lives in a file
-        # the host rotates, and reading the frozen env copy sent unauthenticated
-        # requests that quietly returned only the org's 59 public repositories
-        # instead of all 272.
         token = self.cfg.current_token()
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -200,12 +153,7 @@ class GitHubClient:
         self._client.close()
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> httpx.Response:
-        """GET with retry on rate limits, 5xx and transport errors.
-
-        Honours GitHub's ``Retry-After`` and ``x-ratelimit-reset`` headers rather
-        than backing off blindly, so a secondary-rate-limit trip costs the
-        minimum necessary wait.
-        """
+        """GET with retry on rate limits, 5xx and transport errors."""
         last_error: Exception | None = None
         for attempt in range(1, MAX_RETRIES + 1):
             try:
@@ -223,11 +171,6 @@ class GitHubClient:
             if response.status_code in (403, 429):
                 if not self.patient:
                     response.raise_for_status()
-                # Remembered, because giving up after five retries used to
-                # report "failed after 5 attempts: None" -- last_error is only
-                # set by transport errors, so the one thing a reader needed
-                # (the status, and what the host said) was the one thing
-                # dropped.
                 last_error = self._http_reason(response)
                 wait = self._rate_limit_wait(response)
                 log.warning(
@@ -254,12 +197,7 @@ class GitHubClient:
 
     @staticmethod
     def _http_reason(response: httpx.Response) -> str:
-        """The status and whatever the host said about it, in one line.
-
-        GitHub puts a usable sentence in `message` -- "API rate limit exceeded
-        for 1.2.3.4" -- which is far more use to a reader than the number
-        alone, and costs nothing to carry.
-        """
+        """The status and whatever the host said about it, in one line."""
         detail = ""
         try:
             body = response.json()
@@ -318,11 +256,7 @@ class GitHubClient:
         return self.list_account_repos(org, kind="org")
 
     def fetch_languages(self, full_name: str) -> dict[str, int]:
-        """Byte counts per language for one repo.
-
-        A separate request per repository, so this is optional: the pipeline
-        skips it when discovering hundreds of repos unless explicitly asked.
-        """
+        """Byte counts per language for one repo."""
         try:
             return self._get(f"/repos/{full_name}/languages").json()
         except Exception as exc:  # noqa: BLE001 - languages are a nice-to-have
@@ -330,17 +264,7 @@ class GitHubClient:
             return {}
 
     def fetch_parent(self, full_name: str) -> str:
-        """The repository ``full_name`` was forked from, or "" if unknown.
-
-        One request per fork, because GitHub's list endpoints return the
-        minimal repository representation, which carries ``fork`` but not
-        ``parent``. Only forks are asked about and they are a small minority,
-        so this costs a handful of calls on a whole organisation.
-
-        An empty answer means "not established", never "no parent": the caller
-        keeps a fork it cannot place rather than discarding real history on a
-        failed request.
-        """
+        """The repository ``full_name`` was forked from, or "" if unknown."""
         try:
             payload = self._get(f"/repos/{full_name}").json()
         except Exception as exc:  # noqa: BLE001 - an unplaced fork is kept, not dropped
@@ -354,26 +278,7 @@ def select_repos(
     cfg: SelectionConfig | None = None,
     tracked: frozenset[str] = frozenset(),
 ) -> list[RepoRecord]:
-    """Apply an account's include/exclude filters to a discovered list.
-
-    Takes a :class:`SelectionConfig` rather than anything host-shaped: these
-    questions are the same whether the listing came from GitHub, GitLab or
-    Bitbucket, and this is called with all three.
-
-    An explicit ``ONLY_REPOS`` allowlist overrides every other filter, which
-    makes it easy to reproduce a single repo's ingest while debugging.
-
-    Args:
-        tracked: lowercased ``owner/name`` of every repository already in the
-            corpus. Only forks are judged against it -- see below.
-
-    A fork is dropped when, and only when, the repository it was forked from is
-    also here. That is the whole of the harm: the same commits stored twice,
-    every coupling counted as though two projects had agreed on it. A fork of
-    an upstream nobody tracks duplicates nothing, and its history is as real as
-    any other -- dropping it for the label alone discards evidence about a
-    codebase somebody works in.
-    """
+    """Apply an account's include/exclude filters to a discovered list."""
     cfg = cfg or get_config().selection
 
     if cfg.only_repos:
@@ -383,9 +288,6 @@ def select_repos(
         return selected
 
     skip = {name.lower() for name in cfg.skip_repos}
-    # A fork's parent counts as present whether it is already stored or merely
-    # arriving in this same listing -- an org that owns both a project and a
-    # fork of it hands us the pair at once.
     present = tracked | {r.full_name.lower() for r in records if not r.is_fork}
     selected = []
     for record in records:

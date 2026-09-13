@@ -1,10 +1,4 @@
-"""Ingest orchestration: the guards, not the happy path.
-
-Everything destructive lives here -- deleting commits, re-cloning mirrors,
-aborting runs. The failures that matter are the quiet ones: a run that reports
-success having done nothing, a partial listing accepted as fact, a network blip
-treated as a damaged mirror.
-"""
+"""Ingest orchestration: the guards, not the happy path."""
 from __future__ import annotations
 
 import subprocess
@@ -19,7 +13,6 @@ from git_synapse.ingest.pipeline import (
     _is_contention,
 )
 
-# ------------------------------------------------------- contention detection
 
 @pytest.mark.parametrize(
     "error",
@@ -41,7 +34,6 @@ def test_a_non_contention_error_is_not_retried(error):
     assert not _is_contention(error)
 
 
-# --------------------------------------------------- unreachable-commit sweep
 
 def _commit_repo(tmp_path, n: int):
     work = tmp_path / "w"
@@ -71,11 +63,7 @@ def test_sweep_tolerates_a_missing_mirror(tmp_path, db):
 
 
 def test_a_commit_reachable_only_from_a_tag_is_not_unreachable(tmp_path, db):
-    """The sweep must measure over exactly the refs the ingest walks. Measuring
-    from the branch alone deleted every commit the tag walk had just inserted,
-    and did it silently -- the run reports what the loader wrote, not what
-    survived. It is self-triggering too: the new commits push the stored count
-    above the branch count, which is the condition that runs the sweep."""
+    """The sweep must measure over exactly the refs the ingest walks."""
     from datetime import UTC, datetime
 
     from git_synapse.db.orm import models, session_scope
@@ -124,11 +112,9 @@ def test_a_commit_reachable_only_from_a_tag_is_not_unreachable(tmp_path, db):
             conn.delete(conn.get(models().Repo, repo_id))
 
 
-# ------------------------------------------------------------ discovery guard
 
 def test_discovery_refuses_a_collapsed_listing(two_accounts, db, monkeypatch):
-    """An unauthenticated request returns HTTP 200 and only public repositories
-    -- 59 of 272 here -- and discovery accepted it silently."""
+    """An unauthenticated request returns HTTP 200 and only public repositories -- 59 of 272 here -- and discovery accepted it silently."""
     from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest.pipeline import AuthError
 
@@ -184,7 +170,6 @@ def test_discovery_accepts_a_listing_that_is_merely_smaller(two_accounts, db, mo
     assert len(pipeline.discover()) == keep
 
 
-# --------------------------------------------------------------- run lifecycle
 
 
 
@@ -196,14 +181,7 @@ def test_the_network_abort_threshold_exceeds_the_worker_count(db):
 
 
 def test_load_repo_records_returns_usable_records(db):
-    """Reads back a repository it wrote itself.
-
-    Taking `records[0]` -- whichever repository happened to be first -- made
-    this assert things about another test's fixture, and it failed the moment a
-    fixture row without a clone URL sorted ahead of a real one. The point is
-    that every column survives the round trip, which needs a row whose columns
-    are known.
-    """
+    """Reads back a repository it wrote itself."""
     from git_synapse.db.orm import models, session_scope
 
     with session_scope() as session:
@@ -225,9 +203,6 @@ def test_load_repo_records_returns_usable_records(db):
         assert (r.provider, r.host) == ("github", "github.com")
         assert (r.primary_language, r.default_branch) == ("Rust", "main")
         assert r.topics == ["cli", "tool"]
-        # Booleans and counts specifically: they are read back by name, and a
-        # field added in the middle of a positional projection used to shift every
-        # field after it into a neighbour of compatible type.
         assert r.is_fork is True and r.is_archived is False
         assert r.stargazers == 77 and r.disk_usage_kb == 512
         assert r.github_id == 4242
@@ -236,7 +211,6 @@ def test_load_repo_records_returns_usable_records(db):
             session.delete(session.get(models().Repo, row_id))
 
 
-# ------------------------------------------------------ credential preflight
 
 @pytest.fixture
 def token(monkeypatch):
@@ -260,8 +234,7 @@ def test_an_empty_credential_is_refused_before_any_mirror_is_touched(db, token):
 def test_a_rejected_credential_says_it_expired_and_that_nothing_was_touched(
     db, token, monkeypatch
 ):
-    """The message is the whole value here: it must send someone at the token,
-    not at the mirrors."""
+    """The message is the whole value here: it must send someone at the token, not at the mirrors."""
     import httpx
 
     token("ghu_" + "x" * 36)
@@ -322,11 +295,9 @@ def test_a_valid_credential_reports_the_login(db, token, monkeypatch):
     assert verify_credentials() == "someone"
 
 
-# ------------------------------------------------------- contention retries
 
 def test_a_repo_that_loses_a_deadlock_is_retried(db, monkeypatch):
-    """Postgres resolves a deadlock by killing one participant. The victim's
-    work is still valid, so it is retried rather than reported as failed."""
+    """Postgres resolves a deadlock by killing one participant."""
     from git_synapse.ingest import pipeline
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.pipeline import RepoResult
@@ -390,11 +361,9 @@ def test_an_ordinary_failure_is_not_retried(db, monkeypatch):
     assert attempts["n"] == 1
 
 
-# ------------------------------------------------------- the circuit breaker
 
 def test_a_run_gives_up_once_the_network_is_clearly_down(db, monkeypatch):
-    """Four retries at a two-minute timeout is nine minutes per repository, so
-    grinding the whole corpus took twenty-five minutes to accomplish nothing."""
+    """Four retries at a two-minute timeout is nine minutes per repository, so grinding the whole corpus took twenty-five minutes to accomplish nothing."""
     from git_synapse.ingest import pipeline
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.pipeline import NETWORK_FAILURE_ABORT, RepoResult
@@ -430,9 +399,6 @@ def test_a_run_gives_up_once_the_network_is_clearly_down(db, monkeypatch):
     ]
     pipeline.run_ingest(records=records, trigger="test")
 
-    # Assert the breaker fired, not how many futures happened to be in flight
-    # when it did: the executor submits everything up front, so the count that
-    # slips through is a scheduling detail rather than the behaviour under test.
     assert aborted, "the breaker never fired despite the network being down"
 
 
@@ -490,13 +456,6 @@ def test_one_repository_raising_does_not_kill_the_run(db, monkeypatch):
     assert any(r.status == "failed" for r in result.repos)
 
 
-# ------------------------------------------------- the global derived stages
-#
-# Six global rebuilds run after the per-repo fan-out. Each is wrapped in its own
-# try/except on purpose: the per-repo results are already committed, so one
-# global stage failing must not discard them or the other five. Nothing had ever
-# executed those except arms, which is precisely where that promise could be
-# broken by a re-raise or a mis-ordered dependency.
 
 _STAGES = [
     ("git_synapse.analysis.depbump", "rebuild"),
@@ -545,9 +504,6 @@ def test_a_failing_derived_stage_does_not_stop_the_ones_after_it(db, monkeypatch
                             lambda *a, _n=f"{mod}.{fn}", **k: reached.append(_n) or boom())
 
     result = pipeline.run_ingest(records=[], trigger="test", force_full=True)
-    # Every guarded group was attempted and none of them escaped. refresh_modules
-    # is absent by design: it shares a try block with refresh_declared, so it is
-    # skipped when that one raises rather than running on a half-refreshed table.
     assert reached == [f"{m}.{f}" for m, f in _STAGES
                        if f != "refresh_modules"]
     assert result.run_id is not None
@@ -555,12 +511,9 @@ def test_a_failing_derived_stage_does_not_stop_the_ones_after_it(db, monkeypatch
 
 
 def test_the_derived_stages_are_skipped_when_nothing_changed(db, monkeypatch):
-    """Six global rebuilds over the whole corpus are not free; a sync that added
-    no commits must not pay for them."""
+    """Six global rebuilds over the whole corpus are not free; a sync that added no commits must not pay for them."""
     _stub_run(monkeypatch)
     for mod, fn in _STAGES:
-        # Bound at definition: without this every stub reports the last stage's
-        # name, so the failure names the wrong one.
         monkeypatch.setattr(
             f"{mod}.{fn}",
             lambda *a, mod=mod, fn=fn, **k: pytest.fail(
@@ -570,11 +523,6 @@ def test_the_derived_stages_are_skipped_when_nothing_changed(db, monkeypatch):
     assert result.commits_added == 0
 
 
-# ---------------------------------------- the sweep with commits actually stored
-#
-# The branches above the cheap count gate had never run against a repository that
-# has any. 735 commits across 24 repositories survived a force-push this way,
-# inflating the N of every contingency table in those repos.
 
 @pytest.fixture()
 def swept_repo(scratch_db, tmp_path):
@@ -625,8 +573,7 @@ def test_the_sweep_removes_only_the_commits_git_no_longer_reaches(swept_repo):
 @pytest.mark.parametrize("failing_call", [1, 2])
 def test_a_git_failure_during_the_sweep_deletes_nothing(swept_repo, monkeypatch,
                                                         failing_call):
-    """Deleting commits on the strength of a failed reachability walk would
-    erase real history."""
+    """Deleting commits on the strength of a failed reachability walk would erase real history."""
     from git_synapse.db.orm import models, session_scope
 
     repo_id, mirror = swept_repo
@@ -682,11 +629,6 @@ def test_an_empty_reachable_set_deletes_nothing(swept_repo, monkeypatch):
     assert _drop_unreachable_commits(repo_id, mirror) == 0
 
 
-# ------------------------------------------------- discovery across accounts
-#
-# The guard tests above skip unless the corpus is already populated, so the body
-# of `discover` -- per-account listing, failure isolation, ownership -- ran under
-# no test at all. These build their own accounts instead.
 
 @pytest.fixture
 def two_accounts(db):
@@ -746,8 +688,7 @@ def test_discovery_with_no_accounts_says_how_to_add_one(db, monkeypatch):
 
 
 def test_one_failing_account_does_not_stop_the_others(two_accounts, db, monkeypatch):
-    """Discovery runs across accounts, so a single broken one must cost only
-    its own repositories."""
+    """Discovery runs across accounts, so a single broken one must cost only its own repositories."""
     good = [_record("beta/keep")]
     monkeypatch.setattr(pipeline.providers, "for_source", _client_returning(
         {"alpha": RuntimeError("listing blew up"), "beta": good}))
@@ -758,8 +699,7 @@ def test_one_failing_account_does_not_stop_the_others(two_accounts, db, monkeypa
 
 
 def test_every_account_failing_is_reported_as_one_error(two_accounts, db, monkeypatch):
-    """Nothing discovered *and* everything failed is a broken run, not an empty
-    organisation, and must not be reported as the latter."""
+    """Nothing discovered *and* everything failed is a broken run, not an empty organisation, and must not be reported as the latter."""
     from git_synapse.ingest.pipeline import AuthError
 
     monkeypatch.setattr(pipeline.providers, "for_source", _client_returning(
@@ -773,10 +713,7 @@ def test_every_account_failing_is_reported_as_one_error(two_accounts, db, monkey
 def test_a_forks_parent_is_looked_up_because_the_listing_omits_it(
     two_accounts, db, monkeypatch,
 ):
-    """GitHub's list endpoints carry `fork` but not `parent`, so discovery asks
-    once per fork. That answer is the whole basis for telling a duplicate copy
-    from a codebase somebody actually works in.
-    """
+    """GitHub's list endpoints carry `fork` but not `parent`, so discovery asks once per fork."""
     fork = _record("alpha/fork", is_fork=True)
     plain = _record("alpha/plain")
     asked = []
@@ -809,8 +746,7 @@ def test_a_forks_parent_is_looked_up_because_the_listing_omits_it(
 
 
 def test_a_discovered_repository_records_which_account_found_it(two_accounts, db, monkeypatch):
-    """`repo.account_id` is what lets an account be removed without deleting the
-    history mined from it."""
+    """`repo.account_id` is what lets an account be removed without deleting the history mined from it."""
     from git_synapse.db.orm import models, session_scope
 
     monkeypatch.setattr(pipeline.providers, "for_source", _client_returning(
@@ -827,8 +763,7 @@ def test_a_discovered_repository_records_which_account_found_it(two_accounts, db
 
 
 def test_the_shrink_guard_stands_down_when_an_account_errored(two_accounts, db, monkeypatch):
-    """A collapse already explained by a reported failure is not evidence of a
-    bad credential, and refusing the run twice for one cause helps nobody."""
+    """A collapse already explained by a reported failure is not evidence of a bad credential, and refusing the run twice for one cause helps nobody."""
     monkeypatch.setattr(pipeline.providers, "for_source", _client_returning(
         {"alpha": RuntimeError("down"), "beta": [_record("beta/still-here")]}))
     monkeypatch.setattr(pipeline, "select_repos", lambda records, cfg, tracked=frozenset(): list(records))
@@ -838,8 +773,7 @@ def test_the_shrink_guard_stands_down_when_an_account_errored(two_accounts, db, 
 
 
 def test_marking_no_replays_touches_nothing(db):
-    """Called for every repository, and most have none. An empty set must not
-    become a bulk mutation with an empty collection clause."""
+    """Called for every repository, and most have none."""
     from git_synapse.db.orm import session_scope
     from git_synapse.ingest.pipeline import _mark_replays
 
@@ -848,8 +782,7 @@ def test_marking_no_replays_touches_nothing(db):
 
 
 def test_an_absent_token_is_allowed_when_every_repository_is_public(monkeypatch):
-    """Cloning public repositories needs no credential, so demanding one would
-    refuse a run that would have worked."""
+    """Cloning public repositories needs no credential, so demanding one would refuse a run that would have worked."""
     from git_synapse.ingest import pipeline as P
 
     cfg = P.get_config().providers.github
@@ -858,8 +791,7 @@ def test_an_absent_token_is_allowed_when_every_repository_is_public(monkeypatch)
 
 
 def test_an_absent_token_is_refused_when_something_is_private(monkeypatch):
-    """A private repository cannot be cloned anonymously, and finding that out
-    per-repository turns one missing setting into dozens of clone failures."""
+    """A private repository cannot be cloned anonymously, and finding that out per-repository turns one missing setting into dozens of clone failures."""
     from git_synapse.ingest import pipeline as P
     from git_synapse.ingest.pipeline import AuthError
 
@@ -870,9 +802,7 @@ def test_an_absent_token_is_refused_when_something_is_private(monkeypatch):
 
 
 def test_marking_a_replay_takes_it_out_of_the_statistics(db):
-    """Storing it is the point -- the commit is real and belongs in the range
-    between two releases -- but counting it would say those files belong
-    together on evidence that is one observation repeated."""
+    """Storing it is the point -- the commit is real and belongs in the range between two releases -- but counting it would say those files belong together on evidence that is one observation repeated."""
     from datetime import UTC, datetime
 
     from git_synapse.db.orm import models, session_scope
@@ -900,8 +830,7 @@ def test_marking_a_replay_takes_it_out_of_the_statistics(db):
 
 
 def test_a_bad_credential_stops_discovery_rather_than_repeating_itself(two_accounts, db, monkeypatch):
-    """Retrying the rest would run the same broken credential against every
-    account and report a different failure for each."""
+    """Retrying the rest would run the same broken credential against every account and report a different failure for each."""
     from git_synapse.ingest.pipeline import AuthError
 
     def _client(src, patient=True, token=""):
@@ -921,8 +850,7 @@ def test_a_bad_credential_stops_discovery_rather_than_repeating_itself(two_accou
 
 
 def test_a_collapsed_listing_is_refused_even_with_accounts_configured(two_accounts, db, monkeypatch):
-    """An unauthenticated request returns HTTP 200 and only public repositories,
-    and the run then quietly refreshes a fraction of the corpus."""
+    """An unauthenticated request returns HTTP 200 and only public repositories, and the run then quietly refreshes a fraction of the corpus."""
     from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest.pipeline import AuthError
 
@@ -945,10 +873,7 @@ def test_a_collapsed_listing_is_refused_even_with_accounts_configured(two_accoun
 
 def test_discovery_gives_up_on_a_rate_limit_instead_of_sleeping_through_it(
         db, monkeypatch):
-    """Waiting out a rate limit is right for one repository's mirror. Across a
-    hundred sources it is not: five retries of sixty seconds each, per source,
-    is most of a day asleep inside a single run -- and discovery repeats hourly,
-    so the wait buys nothing a retry does not."""
+    """Waiting out a rate limit is right for one repository's mirror."""
     from git_synapse.ingest import accounts, providers
 
     seen = {}
@@ -977,7 +902,6 @@ def test_the_clone_path_stays_patient(db):
         "a clone should wait out a rate limit rather than fail the repository"
 
 
-# --------------------------------------------------- the single-run lock, and aborts
 
 class _FakeSession:
     """Stands in for the session `_try_ingest_lock` locks its meta row through."""
@@ -1000,8 +924,7 @@ def _operational(detail):
 
 
 def test_a_second_ingest_finds_the_lock_held_and_declines(db):
-    """PostgreSQL reports NOWAIT contention as 55P03. That is the one failure
-    that means "somebody else is already running", not "the lock is broken"."""
+    """PostgreSQL reports NOWAIT contention as 55P03."""
     session = _FakeSession(_operational("55P03: could not obtain lock on row"))
     assert pipeline._try_ingest_lock(session) is False
     assert session.rolled_back is True
@@ -1012,8 +935,7 @@ def test_a_second_ingest_finds_the_lock_held_and_declines(db):
 
 
 def test_a_database_error_that_is_not_contention_is_not_swallowed(db):
-    """Treating every OperationalError as "busy" would turn a broken database
-    into a run that silently does nothing, forever."""
+    """Treating every OperationalError as "busy" would turn a broken database into a run that silently does nothing, forever."""
     from sqlalchemy.exc import OperationalError
 
     session = _FakeSession(_operational("57P01: terminating connection"))
@@ -1023,8 +945,7 @@ def test_a_database_error_that_is_not_contention_is_not_swallowed(db):
 
 
 def test_a_run_against_a_newer_database_refuses_before_touching_a_mirror(db, monkeypatch):
-    """Older code than the database was migrated to: every write would fail one
-    repository at a time, so the run refuses once and records why."""
+    """Older code than the database was migrated to: every write would fail one repository at a time, so the run refuses once and records why."""
     import time as _time
 
     monkeypatch.setattr(pipeline, "schema_drift", lambda: 2)
@@ -1035,8 +956,7 @@ def test_a_run_against_a_newer_database_refuses_before_touching_a_mirror(db, mon
 
 
 def test_a_duplicated_history_is_reported_at_the_end_of_a_run(db, monkeypatch):
-    """Two copies of one history make every corpus-wide total count it twice,
-    and neither row looks wrong on its own -- so the run says so out loud."""
+    """Two copies of one history make every corpus-wide total count it twice, and neither row looks wrong on its own -- so the run says so out loud."""
     import time as _time
 
     from git_synapse.analysis import query
@@ -1055,8 +975,7 @@ def test_a_duplicated_history_is_reported_at_the_end_of_a_run(db, monkeypatch):
 
 
 def test_a_failing_duplicate_report_does_not_lose_a_finished_run(db, monkeypatch):
-    """The repositories are already ingested and recorded by this point. A
-    report that cannot run is not a reason to throw that away."""
+    """The repositories are already ingested and recorded by this point."""
     import time as _time
 
     from git_synapse.analysis import query
@@ -1075,8 +994,7 @@ def test_a_failing_duplicate_report_does_not_lose_a_finished_run(db, monkeypatch
 
 
 def test_the_first_ingest_creates_the_lock_row_it_locks(db):
-    """On a fresh database there is nothing to lock yet, so the first run makes
-    the row. Every later run locks it instead."""
+    """On a fresh database there is nothing to lock yet, so the first run makes the row."""
     from git_synapse.db.orm import models, session_scope
 
     with session_scope() as session:
@@ -1094,10 +1012,7 @@ def test_the_first_ingest_creates_the_lock_row_it_locks(db):
 def test_a_repository_deleted_mid_ingest_fails_that_repository_by_name(
     db, monkeypatch, tmp_path,
 ):
-    """A run can be hours long and an account can be removed while it is in
-    flight, taking its repositories with it. The row is gone by the time the
-    mirror comes back, and the result has to name which one rather than raise
-    an attribute error off a None."""
+    """A run can be hours long and an account can be removed while it is in flight, taking its repositories with it."""
     from git_synapse.ingest import gitops
     from git_synapse.ingest.github import RepoRecord
 
@@ -1105,8 +1020,6 @@ def test_a_repository_deleted_mid_ingest_fails_that_repository_by_name(
                         full_name="acme/vanishing",
                         clone_url="https://github.com/acme/vanishing.git")
 
-    # Upsert reports an id that is not in the table, which is what a concurrent
-    # delete leaves behind.
     monkeypatch.setattr(pipeline, "upsert_repo", lambda rec, conn: 999_999_999)
     monkeypatch.setattr(gitops, "sync_mirror", lambda *a, **kw: gitops.FetchResult(
         path=tmp_path / "mirror", head_sha="0" * 40, cloned=False,
@@ -1118,10 +1031,7 @@ def test_a_repository_deleted_mid_ingest_fails_that_repository_by_name(
 
 
 def test_an_accounts_own_endpoint_reaches_the_client(two_accounts, db, monkeypatch):
-    """A self-hosted install stores its endpoint on the account. If that did not
-    reach the provider, every ordinary lookup would fall through to the
-    public API and describe somebody else's organisation.
-    """
+    """A self-hosted install stores its endpoint on the account."""
     from git_synapse.ingest import accounts
 
     seen = []
@@ -1153,8 +1063,7 @@ def test_an_accounts_own_endpoint_reaches_the_client(two_accounts, db, monkeypat
 def test_an_account_with_no_endpoint_gets_the_providers_public_one(
     two_accounts, db, monkeypatch,
 ):
-    """NULL on the row means "the provider's public API", not "no API" -- which
-    is what sends an ordinary source down the no-API path by mistake."""
+    """NULL on the row means "the provider's public API", not "no API" -- which is what sends an ordinary source down the no-API path by mistake."""
     from git_synapse.ingest import accounts
 
     seen = []

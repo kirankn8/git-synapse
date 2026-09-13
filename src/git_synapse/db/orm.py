@@ -55,12 +55,7 @@ def session_factory() -> sessionmaker[Session]:
 
 @contextmanager
 def session_scope() -> Iterator[Session]:
-    """Yield a transaction-scoped ORM session.
-
-    A clean block commits once. Any exception rolls the transaction back and
-    is re-raised, so callers cannot accidentally return a partially written
-    user/account/settings operation to the pool.
-    """
+    """Yield a transaction-scoped ORM session."""
     session = session_factory()()
     try:
         yield session

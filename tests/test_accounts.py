@@ -1,9 +1,4 @@
-"""The accounts that drive discovery.
-
-These decide which repositories exist at all, so a fault here is not a wrong
-number in one view -- it is a repository that silently never gets scanned, or
-one that gets scanned when someone deliberately excluded it.
-"""
+"""The accounts that drive discovery."""
 
 from __future__ import annotations
 
@@ -22,7 +17,6 @@ def clean(scratch_db):
     return scratch_db
 
 
-# ------------------------------------------------------------------ validation
 
 @pytest.mark.parametrize(
     "login",
@@ -67,7 +61,6 @@ def test_repo_lists_accept_csv_or_json_and_drop_blanks(given, want):
     assert accounts._names(given) == want
 
 
-# ---------------------------------------------------------------------- CRUD
 
 def test_an_account_round_trips(clean):
     made = accounts.add_account("kubernetes", kind="org", include_forks=False, skip_repos="a,b")
@@ -154,12 +147,9 @@ def test_record_discovery_keeps_the_error_for_the_ui(clean):
     assert accounts.get_account(made["id"])["last_discover_error"] == "404 Not Found"
 
 
-# ------------------------------------------------------------- config mapping
 
 def test_config_for_carries_this_accounts_settings_and_no_others(clean):
-    """Two accounts scanned in one run must not see each other's filters, so
-    every value comes from the row rather than from a shared default that the
-    previous account might have replaced."""
+    """Two accounts scanned in one run must not see each other's filters, so every value comes from the row rather than from a shared default that the previous account might have replaced."""
     strict = accounts.add_account("kubernetes", include_forks=False, only_repos="a,b")
     loose = accounts.add_account("grafana", include_forks=True, include_archived=False)
 
@@ -172,24 +162,19 @@ def test_config_for_carries_this_accounts_settings_and_no_others(clean):
 
 
 def test_an_account_with_no_endpoint_of_its_own_stores_none(clean):
-    """NULL means "the provider's public API", which `sources.parse` supplies.
-    Storing a guessed endpoint instead would freeze today's default into the
-    row and survive any later change to it."""
+    """NULL means "the provider's public API", which `sources.parse` supplies."""
     made = accounts.add_account("kubernetes")
     assert made["api_url"] is None
 
 
 def test_a_per_account_api_url_is_stored_as_given(clean):
-    """A self-hosted install knows its endpoint; the host name cannot tell us.
-    Where that endpoint reaches the client is asserted in test_pipeline."""
+    """A self-hosted install knows its endpoint; the host name cannot tell us."""
     made = accounts.add_account("kubernetes", api_url="https://ghe.internal/api/v3")
     assert made["api_url"] == "https://ghe.internal/api/v3"
 
 
 def test_config_for_answers_only_what_is_taken(clean):
-    """It returns a SelectionConfig: the same questions on every host. The
-    endpoint and the credential travel with the Source instead, because the
-    account being described may not be a GitHub one."""
+    """It returns a SelectionConfig: the same questions on every host."""
     from git_synapse.config import SelectionConfig
 
     made = accounts.add_account("kubernetes", include_forks=True, skip_repos="a,b")
@@ -205,7 +190,6 @@ def test_a_blank_api_url_is_stored_as_null_not_empty(clean):
     assert made["api_url"] is None
 
 
-# ---------------------------------------------- owner-driven resolution
 
 def test_owners_are_read_from_ingested_repos_not_configured_accounts(clean):
     """Removing an account must not reclassify what it already mined."""
@@ -225,11 +209,9 @@ def test_owners_are_read_from_ingested_repos_not_configured_accounts(clean):
     assert "acme-owner" in owners
 
 
-# ------------------------------------------------- updating an account's fields
 
 def test_changing_the_kind_is_validated_like_creation(db):
-    """`kind` decides which API listing is used, so a bad value fails the run
-    later rather than here unless it is checked on update too."""
+    """`kind` decides which API listing is used, so a bad value fails the run later rather than here unless it is checked on update too."""
     acct = accounts.add_account("kindly")
     try:
         with pytest.raises(accounts.AccountError):
@@ -240,8 +222,7 @@ def test_changing_the_kind_is_validated_like_creation(db):
 
 
 def test_an_allowlist_is_normalised_on_update(db):
-    """Whitespace and empty entries in a pasted list would otherwise become
-    repository names that match nothing."""
+    """Whitespace and empty entries in a pasted list would otherwise become repository names that match nothing."""
     acct = accounts.add_account("listy")
     try:
         row = accounts.update_account(acct["id"], only_repos=" one , , two ")
@@ -266,9 +247,7 @@ def test_updating_nothing_still_reports_an_unknown_account(db):
 
 
 def test_a_failed_discovery_does_not_zero_the_repository_count(db):
-    """The listing did not come back. That says nothing about how many
-    repositories the source has, and they certainly did not disappear --
-    `google` reported none while owning 122 of them."""
+    """The listing did not come back."""
     from git_synapse.ingest import accounts
 
     src = accounts.add_account("countkeep", kind="org", provider="github",
@@ -291,9 +270,7 @@ def test_a_failed_discovery_does_not_zero_the_repository_count(db):
 
 
 def test_the_count_is_reconciled_against_the_repositories_that_exist(db):
-    """Discovery records what it *selected*, which is written before the upsert
-    and therefore before anything is durable. A run that aborts between the two
-    leaves a source claiming repositories no row backs."""
+    """Discovery records what it *selected*, which is written before the upsert and therefore before anything is durable."""
     from git_synapse.ingest import accounts
 
     src = accounts.add_account("countreal", kind="org", provider="github",
@@ -328,8 +305,7 @@ def test_the_count_is_reconciled_against_the_repositories_that_exist(db):
 
 
 def test_updating_an_account_that_is_not_there_says_which_one(db):
-    """The id came from a URL, so "not found" is the answer a 404 is built
-    from -- not an empty success that looks like the edit was applied."""
+    """The id came from a URL, so "not found" is the answer a 404 is built from -- not an empty success that looks like the edit was applied."""
     from git_synapse.ingest import accounts
 
     with pytest.raises(accounts.AccountError, match="999999999"):
@@ -337,17 +313,14 @@ def test_updating_an_account_that_is_not_there_says_which_one(db):
 
 
 def test_recording_discovery_against_a_removed_account_is_a_no_op(db):
-    """Discovery runs on a schedule and an account can be deleted while it is
-    in flight. Recording the result then must not resurrect or raise."""
+    """Discovery runs on a schedule and an account can be deleted while it is in flight."""
     from git_synapse.ingest import accounts
 
     accounts.record_discovery(999_999_999, error=None, repo_count=5)
 
 
 def test_one_lookup_answers_what_credential_a_host_has(monkeypatch):
-    """Every host's credential is reached the same way, so a caller asking
-    "may we use anything against this host?" branches once rather than per
-    vendor. An unknown provider is answered, not raised at."""
+    """Every host's credential is reached the same way, so a caller asking "may we use anything against this host?" branches once rather than per vendor."""
     from git_synapse.config import Config, HostCredential, ProviderConfig
 
     cfg = Config(providers=ProviderConfig(
@@ -362,8 +335,7 @@ def test_one_lookup_answers_what_credential_a_host_has(monkeypatch):
 
 
 def test_a_host_with_no_credential_reports_an_empty_one(monkeypatch):
-    """Public repositories clone anonymously on every host, so "none set" is an
-    ordinary answer rather than a misconfiguration."""
+    """Public repositories clone anonymously on every host, so "none set" is an ordinary answer rather than a misconfiguration."""
     from git_synapse.config import Config, HostCredential, ProviderConfig
 
     cfg = Config(providers=ProviderConfig(
@@ -373,9 +345,7 @@ def test_a_host_with_no_credential_reports_an_empty_one(monkeypatch):
 
 
 def test_a_host_with_no_known_prefix_accepts_whatever_its_file_holds(tmp_path):
-    """Only GitHub publishes what its credentials look like. For any other host
-    the shape is unknown, so rejecting a token for not matching a pattern we
-    never had would refuse a perfectly good credential."""
+    """Only GitHub publishes what its credentials look like."""
     from git_synapse.config import HostCredential
 
     token_file = tmp_path / "gitlab-token"
@@ -386,8 +356,7 @@ def test_a_host_with_no_known_prefix_accepts_whatever_its_file_holds(tmp_path):
 
 
 def test_a_github_token_file_holding_something_else_is_ignored(tmp_path):
-    """A half-written file would otherwise be sent as a credential and come
-    back 401, which reads as "expired token" and costs somebody an afternoon."""
+    """A half-written file would otherwise be sent as a credential and come back 401, which reads as "expired token" and costs somebody an afternoon."""
     from git_synapse.config import ProviderConfig
 
     token_file = tmp_path / "github-token"

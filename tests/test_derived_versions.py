@@ -53,7 +53,5 @@ def test_derived_stages_rebuild_once_in_dependency_order(scratch_db, monkeypatch
     assert second == []
     assert calls == []
 
-    # The connection-supplied path also needs to skip a stage whose watermark
-    # is already current; this is the fast path used by service requests.
     with session_scope() as conn:
         assert derived.ensure_current(conn) == []

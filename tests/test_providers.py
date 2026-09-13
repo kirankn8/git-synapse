@@ -1,9 +1,4 @@
-"""Asking a host what it has, and coping when it will not say.
-
-Every client here is exercised against a recorded payload rather than the live
-API: the shapes are what matter, and a test that needs the internet is a test
-that fails for reasons nothing in this repository caused.
-"""
+"""Asking a host what it has, and coping when it will not say."""
 from __future__ import annotations
 
 import httpx
@@ -17,7 +12,6 @@ def _resp(status: int, payload=None) -> httpx.Response:
                           request=httpx.Request("GET", "https://example/x"))
 
 
-# ------------------------------------------------------------------ routing
 
 @pytest.mark.parametrize("url,cls", [
     ("https://github.com/a/b", providers.GitHubProvider),
@@ -37,8 +31,6 @@ def test_a_host_with_no_api_still_produces_a_record():
     assert record.full_name == "team/svc"
     assert record.clone_url == "https://git.corp/team/svc.git"
     assert record.host == "git.corp" and record.provider == "git"
-    # It knows nothing about forks or archiving, and says so by leaving the
-    # defaults rather than inventing a value a filter would then act on.
     assert record.is_fork is False and record.github_id is None
 
 
@@ -49,7 +41,6 @@ def test_a_host_with_no_api_cannot_be_enumerated():
     assert providers.for_source(sources.parse("https://github.com/a")).supports_listing()
 
 
-# ------------------------------------------------------------------ mapping
 
 def test_gitlab_projects_map_onto_the_record(monkeypatch):
     payload = {
@@ -85,8 +76,6 @@ def test_bitbucket_repositories_map_onto_the_record(monkeypatch):
     monkeypatch.setattr(client._client, "get", lambda path: _resp(200, payload))
     r = client.get_repo("atlassian", "aui")
     assert (r.full_name, r.owner, r.name) == ("atlassian/aui", "atlassian", "aui")
-    # The https clone URL, picked out of the list by name -- the ssh one would
-    # need a key in the container.
     assert r.clone_url == "https://bitbucket.org/atlassian/aui.git"
     assert (r.is_private, r.visibility, r.primary_language) == (True, "private", "java")
 
@@ -103,11 +92,9 @@ def test_a_github_enterprise_record_carries_its_own_host(monkeypatch):
     assert client.get_repo("acme", "thing").host == "ghe.corp"
 
 
-# ------------------------------------------------------------- listing paths
 
 def test_a_github_owner_that_is_not_an_org_is_tried_as_a_user(monkeypatch):
-    """A person pasting a URL has no way to know which it is, and should not
-    have to answer for it."""
+    """A person pasting a URL has no way to know which it is, and should not have to answer for it."""
     source = sources.parse("https://github.com/torvalds")
     client = providers.for_source(source)
     seen = []
@@ -191,7 +178,6 @@ def test_an_empty_first_page_ends_the_walk(monkeypatch):
     assert client.list_repos("empty") == []
 
 
-# ------------------------------------------------------------- credentials
 
 def test_a_source_token_overrides_the_environment_credential(monkeypatch):
     monkeypatch.setenv("GITLAB_TOKEN", "from-the-environment")
@@ -209,8 +195,7 @@ def test_a_source_token_overrides_the_environment_credential(monkeypatch):
 
 
 def test_a_github_source_token_beats_the_token_file(monkeypatch, tmp_path):
-    """`current_token()` prefers the file, so a source credential that did not
-    also clear it would be silently ignored."""
+    """`current_token()` prefers the file, so a source credential that did not also clear it would be silently ignored."""
     from git_synapse.config import get_config
 
     path = tmp_path / "tok"
@@ -226,8 +211,7 @@ def test_a_github_source_token_beats_the_token_file(monkeypatch, tmp_path):
 
 
 def test_an_impatient_client_reports_a_rate_limit_instead_of_sleeping(monkeypatch):
-    """A handler someone is watching has seconds. Sleeping sixty of them is
-    indistinguishable from a hang."""
+    """A handler someone is watching has seconds. Sleeping sixty of them is indistinguishable from a hang."""
     from git_synapse.ingest.github import GitHubClient
 
     client = GitHubClient(patient=False)
@@ -319,7 +303,6 @@ def test_the_gitlab_get_helper_returns_the_response_on_success(monkeypatch):
     assert client._get("/x").json() == {"ok": 1}
 
 
-# ---------------------------------------------------------------- paging
 
 def _page_resp(rows, link="", headers=None):
     return httpx.Response(200, json=rows, headers={"link": link, **(headers or {})},
@@ -327,8 +310,7 @@ def _page_resp(rows, link="", headers=None):
 
 
 def test_github_reads_the_page_it_was_asked_for_and_the_total_from_the_link(monkeypatch):
-    """`rel="last"` is already in the response, so knowing an organisation has
-    about 8,300 repositories costs nothing extra."""
+    """`rel="last"` is already in the response, so knowing an organisation has about 8,300 repositories costs nothing extra."""
     source = sources.parse("https://github.com/acme")
     client = providers.for_source(source)
     seen = {}
@@ -350,8 +332,7 @@ def test_github_reads_the_page_it_was_asked_for_and_the_total_from_the_link(monk
 
 
 def test_github_falls_back_to_the_user_endpoint_within_the_same_request(monkeypatch):
-    """Probing first would be an extra request on every lookup, and anonymous
-    GitHub allows sixty an hour."""
+    """Probing first would be an extra request on every lookup, and anonymous GitHub allows sixty an hour."""
     client = providers.for_source(sources.parse("https://github.com/torvalds"))
     seen = []
 
@@ -476,8 +457,7 @@ def test_bitbucket_without_a_size_says_unknown(monkeypatch):
 
 
 def test_a_client_that_cannot_page_is_sliced_out_of_a_full_listing():
-    """The default keeps any future client correct without needing to know how
-    that host paginates."""
+    """The default keeps any future client correct without needing to know how that host paginates."""
     class _Simple(providers.Provider):
         def list_repos(self, owner):
             from git_synapse.ingest.github import RepoRecord
@@ -493,8 +473,7 @@ def test_a_client_that_cannot_page_is_sliced_out_of_a_full_listing():
 
 
 def test_a_host_that_names_the_parent_in_its_listing_asks_nothing_extra():
-    """GitLab puts `forked_from_project` in the listing, so the base answers ""
-    and no second request is made. Only GitHub withholds it."""
+    """GitLab puts `forked_from_project` in the listing, so the base answers "" and no second request is made."""
     class _Simple(providers.Provider):
         def list_repos(self, owner):
             return []
@@ -504,8 +483,7 @@ def test_a_host_that_names_the_parent_in_its_listing_asks_nothing_extra():
 
 
 def test_the_github_provider_asks_its_client_for_the_parent():
-    """One request per fork, delegated rather than reimplemented, so Enterprise
-    hosts and the api_url override are honoured the same way."""
+    """One request per fork, delegated rather than reimplemented, so Enterprise hosts and the api_url override are honoured the same way."""
     asked = []
 
     class _Client:

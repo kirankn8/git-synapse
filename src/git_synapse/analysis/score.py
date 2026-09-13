@@ -1,15 +1,4 @@
-"""Materialisation of the 31 association measures over the pair tables.
-
-This is a pure function of the aggregates: it reads ``(n_ab, n_a, n_b, N)`` for
-each pair, evaluates every measure in the registry, and writes the results to
-``file_pair_metric`` / ``dir_pair_metric``. Nothing here reads git or the atomic
-tables, so re-scoring after adding a measure costs one pass over the pair table
-and no re-ingest.
-
-Measures are evaluated in vectorised numpy batches rather than row by row.
-Scoring is therefore dominated by the database round trip rather than the
-arithmetic: 31 measures over a 200k-row batch is a few hundred milliseconds.
-"""
+"""Materialisation of the 31 association measures over the pair tables."""
 
 from __future__ import annotations
 
@@ -28,8 +17,6 @@ from git_synapse.stats.registry import ALL_KEYS, BY_KEY
 
 log = logging.getLogger(__name__)
 
-#: Column order for the metric tables: the four contingency cells, then every
-#: measure in registry order. Shared by the file and directory variants.
 _CELL_COLUMNS = ("n_ab", "n_a", "n_b", "n_total")
 
 
@@ -65,11 +52,7 @@ def score_repo(repo_id: int, conn: object | None = None) -> ScoreStats:
 
 
 def _level_sql(level: str) -> tuple[str, str, str, str, str]:
-    """Return the table and column names for a granularity level.
-
-    Returns:
-        ``(pair_table, metric_table, entity_table, col_a, col_b)``
-    """
+    """Return the table and column names for a granularity level."""
     if level == "file":
         return "file_pair", "file_pair_metric", "file", "file_a_id", "file_b_id"
     if level == "dir":
@@ -121,11 +104,7 @@ class _Batch:
 def _iter_pair_batches(
     conn: object, repo_id: int, level: str, n_total: int
 ) -> Iterator[_Batch]:
-    """Stream pairs joined to their marginals, in fixed-size batches.
-
-    A named (server-side) cursor is used so a repository with tens of millions
-    of pairs never materialises its full result set in the client.
-    """
+    """Stream pairs joined to their marginals, in fixed-size batches."""
     _pair_table, _, _entity_table, col_a, col_b = _level_sql(level)
     batch_size = max(get_config().analysis.score_batch_size, 1000)
     Pair = getattr(models(), "FilePair" if level == "file" else "DirPair")
@@ -153,20 +132,7 @@ def _iter_pair_batches(
 
 
 def _score_batch(repo_id: int, batch: _Batch) -> list[tuple]:
-    """Evaluate every registered measure over a batch and build ORM rows.
-
-    The cells written are the ones the measures were computed from, not the raw
-    aggregates. ``Contingency.from_counts`` clamps input to the feasible region
-    -- ``n_ab`` above either marginal comes down, a marginal above ``N`` comes
-    down, and inclusion-exclusion can force ``a`` *up* from a reported zero when
-    ``n_a + n_b > N``. Writing the raw numbers beside scores derived from the
-    clamped ones breaks the property the whole design rests on: that any number
-    in the UI traces back to four counts, and those four counts reproduce it.
-
-    Clamping should never fire on data this pipeline produced -- the marginals
-    come from the same commits as the joint count -- so a difference means an
-    aggregate is stale, and is logged rather than passed over.
-    """
+    """Evaluate every registered measure over a batch and build ORM rows."""
     table = Contingency.from_counts(
         n_ab=batch.n_ab, n_a=batch.n_a, n_b=batch.n_b, n_total=batch.n_total
     )
@@ -185,13 +151,8 @@ def _score_batch(repo_id: int, batch: _Batch) -> list[tuple]:
             "feasible table before scoring; an aggregate is likely stale",
             repo_id, adjusted)
 
-    # Transpose column-wise arrays into row tuples. zip over the
-    # arrays is materially faster than indexing each array per row.
     return [
         (repo_id, int(a), int(b), int(ab), int(na), int(nb), batch.n_total, *values)
-        # strict: zip stops at the shortest input, so a measure returning
-        # fewer values than there are pairs would silently drop rows from the
-        # metric table, with nothing raised.
         for a, b, ab, na, nb, values in zip(
             batch.a_ids,
             batch.b_ids,

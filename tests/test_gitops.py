@@ -1,10 +1,4 @@
-"""Mirror management, driven against real local repositories.
-
-This is where the worst incident happened: an expired token made every fetch
-fail, the fallback re-cloned, and the clone deleted the existing mirror before
-failing on the same error -- 213 of 272 working mirrors destroyed in one run.
-Everything here exists to keep that shape impossible.
-"""
+"""Mirror management, driven against real local repositories."""
 from __future__ import annotations
 
 import dataclasses
@@ -54,7 +48,6 @@ def remote(tmp_path):
     return work, bare
 
 
-# ------------------------------------------------------ error classification
 
 @pytest.mark.parametrize("stderr", [
     "remote: Invalid username or token.",
@@ -91,7 +84,6 @@ def test_an_unclassified_failure_is_neither(stderr):
     assert not is_transient_error(stderr)
 
 
-# ------------------------------------------------------------ clone and sync
 
 def test_clone_produces_a_valid_bare_mirror(tmp_path, remote):
     _, bare = remote
@@ -181,7 +173,6 @@ def test_an_empty_directory_is_not_a_valid_mirror(tmp_path):
     assert not is_valid_mirror(tmp_path / "does-not-exist")
 
 
-# ---------------------------------------------------------------- clone mode
 
 @pytest.mark.parametrize(("size_kb", "expected"), [
     (None, False),          # unknown size: take the safe, complete clone
@@ -206,11 +197,9 @@ def test_mirror_path_is_namespaced_by_owner(tmp_path, monkeypatch):
         reset_config_cache()
 
 
-# --------------------------------------------- sync's response to failure
 
 def test_a_permanent_failure_preserves_the_mirror_and_raises(tmp_path, remote, monkeypatch):
-    """An expired token made every fetch fail; the fallback re-cloned, and the
-    clone deleted the mirror before failing on the same error."""
+    """An expired token made every fetch fail; the fallback re-cloned, and the clone deleted the mirror before failing on the same error."""
     _, bare = remote
     monkeypatch.setenv("MIRROR_ROOT", str(tmp_path / "mirrors"))
     from git_synapse.config import reset_config_cache
@@ -237,8 +226,7 @@ def test_a_permanent_failure_preserves_the_mirror_and_raises(tmp_path, remote, m
 
 
 def test_a_transient_failure_preserves_the_mirror_and_raises(tmp_path, remote, monkeypatch):
-    """A network blip says nothing about the mirror; re-cloning spent nine
-    minutes per repository failing to replace one that was fine."""
+    """A network blip says nothing about the mirror; re-cloning spent nine minutes per repository failing to replace one that was fine."""
     _, bare = remote
     monkeypatch.setenv("MIRROR_ROOT", str(tmp_path / "mirrors"))
     from git_synapse.config import reset_config_cache
@@ -306,12 +294,9 @@ def test_a_changed_clone_mode_forces_a_re_clone(tmp_path, remote, monkeypatch):
         reset_config_cache()
 
 
-# ------------------------------------------------------- the leftover-state paths
 
 def test_a_stale_incoming_directory_is_cleared_before_cloning(tmp_path, remote):
-    """A clone killed mid-flight leaves `.incoming` behind. git refuses to clone
-    into a non-empty directory, so every later attempt would fail until someone
-    removed it by hand."""
+    """A clone killed mid-flight leaves `.incoming` behind."""
     dest = tmp_path / "mirror.git"
     staging = dest.with_name(dest.name + ".incoming")
     staging.mkdir(parents=True)
@@ -335,8 +320,7 @@ def test_a_stale_retired_directory_does_not_block_a_re_clone(tmp_path, remote):
 
 
 def test_the_token_is_never_written_into_the_mirrors_config(tmp_path, remote):
-    """A mirror on disk outlives the token that created it, and anyone with read
-    access to the volume can read `config`."""
+    """A mirror on disk outlives the token that created it, and anyone with read access to the volume can read `config`."""
     dest = tmp_path / "mirror.git"
     clone_mirror(str(remote[1]), dest, public_url="https://github.com/t/w.git")
     config = (dest / "config").read_text()
@@ -364,8 +348,7 @@ def test_a_git_that_will_not_run_reads_as_an_invalid_mirror(tmp_path, monkeypatc
 
 
 def test_a_blobless_fetch_asks_for_no_blobs(tmp_path, remote, monkeypatch):
-    """Losing the filter on fetch quietly re-downloads every blob the clone
-    deliberately skipped."""
+    """Losing the filter on fetch quietly re-downloads every blob the clone deliberately skipped."""
     dest = tmp_path / "mirror.git"
     clone_mirror(str(remote[1]), dest, blobless=True)
 
@@ -388,8 +371,7 @@ def test_blobless_is_forced_when_configured_whatever_the_size(tmp_path):
 
 
 def test_an_unknown_size_clones_in_full(tmp_path):
-    """GitHub omits the size for some repositories; guessing blobless there
-    trades a known cost for an unknown one."""
+    """GitHub omits the size for some repositories; guessing blobless there trades a known cost for an unknown one."""
     from git_synapse.config import get_config
 
     cfg = dataclasses.replace(get_config().ingest, force_blobless=False)
@@ -412,8 +394,7 @@ def test_commit_exists_is_false_for_an_empty_sha(tmp_path, remote, sha):
 
 
 def test_a_clone_that_fails_leaves_no_staging_directory_behind(tmp_path):
-    """The staging directory is the whole reason a failed clone does not destroy
-    the mirror it was replacing; leaving it would block every later attempt."""
+    """The staging directory is the whole reason a failed clone does not destroy the mirror it was replacing; leaving it would block every later attempt."""
     dest = tmp_path / "mirror.git"
     staging = dest.with_name(dest.name + ".incoming")
 
@@ -425,8 +406,7 @@ def test_a_clone_that_fails_leaves_no_staging_directory_behind(tmp_path):
 
 
 def test_a_failed_re_clone_leaves_the_previous_mirror_intact(tmp_path, remote):
-    """213 working mirrors were destroyed once by a re-clone that deleted first
-    and failed second."""
+    """213 working mirrors were destroyed once by a re-clone that deleted first and failed second."""
     dest = tmp_path / "mirror.git"
     clone_mirror(str(remote[1]), dest)
     head_before = (dest / "HEAD").read_text()
@@ -440,8 +420,7 @@ def test_a_failed_re_clone_leaves_the_previous_mirror_intact(tmp_path, remote):
 
 def test_a_clone_that_fails_after_staging_exists_still_cleans_up(tmp_path, remote,
                                                                  monkeypatch):
-    """The clone can succeed and the follow-up config still fail. Leaving the
-    staging directory behind would block every later attempt at this mirror."""
+    """The clone can succeed and the follow-up config still fail."""
     dest = tmp_path / "mirror.git"
     staging = dest.with_name(dest.name + ".incoming")
     real = gitops.run_git
@@ -461,8 +440,7 @@ def test_a_clone_that_fails_after_staging_exists_still_cleans_up(tmp_path, remot
 
 
 def test_tags_are_mirrored(tmp_path):
-    """A manifest pinning `v1.2.3` names a release, and only a tag turns that
-    into a commit. Excluding tags made the tag index build and stay empty."""
+    """A manifest pinning `v1.2.3` names a release, and only a tag turns that into a commit."""
     import subprocess
 
     from git_synapse.ingest import gitops
@@ -522,8 +500,7 @@ def add_commit(repo, name, body):
 
 
 def test_a_tag_on_the_shipping_branch_anchors_to_itself(tmp_path):
-    """Most projects tag on the branch they ship. The anchor is then the tag's
-    own commit, and no merge-base is needed."""
+    """Most projects tag on the branch they ship."""
     work = worktree(tmp_path, "on-branch")
     g(work, "tag", "v1.0.0")
 
@@ -532,9 +509,7 @@ def test_a_tag_on_the_shipping_branch_anchors_to_itself(tmp_path):
 
 
 def test_a_tag_on_a_release_branch_anchors_to_where_it_was_cut(tmp_path):
-    """Guava tags on a release branch, so 116 of its 123 tags point at commits
-    the walk never reads. The merge-base is on the shipping branch and is
-    therefore already ingested."""
+    """Guava tags on a release branch, so 116 of its 123 tags point at commits the walk never reads."""
     work = worktree(tmp_path, "release-branch")
     cut = g(work, "rev-parse", "HEAD").stdout.strip()
 
@@ -550,9 +525,7 @@ def test_a_tag_on_a_release_branch_anchors_to_where_it_was_cut(tmp_path):
 
 
 def test_an_unrelated_history_gets_no_anchor(tmp_path):
-    """An imported tree or orphan branch shares no ancestor, so there is no
-    commit it was cut from. Left unset rather than anchored to something
-    arbitrary."""
+    """An imported tree or orphan branch shares no ancestor, so there is no commit it was cut from."""
     work = worktree(tmp_path, "orphan")
     g(work, "checkout", "-q", "--orphan", "imported")
     add_commit(work, "vendor.txt", "x")
@@ -564,16 +537,14 @@ def test_an_unrelated_history_gets_no_anchor(tmp_path):
 
 
 def test_tags_are_read_without_a_branch_too(tmp_path):
-    """The anchor is optional: callers that do not know the shipping branch
-    still get every tag."""
+    """The anchor is optional: callers that do not know the shipping branch still get every tag."""
     work = worktree(tmp_path, "nobranch")
     g(work, "tag", "v1.0.0")
     assert [t.name for t in gitops.read_tags(work)] == ["v1.0.0"]
 
 
 def test_an_anchor_that_lands_on_a_merge_moves_to_a_real_commit(tmp_path):
-    """The walk skips merges, so anchoring a tag to one names a commit that was
-    deliberately never stored. 27 of auto's tags landed exactly there."""
+    """The walk skips merges, so anchoring a tag to one names a commit that was deliberately never stored."""
     work = worktree(tmp_path, "merge-anchor")
     base = g(work, "rev-parse", "HEAD").stdout.strip()
 
@@ -598,9 +569,7 @@ def test_an_anchor_that_lands_on_a_merge_moves_to_a_real_commit(tmp_path):
 
 
 def test_a_tag_pointing_straight_at_a_merge_still_anchors_to_a_real_commit(tmp_path):
-    """Prometheus tags nearly half its releases on the merge commit that landed
-    the release PR. Such a tag is on the shipping branch yet names a row the
-    walk never wrote, so "on the branch" is not the same as "resolvable"."""
+    """Prometheus tags nearly half its releases on the merge commit that landed the release PR."""
     work = worktree(tmp_path, "tag-on-merge")
     g(work, "checkout", "-q", "-b", "feature")
     add_commit(work, "feature.txt", "f")
@@ -618,9 +587,7 @@ def test_a_tag_pointing_straight_at_a_merge_still_anchors_to_a_real_commit(tmp_p
 
 
 def test_a_cherry_picked_release_commit_is_recognised_as_a_replay(tmp_path):
-    """A fix landed on the shipping branch and then cherry-picked onto a release
-    branch is the same change twice. Counting the second would claim those files
-    belong together on evidence that is one observation repeated."""
+    """A fix landed on the shipping branch and then cherry-picked onto a release branch is the same change twice."""
     work = worktree(tmp_path, "replay")
     add_commit(work, "auth.py", "def check(): pass\n")
     g(work, "checkout", "-q", "-b", "release-1.0", "HEAD~1")
@@ -633,9 +600,7 @@ def test_a_cherry_picked_release_commit_is_recognised_as_a_replay(tmp_path):
 
 
 def test_a_backport_that_touched_extra_files_is_not_a_replay(tmp_path):
-    """A different diff is a different change, and the extra file really did
-    have to move with the others on that branch. That is evidence we would
-    otherwise throw away."""
+    """A different diff is a different change, and the extra file really did have to move with the others on that branch."""
     work = worktree(tmp_path, "adapted")
     add_commit(work, "auth.py", "def check(): pass\n")
     g(work, "checkout", "-q", "-b", "release-1.0", "HEAD~1")
@@ -663,8 +628,7 @@ def test_a_release_only_commit_is_not_a_replay(tmp_path):
 
 
 def test_the_watermark_covers_every_tip_the_walk_visits(tmp_path):
-    """The walk now reads tags too, so a watermark of the branch tip alone
-    would re-read every release commit on each run."""
+    """The walk now reads tags too, so a watermark of the branch tip alone would re-read every release commit on each run."""
     work = worktree(tmp_path, "tips")
     g(work, "checkout", "-q", "-b", "release-1.0")
     add_commit(work, "pom.xml", "1.0.0")
@@ -684,16 +648,14 @@ def test_reading_tags_from_a_directory_that_is_not_a_repository(tmp_path):
 
 
 def test_replay_detection_declines_when_the_branch_is_unknown(tmp_path):
-    """Without a branch there is nothing to compare against, so claiming a
-    commit is a replay would be a guess."""
+    """Without a branch there is nothing to compare against, so claiming a commit is a replay would be a guess."""
     work = worktree(tmp_path, "nobranch-replay")
     g(work, "tag", "v1.0.0")
     assert gitops.replayed_commits(work, None) == set()
 
 
 def test_a_tag_pointing_at_a_blob_is_skipped(tmp_path):
-    """`git tag` will happily name a blob. It has no commit, so it cannot be a
-    release, and reading it as one would put a non-commit in the index."""
+    """`git tag` will happily name a blob."""
     work = worktree(tmp_path, "blobtag")
     blob = g(work, "hash-object", "-w", "--stdin").stdout if False else None
     import subprocess as sp
@@ -708,16 +670,12 @@ def test_a_tag_pointing_at_a_blob_is_skipped(tmp_path):
 
 
 def test_an_unparseable_tag_date_does_not_lose_the_tag(tmp_path, monkeypatch):
-    """The date is useful; the tag-to-commit mapping is essential. Losing the
-    second because the first was malformed would drop a real release."""
+    """The date is useful; the tag-to-commit mapping is essential."""
     work = worktree(tmp_path, "baddate")
     g(work, "tag", "v1.0.0")
     real = gitops.run_git
 
     def _mangle(args, **kw):
-        # The date is the last field. Targeting it by position rather than by
-        # "the first tab followed by a 2" matters: an object name beginning
-        # with 2 would otherwise be mangled instead, one run in sixteen.
         proc = real(args, **kw)
         if args and args[0] == "for-each-ref":
             proc.stdout = "\n".join(
@@ -732,8 +690,7 @@ def test_an_unparseable_tag_date_does_not_lose_the_tag(tmp_path, monkeypatch):
 
 
 def test_a_directory_that_is_not_a_repository_yields_no_tags(tmp_path):
-    """It exists, so the earlier `is_dir` guard passes and git itself refuses.
-    A half-written mirror looks exactly like this."""
+    """It exists, so the earlier `is_dir` guard passes and git itself refuses."""
     plain = tmp_path / "plain"
     plain.mkdir()
     assert gitops.read_tags(plain, "main") == []
@@ -741,8 +698,7 @@ def test_a_directory_that_is_not_a_repository_yields_no_tags(tmp_path):
 
 
 def test_a_tag_line_that_does_not_parse_is_skipped(tmp_path, monkeypatch):
-    """`for-each-ref` output is split on tabs, and a ref name containing one
-    would otherwise unpack into the wrong fields."""
+    """`for-each-ref` output is split on tabs, and a ref name containing one would otherwise unpack into the wrong fields."""
     work = worktree(tmp_path, "oddline")
     g(work, "tag", "v1.0.0")
     real = gitops.run_git
@@ -758,8 +714,7 @@ def test_a_tag_line_that_does_not_parse_is_skipped(tmp_path, monkeypatch):
 
 
 def test_tags_survive_a_branch_that_cannot_be_listed(tmp_path, monkeypatch):
-    """Without the branch there is no anchor, but the tags themselves are still
-    the version index and must not be dropped with it."""
+    """Without the branch there is no anchor, but the tags themselves are still the version index and must not be dropped with it."""
     work = worktree(tmp_path, "nolist")
     g(work, "tag", "v1.0.0")
     real = gitops.run_git
@@ -795,8 +750,7 @@ def test_a_tag_whose_merge_base_cannot_be_computed_is_left_unanchored(tmp_path, 
 
 
 def test_a_tag_with_an_unreadable_date_keeps_its_commit(tmp_path, monkeypatch):
-    """The date says when a release was cut; the commit is the release. Losing
-    the second because the first was malformed would drop a real version."""
+    """The date says when a release was cut; the commit is the release."""
     work = worktree(tmp_path, "baddate2")
     g(work, "tag", "v1.0.0")
     real = gitops.run_git
@@ -817,8 +771,7 @@ def test_a_tag_with_an_unreadable_date_keeps_its_commit(tmp_path, monkeypatch):
 
 
 def test_one_tag_that_cannot_be_compared_does_not_stop_the_others(tmp_path, monkeypatch):
-    """Replay detection runs per tag, so a single failing comparison must cost
-    only that tag's result."""
+    """Replay detection runs per tag, so a single failing comparison must cost only that tag's result."""
     work = worktree(tmp_path, "onefails")
     g(work, "checkout", "-q", "-b", "rel")
     add_commit(work, "r.txt", "r")
@@ -839,9 +792,7 @@ def test_one_tag_that_cannot_be_compared_does_not_stop_the_others(tmp_path, monk
 
 
 def test_a_ref_naming_something_that_is_not_an_object_id_is_skipped(tmp_path, monkeypatch):
-    """Belt to the object-type check's braces. A truncated or corrupted
-    `for-each-ref` line would otherwise put a non-sha in the version index,
-    where every later lookup has to fail on it."""
+    """Belt to the object-type check's braces."""
     work = worktree(tmp_path, "badsha")
     g(work, "tag", "v1.0.0")
     real = gitops.run_git

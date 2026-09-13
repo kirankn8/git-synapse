@@ -1,20 +1,14 @@
-"""The MCP tools, called the way an agent calls them.
-
-These are the only surface an agent sees. A wrong shape here does not raise --
-it becomes a confident answer, which is the expensive kind of wrong.
-"""
+"""The MCP tools, called the way an agent calls them."""
 from __future__ import annotations
 
 import pytest
 
 from git_synapse.mcp import server
 
-# ------------------------------------------------------------- resolution
 
 @pytest.mark.parametrize("name", ["", "   ", "definitely-not-a-repo", "hubbl", "api"])
 def test_a_name_that_is_not_a_repository_is_refused(db, name):
-    """A substring match resolved to the first hit, so a typo answered
-    confidently about a different repository."""
+    """A substring match resolved to the first hit, so a typo answered confidently about a different repository."""
     out = server.upstream_repos(repo=name)
     assert "error" in out, f"{name!r} resolved to {out.get('repo')}"
 
@@ -36,7 +30,6 @@ def test_real_names_full_names_and_case_all_resolve(db):
         assert out["repo"] == row.full_name
 
 
-# ---------------------------------------------------------- coupled_files
 
 def test_coupled_files_rejects_an_unknown_path_with_a_hint(corpus):
     from git_synapse.db.orm import models, session_scope
@@ -97,7 +90,6 @@ def test_an_unknown_measure_is_refused(corpus):
     assert "error" in out
 
 
-# ----------------------------------------------------------------- currency
 
 @pytest.mark.parametrize(
     ("days", "trend", "deleted", "starts"),
@@ -121,7 +113,6 @@ def test_currency_is_absent_when_recency_is_unknown():
     assert server._describe_currency(None, None, False) is None
 
 
-# ------------------------------------------------------------- module tools
 
 def test_module_context_rejects_a_path_that_does_not_exist(corpus):
     from git_synapse.db.orm import models, session_scope
@@ -147,7 +138,6 @@ def test_coupled_directories_accepts_a_file_or_a_directory(db):
     assert by_file["directory"]["path"] == by_dir["directory"]["path"] == row.dir_path
 
 
-# --------------------------------------------------------------- catalogue
 
 def test_list_measures_describes_every_measure(db):
     out = server.list_measures()
@@ -191,11 +181,9 @@ def test_report_gap_rejects_an_opinion_and_accepts_a_defect(db):
         conn.delete(conn.get(models().Feedback, good["id"]))
 
 
-# ------------------------------------------------------- the explain tools
 
 def test_explain_pair_answers_in_the_callers_argument_order(db):
-    """Storage canonicalises by id; returning that order silently transposed
-    the answer, so confidence_ab was the reverse conditional half the time."""
+    """Storage canonicalises by id; returning that order silently transposed the answer, so confidence_ab was the reverse conditional half the time."""
     from git_synapse.db.orm import models, session_scope
 
     with session_scope() as session:
@@ -244,8 +232,6 @@ def test_impact_of_change_and_upstream_agree(db):
     if row is None:
         pytest.skip("no validated edge")
 
-    # Query the endpoint using the two repository names; the exact projection
-    # is deliberately kept ORM-only in this fixture.
     source = row[0]
     target = row[2].name
     down = server.impact_of_change(repo=source)
@@ -312,11 +298,9 @@ def test_an_empty_chain_explains_itself(db):
     assert out["chains"] == [] and out["explanation"]
 
 
-# ------------------------------------------------------ module_context prose
 
 def test_module_context_describes_a_multi_module_repository(db):
-    """In a monorepo the module graph is the structure; the guidance has to say
-    which direction a change propagates."""
+    """In a monorepo the module graph is the structure; the guidance has to say which direction a change propagates."""
     from git_synapse.db.orm import models, session_scope
 
     with session_scope() as session:
@@ -380,12 +364,10 @@ def test_list_repositories_can_be_filtered(corpus):
                for r in repos), [r["name"] for r in repos][:5]
 
 
-# ---------------------------------------------- the evidence prose, exhaustively
 
 @pytest.mark.parametrize(("declared", "bumped"), [(0, 0), (3, 0), (0, 4), (2, 5)])
 def test_evidence_guidance_states_the_composition_it_is_describing(declared, bumped):
-    """The guidance is read before the scores, so it has to say what the list is
-    made of. The score mixes both tiers and cannot reveal that on its own."""
+    """The guidance is read before the scores, so it has to say what the list is made of."""
     rows = ([{"is_declared": True, "has_bump_history": True}] * declared
             + [{"is_declared": False, "has_bump_history": True}] * bumped)
     out = server._evidence_guidance(rows, "upstream")
@@ -397,9 +379,7 @@ def test_evidence_guidance_states_the_composition_it_is_describing(declared, bum
 
 
 def test_confidence_wording_matches_the_support_behind_it():
-    """A percentage from a handful of commits and one from three hundred must
-    not read the same. They did, and the confident phrasing on thin support is
-    what sent a reviewer at files their own reading had already ruled out."""
+    """A percentage from a handful of commits and one from three hundred must not read the same."""
     strong = server._describe_confidence(0.9, 200)
     thin = server._describe_confidence(0.9, 4)
     assert strong != thin
@@ -411,7 +391,6 @@ def test_confidence_wording_matches_the_support_behind_it():
     assert server._describe_confidence(None, 10) == "no directional signal"
 
 
-# ------------------------------------- every tool, against inputs that do not exist
 
 REPO_TOOLS = [
     "upstream_repos", "impact_of_change", "coupling_chain", "module_context",
@@ -435,10 +414,6 @@ def test_a_directory_with_no_coupling_says_so_rather_than_returning_nothing(db):
     assert out["summary"], "an empty result still needs a sentence"
 
 
-# ---------------------------------------------- the sentences an agent acts on
-#
-# These strings are the product. A number an agent misreads as strong evidence
-# costs more than a wrong number, because it is acted on with confidence.
 
 @pytest.mark.parametrize(("confidence", "n_ab", "must_contain"), [
     (None, 100, "no directional signal"),
@@ -464,8 +439,7 @@ def test_thin_support_never_reads_as_a_strong_recommendation():
 
 
 def test_coupled_files_leads_with_the_sibling_variants_it_found(db, monkeypatch):
-    """Parallel copies of the same filename in another directory are the case
-    this tool finds that reading one file does not."""
+    """Parallel copies of the same filename in another directory are the case this tool finds that reading one file does not."""
     monkeypatch.setattr(server.q, "coupled_files", lambda *a, **k: [
         {"path": "b/handler.go", "n_ab": 40, "n_this": 50, "n_other": 45,
          "score": 0.8, "confidence_out": 0.8, "confidence_in": 0.7,
@@ -476,8 +450,7 @@ def test_coupled_files_leads_with_the_sibling_variants_it_found(db, monkeypatch)
 
 
 def test_coupled_files_warns_when_its_partners_are_all_noise(db, monkeypatch):
-    """Own tests and generated output co-change by construction and tell an
-    agent nothing its own reading did not."""
+    """Own tests and generated output co-change by construction and tell an agent nothing its own reading did not."""
     monkeypatch.setattr(server.q, "coupled_files", lambda *a, **k: [
         {"path": "a/handler_test.go", "n_ab": 1, "n_this": 50, "n_other": 45,
          "score": 0.8, "confidence_out": 0.8, "confidence_in": 0.7,
@@ -538,8 +511,7 @@ def test_two_files_that_never_changed_together_say_so_rather_than_erroring(db,
 ])
 def test_an_empty_chain_explains_which_kind_of_empty_it_is(db, monkeypatch,
                                                            counts, must_contain):
-    """"No chains" from an unvalidated corpus and "no chains" from a genuinely
-    flat one are different answers, and an agent acts differently on each."""
+    """"No chains" from an unvalidated corpus and "no chains" from a genuinely flat one are different answers, and an agent acts differently on each."""
     from git_synapse.db.orm import models, session_scope
 
     with session_scope() as session:
@@ -553,10 +525,7 @@ def test_an_empty_chain_explains_which_kind_of_empty_it_is(db, monkeypatch,
 
 
 def test_every_impact_edge_carries_evidence(corpus, db):
-    """The claim the product rests on, checked against the data rather than
-    asserted: an edge is written only from a dependency declared in a manifest
-    or from an observed version bump. There is no inferred tier to withhold,
-    warn about, or filter -- so no surface offers to."""
+    """The claim the product rests on, checked against the data rather than asserted: an edge is written only from a dependency declared in a manifest or from an observed version bump."""
     from git_synapse.db.orm import models, session_scope
 
     with session_scope() as session:
@@ -628,8 +597,7 @@ def test_search_files_scopes_to_a_repository_when_one_resolves(db):
 ])
 def test_each_transport_starts_the_server_the_way_it_is_meant_to(monkeypatch, argv,
                                                                 expected):
-    """stdio speaks JSON-RPC on stdout; picking the wrong transport is a silent
-    protocol failure, not a crash."""
+    """stdio speaks JSON-RPC on stdout; picking the wrong transport is a silent protocol failure, not a crash."""
     started = {}
     monkeypatch.setattr(server, "wait_for_database", lambda *a, **k: None)
     monkeypatch.setattr(server, "apply_schema", lambda *a, **k: None)
@@ -644,9 +612,7 @@ def test_each_transport_starts_the_server_the_way_it_is_meant_to(monkeypatch, ar
 
 
 def test_http_serves_the_guarded_app_rather_than_the_bare_one(monkeypatch):
-    """The token check lives in a wrapper around the ASGI app, so http cannot
-    go through `server.run` -- and a test that patches `run` would sit waiting
-    on a real server instead of failing."""
+    """The token check lives in a wrapper around the ASGI app, so http cannot go through `server.run` -- and a test that patches `run` would sit waiting on a real server instead of failing."""
     served = {}
     monkeypatch.setattr(server, "wait_for_database", lambda *a, **k: None)
     monkeypatch.setattr(server, "apply_schema", lambda *a, **k: None)
@@ -659,11 +625,9 @@ def test_http_serves_the_guarded_app_rather_than_the_bare_one(monkeypatch):
     assert served["app"] is not None
 
 
-# ----------------------------------------------- explaining a repository pair
 
 def test_explain_repo_pair_names_the_repository_it_cannot_find(monkeypatch):
-    """Two unknown names would otherwise produce an empty explanation that
-    reads as 'these are unrelated' rather than 'I do not know them'."""
+    """Two unknown names would otherwise produce an empty explanation that reads as 'these are unrelated' rather than 'I do not know them'."""
     monkeypatch.setattr(server, "_resolve_repo", lambda name: None)
     out = server.explain_repo_pair("acme/one", "acme/two")
     assert "unknown repository" in out["error"]
@@ -676,16 +640,14 @@ def test_explain_repo_pair_names_the_repository_it_cannot_find(monkeypatch):
     (None, None, "no declared dependency"),
 ])
 def test_a_repository_pair_is_described_by_its_evidence(declared, impact, expected):
-    """Each tier reads differently on purpose: a declaration and an observed
-    bump are not the same claim, and an agent acts on the difference."""
+    """Each tier reads differently on purpose: a declaration and an observed bump are not the same claim, and an agent acts on the difference."""
     a = {"name": "lib", "full_name": "acme/lib"}
     b = {"name": "app", "full_name": "acme/app"}
     assert expected in server._describe_repo_pair(a, b, declared, impact)
 
 
 def test_resolving_a_repository_accepts_either_spelling(monkeypatch):
-    """Agents pass whichever they have -- `guava` or `google/guava` -- and
-    failing on one of them would look like the repository is not indexed."""
+    """Agents pass whichever they have -- `guava` or `google/guava` -- and failing on one of them would look like the repository is not indexed."""
     rows = [{"id": 1, "name": "lib", "full_name": "acme/lib"}]
     monkeypatch.setattr(server.q, "list_repos", lambda **k: rows)
     assert server._resolve_repo("lib")["id"] == 1
@@ -693,8 +655,7 @@ def test_resolving_a_repository_accepts_either_spelling(monkeypatch):
 
 
 def test_an_unambiguous_suffix_resolves_but_an_ambiguous_one_does_not(monkeypatch):
-    """A substring match is not a resolution: answering confidently about the
-    wrong repository is worse than saying the name was not found."""
+    """A substring match is not a resolution: answering confidently about the wrong repository is worse than saying the name was not found."""
     monkeypatch.setattr(server.q, "list_repos", lambda **k: [
         {"id": 1, "name": "core", "full_name": "acme/core"}])
     assert server._resolve_repo("core")["id"] == 1
@@ -711,9 +672,7 @@ def test_resolving_an_unknown_repository_returns_nothing(monkeypatch):
 
 
 def test_explain_repo_pair_reports_every_kind_of_evidence(monkeypatch):
-    """The whole point of this tool is that a declaration, an observed bump and
-    a reverse edge are different claims. Collapsing them would let an agent act
-    on a coincidence as though it were proven."""
+    """The whole point of this tool is that a declaration, an observed bump and a reverse edge are different claims."""
     a = {"id": 1, "name": "lib", "full_name": "acme/lib"}
     b = {"id": 2, "name": "app", "full_name": "acme/app"}
     monkeypatch.setattr(server, "_resolve_repo", lambda name: a if "lib" in name else b)
@@ -731,12 +690,9 @@ def test_explain_repo_pair_reports_every_kind_of_evidence(monkeypatch):
     assert out.get("error") is None
     assert out["repo_a"] == "acme/lib" and out["repo_b"] == "acme/app"
     assert "pom.xml" in out["declared_dependency"]
-    # The forward edge carries its own evidence tier, so an agent can tell a
-    # declaration from a coincidence without reading the score.
     assert out["forward"]["evidence"] == "declared"
 
 
-# ------------------------------------------- every tool refuses an unknown repo
 
 @pytest.mark.parametrize(("tool", "args"), [
     ("impact_of_change",   ("no-such-repo",)),
@@ -746,8 +702,7 @@ def test_explain_repo_pair_reports_every_kind_of_evidence(monkeypatch):
     ("repo_hotspots",      ("no-such-repo",)),
 ])
 def test_a_tool_names_the_repository_it_cannot_find(tool, args, monkeypatch):
-    """Returning empty results would read as "nothing is coupled here", which
-    is a claim about the code rather than about the name being wrong."""
+    """Returning empty results would read as "nothing is coupled here", which is a claim about the code rather than about the name being wrong."""
     monkeypatch.setattr(server, "_resolve_repo", lambda name: None)
     out = getattr(server, tool)(*args)
     assert "no repository matching" in out["error"]
@@ -755,9 +710,7 @@ def test_a_tool_names_the_repository_it_cannot_find(tool, args, monkeypatch):
 
 
 def test_file_history_names_a_path_it_cannot_find(monkeypatch):
-    """It reports both failures as a missing *file*, because a path is resolved
-    within a repository and an unknown repository cannot contain one. The
-    message names both, so the caller can tell which was wrong."""
+    """It reports both failures as a missing *file*, because a path is resolved within a repository and an unknown repository cannot contain one."""
     monkeypatch.setattr(server, "_resolve_repo",
                         lambda name: {"id": 1, "name": "app", "full_name": "acme/app"})
     monkeypatch.setattr(server.q, "resolve_file", lambda repo, path: None)
@@ -765,18 +718,14 @@ def test_file_history_names_a_path_it_cannot_find(monkeypatch):
     assert "no file" in out["error"] and "gone.go" in out["error"]
 
 
-# ------------------------------------------------------------ evidence tiers
 
 @pytest.mark.parametrize(("row", "tier"), [
     ({"is_declared": True,  "has_bump_history": True},  "declared"),
     ({"is_declared": False, "has_bump_history": True},  "bump-backed"),
-    # Unreachable by construction; it must still be legible rather than blank,
-    # so a stale row from an older schema cannot pass as evidence.
     ({"is_declared": False, "has_bump_history": False}, "none"),
 ])
 def test_an_impact_row_states_which_tier_it_came_from(row, tier):
-    """An agent acts differently on a manifest line than on an observed bump, so
-    the tier travels with every row rather than being inferred from the score."""
+    """An agent acts differently on a manifest line than on an observed bump, so the tier travels with every row rather than being inferred from the score."""
     row = {**row, "score": 0.5, "bump_count": 2, "median_adoption_days": None,
            "rank_in_source": 1}
     out = server._impact_row(row, "acme/app")
@@ -786,8 +735,7 @@ def test_an_impact_row_states_which_tier_it_came_from(row, tier):
 
 
 def test_coupled_directories_names_a_directory_it_cannot_find(monkeypatch):
-    """A file path is accepted as a convenience, so a genuine miss has to say
-    it wanted a directory rather than silently returning nothing."""
+    """A file path is accepted as a convenience, so a genuine miss has to say it wanted a directory rather than silently returning nothing."""
     monkeypatch.setattr(server, "_resolve_repo",
                         lambda name: {"id": 1, "name": "app", "full_name": "acme/app"})
     monkeypatch.setattr(server.q, "directory_by_path", lambda *a, **k: None)
@@ -798,8 +746,7 @@ def test_coupled_directories_names_a_directory_it_cannot_find(monkeypatch):
 
 
 def test_module_context_explains_both_directions_of_a_declaration(monkeypatch):
-    """Being declared by a module and declaring one are different obligations,
-    and an agent needs to be told which it is looking at."""
+    """Being declared by a module and declaring one are different obligations, and an agent needs to be told which it is looking at."""
     monkeypatch.setattr(server, "_resolve_repo",
                         lambda name: {"id": 1, "name": "app", "full_name": "acme/app"})
     monkeypatch.setattr(server.q, "resolve_file",
@@ -813,10 +760,7 @@ def test_module_context_explains_both_directions_of_a_declaration(monkeypatch):
 
 
 def test_coupled_directories_reports_only_partners_outside_the_subtree(monkeypatch):
-    """Every change to `pkg/auth` is a change to `pkg` by construction, so a
-    parent scores 1.000 and means nothing. The query now excludes ancestors and
-    descendants, so what reaches the agent is only what could have moved
-    independently and did not -- and the summary says so."""
+    """Every change to `pkg/auth` is a change to `pkg` by construction, so a parent scores 1.000 and means nothing."""
     monkeypatch.setattr(server, "_resolve_repo",
                         lambda name: {"id": 1, "name": "app", "full_name": "acme/app"})
     monkeypatch.setattr(server.q, "directory_by_path", lambda *a, **k: {
@@ -832,12 +776,9 @@ def test_coupled_directories_reports_only_partners_outside_the_subtree(monkeypat
     assert "parents and children are excluded" in out["summary"]
 
 
-# ------------------------------------------------------- recording tool calls
 
 def test_a_tool_reply_is_read_from_the_text_blocks_when_there_is_no_schema():
-    """structured_content is populated only for tools that declare an output
-    schema. Everything else arrives as text, which is what the agent reads --
-    logging a null there would record that nothing came back."""
+    """structured_content is populated only for tools that declare an output schema."""
     from git_synapse.mcp import server as srv
 
     class Block:
@@ -870,8 +811,7 @@ def test_an_error_payload_is_summarised_for_the_log():
 
 
 def test_calling_a_tool_records_what_was_asked_and_what_came_back(monkeypatch):
-    """One interception point covers every tool, including ones added later --
-    the only way this stays true without anyone remembering."""
+    """One interception point covers every tool, including ones added later -- the only way this stays true without anyone remembering."""
     import asyncio
 
     from git_synapse.analysis import calls
@@ -921,8 +861,7 @@ def test_a_tool_that_raises_is_recorded_before_the_error_is_re_raised(monkeypatc
 
 
 def test_a_tool_returning_an_error_object_is_counted_as_a_failure(monkeypatch):
-    """It succeeded at the protocol level and failed at the only level a reader
-    cares about; counting it as ok would make the error rate a fiction."""
+    """It succeeded at the protocol level and failed at the only level a reader cares about; counting it as ok would make the error rate a fiction."""
     import asyncio
 
     from git_synapse.analysis import calls
@@ -946,8 +885,7 @@ def test_a_tool_returning_an_error_object_is_counted_as_a_failure(monkeypatch):
 
 
 def test_the_server_publishes_its_tool_inventory(db):
-    """Written by the MCP process rather than read by the API, which would mean
-    the API importing this module to answer a question about another container."""
+    """Written by the MCP process rather than read by the API, which would mean the API importing this module to answer a question about another container."""
     from git_synapse.analysis import calls
     from git_synapse.mcp import server as srv
 
@@ -973,9 +911,7 @@ def test_publishing_the_inventory_never_stops_the_server(monkeypatch, caplog):
 
 
 def test_the_mcp_gate_lets_a_token_through_and_turns_others_away(monkeypatch):
-    """The switch has to close a real door. Exercised through the ASGI app the
-    server actually serves, not a stand-in: a gate that is only tested in the
-    abstract is a gate nobody has opened."""
+    """The switch has to close a real door."""
     import asyncio
 
     from git_synapse import auth
@@ -1003,9 +939,6 @@ def test_the_mcp_gate_lets_a_token_through_and_turns_others_away(monkeypatch):
         try:
             await app(scope, receive, send)
         except Exception:  # noqa: BLE001 - any failure here means "past the gate"
-            # The real MCP app wants a session manager this test has not
-            # started. Whatever it raises, reaching it is the evidence that the
-            # request was let through rather than refused.
             return None
         started = [m["status"] for m in sent if m["type"] == "http.response.start"]
         return started[0] if started else None
@@ -1015,8 +948,6 @@ def test_the_mcp_gate_lets_a_token_through_and_turns_others_away(monkeypatch):
     # Required, a token that resolves to nobody: same.
     assert asyncio.run(call({"host": "127.0.0.1", "authorization": "Bearer gss_nope"},
                             "required", None)) == 401
-    # Open: the gate delegates, so no 401 is produced by it. What the MCP app
-    # does next is the MCP app's business, not this gate's.
     assert asyncio.run(call({"host": "127.0.0.1"}, "open", None)) != 401
 
     # Required, with a token that resolves: delegated in the same way.
@@ -1025,8 +956,7 @@ def test_the_mcp_gate_lets_a_token_through_and_turns_others_away(monkeypatch):
 
 
 def test_serving_is_a_thin_call_that_can_be_stood_in_for(monkeypatch):
-    """`_serve` exists so `main` can be tested without a server starting. It
-    must stay thin enough that patching it loses nothing."""
+    """`_serve` exists so `main` can be tested without a server starting."""
     calls = {}
     monkeypatch.setitem(__import__("sys").modules, "uvicorn",
                         type("U", (), {"run": staticmethod(
@@ -1036,7 +966,6 @@ def test_serving_is_a_thin_call_that_can_be_stood_in_for(monkeypatch):
                      "log_level": "info"}
 
 
-# ------------------------------------------------- the evidence card, directly
 
 def _card(**partner):
     labels = partner.pop("_labels", [])
@@ -1045,8 +974,7 @@ def _card(**partner):
 
 
 def test_a_card_with_no_measures_at_all_says_so_rather_than_guessing():
-    """No signals is not the same as signals that disagree, and an agent acting
-    on "weak" needs to know which of the two it is looking at."""
+    """No signals is not the same as signals that disagree, and an agent acting on "weak" needs to know which of the two it is looking at."""
     card = _card(n_ab=20)
     assert card["agreement"] == "insufficient signals"
     assert card["evidence"] == "weak"
@@ -1061,8 +989,7 @@ def test_signals_that_all_point_the_same_way_are_reported_as_agreeing():
 
 
 def test_signals_that_all_point_away_also_agree_but_stay_weak():
-    """Three measures agreeing that a pair is unrelated is agreement too; the
-    evidence is what is weak, not the consensus."""
+    """Three measures agreeing that a pair is unrelated is agreement too; the evidence is what is weak, not the consensus."""
     card = _card(n_ab=20, confidence_out=0.1, npmi=0.0, log_likelihood_ratio=0.5)
     assert card["agreement"] == "signals agree"
     assert card["evidence"] == "weak"
@@ -1076,23 +1003,20 @@ def test_a_split_verdict_is_reported_as_mixed():
 
 
 def test_jaccard_alone_is_enough_to_count_as_a_signal():
-    """The pair is read as one signal: either measure clearing the bar is the
-    same claim about the same relationship."""
+    """The pair is read as one signal: either measure clearing the bar is the same claim about the same relationship."""
     assert _card(n_ab=20, jaccard=0.5)["agreement"] == "signals agree"
     assert _card(n_ab=20, npmi=0.5)["agreement"] == "signals agree"
 
 
 def test_support_below_the_reporting_floor_is_weak_whatever_the_measures_say():
-    """Three co-changes can make every ratio look perfect. Support gates them
-    all, so a handful of commits cannot read as strong evidence."""
+    """Three co-changes can make every ratio look perfect."""
     card = _card(n_ab=server.MIN_REPORTABLE_SUPPORT - 1,
                  confidence_out=1.0, npmi=1.0, log_likelihood_ratio=99.0)
     assert card["evidence"] == "weak"
 
 
 def test_a_labelled_partner_is_described_by_its_label():
-    """Generated files and lockfiles co-change with everything; the label is
-    the useful thing to say, not the strength of an artefact's correlation."""
+    """Generated files and lockfiles co-change with everything; the label is the useful thing to say, not the strength of an artefact's correlation."""
     card = _card(n_ab=50, confidence_out=1.0, npmi=1.0, _labels=["lockfile"])
     assert card["summary"] == "Flagged as lockfile; verify before editing."
 

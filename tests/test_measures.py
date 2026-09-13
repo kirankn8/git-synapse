@@ -1,14 +1,4 @@
-"""Validation of the 29 association measures against hand-computed values.
-
-The reference table used throughout is::
-
-    n_ab = 10, n_a = 20, n_b = 30, N = 100
-    =>  a = 10, b = 10, c = 20, d = 60
-
-Every expected value below was worked out by hand from the formula in the
-measure's docstring, so these tests catch an implementation that is
-self-consistent but wrong -- which a round-trip or property test alone would not.
-"""
+"""Validation of the 29 association measures against hand-computed values."""
 
 from __future__ import annotations
 
@@ -27,20 +17,12 @@ TOL = 1e-9
 
 
 def random_feasible_tables(seed: int, size: int, n_total: int = 1000) -> Contingency:
-    """Generate random but *realisable* 2x2 tables.
-
-    A table only exists when ``max(0, n_a + n_b - N) <= n_ab <= min(n_a, n_b)``.
-    Sampling n_ab uniformly over ``[0, min(n_a, n_b)]`` -- the obvious thing to
-    do -- silently produces tables with a negative ``d`` cell, which are not
-    contingency tables at all and on which no bound can be expected to hold.
-    """
+    """Generate random but *realisable* 2x2 tables."""
     rng = np.random.default_rng(seed)
     n_a = rng.integers(1, n_total, size)
     n_b = rng.integers(1, n_total, size)
     lo = np.maximum(0, n_a + n_b - n_total)
     hi = np.minimum(n_a, n_b)
-    # Uniform over the feasible interval, inclusive of both endpoints so the
-    # degenerate extremes are exercised too.
     n_ab = lo + (rng.random(size) * (hi - lo + 1)).astype(np.int64)
     n_ab = np.minimum(n_ab, hi)
     return Contingency.from_counts(n_ab, n_a, n_b, n_total)
@@ -54,12 +36,7 @@ def test_generator_produces_only_feasible_tables() -> None:
 
 
 def test_infeasible_counts_are_clamped() -> None:
-    """An impossible input must be clamped, not propagated as nonsense.
-
-    n_a = n_b = 900 with N = 1000 forces at least 800 co-occurrences. Asking for
-    100 describes a table with d = -700. Before clamping this produced a phi
-    coefficient of -7.89, far outside phi's [-1, 1] range.
-    """
+    """An impossible input must be clamped, not propagated as nonsense."""
     t = Contingency.from_counts(n_ab=100, n_a=900, n_b=900, n_total=1000)
     assert float(t.d) >= 0.0
     assert float(t.a) == 800.0, "n_ab should be lifted to the feasible minimum"
@@ -77,9 +54,6 @@ def val(fn, t) -> float:
     return float(np.asarray(fn(t)).reshape(-1)[0])
 
 
-# ---------------------------------------------------------------------------
-# Contingency construction
-# ---------------------------------------------------------------------------
 
 
 def test_contingency_cells(table: Contingency) -> None:
@@ -96,9 +70,6 @@ def test_expected_count(table: Contingency) -> None:
     assert val(lambda t: t.expected, table) == pytest.approx(6.0, abs=TOL)
 
 
-# ---------------------------------------------------------------------------
-# Hand-computed expected values, measure by measure
-# ---------------------------------------------------------------------------
 
 EXPECTED: dict[str, float] = {
     # Similarity & overlap
@@ -189,9 +160,6 @@ def test_significance_measures_match_scipy(table: Contingency) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Structural properties that must hold for every measure
-# ---------------------------------------------------------------------------
 
 
 def test_registry_covers_the_specified_29_measures() -> None:
@@ -289,11 +257,7 @@ def test_measure_respects_declared_bounds(spec) -> None:
 
 @pytest.mark.parametrize("spec", MEASURES, ids=lambda s: s.key)
 def test_measure_is_finite_on_degenerate_tables(spec) -> None:
-    """Pathological tables must not produce nan or inf.
-
-    A single file present in every commit, or a pair never seen at all, must not
-    be able to poison a whole scoring batch.
-    """
+    """Pathological tables must not produce nan or inf."""
     degenerate = Contingency.from_counts(
         n_ab=np.array([0, 0, 5, 100, 0, 1]),
         n_a=np.array([0, 100, 5, 100, 1, 1]),
@@ -342,21 +306,13 @@ def test_vectorisation_matches_scalar_evaluation() -> None:
             ), f"{spec.key} mismatch at index {i}"
 
 
-# ---------------------------------------------- degenerate tables, revisited
-#
-# Each of these passed before the measure it names was fixed, because the
-# existing degenerate-case tests assert "does not raise" and "is finite", and
-# every one of these bugs returned a perfectly finite, perfectly wrong number.
 
 def _tbl(a, b, c, d):
     return Contingency.from_counts(n_ab=a, n_a=a + b, n_b=a + c, n_total=a + b + c + d)
 
 
 def test_a_pair_that_never_co_occurred_does_not_score_as_chance():
-    """t_score divided by sqrt(a). At a = 0 the guard returned the fill value,
-    which is 0.0 -- the declared *neutral* score. So two files that have never
-    once changed together were reported as exactly independent, and ranked
-    above every pair that merely co-occurred less often than expected."""
+    """t_score divided by sqrt(a)."""
     never = BY_KEY["t_score"].compute(_tbl(0, 50, 50, 900))
     independent = BY_KEY["t_score"].compute(_tbl(4, 16, 16, 64))
     under = BY_KEY["t_score"].compute(_tbl(2, 18, 18, 62))
@@ -368,15 +324,11 @@ def test_a_pair_that_never_co_occurred_does_not_score_as_chance():
 
 
 def test_only_an_independent_table_scores_the_neutral_value():
-    """The invariant behind `neutral`: if a measure declares one, no degenerate
-    table may land on it by accident."""
+    """The invariant behind `neutral`: if a measure declares one, no degenerate table may land on it by accident."""
     degenerate = [(0, 50, 50, 900), (0, 0, 10, 90), (0, 10, 0, 90),
                   (5, 0, 0, 95), (1, 0, 0, 0)]
     for spec in MEASURES:
         if spec.neutral is None or spec.zero_when_unobserved:
-            # zero_when_unobserved says so on purpose: PMI's limit at a = 0 is
-            # -inf and the literature convention is 0. Declared, so it shows in
-            # the catalogue rather than surprising a reader.
             continue
         for cells in degenerate:
             table = _tbl(*cells)
@@ -391,8 +343,7 @@ def test_only_an_independent_table_scores_the_neutral_value():
 
 
 def test_hamann_declares_no_neutral_because_it_has_none():
-    """hamann = 2(a+d)/N - 1, which is zero iff a+d == b+c -- unrelated to
-    independence. It declared 0.0, and independent tables score +0.36, +0.64."""
+    """hamann = 2(a+d)/N - 1, which is zero iff a+d == b+c -- unrelated to independence."""
     assert BY_KEY["hamann"].neutral is None
     for cells in [(4, 16, 16, 64), (1, 9, 9, 81), (6, 4, 24, 16)]:
         a, b, c, d = cells
@@ -403,9 +354,7 @@ def test_hamann_declares_no_neutral_because_it_has_none():
 
 
 def test_fager_scores_nothing_when_no_association_is_possible():
-    """A file that never changed cannot be associated with anything. Ochiai
-    collapses to 0, but the penalty term survived on max(n_a, n_b) > 0 and left
-    a bare negative score for a pair with no shared evidence at all."""
+    """A file that never changed cannot be associated with anything."""
     for cells in [(0, 0, 10, 90), (0, 0, 1, 99), (0, 10, 0, 90)]:
         assert float(BY_KEY["fager"].compute(_tbl(*cells))) == 0.0, cells
     # Both files observed but never together is a real, scoreable situation.
@@ -413,8 +362,7 @@ def test_fager_scores_nothing_when_no_association_is_possible():
 
 
 def test_every_declared_bound_is_the_real_bound():
-    """`lower=None` on fager meant the bounds test skipped it, hiding that its
-    true minimum is exactly -0.5."""
+    """`lower=None` on fager meant the bounds test skipped it, hiding that its true minimum is exactly -0.5."""
     worst: dict[str, float] = {}
     best: dict[str, float] = {}
     for n_a in range(10):
@@ -439,18 +387,14 @@ def test_every_declared_bound_is_the_real_bound():
 
 
 def test_a_p_value_of_one_is_positive_zero():
-    """np.clip(-log10(1.0), 0, ...) is -0.0: clip does not normalise the sign
-    bit, and -0 reached the database and the UI."""
+    """np.clip(-log10(1.0), 0, ...) is -0.0: clip does not normalise the sign bit, and -0 reached the database and the UI."""
     for key in ("poisson_significance", "hypergeometric_significance"):
         v = np.asarray(BY_KEY[key].compute(_tbl(0, 10, 10, 80))).ravel()[0]
         assert not np.signbit(v), f"{key} produced negative zero"
 
 
 def test_the_significance_tails_keep_ordering_past_where_p_underflows():
-    """Both measures saturated at the cap on any large repository, so every
-    pair past that point shared one value -- the ordering they exist to provide,
-    gone exactly where the evidence is strongest. Two tables that differ by a
-    factor of two in their co-change count both reported 300.0."""
+    """Both measures saturated at the cap on any large repository, so every pair past that point shared one value -- the ordering they exist to provide, gone exactly where the evidence is strongest."""
     strong = _tbl(10**6, 10**6, 10**6, 8 * 10**6)
     stronger = _tbl(5 * 10**5, 5 * 10**5, 5 * 10**5, 8_500_000)
     for key in ("poisson_significance", "hypergeometric_significance"):

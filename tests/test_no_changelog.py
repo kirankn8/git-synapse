@@ -1,36 +1,10 @@
-"""Nothing a user or an agent reads may describe a previous version.
-
-They have never seen it. "The table that used to sit here ranked repositories
-by co-change" costs a reader a paragraph and tells them nothing they can act
-on, and an agent handed the same sentence spends tokens on it.
-
-This covers the runtime surfaces: the MCP instructions and tool descriptions,
-the API's own documentation and its error messages, and the CLI's help. The UI
-is covered by tests/ui/layout.mjs, which reads what the pages actually render
-rather than what the source contains -- most of that prose is assembled at
-runtime.
-
-It also covers the prose docs. The distinction there is not "no history" but
-*whose* history: a rejected alternative stated as one -- "the obvious repair is
-to widen the unit; measured, that construction is unsound" -- is rationale a
-maintainer needs, and reads as true whenever it is read. "The table that used to
-sit here" is a diff against a version the reader never saw, and rots the moment
-it is written. The first survives this check by construction; the second is what
-it looks for.
-
-Code comments are not covered. They are read beside the code they annotate, by
-someone who can see the current state next to them.
-"""
+"""Nothing a user or an agent reads may describe a previous version."""
 from __future__ import annotations
 
 import re
 
 import pytest
 
-#: Narrow on purpose. "Best used to confirm candidates" is employed-to, and
-#: "where the reduction no longer holds" is about the maths -- both are real
-#: sentences in this product and both are correct. Only phrasing that can mean
-#: nothing except a previous version belongs here.
 CHANGELOG = re.compile(
     r"used to (sit|be|show|live|say|appear|rank|have)"
     r"|(was|were) (tried|removed|replaced|dropped)"
@@ -80,8 +54,7 @@ def test_no_api_endpoint_documents_a_previous_version():
 
 
 def test_no_error_message_explains_what_the_code_used_to_do():
-    """A message shown when something has already gone wrong is the worst place
-    to spend a reader's attention on history."""
+    """A message shown when something has already gone wrong is the worst place to spend a reader's attention on history."""
     import ast
     from pathlib import Path
 
@@ -111,15 +84,7 @@ def test_no_error_message_explains_what_the_code_used_to_do():
     "tests/ui/README.md", "skills/git-synapse-mcp/SKILL.md",
 ])
 def test_no_document_narrates_its_own_past(doc):
-    """A reader of the docs has never seen the previous version either.
-
-    DESIGN.md is included, which is not a claim that it may not discuss what
-    was rejected -- that is most of its job. The distinction is tense. "The
-    obvious repair is to widen the unit; measured, that construction is
-    unsound" is a fact about the problem and reads as true whenever it is read.
-    "The table that used to sit here" is a diff against a build nobody can see,
-    and rots the moment it is written. Only the second shape is matched.
-    """
+    """A reader of the docs has never seen the previous version either."""
     from pathlib import Path
 
     path = Path(__file__).resolve().parents[1] / doc

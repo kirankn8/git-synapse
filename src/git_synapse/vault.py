@@ -1,25 +1,4 @@
-"""The one secret this system has to be able to read back.
-
-Everything else it stores is a hash: a session cookie, an API token, a
-password. That works because those are only ever *checked*, never replayed --
-a database dump yields the fact that a credential existed and nothing usable.
-
-An access token for a private repository breaks that, unavoidably. `git clone`
-has to be handed the actual characters, so the deployment must be able to
-recover them. The next best guarantee is that the database alone is not
-enough: the ciphertext lives in Postgres and the key lives in the environment,
-so a dump, a backup, or a replica leaks nothing without the process's own
-configuration.
-
-That is a real reduction in the strength of the promise, and it is why storing
-one is opt-in. With no key configured this refuses to store anything and the
-deployment-level credentials in the environment remain the only way in.
-
-Fernet rather than anything hand-rolled: AES-128-CBC with an HMAC over the
-ciphertext, a random IV per message and a timestamp, from a library that is
-already installed here. Encryption written for the occasion is the one kind of
-code that fails silently and completely.
-"""
+"""The one secret this system has to be able to read back."""
 from __future__ import annotations
 
 import base64
@@ -29,16 +8,8 @@ import os
 
 log = logging.getLogger(__name__)
 
-#: The key, as either a Fernet key (44 urlsafe-base64 characters) or any
-#: passphrase, which is stretched into one. A passphrase is accepted because
-#: the alternative is people pasting `openssl rand` output into a compose file
-#: and losing it -- and a stretched passphrase is far better than the feature
-#: going unused.
 ENV_KEY = "GS_SECRET_KEY"
 
-#: Fixed salt. A per-deployment salt would have to be stored somewhere, and the
-#: only place available is the database this is protecting the contents of. The
-#: work factor is what defends a weak passphrase here, not the salt's secrecy.
 _SALT = b"git-synapse-vault-v1"
 
 
@@ -82,13 +53,7 @@ def seal(secret: str) -> str:
 
 
 def open_(sealed: str | None) -> str:
-    """Decrypt a stored token, or return empty on anything unreadable.
-
-    Empty rather than raising, in every failure: a rotated key, a truncated
-    column, a row written by another deployment. The caller's fallback is the
-    environment credential, which is a working outcome -- while an exception
-    here would take down a discovery run over one unreadable source.
-    """
+    """Decrypt a stored token, or return empty on anything unreadable."""
     if not sealed:
         return ""
     try:
@@ -100,11 +65,7 @@ def open_(sealed: str | None) -> str:
 
 
 def hint(secret: str) -> str:
-    """A few characters a person can recognise their own token by.
-
-    The prefix and the last four, which is how every host prints them. Never
-    enough to use, always enough to answer "is that the one I pasted?".
-    """
+    """A few characters a person can recognise their own token by."""
     text = (secret or "").strip()
     if len(text) < 12:
         return "••••"

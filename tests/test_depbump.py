@@ -1,9 +1,4 @@
-"""Manifest parsing and dependency extraction.
-
-This layer produces the `declared` evidence tier, which agents are told to trust
-above everything else, so a parse error here is the most expensive kind: it does
-not look like a failure, it looks like a fact.
-"""
+"""Manifest parsing and dependency extraction."""
 from __future__ import annotations
 
 import subprocess
@@ -22,7 +17,6 @@ from git_synapse.analysis.depbump import (
 from git_synapse.analysis.manifests import _PSEUDO
 from git_synapse.db.orm import models
 
-# --------------------------------------------------------- pseudo-versions
 
 @pytest.mark.parametrize(
     ("version", "sha"),
@@ -33,8 +27,7 @@ from git_synapse.db.orm import models
     ],
 )
 def test_pseudo_version_shapes_all_yield_their_sha(version, sha):
-    """The separator before the timestamp is '-' in one shape and '.' in the
-    others; accepting only '-' silently dropped 17% of edges."""
+    """The separator before the timestamp is '-' in one shape and '.' in the others; accepting only '-' silently dropped 17% of edges."""
     m = _PSEUDO.search(version)
     assert m is not None and m.group(2) == sha
 
@@ -44,11 +37,9 @@ def test_release_versions_carry_no_sha(version):
     assert _PSEUDO.search(version) is None
 
 
-# ------------------------------------------------- manifests on a real repo
 
 def _history_repo(tmp_path, revisions: list[dict[str, str]]):
-    """A bare mirror with one commit per entry, so a manifest's *history* is
-    what gets read rather than a single snapshot."""
+    """A bare mirror with one commit per entry, so a manifest's *history* is what gets read rather than a single snapshot."""
     env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e",
            "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
@@ -122,9 +113,6 @@ def test_declared_at_head_excludes_the_module_itself(tmp_path):
         ),
     })
     got = dict(declared_at_head(mirror, "runtime", "go.mod", "go"))
-    # Stored as written, so the owner can be checked at resolution time; the
-    # third-party reference is kept, and resolves to nothing until that
-    # repository is onboarded.
     assert got == {
         "github.com/acme/contracts": "v1.2.3",
         "github.com/acme/runtime/api": "v0.1.0",
@@ -137,7 +125,6 @@ def test_declared_at_head_on_a_missing_manifest_is_empty_not_an_error(tmp_path):
     assert declared_at_head(mirror, "any", "go.mod", "go") == []
 
 
-# -------------------------------------------------- the intra-repo module graph
 
 def _module_edges(mirror, repo_name):
     """Every internal edge across every manifest, the way refresh_modules does."""
@@ -151,8 +138,7 @@ def _module_edges(mirror, repo_name):
 
 
 def test_declared_modules_at_head_maps_a_monorepos_internal_edges(tmp_path):
-    """A monorepo's real structure is in its own submodules, and reading only
-    the root manifest made that invisible."""
+    """A monorepo's real structure is in its own submodules, and reading only the root manifest made that invisible."""
     mirror = _repo(tmp_path, {
         "go.mod": "module github.com/acme/mono\n",
         "svc/api/go.mod": (
@@ -197,7 +183,6 @@ def test_a_dependency_on_another_repository_is_not_an_internal_module_edge(tmp_p
     assert _module_edges(mirror, "mono") == set()
 
 
-# ---------------------------------------------------------- history walking
 
 def test_extract_from_mirror_finds_every_bump_in_history(tmp_path):
     """Bump history is the ground truth propagation lag rests on."""
@@ -255,13 +240,11 @@ def test_manifest_history_limit_keeps_the_newest_revisions(monkeypatch, tmp_path
     assert [b.dep_version for b in bumps] == ["v2.0.0", "v3.0.0"]
 
 
-# ------------------------------------------------- the parser's darker corners
 
 
 
 def test_a_blank_line_in_the_tree_listing_is_not_a_manifest(tmp_path, monkeypatch):
-    """git can emit an empty line; treating it as a path would make its basename
-    the empty string and index MANIFESTS with it."""
+    """git can emit an empty line; treating it as a path would make its basename the empty string and index MANIFESTS with it."""
     import subprocess as sp
 
     class _Proc:
@@ -303,8 +286,7 @@ def test_declared_modules_on_a_non_repository_is_empty(tmp_path):
 
 
 def test_a_module_replacing_itself_is_not_an_internal_edge(tmp_path):
-    """`replace` pointing a module at its own directory is a build directive, not
-    a dependency; counting it would make every module couple to itself."""
+    """`replace` pointing a module at its own directory is a build directive, not a dependency; counting it would make every module couple to itself."""
     mirror = _repo(tmp_path, {
         "gateway/go.mod": (
             "module github.com/acme/mono/gateway\n"
@@ -317,9 +299,7 @@ def test_a_module_replacing_itself_is_not_an_internal_edge(tmp_path):
 
 
 def test_a_module_line_is_never_read_as_a_dependency_even_when_it_parses(tmp_path):
-    """A trailing comment gives the `module` line a token where a version would
-    be, so the path regex matches it. Only the explicit `module ` check stops the
-    repository from declaring a dependency on itself under a different name."""
+    """A trailing comment gives the `module` line a token where a version would be, so the path regex matches it."""
     mirror = _repo(tmp_path, {
         "cmd/go.mod": (
             "module github.com/acme/mono/gateway // moved, kept for tooling\n"
@@ -332,8 +312,7 @@ def test_a_module_line_is_never_read_as_a_dependency_even_when_it_parses(tmp_pat
 
 def test_the_manifest_cap_stops_a_vendored_tree_that_slipped_the_filter(tmp_path,
                                                                        monkeypatch):
-    """A repository with tens of thousands of go.mod files under an unfiltered
-    path would otherwise spawn a git invocation per manifest."""
+    """A repository with tens of thousands of go.mod files under an unfiltered path would otherwise spawn a git invocation per manifest."""
     import subprocess as sp
 
     from git_synapse.analysis.depbump import MAX_MANIFESTS_PER_REPO
@@ -346,7 +325,6 @@ def test_the_manifest_cap_stops_a_vendored_tree_that_slipped_the_filter(tmp_path
     assert len(manifest_paths(tmp_path)) == MAX_MANIFESTS_PER_REPO
 
 
-# ------------------------------------------------------- resolving a reference
 
 @pytest.mark.parametrize(("ref", "expected"), [
     ("github.com/acme/signer", ("acme", "signer")),
@@ -361,8 +339,7 @@ def test_a_reference_splits_into_owner_and_name(ref, expected):
 
 
 def test_a_different_owners_repository_of_the_same_name_is_not_a_match():
-    """Matching on the name alone would let an unrelated company's library
-    become an edge into this codebase."""
+    """Matching on the name alone would let an unrelated company's library become an edge into this codebase."""
     by_full, by_name = {("acme", "utils"): 7}, {"utils": 7}
     assert resolve_repo("github.com/acme/utils", by_full, by_name) == 7
     assert resolve_repo("gitlab.com/otherco/utils", by_full, by_name) is None
@@ -378,8 +355,7 @@ def test_an_unknown_reference_resolves_to_nothing():
 
 
 def test_documentation_is_not_scanned_for_dependencies(tmp_path, monkeypatch):
-    """django ships `docs/ref/models/constraints.txt`, which is prose. Reading it
-    as a pip constraints file invented dependencies called `name`."""
+    """django ships `docs/ref/models/constraints.txt`, which is prose."""
     import subprocess as sp
 
     from git_synapse.analysis import depbump
@@ -394,11 +370,6 @@ def test_documentation_is_not_scanned_for_dependencies(tmp_path, monkeypatch):
     assert found == ["requirements.txt"]
 
 
-# ------------------------------------------------------- resolution tiers
-#
-# These build the rows directly rather than ingesting a repository, because what
-# is under test is the *matching* -- a declared version against a tag name --
-# and a real repository would only obscure which spelling each case exercises.
 
 
 @pytest.fixture
@@ -453,8 +424,7 @@ def _resolved(conn, bump_id):
 
 
 def test_a_declared_version_resolves_through_the_shipping_branch_anchor(bump_env):
-    """The whole point of the anchor: guava tags on a release branch, so the
-    tagged commit was never walked and only the merge-base exists."""
+    """The whole point of the anchor: guava tags on a release branch, so the tagged commit was never walked and only the merge-base exists."""
     conn, repo, dep = bump_env
     anchor = _commit(conn, dep, "aa" * 20, "2024-01-01")
     _tag(conn, dep, "v33.4.0", commit_id=None, main_commit_id=anchor, key="33.4")
@@ -465,8 +435,7 @@ def test_a_declared_version_resolves_through_the_shipping_branch_anchor(bump_env
 
 
 def test_a_range_resolves_to_its_declared_floor(bump_env):
-    """`^4.17.21` states 4.17.21 as its own lower bound, so that is the version
-    taken -- and it is recorded as a floor, not as an exact answer."""
+    """`^4.17.21` states 4.17.21 as its own lower bound, so that is the version taken -- and it is recorded as a floor, not as an exact answer."""
     conn, repo, dep = bump_env
     c = _commit(conn, dep, "bb" * 20, "2024-01-01")
     _tag(conn, dep, "v4.17.21", commit_id=c, main_commit_id=c, key="4.17.21")
@@ -490,8 +459,7 @@ def test_ambiguous_release_tags_are_not_resolved_arbitrarily(bump_env):
 
 
 def test_an_upper_bound_resolves_to_the_newest_release_beneath_it(bump_env):
-    """`<3.0` names no version that was used, so the answer is the newest one
-    that existed and was permitted."""
+    """`<3.0` names no version that was used, so the answer is the newest one that existed and was permitted."""
     conn, repo, dep = bump_env
     old = _commit(conn, dep, "c1" * 20, "2023-01-01")
     new = _commit(conn, dep, "c2" * 20, "2023-06-01")
@@ -507,8 +475,7 @@ def test_an_upper_bound_resolves_to_the_newest_release_beneath_it(bump_env):
 
 
 def test_a_release_published_after_the_bump_is_not_a_candidate(bump_env):
-    """Bounded by the bump's own date, so the answer cannot drift as later tags
-    arrive."""
+    """Bounded by the bump's own date, so the answer cannot drift as later tags arrive."""
     conn, repo, dep = bump_env
     early = _commit(conn, dep, "d1" * 20, "2023-01-01")
     later = _commit(conn, dep, "d2" * 20, "2025-01-01")
@@ -540,8 +507,7 @@ def test_tag_resolution_is_revalidated_when_the_tag_mapping_changes(bump_env):
 
 
 def test_a_prerelease_never_matches_the_release_it_precedes(bump_env):
-    """Collapsing `-rc1` onto the final release resolves to the wrong commit
-    while looking perfectly successful."""
+    """Collapsing `-rc1` onto the final release resolves to the wrong commit while looking perfectly successful."""
     conn, repo, dep = bump_env
     final = _commit(conn, dep, "ee" * 20, "2024-01-01")
     _tag(conn, dep, "v1.0.0", commit_id=final, main_commit_id=final, key="1")
@@ -552,8 +518,7 @@ def test_a_prerelease_never_matches_the_release_it_precedes(bump_env):
 
 
 def test_a_commit_written_after_the_bump_is_rejected(bump_env):
-    """Nothing can depend on a commit that does not exist yet, so a match that
-    claims otherwise is proof the match is wrong."""
+    """Nothing can depend on a commit that does not exist yet, so a match that claims otherwise is proof the match is wrong."""
     conn, repo, dep = bump_env
     future = _commit(conn, dep, "ff" * 20, "2025-01-01")
     _tag(conn, dep, "v1.0.0", commit_id=future, main_commit_id=future, key="1")
@@ -563,7 +528,6 @@ def test_a_commit_written_after_the_bump_is_rejected(bump_env):
     assert _resolved(conn, row) == (None, None)
 
 
-# ------------------------------------------- which repository is this package
 
 @pytest.mark.parametrize(("path", "text", "expected"), [
     ("package.json",   '{"name": "lodash"}',                        ["lodash"]),
@@ -577,14 +541,12 @@ def test_a_commit_written_after_the_bump_is_rejected(bump_env):
                        "<artifactId>guava</artifactId></project>"),  ["com.google.guava:guava"]),
 ])
 def test_a_repository_states_which_package_it_publishes(path, text, expected):
-    """Turning "which repository is `com.google.guava:guava`?" from a guess
-    about strings into something the repository declared about itself."""
+    """Turning "which repository is `com.google.guava:guava`?" from a guess about strings into something the repository declared about itself."""
     assert manifests.published_names(path, text) == expected
 
 
 def test_a_maven_module_inherits_its_group_from_its_parent():
-    """A child module omits `groupId`, so reading only the top-level element
-    finds nothing for exactly the modules a monorepo publishes."""
+    """A child module omits `groupId`, so reading only the top-level element finds nothing for exactly the modules a monorepo publishes."""
     pom = ("<project><parent><groupId>com.google.guava</groupId></parent>"
            "<artifactId>guava-testlib</artifactId></project>")
     assert manifests.published_names("pom.xml", pom) == ["com.google.guava:guava-testlib"]
@@ -601,15 +563,11 @@ def test_an_unreadable_manifest_claims_nothing(path, text):
 
 
 def test_what_a_repository_publishes_beats_a_name_that_merely_matches():
-    """`otherco/utils` and an indexed `acme/utils` share a name and nothing
-    else. A declaration outranks the coincidence."""
+    """`otherco/utils` and an indexed `acme/utils` share a name and nothing else."""
     by_full = {("acme", "utils"): 1}
     by_name = {"utils": 1}
     claimed = {("rust", "utils"): 7}
     assert resolve_repo("utils", by_full, by_name, claimed, "rust") == 7
-    # The same name in another ecosystem is a different package entirely, and
-    # with nothing claiming it there is no repository to resolve to: a registry
-    # coordinate is not a repository path.
     assert resolve_repo("utils", by_full, by_name, claimed, "npm") is None
     assert resolve_repo("utils", by_full, by_name, {}, "rust") is None
     # Go names a repository outright, so there the name is the answer.
@@ -617,8 +575,7 @@ def test_what_a_repository_publishes_beats_a_name_that_merely_matches():
 
 
 def test_a_coordinate_two_repositories_claim_resolves_to_neither(db):
-    """Two projects publishing an artifact called `core` is ordinary, and
-    picking one of them would invent an edge."""
+    """Two projects publishing an artifact called `core` is ordinary, and picking one of them would invent an edge."""
     from uuid import uuid4
 
     from git_synapse.analysis.depbump import _repo_lookups
@@ -646,10 +603,6 @@ def test_a_bare_repository_name_is_not_resolved_when_names_are_ambiguous(db):
     from git_synapse.db.orm import models, session_scope
 
     with session_scope() as session:
-        # The bare `name` is unique per run, not just `full_name`. Sharing it
-        # made ("acme", "core") collide with the row every previous run left
-        # behind, and `by_full` keeps whichever of them the database happened
-        # to return last -- so this asserted the winner of a race.
         name = f"core-{uuid4().hex[:10]}"
         first = models().Repo(full_name=f"acme/{name}", name=name, owner="acme")
         second = models().Repo(full_name=f"otherco/{name}", name=name, owner="otherco")
@@ -664,8 +617,7 @@ def test_a_bare_repository_name_is_not_resolved_when_names_are_ambiguous(db):
 
 
 def test_a_bump_is_linked_to_the_repository_that_publishes_the_coordinate(bump_env):
-    """A coordinate becomes attributable only once the repository publishing it
-    has had its own manifests read, which can happen long after the bump."""
+    """A coordinate becomes attributable only once the repository publishing it has had its own manifests read, which can happen long after the bump."""
     conn, repo, dep = bump_env
     from uuid import uuid4
     package = f"geocoder-{uuid4().hex[:10]}"
@@ -677,8 +629,7 @@ def test_a_bump_is_linked_to_the_repository_that_publishes_the_coordinate(bump_e
 
 
 def test_a_reference_to_the_consumer_itself_is_not_a_repository_edge(bump_env):
-    """A monorepo names its own modules. That is a module edge, not a
-    dependency between two repositories."""
+    """A monorepo names its own modules. That is a module edge, not a dependency between two repositories."""
     conn, repo, _ = bump_env
     conn.add(models().RepoPackage(repo_id=repo, ecosystem="maven", name="geocoder"))
     row = _bump(conn, repo, None, version="1.0.0", at="2024-01-01", name="geocoder")
@@ -688,9 +639,7 @@ def test_a_reference_to_the_consumer_itself_is_not_a_repository_edge(bump_env):
 
 
 def test_every_resolved_bump_records_how_it_was_resolved(bump_env):
-    """The tier is what keeps a floor from being read as an exact answer, so a
-    row carrying a commit and no tier defeats the point. Extraction used to
-    resolve versions itself and record nothing, leaving 1,099 such rows."""
+    """The tier is what keeps a floor from being read as an exact answer, so a row carrying a commit and no tier defeats the point."""
     conn, repo, dep = bump_env
     c = _commit(conn, dep, "ab" * 20, "2024-01-01")
     _tag(conn, dep, "v1.0.0", commit_id=c, main_commit_id=c, key="1")
@@ -705,10 +654,7 @@ def test_every_resolved_bump_records_how_it_was_resolved(bump_env):
 
 
 def test_a_coordinate_does_not_cross_ecosystems(bump_env):
-    """`illuminate/events` is a PHP package published by laravel/framework;
-    `events` is an unrelated npm one. Indexing the bare tail without its
-    ecosystem made every npm dependency on `events` an edge into a PHP
-    repository."""
+    """`illuminate/events` is a PHP package published by laravel/framework; `events` is an unrelated npm one."""
     conn, repo, dep = bump_env
     from uuid import uuid4
     package = f"events-{uuid4().hex[:10]}"
@@ -727,19 +673,16 @@ def test_a_coordinate_does_not_cross_ecosystems(bump_env):
 
 
 
-# ------------------------------------------------------- reference parsing
 
 @pytest.mark.parametrize("ref", ["", "   ", "/", "@", "///"])
 def test_a_reference_with_no_name_resolves_to_nothing(ref):
-    """An empty coordinate must not fall through to whichever repository the
-    index happens to yield first."""
+    """An empty coordinate must not fall through to whichever repository the index happens to yield first."""
     assert repo_ref(ref) == (None, "")
     assert resolve_repo(ref, {("a", "b"): 1}, {"b": 1}) is None
 
 
 def test_an_unchanged_manifest_line_is_not_a_bump(tmp_path):
-    """A bump is a *change*. Re-reading the same version at every commit would
-    record one decision once per commit that followed it."""
+    """A bump is a *change*."""
     from git_synapse.analysis.depbump import extract_from_mirror
 
     repo = _history_repo(tmp_path, [
@@ -752,8 +695,7 @@ def test_an_unchanged_manifest_line_is_not_a_bump(tmp_path):
 
 
 def test_a_module_naming_itself_is_not_a_dependency(tmp_path):
-    """A monorepo's module names itself in its own manifest; recording that
-    would make every repository depend on itself."""
+    """A monorepo's module names itself in its own manifest; recording that would make every repository depend on itself."""
     from git_synapse.analysis.depbump import extract_from_mirror
 
     repo = _repo(tmp_path, {
@@ -769,16 +711,14 @@ def test_a_module_naming_itself_is_not_a_dependency(tmp_path):
     ("", None),
 ])
 def test_a_version_key_orders_only_when_it_is_a_release(key, expected):
-    """`1.10` sorts below `1.9` as text, which is why the ceiling search orders
-    in Python. A prerelease is excluded rather than guessed at."""
+    """`1.10` sorts below `1.9` as text, which is why the ceiling search orders in Python."""
     from git_synapse.analysis.depbump import _ordinal
 
     assert _ordinal(key) == expected
 
 
 def test_a_version_key_with_a_non_numeric_segment_does_not_order():
-    """`1.x` reaches here only if a wildcard slipped the earlier cleaning; it
-    must decline rather than raise mid-resolution."""
+    """`1.x` reaches here only if a wildcard slipped the earlier cleaning; it must decline rather than raise mid-resolution."""
     from git_synapse.analysis.depbump import _ordinal
 
     assert _ordinal("1.x") is None
@@ -792,9 +732,7 @@ def test_resolution_opens_its_own_connection_when_given_none(db):
 
 
 def test_only_the_line_that_moved_is_recorded_as_a_bump(tmp_path):
-    """A manifest commit usually changes one dependency and leaves the rest
-    alone. Recording all of them would credit every untouched line with a
-    decision nobody made."""
+    """A manifest commit usually changes one dependency and leaves the rest alone."""
     from git_synapse.analysis.depbump import extract_from_mirror
 
     repo = _history_repo(tmp_path, [
@@ -810,7 +748,6 @@ def test_only_the_line_that_moved_is_recorded_as_a_bump(tmp_path):
     assert moved.count(("two", "v2.0.0")) == 1, "an unchanged line is not a second bump"
 
 
-# ----------------------------------- a registry coordinate is not a repo path
 
 @pytest.mark.parametrize(("ecosystem", "resolves"), [
     ("go", True),          # a module path is host/owner/repo
@@ -821,31 +758,25 @@ def test_only_the_line_that_moved_is_recorded_as_a_bump(tmp_path):
     ("php", False),
 ])
 def test_a_bare_name_resolves_only_where_the_name_is_a_repository(ecosystem, resolves):
-    """npm's `uuid` is not google/uuid, which is a Go library, and npm's `bytes`
-    is not tokio-rs/bytes, which is a Rust crate. Both became edges, and both
-    resolved to no commit only because the versions could never match -- luck
-    rather than a guard."""
+    """npm's `uuid` is not google/uuid, which is a Go library, and npm's `bytes` is not tokio-rs/bytes, which is a Rust crate."""
     by_full, by_name = {("google", "uuid"): 7}, {"uuid": 7}
     got = resolve_repo("uuid", by_full, by_name, {}, ecosystem)
     assert (got == 7) is resolves
 
 
 def test_a_repository_that_declares_the_name_resolves_in_any_ecosystem():
-    """The guard applies to guessing, not to a declaration. A repository whose
-    own manifest says it publishes `uuid` for npm still answers for it."""
+    """The guard applies to guessing, not to a declaration."""
     claimed = {("npm", "uuid"): 42}
     assert resolve_repo("uuid", {}, {"uuid": 7}, claimed, "npm") == 42
 
 
 def test_an_unknown_ecosystem_keeps_the_old_behaviour():
-    """Callers that cannot say which ecosystem they are in are not punished for
-    it; the guard needs to know what it is guarding."""
+    """Callers that cannot say which ecosystem they are in are not punished for it; the guard needs to know what it is guarding."""
     assert resolve_repo("uuid", {("google", "uuid"): 7}, {"uuid": 7}, {}, "") == 7
 
 
 def test_a_ceiling_is_not_resolved_when_the_consuming_commit_is_missing(bump_env):
-    """The ceiling is the version the consumer could see *at the time it moved*,
-    so without that commit's date there is no window to pick a tag from."""
+    """The ceiling is the version the consumer could see *at the time it moved*, so without that commit's date there is no window to pick a tag from."""
     from datetime import UTC, datetime
 
     conn, repo, dep = bump_env
@@ -861,8 +792,7 @@ def test_a_ceiling_is_not_resolved_when_the_consuming_commit_is_missing(bump_env
 
 
 def test_a_bump_naming_a_commit_sha_resolves_straight_to_it(bump_env):
-    """A Go pseudo-version carries the upstream commit it was cut from, so the
-    edge is provable rather than inferred from a tag's date."""
+    """A Go pseudo-version carries the upstream commit it was cut from, so the edge is provable rather than inferred from a tag's date."""
     conn, repo, dep = bump_env
     dep_sha = "abc123def456" + "0" * 28
     dep_commit = _commit(conn, dep, dep_sha, "2024-01-05")
@@ -879,8 +809,7 @@ def test_a_bump_naming_a_commit_sha_resolves_straight_to_it(bump_env):
 
 
 def test_a_dependency_recorded_before_its_publisher_was_indexed_is_resolved_later(db):
-    """A manifest names a package before the repository publishing it has been
-    ingested, so the row is stored unresolved and picked up on a later pass."""
+    """A manifest names a package before the repository publishing it has been ingested, so the row is stored unresolved and picked up on a later pass."""
     from uuid import uuid4
 
     from git_synapse.db.orm import session_scope
@@ -915,8 +844,7 @@ def test_a_dependency_recorded_before_its_publisher_was_indexed_is_resolved_late
 
 
 def test_one_manifest_declaring_a_dependency_twice_records_it_once(db, tmp_path, monkeypatch):
-    """A pom can name the same artifact in both `dependencies` and
-    `dependencyManagement`. That is one declaration, not two."""
+    """A pom can name the same artifact in both `dependencies` and `dependencyManagement`."""
     from uuid import uuid4
 
     from git_synapse.db.orm import session_scope
@@ -954,8 +882,7 @@ def test_one_manifest_declaring_a_dependency_twice_records_it_once(db, tmp_path,
 
 
 def test_an_edge_already_recorded_is_not_stored_a_second_time(db, tmp_path, monkeypatch):
-    """`rebuild` re-walks manifest history, so every run sees the same edges it
-    saw last time. Re-inserting them would multiply every bump count."""
+    """`rebuild` re-walks manifest history, so every run sees the same edges it saw last time."""
     from uuid import uuid4
 
     from git_synapse.db.orm import session_scope

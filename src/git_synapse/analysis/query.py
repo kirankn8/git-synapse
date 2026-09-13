@@ -98,14 +98,7 @@ def get_repo(repo_id: int) -> dict | None:
 
 
 def repo_languages() -> list[dict]:
-    """How many repositories each primary language accounts for.
-
-    Counted in the database rather than in Python. Loading every repository to
-    tally one column of it cost a second on this corpus, and the page that
-    draws this fires it alongside several other calls -- a navigation away
-    cancels the browser's request but not the query behind it, so a slow one
-    holds its connection until it finishes regardless.
-    """
+    """How many repositories each primary language accounts for."""
     Repo = _model("Repo")
     with session_scope() as session:
         rows = (session.query(Repo.primary_language, func.count().label("n"))

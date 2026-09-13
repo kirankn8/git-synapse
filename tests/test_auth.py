@@ -1,12 +1,4 @@
-"""Who may read this deployment, and how that is proven.
-
-The dashboard is derived from public repositories but is not itself public: it
-says which repositories an organisation tracks, where its coupling is weakest,
-and which files one person alone understands. These cover the parts that would
-be quietly wrong rather than loudly broken -- a password that verifies when it
-should not, a session that outlives the account, a door that can be walked
-around.
-"""
+"""Who may read this deployment, and how that is proven."""
 from __future__ import annotations
 
 from uuid import uuid4
@@ -28,7 +20,6 @@ def person(db):
     auth.delete_user(user["id"])
 
 
-# ------------------------------------------------------------------ hashing
 
 def test_a_password_verifies_only_against_itself():
     stored = auth.hash_password("correct horse battery staple")
@@ -38,8 +29,7 @@ def test_a_password_verifies_only_against_itself():
 
 
 def test_two_hashes_of_one_password_differ():
-    """A per-password salt: identical passwords must not produce identical
-    rows, or the table tells an attacker who to attack once."""
+    """A per-password salt: identical passwords must not produce identical rows, or the table tells an attacker who to attack once."""
     a = auth.hash_password("the same password twice")
     b = auth.hash_password("the same password twice")
     assert a != b
@@ -48,8 +38,7 @@ def test_two_hashes_of_one_password_differ():
 
 
 def test_the_hash_records_its_own_cost():
-    """Stored parameters mean the cost can be raised later without
-    invalidating every existing password."""
+    """Stored parameters mean the cost can be raised later without invalidating every existing password."""
     algo, n, r, p, salt, digest = auth.hash_password("a long enough password").split("$")
     assert algo == "scrypt" and int(n) >= 2**14 and int(r) >= 8 and int(p) >= 1
     assert salt and digest
@@ -66,7 +55,6 @@ def test_a_short_password_is_refused_where_it_is_set():
         auth.hash_password("short")
 
 
-# ------------------------------------------------------------------- people
 
 def test_a_person_can_sign_in_and_the_session_finds_them(person):
     token, user = auth.sign_in(person["email"], "a-sufficiently-long-pass")
@@ -76,8 +64,7 @@ def test_a_person_can_sign_in_and_the_session_finds_them(person):
 
 
 def test_an_unknown_address_and_a_wrong_password_are_the_same_answer(person):
-    """A different message, or a faster one, tells an attacker which addresses
-    are real. The dummy hash makes the unknown path do the same work."""
+    """A different message, or a faster one, tells an attacker which addresses are real."""
     with pytest.raises(auth.AuthError) as wrong:
         auth.sign_in(person["email"], "not-the-password")
     with pytest.raises(auth.AuthError) as missing:
@@ -96,8 +83,7 @@ def test_a_deactivated_person_cannot_sign_in_and_their_sessions_end(person):
 
 
 def test_changing_a_password_ends_every_session(person):
-    """Otherwise the change is advisory: whoever knew the old password is still
-    signed in, which is the situation the change was meant to end."""
+    """Otherwise the change is advisory: whoever knew the old password is still signed in, which is the situation the change was meant to end."""
     token, _ = auth.sign_in(person["email"], "a-sufficiently-long-pass")
     auth.update_user(person["id"], password="a-different-long-password")
     assert auth.session_user(token) is None
@@ -170,7 +156,6 @@ def test_admin_count_can_ignore_one(db):
         auth.delete_user(b["id"])
 
 
-# ------------------------------------------------------------------- tokens
 
 def test_a_token_acts_as_the_person_who_made_it(person):
     secret, row = auth.create_token(person["id"], "laptop agent")
@@ -183,8 +168,7 @@ def test_a_token_acts_as_the_person_who_made_it(person):
 
 
 def test_the_token_secret_is_not_recoverable(person):
-    """Stored as a hash: whoever holds the database cannot use the tokens in
-    it, and a listing is not a set of working credentials."""
+    """Stored as a hash: whoever holds the database cannot use the tokens in it, and a listing is not a set of working credentials."""
     from git_synapse.db.orm import models, session_scope
 
     secret, _ = auth.create_token(person["id"], "a token")
@@ -258,11 +242,9 @@ def test_first_admin_claim_is_validated_and_single_use(db):
     auth.delete_user(user["id"])
 
 
-# ------------------------------------------------------------ access policy
 
 def test_with_nobody_registered_the_door_is_open(db):
-    """Requiring sign-in when no account exists would lock the first
-    administrator out of the screen that creates them."""
+    """Requiring sign-in when no account exists would lock the first administrator out of the screen that creates them."""
     assert auth.count_users() == 0, "this test needs a deployment with no users"
     assert auth.access_mode("dashboard") == "open"
 
@@ -284,8 +266,7 @@ def test_an_administrator_can_open_and_close_the_door(person):
 
 
 def test_a_stored_mode_that_is_not_one_falls_closed(person):
-    """Written by hand, or by a future version. Falling open would turn a typo
-    into a public dashboard."""
+    """Written by hand, or by a future version. Falling open would turn a typo into a public dashboard."""
     from git_synapse.analysis import settings
 
     try:
@@ -295,11 +276,9 @@ def test_a_stored_mode_that_is_not_one_falls_closed(person):
         settings.clear("dashboard_auth")
 
 
-# ------------------------------------------------------- guessing a password
 
 def test_a_password_cannot_be_guessed_at_machine_speed(person):
-    """scrypt costs about 70ms an attempt, which throttles one attacker on one
-    thread and does nothing about a thousand in parallel."""
+    """scrypt costs about 70ms an attempt, which throttles one attacker on one thread and does nothing about a thousand in parallel."""
     for _ in range(auth.MAX_FAILURES):
         with pytest.raises(auth.AuthError):
             auth.sign_in(person["email"], "not-the-password")
@@ -307,15 +286,12 @@ def test_a_password_cannot_be_guessed_at_machine_speed(person):
     with pytest.raises(auth.TooManyAttempts, match="too many failed attempts"):
         auth.sign_in(person["email"], "not-the-password")
 
-    # Refused even with the right password: the point is that credentials are
-    # no longer being examined at all.
     with pytest.raises(auth.TooManyAttempts):
         auth.sign_in(person["email"], "a-sufficiently-long-pass")
 
 
 def test_the_lockout_is_scoped_to_one_address(person, db):
-    """Otherwise a handful of guesses at one account closes the door on
-    everyone, which is a denial of service rather than a defence."""
+    """Otherwise a handful of guesses at one account closes the door on everyone, which is a denial of service rather than a defence."""
     other = auth.create_user(_email(), "Other", "a-sufficiently-long-pass")
     try:
         for _ in range(auth.MAX_FAILURES + 1):
@@ -329,8 +305,7 @@ def test_the_lockout_is_scoped_to_one_address(person, db):
 
 
 def test_signing_in_clears_the_count(person):
-    """A stale count would lock someone out on their next typo, long after
-    they proved it was them."""
+    """A stale count would lock someone out on their next typo, long after they proved it was them."""
     for _ in range(auth.MAX_FAILURES - 1):
         with pytest.raises(auth.AuthError):
             auth.sign_in(person["email"], "wrong")
@@ -360,17 +335,14 @@ def test_attempts_past_the_window_stop_counting(person):
 
 
 def test_deleting_a_user_who_is_not_there_reports_it_rather_than_raising(db):
-    """The caller is a DELETE endpoint: "nobody by that id" is a 404 it renders,
-    not an exception it has to catch."""
+    """The caller is a DELETE endpoint: "nobody by that id" is a 404 it renders, not an exception it has to catch."""
     from git_synapse import auth
 
     assert auth.delete_user(999_999_999) is False
 
 
 def test_the_first_admin_can_be_claimed_before_the_schema_row_exists(scratch_db):
-    """The claim locks the schema row to serialise two simultaneous first-run
-    requests. On a database where bootstrap has not written it yet, the lock
-    has to be created rather than waited for."""
+    """The claim locks the schema row to serialise two simultaneous first-run requests."""
     from git_synapse import auth
     from git_synapse.db.orm import models, session_scope
 

@@ -152,10 +152,6 @@ def declared_modules_at_head(mirror: Path, repo_name: str, manifest: str) -> lis
 
 def _repo_lookups(session: object) -> tuple[dict[tuple[str, str], int], dict[str, int], dict[tuple[str, str], int]]:
     Repo, Package = models().Repo, models().RepoPackage
-    # Ordered, because `by_full` below is a dict comprehension: when two
-    # repositories share an owner and a name -- the same project mirrored on
-    # two hosts, say -- the last row read wins, and an unordered query makes
-    # that whichever one the database felt like returning last.
     rows = session.query(Repo.owner, Repo.name, Repo.id).order_by(Repo.id).all()
     by_full = {(str(owner).lower(), str(name).lower()): int(repo_id) for owner, name, repo_id in rows}
     grouped = defaultdict(set)
@@ -333,10 +329,6 @@ def _reject_impossible(session: object) -> int:
 def resolve_bumps(conn: object | None = None) -> int:
     def run(session: object) -> int:
         Bump, Tag, Commit = models().DepBump, models().RefTag, models().Commit
-        # Callers commonly build or update bump/package rows in this same
-        # transaction immediately before resolving them. Since the shared ORM
-        # sessions use autoflush=False, make those writes visible to the lookup
-        # queries explicitly.
         session.flush()
         _link_repositories(session)
         _fill_version_keys(session)
@@ -344,9 +336,6 @@ def resolve_bumps(conn: object | None = None) -> int:
             bump.dep_commit_id = None
             bump.resolution = None
             bump.adoption_seconds = None
-        # Queries below intentionally run with autoflush disabled. Persist the
-        # invalidation before selecting pending rows, otherwise a previously
-        # resolved bump is still filtered out by its old database values.
         session.flush()
         pending = session.query(Bump).filter(
             Bump.dep_commit_id.is_(None), Bump.dep_repo_id.is_not(None)
@@ -380,9 +369,6 @@ def resolve_bumps(conn: object | None = None) -> int:
                 bump.dep_commit_id = next(iter(ids))
                 bump.resolution = "floor" if (bump.dep_version or "").startswith(("^", "~", ">", "<", "=")) else "tag"
         _resolve_ceilings(session)
-        # `_reject_impossible` uses a query over resolved rows; flush the
-        # in-memory matches first so future-dated candidates are actually
-        # inspected when autoflush is disabled for this session.
         session.flush()
         _reject_impossible(session)
         session.flush()

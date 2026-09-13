@@ -1,40 +1,4 @@
-"""Does this actually help? Answered against history itself.
-
-Every other number in this system describes the corpus. This one describes the
-*product*: replay history commit by commit and ask, before each commit is
-revealed, "given one file this commit touched, would we have named the others?"
-
-Method
-------
-Strictly prequential -- test, then train. Walking commits in time order, each
-commit is first scored using only the counts accumulated from earlier commits,
-and only afterwards do its own pairs update those counts. A file pair therefore
-never contributes evidence to its own prediction, which is the whole difficulty
-in evaluating a co-change model, and the reason the materialised
-``file_pair_metric`` table cannot be used here: it is computed over all history,
-so every query against it has already seen the future.
-
-Reading the result honestly
----------------------------
-Three things are reported next to every measure, because recall alone is a
-vanity metric:
-
-* **Lift over the strongest baseline**, not a convenient one. "Guess the busiest
-  files" is a straw man: it is not how anyone finds files. An agent greps for a
-  symbol, opens what it finds, and looks at the obvious neighbours -- the test
-  beside the source, the header beside the implementation, the rest of the
-  directory. Those cost nothing and are usually right, so the only question
-  worth asking is whether co-change history adds anything **on top of them**.
-  Three baselines are therefore scored, and lift is measured against whichever
-  does best.
-* **A 95% confidence interval** on the hit rate, so a difference between two
-  measures is not read as real when the sample cannot support it.
-* **Whether the measure is known to over-reward rare items**, which is exactly
-  how a measure tops this table while being useless in practice.
-
-The interval assumes independent trials. Prompts drawn from the same commit are
-not independent, so the true interval is somewhat wider than the one reported.
-"""
+"""Does this actually help? Answered against history itself."""
 
 from __future__ import annotations
 
@@ -58,18 +22,10 @@ from git_synapse.stats.registry import DEFAULT_MEASURE, resolve
 
 log = logging.getLogger(__name__)
 
-#: Commits observed before scoring begins. With no history there is nothing to
-#: predict from, and those degenerate commits would otherwise drag every
-#: average toward zero and make two runs incomparable.
 WARMUP_COMMITS = 20
 
-#: Commits touching more files than this are skipped as prompts. A sweeping
-#: change has no single "the file you are editing", so asking the question of it
-#: measures nothing about the product.
 MAX_FILES_PER_PROMPT = 25
 
-#: Below this many prompts the intervals are too wide to separate anything, and
-#: the result is reported as indicative rather than as a finding.
 MIN_PROMPTS_FOR_A_VERDICT = 300
 
 #: The one baseline that is sampled rather than run over every prompt.
@@ -107,16 +63,10 @@ class Score:
     mrr: float
     lift: float = 0.0
     rare_item_bias: bool = False
-    #: Hit rate over the prompts the free neighbour rules did *not* solve. The
-    #: number that matters: on everything else this product is redundant.
     hard_hit_rate: float = 0.0
     hard_prompts: int = 0
-    #: As above, but against everything an agent can do unaided -- the free
-    #: rules *and* its own search. Measured on the sampled subset only.
     unaided_hits: int = 0
     unaided_prompts: int = 0
-    #: Hit rate of the baseline lift was measured against, kept so that beating
-    #: it can be tested against the interval rather than the point estimate.
     baseline_hit_rate: float = 0.0
 
     @property
@@ -130,12 +80,7 @@ class Score:
 
     @property
     def beats_baseline(self) -> bool:
-        """True only when the interval clears the baseline, not merely the point.
-
-        The point estimate crossing 1.0 is what a lift column shows and is not
-        evidence on its own; a measure one noisy percent above the baseline has
-        not beaten it.
-        """
+        """True only when the interval clears the baseline, not merely the point."""
         return self.ci_low > self.baseline_hit_rate
 
 
@@ -161,14 +106,7 @@ class BacktestResult:
 
     @property
     def baseline(self) -> Score:
-        """The hardest baseline lift is measured against.
-
-        Sampled baselines are excluded. Lift is a ratio, and dividing a rate
-        measured over every prompt by one measured over a few hundred mixes two
-        estimators: the figure would then move with the draw rather than with
-        the product. The New Hire is still shown in the table, and it is what
-        the unaided count is computed against.
-        """
+        """The hardest baseline lift is measured against."""
         full = [b for b in self.baselines if b.measure != SAMPLED_BASELINE]
         return (full or self.baselines)[0]
 
@@ -206,12 +144,7 @@ class BacktestResult:
 
 
 def _commit_shas(repo_id: int | None) -> dict[int, tuple[str, str, str]]:
-    """commit id -> (sha, repository full name, host), for the grep baseline.
-
-    The host travels with the name because it is half the mirror's address:
-    `owner/name` is unique on one host, so without it two repositories can
-    resolve to the same directory on disk.
-    """
+    """commit id -> (sha, repository full name, host), for the grep baseline."""
     Commit, Repo = models().Commit, models().Repo
     with session_scope() as session:
         query = session.query(Commit, Repo).join(Repo, Repo.id == Commit.repo_id)
@@ -222,14 +155,7 @@ def _commit_shas(repo_id: int | None) -> dict[int, tuple[str, str, str]]:
 
 
 def _history(repo_id: int | None) -> list[tuple[int, list[int], int]]:
-    """Pair-eligible commits in time order, as ``(repo_id, file ids)``.
-
-    The repository travels with the commit because counts must never be pooled
-    across repositories. Two files in different repositories cannot co-occur, so
-    a shared population would hand the popularity baseline a set of candidates it
-    can never hit -- which does not weaken the baseline honestly, it breaks it,
-    and every lift measured against it is inflated.
-    """
+    """Pair-eligible commits in time order, as ``(repo_id, file ids)``."""
     Commit, Change = models().Commit, models().CommitFile
     with session_scope() as session:
         query = session.query(Commit.id, Commit.repo_id, Change.file_id).join(
@@ -247,8 +173,6 @@ def _history(repo_id: int | None) -> list[tuple[int, list[int], int]]:
     return [(owner[cid], files, cid) for cid, files in grouped.items()]
 
 
-#: Words that occur in half the files of any repository. An agent drops them by
-#: instinct; leaving them in makes every query match everything.
 _STOPWORDS = frozenset((
     "test", "tests", "spec", "specs", "main", "index", "util", "utils",
     "common", "base", "core", "impl", "internal", "public", "private",
@@ -256,27 +180,17 @@ _STOPWORDS = frozenset((
     "class", "interface", "string", "value", "result", "error", "context",
 ))
 
-#: Declaration forms across the languages in scope. What is captured is the
-#: name another file has to write down in order to use this one, which is the
-#: term an agent searches for once it has read the file.
 _DECL = re.compile(
     r"\b(?:class|interface|struct|enum|trait|type|func|def|fn|module|"
     r"package|function)\s+([A-Za-z_][A-Za-z0-9_]{3,})")
 
-#: Directories whose contents are vendored or generated. An agent excludes them
-#: by reflex, and leaving them in rewards the baseline for noise.
 _EXCLUDE = (":(exclude)*vendor/*", ":(exclude)*third_party/*",
             ":(exclude)*node_modules/*", ":(exclude)*.min.js")
 
 
 @lru_cache(maxsize=200_000)
 def concept_tokens(name: str) -> frozenset[str]:
-    """Split a path or symbol into the words an agent would actually search for.
-
-    ``ImmutableList.java`` becomes ``{immutable, list}``. This is what a ``.*``
-    pattern buys: it reaches files that share a concept but no symbol and sit in
-    another directory, or another language, where no reference edge exists.
-    """
+    """Split a path or symbol into the words an agent would actually search for."""
     stem = name.rsplit("/", 1)[-1].split(".", 1)[0]
     out = set()
     for word in re.split(r"[^A-Za-z0-9]+", stem):
@@ -288,12 +202,7 @@ def concept_tokens(name: str) -> frozenset[str]:
 
 
 def _git(mirror: str, args: list[str], timeout: int) -> str:
-    """Stdout of a git command, or "" if it failed, timed out or git is absent.
-
-    A baseline that cannot answer scores a miss. Letting one slow `git grep`
-    raise would abandon a replay that has already scored hundreds of thousands
-    of prompts, which is a far worse outcome than one unanswered prompt.
-    """
+    """Stdout of a git command, or "" if it failed, timed out or git is absent."""
     try:
         proc = subprocess.run(
             ["git", *args], cwd=mirror, env=_base_env(), capture_output=True,
@@ -304,9 +213,6 @@ def _git(mirror: str, args: list[str], timeout: int) -> str:
     return proc.stdout if proc.returncode in (0, 1) else ""
 
 
-#: Vendored, generated and minified paths. Excluded from *both* halves of the
-#: search: an agent ignores them, and matching their names while refusing to
-#: match their contents would score them on a rule the grep never applied.
 _EXCLUDE_DIRS = ("vendor/", "third_party/", "node_modules/", "testdata/")
 
 
@@ -346,27 +252,11 @@ def _blob(mirror: str, sha: str, path: str) -> str:
     return _git(mirror, ["show", f"{sha}:{path}"], timeout=60)
 
 
-#: How strongly each kind of evidence counts. A term in the file's *name* is the
-#: strongest signal an agent has; a mention in the body is weaker; a mention
-#: found only after widening the search is weaker still.
 _W_NAME, _W_BODY, _W_WIDENED = 3.0, 2.0, 1.0
 
 
 def agent_search(mirror: Path, sha: str, seed_path: str, k: int) -> list[str]:
-    """What an agent's own search would have surfaced, at that commit.
-
-    Models the loop rather than one query. Terms are derived from the seed's
-    path *and* the symbols it declares, matched against both file names and
-    file contents, and then widened with what the first round returned -- the
-    read-a-result-and-search-again step that finds callers no naming or folder
-    rule would suggest.
-
-    Searched against the **parent** tree, so it sees the repository exactly as
-    it stood before the change existed. Grepping the commit's own tree would
-    let a file that was edited *by* this commit answer for it.
-
-    Expensive -- several `git grep` passes per prompt -- so it is sampled.
-    """
+    """What an agent's own search would have surfaced, at that commit."""
     parent = f"{sha}^"
     tree = _tree(str(mirror), parent)
     if not tree:
@@ -375,8 +265,6 @@ def agent_search(mirror: Path, sha: str, seed_path: str, k: int) -> list[str]:
     path_tokens = concept_tokens(seed_path)
     symbols = {m for m in _DECL.findall(_blob(str(mirror), parent, seed_path))
                if len(m) >= 4}
-    # Declared symbols first: they are the precise terms. Longer path tokens
-    # next, because a long word is a more selective query than a short one.
     terms = (sorted(symbols, key=lambda t: (-len(t), t))[:8]
              + sorted(path_tokens, key=lambda t: (-len(t), t))[:4])
     if not terms:
@@ -394,8 +282,6 @@ def agent_search(mirror: Path, sha: str, seed_path: str, k: int) -> list[str]:
         if path != seed_path:
             score[path] += _W_BODY * len(matched)
 
-    # Second round: widen using the names of what came back, the way an agent
-    # follows a result it has just read.
     lead = sorted(score, key=lambda p: -score[p])[:3]
     widened = set().union(*(concept_tokens(p) for p in lead)) if lead else set()
     widened -= path_tokens
@@ -447,8 +333,6 @@ def _popular(marginal: dict[int, int], seed: int, k: int) -> list[int]:
     return [f for f, _ in ranked if f != seed][:k]
 
 
-#: Affixes that mark a file as the test, spec or header partner of another.
-#: `auth.go`/`auth_test.go` and `Auth.java`/`AuthTest.java` share a stem.
 _AFFIXES = ("_test", "test_", "_spec", "spec_", ".test", ".spec", "_impl", "-test", "-spec")
 
 
@@ -467,12 +351,7 @@ def stem_of(path: str) -> str:
 
 def _neighbours(seed: int, marginal: dict[int, int], k: int, paths: dict[int, str],
                 by_stem: dict[str, list[int]], by_dir: dict[str, list[int]]) -> list[int]:
-    """What an agent finds without any history: siblings, then the directory.
-
-    A name sibling first -- the test beside the source, the header beside the
-    implementation -- because that is the cheapest and most reliable guess
-    anyone makes. Then the rest of the directory, busiest first.
-    """
+    """What an agent finds without any history: siblings, then the directory."""
     seed_path = paths.get(seed)
     if seed_path is None:
         return []
@@ -501,14 +380,6 @@ def _same_directory(seed: int, marginal: dict[int, int], k: int, paths: dict[int
     return out[:k]
 
 
-#: How the file "you are editing" is chosen from a commit.
-#:
-#: ``all``     -- every changed file takes a turn as the seed. The product's own
-#:               question, asked once per file, and the larger sample.
-#: ``obscure`` -- one prompt per commit, seeded with the *least* changed file.
-#:               Starting from a quiet corner rather than a hub that half the
-#:               repository already moves with. Harder, and the case where a
-#:               naming or folder rule has least to offer.
 SEEDINGS = ("all", "obscure")
 
 
@@ -516,25 +387,11 @@ def _seeds(files: list[int], marginal: dict[int, int], seeding: str) -> list[int
     """Which files of this commit become prompts."""
     if seeding == "all":
         return files
-    # Prior counts only -- this commit has not been trained on yet, so choosing
-    # by them cannot leak. Tie-broken by id so a run is reproducible.
     return [min(files, key=lambda f: (marginal.get(f, 0), f))]
 
 
 def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE,), k: int = 5, min_support: int = 2, limit: int | None = None, grep_sample: int = 0, seeding: str = "all") -> BacktestResult:
-    """Replay history and report how often each measure named the right files.
-
-    Args:
-        repo_id: restrict to one repository, or None for the whole corpus.
-        measures: measure keys to evaluate side by side.
-        k: how many suggestions the product is allowed to offer.
-        min_support: ignore partners seen together fewer times than this.
-        limit: stop after this many commits, for a quick look.
-
-    Returns:
-        A :class:`BacktestResult`, carrying each measure's lift over the
-        popularity baseline and a confidence interval on its hit rate.
-    """
+    """Replay history and report how often each measure named the right files."""
     if seeding not in SEEDINGS:
         raise ValueError(f"unknown seeding {seeding!r}; expected one of {SEEDINGS}")
     specs = [resolve(m) for m in measures]
@@ -558,18 +415,9 @@ def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE
     rr = {s.key: 0.0 for s in specs}
     #: name -> (hit prompts, files found, summed recall)
     bases = {n: [0, 0, 0.0] for n in ("neighbours", "same directory", "popularity")}
-    #: The grep baseline is sampled: one `git grep` per prompt is far too slow
-    #: to run over every one, so it carries its own denominator.
     grep_hits, grep_found, grep_recall, grep_n, grep_wanted = 0, 0, 0.0, 0, 0
-    #: A uniform sample of prompts, filled by reservoir sampling and searched
-    #: once the replay is over. Sampling with a fixed probability and a cap
-    #: stopped as soon as the cap was reached, which drew the whole sample from
-    #: the oldest commits while every other measure was scored across all of
-    #: history -- a comparison between different eras of the repository.
     reservoir: list[tuple] = []
     candidates = 0
-    #: Prompts in that sample which neither the free rules nor the agent's own
-    #: search solved, and how often each measure answered them anyway.
     unaided_hard, unaided_hits = 0, dict(zero)
     shas = _commit_shas(repo_id) if grep_sample else {}
     rng = random.Random(20260830)  # noqa: S311 - sampling, not secrets
@@ -577,7 +425,6 @@ def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE
 
     for repo, files, commit_id in commits:
         joint, marginal, total = joints[repo], marginals[repo], totals[repo]
-        # ---- test, using only what earlier commits taught -------------------
         if total >= WARMUP_COMMITS and 2 <= len(files) <= MAX_FILES_PER_PROMPT:
             scored_here = False
             for seed in _seeds(files, marginal, seeding):
@@ -634,7 +481,6 @@ def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE
                     slot[2] += len(correct) / len(targets)
             scored_commits += 1 if scored_here else 0
 
-        # ---- then train -----------------------------------------------------
         for a, b in combinations(sorted(set(files)), 2):
             joint[a][b] = joint[a].get(b, 0) + 1
             joint[b][a] = joint[b].get(a, 0) + 1
@@ -642,8 +488,6 @@ def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE
             marginal[f] += 1
         totals[repo] += 1
 
-    # The sample is searched only now, so that every prompt in the replay had an
-    # equal chance of being in it regardless of when it occurred.
     for full_name, host, sha, seed_path, want, n_targets, solved, hits in reservoir:
         got = agent_search(mirror_path_for(full_name, host=host), sha, seed_path, k)
         correct = [g for g in got if g in want]
@@ -658,10 +502,6 @@ def run(repo_id: int | None = None, measures: tuple[str, ...] = (DEFAULT_MEASURE
                 unaided_hits[key] += 1 if hit else 0
 
     n = prompts or 1
-    # Each baseline is a person who could answer this question without any
-    # history, nicknamed by how much of the codebase they have seen. Every rung
-    # is free, so whatever Git Synapse adds on top of the highest one has to
-    # have come from the commit log and nowhere else.
     labels = {"neighbours": "Apprentice -- the file's test, then its folder",
               "same directory": "Intern -- the file's folder-mates, busiest first",
               "popularity": "Tourist -- the repository's busiest files"}

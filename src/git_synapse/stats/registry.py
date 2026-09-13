@@ -1,11 +1,4 @@
-"""Registry describing every association measure: metadata plus the callable.
-
-The registry is the single source of truth about what measures exist. The API,
-the MCP server, the UI's metric picker and the aggregation job all enumerate
-from here, so adding a 30th measure means adding one function in
-:mod:`git_synapse.stats.measures` and one :class:`MeasureSpec` below -- nothing else
-in the system needs to change.
-"""
+"""Registry describing every association measure: metadata plus the callable."""
 
 from __future__ import annotations
 
@@ -32,39 +25,7 @@ class Family(str):
 
 @dataclass(frozen=True)
 class MeasureSpec:
-    """Everything the system knows about one association measure.
-
-    Attributes:
-        key: stable machine identifier; also the database column name.
-        label: human-facing name.
-        family: which :class:`Family` it belongs to.
-        formula: the formula in terms of the contingency cells a, b, c, d, N.
-        summary: one-line description for tooltips and list views.
-        detail: longer explanation of when the measure is and is not useful.
-        fn: the vectorised implementation.
-        lower: lower bound of the range, or None if unbounded.
-        upper: upper bound of the range, or None if unbounded.
-        signed: True if negative values carry meaning (anti-coupling).
-        neutral: the value that indicates exact independence, if one exists.
-        is_significance: True for hypothesis tests, which answer "is this real"
-            rather than "how strong is this".
-        rare_item_bias: True if the measure systematically over-rewards items
-            with tiny marginals; the UI warns on these.
-        saturates_on_sparse: True for measures that count joint absence and so
-            sit near their maximum for almost every commit-data pair.
-        zero_when_unobserved: True where the measure returns 0 for a pair that
-            never co-occurred, by convention rather than by limit -- PMI's true
-            value there is -inf. Declared rather than left implicit because it
-            collides with ``neutral``: the same 0 then means both "independent"
-            and "never seen together", so a pair observed once can score *below*
-            a pair never observed at all. Nothing materialises such a pair --
-            support is at least 1 -- but a caller passing its own table can.
-        hit_rate: what the reference backtest measured -- the share of prompts
-            where a file that really changed appeared in this measure's top 5.
-            Not a recommendation. Which question a caller wants asked depends on
-            a scenario only the caller knows; this says only how each question
-            fared at predicting the next commit.
-    """
+    """Everything the system knows about one association measure."""
 
     key: str
     label: str
@@ -91,7 +52,6 @@ class MeasureSpec:
 
 
 MEASURES: tuple[MeasureSpec, ...] = (
-    # ---------------- Similarity & overlap ----------------
     MeasureSpec(
         key="jaccard",
         label="Jaccard Index",
@@ -220,14 +180,10 @@ MEASURES: tuple[MeasureSpec, ...] = (
             "once still scores 0.5, ahead of five co-changes out of ten."
         ),
         fn=m.fager,
-        # -0.5, not unbounded: the worst case is n_a = n_b = 1 with a = 0, where
-        # ochiai is 0 and the penalty is its largest. Declaring it None meant
-        # the bounds test skipped this measure entirely.
         lower=-0.5,
         upper=1.0,
         signed=True,
     ),
-    # ---------------- Matching coefficients ----------------
     MeasureSpec(
         key="russell_rao",
         label="Russell-Rao Metric",
@@ -290,10 +246,6 @@ MEASURES: tuple[MeasureSpec, ...] = (
         lower=-1.0,
         upper=1.0,
         signed=True,
-        # No neutral value. Hamann is zero iff a + d == b + c, which has nothing
-        # to do with independence: the independent tables (4,16,16,64) and
-        # (1,9,9,81) score +0.36 and +0.64. Its siblings in this family
-        # correctly declare none either.
         saturates_on_sparse=True,
     ),
     MeasureSpec(
@@ -311,7 +263,6 @@ MEASURES: tuple[MeasureSpec, ...] = (
         upper=1.0,
         saturates_on_sparse=True,
     ),
-    # ---------------- Information theoretic ----------------
     MeasureSpec(
         key="mutual_information",
         label="Mutual Information (MI)",
@@ -382,7 +333,6 @@ MEASURES: tuple[MeasureSpec, ...] = (
         lower=0.0,
         rare_item_bias=True,
     ),
-    # ---------------- Significance tests ----------------
     MeasureSpec(
         key="chi_square",
         label="Chi-Square",
@@ -481,7 +431,6 @@ MEASURES: tuple[MeasureSpec, ...] = (
         lower=0.0,
         is_significance=True,
     ),
-    # ---------------- Correlation ----------------
     MeasureSpec(
         key="phi",
         label="Phi Coefficient",
@@ -571,7 +520,6 @@ MEASURES: tuple[MeasureSpec, ...] = (
         neutral=0.0,
         saturates_on_sparse=True,
     ),
-    # ---------------- Probability / lift ----------------
     MeasureSpec(
         key="association_strength",
         label="Association Strength",
@@ -590,7 +538,6 @@ MEASURES: tuple[MeasureSpec, ...] = (
         rare_item_bias=True,
         aliases=("lift",),
     ),
-    # ---------------- Directional extras (not part of the 29) ----------------
     MeasureSpec(
         key="confidence_ab",
         label="Confidence P(B|A)",
@@ -630,9 +577,6 @@ _ALIASES: dict[str, str] = {
     alias: spec.key for spec in MEASURES for alias in spec.aliases
 }
 
-#: The symmetric measures: every family except DIRECTIONAL. Scoring persists
-#: ALL_KEYS, so this is not a subset anything stores -- it is the set for which
-#: `m(A,B) == m(B,A)` holds, which is what the symmetry tests parametrise over.
 CORE_KEYS: tuple[str, ...] = tuple(
     spec.key for spec in MEASURES if spec.family != Family.DIRECTIONAL
 )
@@ -640,46 +584,13 @@ CORE_KEYS: tuple[str, ...] = tuple(
 #: Every key that gets a materialised column, including the directional extras.
 ALL_KEYS: tuple[str, ...] = tuple(spec.key for spec in MEASURES)
 
-#: Sensible default when a caller does not name a measure.
-#: Chosen by measurement, not taste, and the claim is narrower than it once was.
-#: Backtested over 212,269 commits across six organisations and six languages,
-#: P(B|A) ranks first among the measures on every corpus tried. Against the
-#: hardest free baseline -- the file's test, then its folder -- that is 1.18x
-#: corpus-wide, not the 1.6x-3.9x once quoted here: those figures were measured
-#: against "the repository's busiest files", which nobody has ever used to
-#: decide what to open. On a meticulously organised codebase the free rule wins
-#: outright. See scripts/backtest.py.
-#:
-#: The result is principled rather than lucky: "what else must change" asks for
-#: the probability B changes given A did, which is exactly what this computes.
-#: The symmetric measures answer "is this association surprising?" -- a better
-#: question for discovery, a worse one for prediction.
 DEFAULT_MEASURE = "confidence_ab"
 
-#: The corpus every `hit_rate` and `lift` on a MeasureSpec was measured over, so
-#: a caller can weigh how much the number should travel. Different code has
-#: different habits: the figures move by repository, and on the most
-#: convention-regular ones every measure loses to guessing the file's test.
 MEASURED_ON = ("471,972 predictions over 105,986 commits in 79 repositories "
                "across six organisations and six languages")
 
-#: What the same corpus yields with no history at all: the file's test, then the
-#: rest of its folder. Reported beside every measured hit rate so the two can be
-#: compared without a ratio anyone has to interpret. A measure below it is one
-#: worth ignoring -- and on the most convention-regular repositories, every
-#: measure is below it.
 FREE_LOOKUP_HIT_RATE = 0.534
 
-#: What each measure scored on that corpus. Reported rather than ranked: the
-#: order here answers one question -- what else changes with this file -- and a
-#: caller asking a different one should read the formula, not this number.
-#:
-#: Note what the top of the list means. `confidence_ab` is `a / n_a` and
-#: `russell_rao` is `a / N`; when ranking one file's partners both denominators
-#: are constant, so both sort by `a` alone and score identically. The measure
-#: that wins this benchmark is arithmetically "how often did these two change
-#: together", and the other thirty earn their place on other questions, not on
-#: this one.
 _MEASURED_HIT_RATE = {
     "russell_rao": 0.632,
     "confidence_ab": 0.632,
@@ -714,11 +625,7 @@ for _spec in MEASURES:
 
 
 def resolve(key: str) -> MeasureSpec:
-    """Look up a measure by key or alias.
-
-    Raises:
-        KeyError: if the name matches no measure, with the valid keys listed.
-    """
+    """Look up a measure by key or alias."""
     normalised = key.strip().lower()
     canonical = _ALIASES.get(normalised, normalised)
     if canonical not in BY_KEY:

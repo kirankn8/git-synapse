@@ -1,16 +1,10 @@
-"""The last defensive branches, module by module.
-
-Nothing exotic here: guards for empty inputs, absent rows and unusual shapes.
-They exist because someone anticipated the case, and until they are exercised
-that anticipation is untested.
-"""
+"""The last defensive branches, module by module."""
 from __future__ import annotations
 
 from datetime import UTC
 
 import pytest
 
-# ------------------------------------------------------------- aggregate
 
 def test_directory_rollups_handle_a_repo_with_only_root_files(scratch_db):
     """Depth-zero files have no parent directory to roll into."""
@@ -43,11 +37,9 @@ def test_directory_rollups_handle_a_repo_with_only_root_files(scratch_db):
         conn.delete(conn.get(models().Repo, rid))
 
 
-# ----------------------------------------------------------------- score
 
 def test_scoring_a_repo_with_a_single_file_produces_no_pairs(scratch_db):
-    """A pair needs two files; one file must yield nothing rather than a
-    degenerate self-pair."""
+    """A pair needs two files; one file must yield nothing rather than a degenerate self-pair."""
     from datetime import datetime, timedelta
 
     from git_synapse.analysis.aggregate import rebuild_repo
@@ -81,7 +73,6 @@ def test_scoring_a_repo_with_a_single_file_produces_no_pairs(scratch_db):
         conn.delete(conn.get(models().Repo, rid))
 
 
-# ----------------------------------------------------------------- query
 
 def test_limits_are_clamped_rather_than_trusted(db):
     from git_synapse.analysis.query import _clamp_limit
@@ -112,11 +103,9 @@ def test_measure_aliases_resolve(db):
     assert _safe_order("") == _safe_order(None)
 
 
-# ---------------------------------------------------------------- gitops
 
 def test_current_head_and_default_branch_on_a_broken_mirror(tmp_path):
-    """These are called on every sync; they must return None rather than raise
-    when the mirror is not usable."""
+    """These are called on every sync; they must return None rather than raise when the mirror is not usable."""
     from git_synapse.ingest.gitops import current_head, default_branch, repo_size_kb
 
     junk = tmp_path / "junk"
@@ -133,12 +122,9 @@ def test_ref_tips_on_a_repository_with_no_commits(tmp_path):
 
     bare = tmp_path / "empty.git"
     subprocess.run(["git", "init", "--bare", "--quiet", str(bare)], check=True)
-    # git exits 0 and echoes the literal "HEAD" here; storing that as a
-    # watermark would make the next run exclude everything.
     assert ref_tips(bare) == []
 
 
-# ---------------------------------------------------------------- parser
 
 def test_split_path_on_pathological_input():
     from git_synapse.ingest.parser import split_path
@@ -149,13 +135,10 @@ def test_split_path_on_pathological_input():
         assert depth >= 0
 
 
-# ----------------------------------------------------- reporting with rows
 
-# ------------------------------------------------ manifest scanning limits
 
 def test_the_manifest_scan_stops_at_its_cap(tmp_path, monkeypatch):
-    """A repository with thousands of manifests must not make discovery
-    unbounded; the cap exists so one pathological repo cannot stall a run."""
+    """A repository with thousands of manifests must not make discovery unbounded; the cap exists so one pathological repo cannot stall a run."""
     import subprocess
 
     from git_synapse.analysis import depbump

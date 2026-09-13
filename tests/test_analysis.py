@@ -1,15 +1,4 @@
-"""End-to-end verification of aggregation and scoring.
-
-A synthetic repository with a hand-designed co-change structure is loaded, then
-aggregated and scored through the real SQL. The resulting stored measures are
-compared against :mod:`git_synapse.stats.measures` evaluated directly on the counts
-the test itself knows to be true.
-
-This is the test that would catch a wrong population size, a mis-scoped
-marginal, or an off-by-one in the pair self-join -- none of which the unit tests
-in ``test_measures.py`` can see, because those start from a contingency table
-that is assumed correct.
-"""
+"""End-to-end verification of aggregation and scoring."""
 
 from __future__ import annotations
 
@@ -30,15 +19,6 @@ from git_synapse.stats.registry import BY_KEY, CORE_KEYS
 
 BASE = datetime(2024, 1, 1, tzinfo=UTC)
 
-# A deliberately designed history.
-#
-#   A and B always change together        -> 10 commits
-#   A changes alone                       ->  5 commits
-#   B changes alone                       ->  3 commits
-#   C changes alone (never with A or B)   ->  7 commits
-#
-# Total pair-eligible commits N = 25.
-# For the pair (A, B):  n_ab = 10, n_a = 15, n_b = 13
 HISTORY = (
     [["A.py", "B.py"]] * 10
     + [["A.py"]] * 5
@@ -155,13 +135,7 @@ def test_stored_contingency_is_self_consistent(analysed):
 
 @pytest.mark.parametrize("key", CORE_KEYS)
 def test_every_stored_measure_matches_direct_computation(analysed, key):
-    """The value in the database must equal the measure evaluated in Python.
-
-    This closes the loop between the SQL aggregation and the statistics module:
-    if the pair join, the marginals or the population were wrong, the stored
-    value would diverge from the value computed from the counts this test
-    independently asserts.
-    """
+    """The value in the database must equal the measure evaluated in Python."""
     a, b = file_id(analysed, "A.py"), file_id(analysed, "B.py")
     detail = pair_detail(a, b)
     assert detail is not None
@@ -213,13 +187,7 @@ def test_rescoring_is_deterministic(analysed):
 
 
 def test_deleting_a_repo_cascades_its_derived_metrics(db):
-    """Metric rows must not survive their repository.
-
-    ``file_pair_metric`` originally had no foreign key to ``repo``, so deleting a
-    repository cascaded away its ``file_pair`` rows but stranded the matching
-    metric rows -- and ``TRUNCATE repo ... CASCADE`` skipped them entirely, so
-    ``git-synapse reset`` left stale scores the API would still serve.
-    """
+    """Metric rows must not survive their repository."""
     record = RepoRecord(
         github_id=999_000_003,
         owner="test",
@@ -284,7 +252,6 @@ def test_no_orphaned_metric_rows_exist(db):
 
 
 
-# ------------------------------------------- direction-aware ordering columns
 
 @pytest.mark.parametrize(("measure", "expected"), [
     ("confidence_ab", ("confidence_out", "confidence_ab", "confidence_ba")),
@@ -292,21 +259,15 @@ def test_no_orphaned_metric_rows_exist(db):
     ("jaccard", ("jaccard", "jaccard", "jaccard")),
 ])
 def test_the_conditional_measures_order_by_direction(measure, expected):
-    """`P(B|A)` and `P(A|B)` are the same pair read from opposite ends, so the
-    A-side and B-side of the query must not use the same column -- doing so
-    reported the partner's confidence as the file's own."""
+    """`P(B|A)` and `P(A|B)` are the same pair read from opposite ends, so the A-side and B-side of the query must not use the same column -- doing so reported the partner's confidence as the file's own."""
     from git_synapse.analysis.query import _oriented_order
 
     assert _oriented_order(measure) == expected
 
 
-# ------------------------------------- callers that pass their own connection
 
 def test_the_derived_stages_accept_a_caller_supplied_connection(db):
-    """Every stage takes an optional connection so a pipeline run does the whole
-    repository in one transaction. Called without one they open their own, which
-    is the path the tests took -- leaving the shared-transaction path untested,
-    and that is the one the pipeline actually uses."""
+    """Every stage takes an optional connection so a pipeline run does the whole repository in one transaction."""
     from git_synapse.analysis import depbump, score
     from git_synapse.analysis.aggregate import rebuild_repo
     from git_synapse.db.orm import session_scope
@@ -330,8 +291,7 @@ def test_the_derived_stages_accept_a_caller_supplied_connection(db):
 
 
 def test_declared_only_impact_filters_to_manifest_backed_edges(db):
-    """The flag is what separates "these are declared" from "these correlate",
-    and an agent is told to trust the first."""
+    """The flag is what separates "these are declared" from "these correlate", and an agent is told to trust the first."""
     from git_synapse.analysis import predict
 
     assert predict.impact_for(repo_id=-1, declared_only=False) == []
@@ -339,9 +299,7 @@ def test_declared_only_impact_filters_to_manifest_backed_edges(db):
 
 
 def test_a_minimum_score_filters_both_orientations(db):
-    """A pair is stored once and read from either end, so a threshold applied to
-    only one side would return partners below it whenever the pair happened to
-    be stored the other way round."""
+    """A pair is stored once and read from either end, so a threshold applied to only one side would return partners below it whenever the pair happened to be stored the other way round."""
     from git_synapse.analysis import query as q
 
     assert q.coupled_files(file_id=-1, measure="jaccard", limit=5,
@@ -349,8 +307,7 @@ def test_a_minimum_score_filters_both_orientations(db):
 
 
 def test_repositories_can_be_listed_by_the_account_that_owns_them(db):
-    """The rung that makes the hierarchy navigable. Without it the Accounts page
-    can only send a reader to every repository in the corpus."""
+    """The rung that makes the hierarchy navigable."""
     from git_synapse.analysis import query as q
     from git_synapse.db.orm import session_scope
 
@@ -373,11 +330,7 @@ def test_repositories_can_be_listed_by_the_account_that_owns_them(db):
 
 
 def test_the_cells_stored_are_the_cells_the_scores_came_from(caplog):
-    """`Contingency.from_counts` clamps infeasible input to the feasible
-    region, and inclusion-exclusion can force `a` *up* from a reported zero.
-    Storing the raw counts beside scores derived from the clamped ones breaks
-    the property everything here rests on: that four counts reproduce the
-    number shown beside them."""
+    """`Contingency.from_counts` clamps infeasible input to the feasible region, and inclusion-exclusion can force `a` *up* from a reported zero."""
     import logging
 
     import numpy as np
@@ -387,8 +340,6 @@ def test_the_cells_stored_are_the_cells_the_scores_came_from(caplog):
     class _Batch:
         a_ids = np.array([11])
         b_ids = np.array([22])
-        # n_a + n_b > N, so at least 20 co-changes are forced however many were
-        # reported. The reported figure here is zero.
         n_ab = np.array([0])
         n_a = np.array([60])
         n_b = np.array([60])
@@ -415,9 +366,7 @@ def test_the_cells_stored_are_the_cells_the_scores_came_from(caplog):
 
 
 def test_feasible_counts_are_stored_unchanged_and_say_nothing(caplog):
-    """The warning must not cry wolf on ordinary data -- which is all data this
-    pipeline produces, since the marginals come from the same commits as the
-    joint count."""
+    """The warning must not cry wolf on ordinary data -- which is all data this pipeline produces, since the marginals come from the same commits as the joint count."""
     import logging
 
     import numpy as np
@@ -439,10 +388,7 @@ def test_feasible_counts_are_stored_unchanged_and_say_nothing(caplog):
 
 
 def test_a_directory_nothing_lives_in_any_more_is_removed(db):
-    """`directory` is insert-only while `file_directory` is rebuilt every pass,
-    so a folder whose files were all renamed away or deleted kept its row --
-    and the counts it had when it still had files. Eleven were live: a folder
-    page offering "79 changes, 3 files" with nothing in it."""
+    """`directory` is insert-only while `file_directory` is rebuilt every pass, so a folder whose files were all renamed away or deleted kept its row -- and the counts it had when it still had files."""
     from git_synapse.analysis import aggregate
 
     with session_scope() as session:
@@ -467,10 +413,7 @@ def test_a_directory_nothing_lives_in_any_more_is_removed(db):
 
 
 def test_pairs_are_streamed_in_fixed_size_batches(db, monkeypatch):
-    """The batch exists so a repository with tens of millions of pairs never
-    materialises in the client. The configured size is 200,000, which no test
-    corpus reaches, so this lowers it to the floor and crosses that instead.
-    """
+    """The batch exists so a repository with tens of millions of pairs never materialises in the client."""
     import dataclasses
     from uuid import uuid4
 
@@ -491,8 +434,6 @@ def test_pairs_are_streamed_in_fixed_size_batches(db, monkeypatch):
         session.add(repo)
         session.flush()
 
-        # 46 files make 1,035 distinct pairs, which clears the 1,000 floor the
-        # batch size is clamped to.
         files = [models().File(repo_id=repo.id, path=f"f{i}.py", dir_path="",
                                basename=f"f{i}.py", pair_change_count=3)
                  for i in range(46)]
@@ -524,11 +465,7 @@ def test_pairs_are_streamed_in_fixed_size_batches(db, monkeypatch):
 
 
 def test_an_ineligible_commit_contributes_no_pairs(db):
-    """A merge restates its parents' changes and a sweeping commit touches
-    files that have nothing to do with each other. Both are stored, and both
-    are excluded from pair counting -- otherwise one commit invents a coupling
-    between every file it happened to touch.
-    """
+    """A merge restates its parents' changes and a sweeping commit touches files that have nothing to do with each other."""
     from datetime import UTC, datetime
     from uuid import uuid4
 
@@ -548,9 +485,6 @@ def test_an_ineligible_commit_contributes_no_pairs(db):
         session.flush()
 
         now = datetime.now(UTC)
-        # Two ordinary commits, because a pair needs `min_pair_support` (2)
-        # co-changes before it is persisted at all; plus one merge, which is
-        # the commit under test.
         for i, is_merge in enumerate((False, False, True)):
             commit = models().Commit(repo_id=repo.id, sha=f"{i:040x}", authored_at=now,
                                      committed_at=now, is_merge=is_merge, n_files=2)

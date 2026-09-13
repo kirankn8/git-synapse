@@ -1,10 +1,4 @@
-"""The call log: what was asked, what came back, and what it costs to record.
-
-Two surfaces consume this product and neither left a trace, so "is anything
-using this?" had no answer. These cover the properties that make the log
-trustworthy: it never blocks or breaks a caller, it bounds what it stores, and
-it says when it dropped something rather than under-reporting silently.
-"""
+"""The call log: what was asked, what came back, and what it costs to record."""
 from __future__ import annotations
 
 import json
@@ -37,10 +31,7 @@ def test_a_call_is_queued_with_what_was_asked_and_what_came_back():
 
 
 def test_a_large_reply_is_truncated_but_its_true_size_is_kept():
-    """A thousand-row table would make the log larger than the data it
-    describes. How much came back is usually the question anyway."""
-    # Sized from the constant, so raising CALL_LOG_BODY_BYTES does not quietly
-    # turn this into a test of nothing.
+    """A thousand-row table would make the log larger than the data it describes."""
     big = {"rows": ["x" * 100] * (calls.PREVIEW_BYTES // 100 + 20)}
     calls.record("http", "/api/pairs", result=big)
     row = calls._queue.get_nowait()
@@ -52,8 +43,7 @@ def test_a_large_reply_is_truncated_but_its_true_size_is_kept():
 
 
 def test_explicit_size_and_rows_win_over_what_can_be_inferred():
-    """An HTTP reply is bytes on the wire; re-encoding the parsed body would
-    report a number the client never saw."""
+    """An HTTP reply is bytes on the wire; re-encoding the parsed body would report a number the client never saw."""
     calls.record("http", "/api/repos", result={"repos": [1]},
                  result_bytes=9999, result_rows=42)
     row = calls._queue.get_nowait()
@@ -67,8 +57,7 @@ def test_something_unserialisable_is_described_rather_than_dropped():
 
 
 def test_a_full_queue_drops_and_counts_rather_than_blocking(monkeypatch):
-    """Telemetry that slows the thing it measures is a bad trade; telemetry
-    that can wedge it is worse. The count makes the loss visible."""
+    """Telemetry that slows the thing it measures is a bad trade; telemetry that can wedge it is worse."""
     monkeypatch.setattr(calls, "_ensure_worker", lambda: None)
     before = calls.dropped()
     tiny: queue.Queue = queue.Queue(maxsize=1)
@@ -157,8 +146,7 @@ def test_filters_narrow_the_list(db, settled_calls):
 
 
 def test_pruning_is_best_effort_and_reports_what_it_removed(db, caplog, monkeypatch):
-    """It runs at the end of an ingest. A failure there must not fail the run,
-    and a silent failure would let the table grow unbounded unnoticed."""
+    """It runs at the end of an ingest."""
     import logging
 
     from git_synapse.ingest import pipeline
@@ -178,8 +166,7 @@ def test_pruning_is_best_effort_and_reports_what_it_removed(db, caplog, monkeypa
 
 
 def test_a_list_reply_and_an_unserialisable_one_are_both_summarised():
-    """Not every reply is a dict of rows: MCP tools return lists, and anything
-    can arrive that json refuses. Neither may lose the record."""
+    """Not every reply is a dict of rows: MCP tools return lists, and anything can arrive that json refuses."""
     calls.record("mcp", "list_tool", result=[1, 2, 3, 4])
     assert calls._queue.get_nowait()["result_rows"] == 4
 
@@ -207,8 +194,7 @@ def test_the_flusher_thread_starts_once_and_is_reused():
 
 
 def test_a_value_json_refuses_is_still_recorded_as_something():
-    """A circular structure defeats json.dumps even with default=str. Losing
-    the whole row over an unprintable argument would hide the call."""
+    """A circular structure defeats json.dumps even with default=str."""
     loop: dict = {}
     loop["self"] = loop
 
@@ -219,8 +205,7 @@ def test_a_value_json_refuses_is_still_recorded_as_something():
 
 
 def test_two_threads_racing_to_start_the_flusher_start_only_one(monkeypatch):
-    """The check outside the lock is a fast path; the one inside is what makes
-    it correct. Without it, two callers arriving together get two threads."""
+    """The check outside the lock is a fast path; the one inside is what makes it correct."""
     import contextlib
     import threading
 
@@ -252,9 +237,7 @@ def test_two_threads_racing_to_start_the_flusher_start_only_one(monkeypatch):
 
 
 def test_every_registered_tool_is_listed_even_when_never_called(db, monkeypatch, settled_calls):
-    """Two tools had been called and fourteen exist, so the page showed two and
-    read as "this server has two tools". A tool nobody uses is the row worth
-    seeing, and it cannot come from a table built out of calls."""
+    """Two tools had been called and fourteen exist, so the page showed two and read as "this server has two tools"."""
     monkeypatch.setattr(calls, "known_mcp_tools",
                         lambda: ["called_one", "never_one", "never_two"])
     calls.record("mcp", "called_one", result={"x": [1]})
@@ -269,8 +252,7 @@ def test_every_registered_tool_is_listed_even_when_never_called(db, monkeypatch,
 
 
 def test_the_idle_inventory_is_left_out_where_it_would_mislead(db, monkeypatch):
-    """Under "errors only", a tool that has never run has never failed either;
-    listing it with zero would read as a passing tool in a failure report."""
+    """Under "errors only", a tool that has never run has never failed either; listing it with zero would read as a passing tool in a failure report."""
     monkeypatch.setattr(calls, "known_mcp_tools", lambda: ["never_one"])
     assert not [r for r in calls.by_name(surface="mcp", hours=1, status="error")
                 if r["name"] == "never_one"]
@@ -279,8 +261,7 @@ def test_the_idle_inventory_is_left_out_where_it_would_mislead(db, monkeypatch):
 
 
 def test_the_summary_narrows_with_the_surface_the_reader_chose(db, settled_calls):
-    """It ignored the filter, so the list narrowed and every figure above it
-    stayed put -- which reads as the filters not working."""
+    """It ignored the filter, so the list narrowed and every figure above it stayed put -- which reads as the filters not working."""
     calls.record("mcp", "a_tool", result={"x": [1]})
     calls.record("http", "/api/thing", result={"x": [1]})
     settled_calls(lambda: calls.recent(surface="http", name="/api/thing", limit=1))
@@ -305,8 +286,7 @@ def test_the_window_reaches_the_call_list(db):
 
 
 def test_an_unpublished_inventory_is_empty_rather_than_an_error(db):
-    """The API reads what the MCP container published. Before it has started,
-    or if it never does, the activity page must still render."""
+    """The API reads what the MCP container published."""
     from git_synapse.db.orm import models, session_scope
     with session_scope() as session:
         session.query(models().Meta).filter_by(key="watermark:mcp_tools").delete(synchronize_session=False)
@@ -314,8 +294,7 @@ def test_an_unpublished_inventory_is_empty_rather_than_an_error(db):
 
 
 def test_the_timeline_returns_every_hour_including_the_empty_ones(db):
-    """A chart drawn only from hours that had traffic closes the gaps silently
-    and turns an outage into a smooth line."""
+    """A chart drawn only from hours that had traffic closes the gaps silently and turns an outage into a smooth line."""
     buckets = calls.timeline(hours=6)
     assert len(buckets) == 6
     hours = [b["hour"] for b in buckets]
@@ -326,15 +305,13 @@ def test_the_timeline_returns_every_hour_including_the_empty_ones(db):
 
 
 def test_the_timeline_window_is_clamped(db):
-    """A hand-typed hours=100000 would ask Postgres to generate a series with
-    four million rows in it."""
+    """A hand-typed hours=100000 would ask Postgres to generate a series with four million rows in it."""
     assert len(calls.timeline(hours=10_000)) == 168
     assert len(calls.timeline(hours=0)) == 1
 
 
 def test_expired_sessions_are_pruned_with_the_call_log(db, caplog, monkeypatch):
-    """Kept forever they are dead weight, and a record of who was signed in
-    from where long after it could matter."""
+    """Kept forever they are dead weight, and a record of who was signed in from where long after it could matter."""
     import logging
 
     from git_synapse import auth

@@ -1,10 +1,4 @@
-"""Declarative ORM schema for Git Synapse.
-
-Every persisted table is represented by a mapped class in this module.  The
-classes are generated from the compact declarations below with SQLAlchemy's
-declarative metaclass; they are ordinary mapped classes, not reflected or
-automapped tables.  ``Base.metadata`` is the sole schema registry.
-"""
+"""Declarative ORM schema for Git Synapse."""
 
 from __future__ import annotations
 
@@ -236,9 +230,6 @@ MODEL_CLASSES = SimpleNamespace(
 )
 
 
-# These indexes are part of the canonical schema, not a post-bootstrap SQL
-# script.  PostgreSQL-specific operator classes are intentionally kept here;
-# they are needed by the path and repository search endpoints.
 Index("account_login_host_idx", func.lower(account.__table__.c.login), func.lower(account.__table__.c.host), unique=True)
 Index("app_user_email_idx", func.lower(app_user.__table__.c.email), unique=True)
 Index("repo_owner_idx", repo.__table__.c.owner)
@@ -277,10 +268,6 @@ Index("user_session_expiry_idx", user_session.__table__.c.expires_at)
 Index("repo_account_idx", repo.__table__.c.account_id)
 
 
-# Keep the deletion semantics explicit.  Derived facts must disappear with
-# their repository/file, while optional identity links may be nulled when an
-# author or account is removed.  Setting this on the SQLAlchemy ForeignKey
-# objects makes it part of the generated DDL rather than an application rule.
 _cascade = {
     "repo": ["account_id"],
     "file": ["repo_id"],
@@ -326,9 +313,6 @@ for _table_name, _column_name in _set_null:
         _foreign_key.constraint.ondelete = "SET NULL"
 
 
-# PostgreSQL search indexes used by repository/file path queries.  They are
-# declared here so a fresh install has the same query characteristics as the
-# populated development database.
 Index("repo_name_trgm_idx", repo.__table__.c.full_name, postgresql_using="gin", postgresql_ops={"full_name": "gin_trgm_ops"})
 Index("repo_topics_idx", repo.__table__.c.topics, postgresql_using="gin")
 Index("author_name_trgm_idx", author.__table__.c.display_name, postgresql_using="gin", postgresql_ops={"display_name": "gin_trgm_ops"})

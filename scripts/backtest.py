@@ -1,7 +1,4 @@
-"""Replay history and measure whether coupling suggestions would have helped.
-
-    docker compose run --rm -v "$PWD:/repo" --entrypoint python cli /repo/scripts/backtest.py --top 5
-"""
+"""Replay history and measure whether coupling suggestions would have helped."""
 
 from __future__ import annotations
 

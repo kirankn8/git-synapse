@@ -1,17 +1,4 @@
-"""End-to-end orchestration: discover -> mirror -> parse -> load -> aggregate -> score.
-
-Repositories are independent of one another at every stage, so the pipeline
-fans out across a thread pool. The work is almost entirely I/O -- git talking to
-GitHub and PostgreSQL talking to the application -- so threads are the right primitive
-despite the GIL; the CPU-bound part (vectorised scoring) releases the GIL inside
-numpy anyway.
-
-Failure is isolated per repository. One repo that has been deleted upstream, or
-whose history is corrupt, records its error in ``ingest_run_repo`` and leaves
-the other 269 to finish. A run reports ``partial`` rather than ``failed`` when
-some repos succeeded, because "263 of 270 refreshed" is a materially different
-operational situation from "nothing ran".
-"""
+"""End-to-end orchestration: discover -> mirror -> parse -> load -> aggregate -> score."""
 
 from __future__ import annotations
 
@@ -53,24 +40,14 @@ def _mark_replays(repo_id: int, shas: set[str], conn: object) -> int:
 
 log = logging.getLogger(__name__)
 
-#: Consecutive network-failed repositories before a run gives up. Set above the
-#: worker count so a single unlucky burst cannot trip it.
 NETWORK_FAILURE_ABORT = 12
 
-#: A discovery returning less than this fraction of the repositories already
-#: known is treated as a failed listing rather than as the org having shrunk.
 DISCOVERY_SHRINK_FLOOR = 0.8
 
 
 
 def _try_ingest_lock(session: object) -> bool:
-    """Acquire a transaction-scoped ORM row lock for the ingest run.
-
-    The lock is represented by one well-known ``meta`` row.  This keeps the
-    serialization primitive in the mapped schema and avoids database-specific
-    advisory-lock SQL.  The surrounding session remains open for the whole
-    run, so PostgreSQL releases the row lock if the process dies.
-    """
+    """Acquire a transaction-scoped ORM row lock for the ingest run."""
     Meta = models().Meta
     try:
         row = session.get(Meta, "lock:ingest", with_for_update={"nowait": True})
@@ -80,9 +57,8 @@ def _try_ingest_lock(session: object) -> bool:
         return True
     except (OperationalError, DBAPIError) as exc:
         if getattr(getattr(exc, "orig", None), "args", None):
-            # PostgreSQL reports NOWAIT contention as SQLSTATE 55P03 through
-            # different database-driver exception classes.
             detail = str(exc.orig.args[0])
+            # 55P03 is lock_not_available: another run holds the ingest lock.
             if "55P03" not in detail and "could not obtain lock" not in detail:
                 raise
         session.rollback()
@@ -128,27 +104,11 @@ class RunResult:
         return sum(r.commits_added for r in self.repos)
 
 
-#: A run still marked "running" after this long was almost certainly killed --
-#: its container was stopped, or the host went away. Nothing updates the row in
-#: that case, so without reconciliation it blocks every future run forever.
 STALE_RUN_HOURS = 6
 
 
 def reconcile_stale_runs(max_age_hours: int = STALE_RUN_HOURS) -> int:
-    """Mark abandoned runs as failed.
-
-    Called on service startup and before any new run is admitted. A run whose
-    process died leaves a row stuck in ``running``; the API refuses to start a
-    second run while one is in flight, so a single killed container would
-    otherwise disable ingestion permanently.
-
-    Liveness is the ingest advisory lock rather than the row's age: a run holds
-    it for its whole life, so its absence is proof the run is gone. The age
-    window remains as a backstop.
-
-    Returns:
-        Number of runs reconciled.
-    """
+    """Mark abandoned runs as failed."""
     cutoff = datetime.now(UTC).timestamp() - max_age_hours * 3600
     cutoff_at = datetime.fromtimestamp(cutoff, tz=UTC)
     IngestRun = models().IngestRun
@@ -191,12 +151,7 @@ def _start_run(kind: str, trigger: str, repos_total: int) -> int:
 
 
 def _prune_call_log() -> None:
-    """Trim the call log at the end of a run.
-
-    It is the one table that grows with traffic rather than with history, so it
-    needs a bound something actually applies. A refresh is the natural place:
-    it happens on a schedule, and a failure here must not fail the run.
-    """
+    """Trim the call log at the end of a run."""
     from git_synapse.analysis import calls
 
     try:
@@ -206,8 +161,6 @@ def _prune_call_log() -> None:
     except Exception:
         log.warning("could not prune the call log", exc_info=True)
 
-    # Expired sessions are dead weight and, kept forever, a record of who was
-    # signed in from where long after it could matter.
     try:
         from git_synapse import auth
 
@@ -222,16 +175,7 @@ def _prune_call_log() -> None:
 
 
 def _failure_summary(run: RunResult) -> str | None:
-    """One sentence explaining a failed run, or None when nothing failed.
-
-    A run whose repositories all fail identically is one systemic problem --
-    a migration, a credential, a full disk -- not N independent ones, and the
-    shared message is the whole diagnosis. Without this the row said `failed`
-    with an empty error, and the per-repository table could not help either:
-    it is keyed on a repository id, and a repository that fails before it has
-    one records nothing at all. Which is exactly the earliest, most systemic
-    failures.
-    """
+    """One sentence explaining a failed run, or None when nothing failed."""
     if not run.failed:
         return None
 
@@ -319,31 +263,14 @@ class AuthError(RuntimeError):
 
 
 def private_repos_in_scope() -> int:
-    """How many repositories about to be mirrored are private.
-
-    A token is only genuinely required for those. An entirely public corpus --
-    a public organisation, or an allowlist of public repositories -- clones over
-    plain HTTPS and needs no credential at all.
-    """
+    """How many repositories about to be mirrored are private."""
     Repo = models().Repo
     with session_scope() as conn:
         return int(conn.query(Repo).filter(Repo.is_enabled.is_(True), Repo.is_private.is_(True)).count())
 
 
 def verify_credentials(required: bool = True) -> str:
-    """Confirm the token works before any mirror is touched.
-
-    Called at the start of every run. Without it, an expired token produces 272
-    individually-failing repositories and a run that looks like a mass outage
-    instead of one bad credential -- and `gh auth token` yields short-lived
-    `ghu_` tokens, so expiry is routine rather than exceptional.
-
-    Returns:
-        The authenticated login.
-
-    Raises:
-        AuthError: if the token is absent or rejected.
-    """
+    """Confirm the token works before any mirror is touched."""
     cfg = get_config().providers.github
     token = cfg.current_token()
     if not token:
@@ -368,8 +295,6 @@ def verify_credentials(required: bool = True) -> str:
             timeout=15.0,
         )
     except httpx.HTTPError as exc:
-        # A network problem is not an auth problem; let the run proceed and let
-        # the per-repo retry logic deal with it.
         log.warning("could not reach the GitHub API to verify the token: %s", exc)
         return "unverified"
 
@@ -393,10 +318,7 @@ def verify_credentials(required: bool = True) -> str:
 
 
 def discover(trigger: str = "manual") -> list[RepoRecord]:
-    """List every configured account's repositories and upsert every record.
-
-    Returns the filtered set that ingestion should operate on.
-    """
+    """List every configured account's repositories and upsert every record."""
     configured = accounts.list_accounts(enabled_only=True)
     if not configured:
         raise AuthError(
@@ -413,13 +335,9 @@ def discover(trigger: str = "manual") -> list[RepoRecord]:
         try:
             found, raw = _discover_account(account)
         except AuthError:
-            # A bad credential is not this account's fault and retrying the
-            # rest would repeat the same failure against every one of them.
             raise
         except Exception as exc:  # noqa: BLE001 - one bad account must not stop the rest
             log.warning("discovery failed for %s: %s", account["login"], exc)
-            # No count: the listing failed, so nothing is known about how
-            # many repositories this source has -- and they did not vanish.
             accounts.record_discovery(account["id"], error=str(exc))
             failures.append(f"{account['login']}: {exc}")
             continue
@@ -432,15 +350,6 @@ def discover(trigger: str = "manual") -> list[RepoRecord]:
     if not selected and failures:
         raise AuthError("every configured account failed discovery: " + "; ".join(failures))
 
-    # A discovery that collapses is a symptom, not a fact about the accounts: an
-    # unauthenticated request returns only public repositories, with HTTP 200 and
-    # no error, and the run then quietly refreshes a fraction of the corpus.
-    #
-    # The comparison is against what the API *listed*, not what survived the
-    # filters. Measuring the filtered count made narrowing an allowlist
-    # indistinguishable from a broken credential, and refused the configuration
-    # change with an error about the credential. Skipped when an account errored,
-    # since then the shrinkage is explained and already reported.
     Repo = models().Repo
     with session_scope() as conn:
         known = int(conn.query(Repo).filter(Repo.is_enabled.is_(True)).count())
@@ -454,42 +363,14 @@ def discover(trigger: str = "manual") -> list[RepoRecord]:
     with session_scope() as conn:
         for record in selected:
             upsert_repo(record, conn, account_id=owners.get(record.full_name))
-    # After the writes, never before: what was selected is an intention, and a
-    # run that aborts between the two leaves a source claiming repositories no
-    # row backs.
     accounts.refresh_repo_counts()
     log.info("discovery upserted %d repositories from %d accounts", len(selected), len(configured))
     return selected
 
 
 def _discover_account(account: dict) -> tuple[list[RepoRecord], int]:
-    """List and filter one source, returning the kept records and the raw count.
-
-    The raw count is what the shrink guard has to reason about: narrowing an
-    allowlist legitimately collapses the *filtered* result, while a credential
-    that has stopped working collapses the *listing*.
-
-    For a source that names its repositories, the cheap way to get them depends
-    entirely on how big the owner is, which is not knowable in advance -- and
-    guessing it from the number of names is how a fixed threshold gets this
-    exactly backwards. Naming seven repositories in an org that holds thirty
-    costs seven requests by name and *one* by listing; naming one out of
-    microsoft's 8,296 costs one by name and eighty-three by listing.
-
-    So the first page is fetched either way -- one request, which the listing
-    needs anyway -- and it reports how many the owner has. The choice is then
-    arithmetic rather than a guess:
-
-    * the owner fits in that page, so there is nothing left to fetch;
-    * or the remaining pages cost less than the remaining names, so keep going;
-    * or the names are cheaper, so ask for exactly those.
-    """
+    """List and filter one source, returning the kept records and the raw count."""
     cfg = accounts.config_for(account)
-    # Built through `parse` rather than by hand. Assembling a Source field by
-    # field here meant `api_url` came straight from the account row, where NULL
-    # means "the provider's public API" -- and `has_api` reads None as "no API
-    # at all", so every ordinary GitHub source fell through to the no-API
-    # fallback and re-imported 164 repositories as bare git URLs.
     host = account.get("host") or "github.com"
     source = sources.parse(f"https://{host}/{account['login']}")
     overrides = {}
@@ -505,20 +386,12 @@ def _discover_account(account: dict) -> tuple[list[RepoRecord], int]:
     only = list(account.get("only_repos") or ())
     token = accounts.credential_for(accounts._with_credential(account))
 
-    # Impatient, unlike the clone path. Waiting out a rate limit is right for
-    # one repository's mirror; across a hundred sources it is not -- five
-    # retries of sixty seconds each, per source, is most of a day asleep inside
-    # a single run. Discovery repeats hourly, so giving up on a source and
-    # recording why costs nothing that the next run does not recover.
     with providers.for_source(source, token=token, patient=False) as client:
         if not client.supports_listing():
             if not only:
                 log.warning("%s has no API to enumerate; add its repositories by URL",
                             login)
                 return [], 0
-            # Nothing to compare against: by name is the only way in. Note that
-            # a host with no API cannot tell us a name is wrong, so a stale
-            # entry becomes a record that fails at clone time instead.
             return _fetch_by_name(client, login, only), len(only)
 
         first = client.list_page(login, 1)
@@ -530,8 +403,6 @@ def _discover_account(account: dict) -> tuple[list[RepoRecord], int]:
                 if first.total else None
             )
             if only and (remaining_pages is None or remaining_pages > len(only)):
-                # The owner is large and the allowlist is short: ask for exactly
-                # what was named and stop paging.
                 return _fetch_by_name(client, login, only), len(only)
             records = list(first.records)
             page = 1
@@ -542,26 +413,14 @@ def _discover_account(account: dict) -> tuple[list[RepoRecord], int]:
                 if not nxt.has_more:
                     break
 
-        # Inside the client's lifetime, and skipped entirely when an allowlist
-        # already decided. Only forks are asked about, and only when the
-        # listing did not already say: on GitHub that is one request each,
-        # everywhere else none.
         if not only:
             for record in records:
                 if record.is_fork and not record.parent_full_name:
                     record.parent_full_name = client.fetch_parent(record.full_name)
 
     if only:
-        # An allowlist is an explicit answer, so it decides on its own; running
-        # the include filters over it as well would let `include_forks` drop a
-        # repository somebody named.
-        #
-        # Matched on the path *under the owner*, never on the bare last segment.
-        # On GitHub the two are the same. On GitLab they are not: `veloren`
-        # also matches `veloren/dev/veloren`, a different project that happens
-        # to share a name -- and in that case a byte-identical history, which
-        # was then counted twice in every corpus-wide total.
         wanted = {n.lower().strip("/") for n in only}
+        # Match under the owner: on GitLab a bare name also matches nested groups.
         prefix = f"{login.lower()}/"
         kept = [r for r in records
                 if r.full_name.lower() in wanted
@@ -572,12 +431,7 @@ def _discover_account(account: dict) -> tuple[list[RepoRecord], int]:
 
 
 def _tracked_full_names() -> frozenset[str]:
-    """Every repository already in the corpus, lowercased.
-
-    Enabled ones only. A repository somebody switched off is not evidence, so
-    a fork of it is not a duplicate of anything -- switching a repository off
-    and having its fork silently vanish too would be its own surprise.
-    """
+    """Every repository already in the corpus, lowercased."""
     Repo = models().Repo
     with session_scope() as conn:
         rows = conn.query(Repo.full_name).filter(Repo.is_enabled.is_(True)).all()
@@ -585,11 +439,7 @@ def _tracked_full_names() -> frozenset[str]:
 
 
 def _fetch_by_name(client, login: str, names: list[str]) -> list[RepoRecord]:
-    """Fetch exactly the repositories an allowlist names, one request each.
-
-    One bad name must not cost the others: a repository that was renamed or
-    deleted upstream is a fact about that repository, not about the source.
-    """
+    """Fetch exactly the repositories an allowlist names, one request each."""
     out: list[RepoRecord] = []
     for name in names:
         try:
@@ -599,23 +449,11 @@ def _fetch_by_name(client, login: str, names: list[str]) -> list[RepoRecord]:
     return out
 
 
-#: Attempts for a repository whose transaction lost a deadlock or serialization
-#: race. Postgres resolves a deadlock by killing one participant, and the victim
-#: is chosen arbitrarily, so simply trying again is the correct response.
 DB_CONTENTION_RETRIES = 3
 
 
 def sync_repo(record: RepoRecord, force_full: bool = False) -> RepoResult:
-    """Mirror, parse and load one repository, retrying on database contention.
-
-    Args:
-        record: the repository to process.
-        force_full: re-read the entire history even if a watermark exists.
-
-    Returns:
-        A :class:`RepoResult`, with ``status='failed'`` and ``error`` set rather
-        than raising, so one bad repository cannot abort the run.
-    """
+    """Mirror, parse and load one repository, retrying on database contention."""
     for attempt in range(1, DB_CONTENTION_RETRIES + 1):
         result = _sync_repo_once(record, force_full)
         if result.status != "failed" or not _is_contention(result.error):
@@ -640,22 +478,7 @@ def _is_contention(error: str | None) -> bool:
 
 
 def _drop_unreachable_commits(repo_id: int, mirror: Path) -> int:
-    """Delete commits the mirror no longer reaches, e.g. after a force-push.
-
-    Mirrors are pruned on fetch but the database was insert-only, so rewritten
-    history accumulated forever: 735 commits across 24 repositories, inflating
-    the ``N`` of every contingency table in those repos and keeping files alive
-    that were deliberately removed. The reachable-set walk is only worth its cost
-    when the counts actually disagree, so a cheap comparison gates it.
-
-    Reachability must be measured over exactly the refs the ingest walks, which
-    is the shipping branch *and* every release tag. Measuring from the branch
-    alone made this prune delete every commit the tag walk had just inserted --
-    and delete it silently, because the run counts what the loader wrote rather
-    than what survived. It is self-triggering, too: the new commits push the
-    stored count above the branch count, which is the very condition that runs
-    the prune.
-    """
+    """Delete commits the mirror no longer reaches, e.g. after a force-push."""
     Commit = models().Commit
     with session_scope() as conn:
         stored = int(conn.query(Commit).filter(Commit.repo_id == repo_id).count())
@@ -718,9 +541,6 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
         blobless = gitops.choose_clone_mode(record.disk_usage_kb, cfg.ingest)
         result.blobless = blobless
 
-        # This repository's own source credential wins over the deployment
-        # one; `authed_clone_url` then refuses to embed either on a host that
-        # did not issue it.
         token = _clone_token(record) or cfg.providers.github.current_token()
         fetch = gitops.sync_mirror(
             record.full_name,
@@ -750,11 +570,9 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
         if not stored_refs and stored_sha:
             stored_refs = [stored_sha]
 
-        # A force-push can orphan a previous tip. Asking git for `^<missing>` is
-        # a hard error, so drop any SHA the mirror no longer contains rather
-        # than failing the whole repository.
         watermarks: list[str] = []
         if not force_full:
+            # A force-push can orphan an old tip, and ^<missing-sha> is a hard git error.
             watermarks = [
                 sha for sha in stored_refs if gitops.commit_exists(fetch.path, sha)
             ]
@@ -775,19 +593,10 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
 
         with session_scope() as conn:
             stats = load_commits(repo_id, commits, conn)
-            # Marked after loading, because a replay is only recognisable by
-            # comparing against the branch, and the flag is what keeps the same
-            # change from being counted once per release branch it reached.
             branch = gitops.default_branch(fetch.path)
             _mark_replays(repo_id, gitops.replayed_commits(fetch.path, branch), conn)
-            # After the commits, so each tag resolves to a row rather than
-            # leaving commit_id null on the first run.
             mirror = gitops.mirror_path_for(record.full_name, host=record.host)
             load_tags(repo_id, gitops.read_tags(mirror, gitops.default_branch(mirror)), conn)
-            # Record the default branch tip as the next run's exclusion point.
-            # This was every branch tip when the walk covered every branch;
-            # excluding more than the walk visits would skip commits that must
-            # still be read when their branch merges.
             repo_row = conn.get(Repo, repo_id)
             if repo_row is not None:
                 repo_row.last_ingest_at = datetime.now(UTC)
@@ -802,10 +611,6 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
         if removed:
             log.info("repo %d: removed %d commit(s) no longer in git", repo_id, removed)
 
-        # Re-derive aggregates when the atomic data moved, or when a previous
-        # pass ingested commits but failed before aggregating them. Without the
-        # second condition that failure was permanent: the commit watermark had
-        # already advanced, so every later run saw nothing to do.
         with session_scope() as conn:
             repo_row = conn.get(Repo, repo_id)
             stale_aggregate = bool(
@@ -855,21 +660,9 @@ def run_ingest(
     force_full: bool = False,
     concurrency: int | None = None,
 ) -> RunResult:
-    """Run the full pipeline over a set of repositories.
-
-    Args:
-        records: repositories to process. Discovered from GitHub when omitted.
-        trigger: ``manual``, ``schedule`` or ``api``; recorded on the run.
-        force_full: ignore watermarks and re-read every history.
-        concurrency: worker threads; defaults to ``INGEST_CONCURRENCY``.
-
-    Returns:
-        A :class:`RunResult` summarising every repository.
-    """
+    """Run the full pipeline over a set of repositories."""
     started = time.monotonic()
 
-    # One ingest at a time, across processes. The mapped meta row is locked for
-    # this transaction and released automatically if the process exits.
     with session_scope() as conn:
         if not _try_ingest_lock(conn):
             log.warning("another ingest run holds the lock; skipping this one")
@@ -886,11 +679,7 @@ def run_ingest(
 def _aborted_run(
     exc: Exception, force_full: bool, trigger: str, started: float
 ) -> RunResult:
-    """Record a run that refused to start, so the failure is visible in history.
-
-    An abort still opens and closes a run row: a refusal that leaves no trace
-    is indistinguishable from a scheduler that never fired.
-    """
+    """Record a run that refused to start, so the failure is visible in history."""
     log.error("aborting run: %s", exc)
     run = RunResult(kind="full" if force_full else "sync")
     run.run_id = _start_run(run.kind, trigger, 0)
@@ -918,9 +707,6 @@ def _run_ingest_locked(
 
     reconcile_stale_runs()
 
-    # Older code than the database was migrated to. Every write would fail
-    # against a constraint this process still expects, one repository at a
-    # time, so refuse once with something a reader can act on.
     drift = schema_drift()
     if drift:
         exc = AuthError(
@@ -931,17 +717,8 @@ def _run_ingest_locked(
         )
         return _aborted_run(exc, force_full, trigger, started)
 
-    # Fail the whole run on a bad credential rather than letting every
-    # repository fail individually. Deliberately before any mirror is touched.
-    #
-    # Required only when something private is in scope: refusing to run at all
-    # on a wholly public corpus blocks a legitimate configuration for no reason,
-    # since those clone over plain HTTPS.
     try:
         verify_credentials(required=private_repos_in_scope() > 0)
-        # Materialised analytics are versioned separately from source data.
-        # This catches calculation changes even when no repository has new
-        # commits, and runs the affected dependency closure exactly once.
         derived.ensure_current()
     except AuthError as exc:
         return _aborted_run(exc, force_full, trigger, started)
@@ -973,11 +750,6 @@ def _run_ingest_locked(
                     error=f"{type(exc).__name__}: {exc}",
                 )
 
-            # When connectivity goes, every repository fails the same way after
-            # exhausting its retries -- four attempts at a two-minute timeout is
-            # nine minutes each. Grinding through the whole corpus that way took
-            # 25 minutes to accomplish nothing. Give up once the pattern is
-            # unmistakable; the mirrors are untouched and the next run retries.
             if result.status == "failed" and gitops.is_transient_error(
                 result.error or ""
             ):
@@ -1006,12 +778,7 @@ def _run_ingest_locked(
                 " (blobless)" if result.blobless else "",
             )
 
-    # The dependency graph is global -- an edge spans repositories -- so it runs
-    # once after all per-repo work completes. A failure here must not fail the
-    # whole run: the per-repo results are already committed and useful alone.
     if run.commits_added > 0 or force_full or _crossrepo_rebuild_needed():
-        # Manifest bumps first: they are incremental per repository, and they
-        # are what dates every edge the graph below carries.
         try:
             db = depbump.rebuild(force=force_full)
             log.info(
@@ -1022,9 +789,6 @@ def _run_ingest_locked(
             log.exception("manifest bump scan failed")
 
         try:
-            # Keep both structural graphs in one transaction. If the module
-            # refresh fails, the declared graph remains stale too and the next
-            # ordinary refresh retries both stages.
             with session_scope() as conn:
                 depbump.refresh_declared(conn=conn, force=force_full)
                 depbump.refresh_modules(conn=conn)
@@ -1052,9 +816,6 @@ def _run_ingest_locked(
 
     run.duration_s = time.monotonic() - started
     _prune_call_log()
-    # Loud, and at the end, where a reader is already looking at the run: a
-    # duplicated history makes every corpus-wide total wrong, and nothing about
-    # either row on its own looks it.
     try:
         from git_synapse.analysis.query import duplicate_histories
 
@@ -1064,8 +825,6 @@ def _run_ingest_locked(
                 "corpus-wide totals count it once per copy; pause all but one",
                 dup["copies"], dup["host"], dup["commits"], ", ".join(dup["names"]))
     except Exception:
-        # The work is already done and recorded. A report that cannot run is
-        # not a reason to lose it.
         log.debug("could not check for duplicated histories", exc_info=True)
 
     _finish_run(run)
@@ -1077,21 +836,7 @@ def _run_ingest_locked(
 
 
 def load_repo_records() -> list[RepoRecord]:
-    """Rebuild :class:`RepoRecord` objects from the database.
-
-    Lets a refresh run without calling any host's API, which is useful when
-    re-processing after a config change or when the API is rate limited.
-
-    Every descriptive column is read back, not just the handful the pipeline
-    needs. The record is written straight back out by ``upsert_repo``, so a
-    partial read here silently blanked everything it omitted: language,
-    description, topics, licence and stars were wiped on every ingest.
-
-    Columns are named once and zipped into keyword arguments rather than read
-    by position. A positional read is how a column added in the middle of a
-    A positional projection shifts every field after it -- silently, wherever the types
-    happen to be compatible.
-    """
+    """Rebuild :class:`RepoRecord` objects from the database."""
     columns = (
         "github_id", "owner", "name", "full_name", "provider", "host",
         "clone_url", "default_branch", "disk_usage_kb", "is_private", "is_fork",

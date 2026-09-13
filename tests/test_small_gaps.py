@@ -1,14 +1,9 @@
-"""The small remaining branches: accessors, formatters and rarely-hit returns.
-
-Individually trivial. Collectively they are the parts of the codebase nothing
-has ever executed, which is the only category where a typo survives review.
-"""
+"""The small remaining branches: accessors, formatters and rarely-hit returns."""
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-# ------------------------------------------------------------ contingency
 
 def test_contingency_reports_its_shape_and_repr():
     from git_synapse.stats.contingency import Contingency
@@ -28,9 +23,7 @@ def test_a_scalar_contingency_has_scalar_shape():
     assert t.shape in ((), (1,))
 
 
-# --------------------------------------------------------------- registry
 
-# ----------------------------------------------------------------- config
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
@@ -64,15 +57,12 @@ def test_the_sqlalchemy_url_names_the_pg8000_driver():
     assert get_config().db.url.startswith("postgresql+pg8000://")
 
 
-# --------------------------------------------------------------- validate
 
 
-# ------------------------------------------- the "should never happen" arguments
 
 @pytest.mark.parametrize("level", ["", "FILE", "repo", "module", None])
 def test_scoring_refuses_a_level_it_does_not_know(level):
-    """file and dir are the only two. A typo must not silently score the wrong
-    table -- the tables have different key columns, so it would half-work."""
+    """file and dir are the only two."""
     from git_synapse.analysis.score import _level_sql
 
     with pytest.raises(ValueError, match="unknown level"):
@@ -110,8 +100,6 @@ def test_githubs_trailing_z_is_understood():
 
 @pytest.mark.parametrize(("headers", "expected"), [
     ({"retry-after": "30"}, 30),
-    # Capped: a server that asks for an hour still gets retried within five
-    # minutes, because the run has other repositories to get to.
     ({"retry-after": "99999"}, 300),
     ({"retry-after": "soon"}, 60),
     ({}, 60),
@@ -144,9 +132,7 @@ def test_a_reset_timestamp_is_honoured_only_when_it_is_plausible(delta, expected
 
 
 def test_a_contingency_table_with_a_collapsed_marginal_is_degenerate():
-    """A file present in every commit, or in none, collapses a marginal. Every
-    measure divides by one somewhere, so that is not a score of zero -- it is no
-    score at all."""
+    """A file present in every commit, or in none, collapses a marginal."""
     import numpy as np
 
     from git_synapse.stats.contingency import Contingency
