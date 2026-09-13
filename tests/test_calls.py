@@ -120,6 +120,34 @@ def test_the_log_is_pruned_by_age(db):
         assert session.query(models().CallLog).filter_by(name="ancient").count() == 0
 
 
+def test_the_log_is_pruned_by_row_count(db, monkeypatch):
+    from datetime import UTC, datetime
+
+    from git_synapse.db.orm import models, session_scope
+
+    with session_scope() as session:
+        rows = [models().CallLog(at=datetime.now(UTC), surface="http", name=f"bounded-{i}",
+                                 status="ok", duration_ms=1) for i in range(3)]
+        session.add_all(rows)
+        session.flush()
+        newest = sorted(row.id for row in rows)[-2:]
+
+    monkeypatch.setattr(calls, "KEEP_ROWS", 2)
+    assert calls.prune() >= 1
+    with session_scope() as session:
+        kept = {row.id for row in session.query(models().CallLog.id)}
+    assert kept == set(newest)
+
+
+@pytest.mark.parametrize("timed,value,only,expected", [
+    (0, None, None, None),
+    (1, 42.0, 42, 42),
+    (3, 41.26, 10, 41.3),
+])
+def test_a_percentile_needs_two_timings_before_it_interpolates(timed, value, only, expected):
+    assert calls._percentile(timed, value, only) == expected
+
+
 def test_filters_narrow_the_list(db, settled_calls):
     calls.record("http", "/api/a", status="ok")
     calls.record("http", "/api/b", status="error", error="boom")
