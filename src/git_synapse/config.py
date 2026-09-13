@@ -68,55 +68,57 @@ class DatabaseConfig:
 
 
 
-#: GitHub credential prefixes. Used to reject a partially written token file
-#: rather than send half a credential and get an indistinguishable 401 back.
-_TOKEN_PREFIXES = ("ghu_", "ghp_", "gho_", "ghs_", "ghr_", "github_pat_")
-
-
-def _looks_like_token(value: str) -> bool:
-    """True if the value has the shape of a GitHub token."""
-    return len(value) >= 20 and value.startswith(_TOKEN_PREFIXES)
+#: What a GitHub credential looks like. Used to reject a partially written
+#: token file rather than send half a credential and get an indistinguishable
+#: 401 back.
+_GITHUB_TOKEN_PREFIXES = ("ghu_", "ghp_", "gho_", "ghs_", "ghr_", "github_pat_")
 
 
 @dataclass(frozen=True)
-class GitHubConfig:
-    """How to reach GitHub: a credential and an endpoint.
+class HostCredential:
+    """What may be presented to one host, and where that host answers.
 
-    Which repositories to take is not here. That question is the same on every
-    host, and lives in :class:`SelectionConfig`.
+    One shape for every host. Not all of them use every field -- basic auth
+    carries a username, a rotating credential needs a file, a self-hosted
+    install needs an endpoint -- but which fields a host happens to use is not
+    a reason to give it a class of its own.
     """
 
-    token: str = field(default_factory=lambda: _env_str("GITHUB_TOKEN", ""))
+    token: str = ""
     #: A file the host keeps current, read fresh on every use. `gh` issues
-    #: short-lived ghu_ credentials, so a token captured into the environment at
-    #: container start is expired within hours and every fetch 401s until someone
-    #: restarts the container. Reading a file decouples credential lifetime from
-    #: container lifetime.
-    token_file: str = field(
-        default_factory=lambda: _env_str("GITHUB_TOKEN_FILE", "/run/git-synapse/github-token")
-    )
+    #: short-lived credentials, so one captured into the environment at
+    #: container start is expired within hours and every fetch 401s until
+    #: somebody restarts the container. Reading a file decouples credential
+    #: lifetime from container lifetime.
+    token_file: str = ""
+    #: Basic auth carries a username beside the secret; token schemes do not.
+    user: str = ""
+    #: The endpoint, where it is not the provider's public one.
+    api_url: str = ""
+    #: Prefixes a credential for this host is known to carry. Empty accepts any
+    #: non-empty value, which is the right answer for a host we cannot check.
+    token_prefixes: tuple[str, ...] = ()
 
     def current_token(self) -> str:
-        """The freshest token available: the file if present, else the env var."""
+        """The freshest credential available: the file if usable, else the value."""
         path = Path(self.token_file) if self.token_file else None
         if path is not None:
             try:
                 value = path.read_text(encoding="utf-8").strip()
             except OSError:
                 value = ""
-            # A half-written file would otherwise be sent to GitHub as a
-            # credential and come back 401, which reads as "expired token" and
-            # sends someone hunting the wrong problem. An unreadable, empty or
-            # malformed file must never blank or corrupt a working env token.
-            if value and _looks_like_token(value):
+            # A half-written file would otherwise be sent as a credential and
+            # come back 401, which reads as "expired token" and sends someone
+            # hunting the wrong problem. An unreadable, empty or malformed file
+            # must never blank or corrupt a working value.
+            if value and self._plausible(value):
                 return value
         return self.token
-    #: Legacy single-org setting, seeded into the `account` table on first boot
-    #: and ignored thereafter. Empty by default: there is no sensible org to
-    #: guess, and a non-empty default cannot be switched off from the
-    #: environment because a blank value falls back to it.
-    org: str = field(default_factory=lambda: _env_str("GITHUB_ORG", ""))
-    api_url: str = field(default_factory=lambda: _env_str("GITHUB_API_URL", "https://api.github.com"))
+
+    def _plausible(self, value: str) -> bool:
+        if not self.token_prefixes:
+            return True
+        return len(value) >= 20 and value.startswith(self.token_prefixes)
 
 
 @dataclass(frozen=True)
@@ -282,38 +284,44 @@ class ServerConfig:
 
 @dataclass(frozen=True)
 class ProviderConfig:
-    """The deployment-wide credential for each host, GitHub included.
+    """The deployment-wide credential for each host. GitHub is one of them.
 
     All optional. A public repository on any host clones and ingests with no
     credential at all -- these only widen what is visible and lift the
-    anonymous rate limit, which is the same bargain every one of them makes.
-
-    GitHub sits here beside the others rather than in a class of its own: a
-    credential for a host is one kind of thing however early that host was
-    supported, and asking "what may we use against this host?" should be one
-    lookup rather than a branch per vendor.
+    anonymous rate limit, which is the same bargain every host makes.
     """
 
-    github: GitHubConfig = field(default_factory=GitHubConfig)
-    gitlab_token: str = field(default_factory=lambda: _env_str("GITLAB_TOKEN", ""))
-    #: Bitbucket app passwords are basic auth, so they need the username too.
-    bitbucket_user: str = field(default_factory=lambda: _env_str("BITBUCKET_USER", ""))
-    bitbucket_token: str = field(default_factory=lambda: _env_str("BITBUCKET_TOKEN", ""))
+    github: HostCredential = field(default_factory=lambda: HostCredential(
+        token=_env_str("GITHUB_TOKEN", ""),
+        token_file=_env_str("GITHUB_TOKEN_FILE", "/run/git-synapse/github-token"),
+        api_url=_env_str("GITHUB_API_URL", "https://api.github.com"),
+        token_prefixes=_GITHUB_TOKEN_PREFIXES,
+    ))
+    gitlab: HostCredential = field(default_factory=lambda: HostCredential(
+        token=_env_str("GITLAB_TOKEN", ""),
+    ))
+    #: Bitbucket app passwords are basic auth, so the username is half of it.
+    bitbucket: HostCredential = field(default_factory=lambda: HostCredential(
+        token=_env_str("BITBUCKET_TOKEN", ""),
+        user=_env_str("BITBUCKET_USER", ""),
+    ))
+
+    def for_host(self, provider: str) -> HostCredential:
+        """This deployment's credential for one host.
+
+        An unknown host is answered with an empty credential rather than a
+        failure: a git URL on a host with no API client still clones, and
+        "nothing to present" is the true answer for it.
+        """
+        return {
+            "github": self.github,
+            "gitlab": self.gitlab,
+            "bitbucket": self.bitbucket,
+        }.get(provider, HostCredential())
 
     def token_for(self, provider: str) -> str:
-        """The deployment-wide credential for one host, or "" when it has none.
-
-        A source carries its own credential where somebody has pasted one; this
-        is the fallback behind it, and the answer to "is this host reachable at
-        all beyond the anonymous rate limit?"
-        """
-        if provider == "github":
-            return self.github.current_token()
-        if provider == "gitlab":
-            return self.gitlab_token
-        if provider == "bitbucket":
-            return self.bitbucket_token
-        return ""
+        """The credential to present to one host, or "" where there is none."""
+        return self.for_host(provider).current_token()
 
 
 @dataclass(frozen=True)
@@ -325,6 +333,12 @@ class Config:
     providers: ProviderConfig = field(default_factory=ProviderConfig)
     #: Which repositories an account takes, on any host.
     selection: SelectionConfig = field(default_factory=SelectionConfig)
+    #: Legacy single-org setting, seeded into the `account` table on first boot
+    #: and ignored thereafter. Not a credential and not an endpoint, so it sits
+    #: here rather than beside either. Empty by default: there is no sensible
+    #: org to guess, and a non-empty default could not be switched off from the
+    #: environment because a blank value would fall back to it.
+    seed_org: str = field(default_factory=lambda: _env_str("GITHUB_ORG", ""))
     ingest: IngestConfig = field(default_factory=IngestConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)

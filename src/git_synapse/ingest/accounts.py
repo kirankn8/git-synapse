@@ -292,7 +292,7 @@ def seed_from_env() -> dict | None:
     if list_accounts():
         return None
     cfg = get_config()
-    org = (cfg.providers.github.org or "").strip()
+    org = (cfg.seed_org or "").strip()
     if not org:
         return None
     selection = cfg.selection

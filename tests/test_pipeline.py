@@ -245,10 +245,10 @@ def test_load_repo_records_returns_usable_records(db):
 @pytest.fixture
 def token(monkeypatch):
     """Control what current_token() returns; Config is frozen, so patch the class."""
-    from git_synapse.config import GitHubConfig
+    from git_synapse.config import HostCredential
 
     def _set(value: str):
-        monkeypatch.setattr(GitHubConfig, "current_token", lambda self: value)
+        monkeypatch.setattr(HostCredential, "current_token", lambda self: value)
 
     return _set
 

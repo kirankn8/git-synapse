@@ -248,7 +248,7 @@ class GitLabProvider(Provider):
     def __init__(self, source: Source, patient: bool = True, token: str = "") -> None:
         super().__init__(source, patient, token)
         headers = {"User-Agent": "git-synapse-change-coupling/1.0"}
-        secret = token or get_config().providers.token_for("gitlab")
+        secret = token or get_config().providers.for_host("gitlab").current_token()
         if secret:
             headers["PRIVATE-TOKEN"] = secret
         self._client = httpx.Client(base_url=source.api_url or "https://gitlab.com/api/v4",
@@ -360,13 +360,12 @@ class BitbucketProvider(Provider):
     def __init__(self, source: Source, patient: bool = True, token: str = "") -> None:
         super().__init__(source, patient, token)
         headers = {"User-Agent": "git-synapse-change-coupling/1.0"}
-        cfg = get_config().providers
+        bitbucket = get_config().providers.for_host("bitbucket")
         auth = None
-        secret = token or cfg.token_for("bitbucket")
-        # The username stays a direct read: basic auth needs both halves, and
-        # only this host has a second half to need.
-        if cfg.bitbucket_user and secret:
-            auth = (cfg.bitbucket_user, secret)
+        secret = token or bitbucket.current_token()
+        # Basic auth needs both halves; a token alone cannot be presented.
+        if bitbucket.user and secret:
+            auth = (bitbucket.user, secret)
         self._client = httpx.Client(base_url=source.api_url or "https://api.bitbucket.org/2.0",
                                     headers=headers, auth=auth, timeout=30.0,
                                     follow_redirects=True)

@@ -64,7 +64,7 @@ def config() -> dict:
     return {
         # Accounts are configured in the database; this is only the seed value
         # a fresh deployment adopts on its first discovery.
-        "default_org": cfg.providers.github.org,
+        "default_org": cfg.seed_org,
         "max_files_per_commit": cfg.ingest.max_files_per_commit,
         "min_pair_support": cfg.ingest.min_pair_support,
         "rename_similarity": cfg.ingest.rename_similarity,

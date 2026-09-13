@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from git_synapse.config import GitHubConfig, SelectionConfig, get_config
+from git_synapse.config import HostCredential, SelectionConfig, get_config
 
 log = logging.getLogger(__name__)
 
@@ -163,7 +163,7 @@ def _parse_ts(value: str | None) -> datetime | None:
 class GitHubClient:
     """Thin REST client with retry, rate-limit awareness and pagination."""
 
-    def __init__(self, cfg: GitHubConfig | None = None, timeout: float = 30.0,
+    def __init__(self, cfg: HostCredential | None = None, timeout: float = 30.0,
                  patient: bool = True) -> None:
         """`patient` decides what a rate limit means.
 
@@ -304,9 +304,8 @@ class GitHubClient:
         """Current rate-limit budget, surfaced in the UI's status panel."""
         return self._get("/rate_limit").json()
 
-    def list_account_repos(self, login: str | None = None, kind: str = "org") -> list[RepoRecord]:
+    def list_account_repos(self, login: str, kind: str = "org") -> list[RepoRecord]:
         """List every repository under an org or user that the token can see."""
-        login = login or self.cfg.org
         path = f"/users/{login}/repos" if kind == "user" else f"/orgs/{login}/repos"
         log.info("discovering repositories in %s %s", kind, login)
         payloads = self._paginate(path, {"type": "all", "sort": "pushed"})
@@ -314,7 +313,7 @@ class GitHubClient:
         log.info("discovered %d repositories in %s", len(records), login)
         return records
 
-    def list_org_repos(self, org: str | None = None) -> list[RepoRecord]:
+    def list_org_repos(self, org: str) -> list[RepoRecord]:
         """List every repository in the org that the token can see."""
         return self.list_account_repos(org, kind="org")
 

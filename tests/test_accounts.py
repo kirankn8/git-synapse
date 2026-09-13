@@ -392,12 +392,12 @@ def test_one_lookup_answers_what_credential_a_host_has(monkeypatch):
     """Every host's credential is reached the same way, so a caller asking
     "may we use anything against this host?" branches once rather than per
     vendor. An unknown provider is answered, not raised at."""
-    from git_synapse.config import Config, GitHubConfig, ProviderConfig
+    from git_synapse.config import Config, HostCredential, ProviderConfig
 
     cfg = Config(providers=ProviderConfig(
-        github=GitHubConfig(token="ghp_" + "a" * 36, token_file=""),
-        gitlab_token="glpat-token", bitbucket_user="someone",
-        bitbucket_token="bb-token"))
+        github=HostCredential(token="ghp_" + "a" * 36, token_file=""),
+        gitlab=HostCredential(token="glpat-token"),
+        bitbucket=HostCredential(token="bb-token", user="someone")))
 
     assert cfg.providers.token_for("github") == "ghp_" + "a" * 36
     assert cfg.providers.token_for("gitlab") == "glpat-token"
@@ -408,9 +408,37 @@ def test_one_lookup_answers_what_credential_a_host_has(monkeypatch):
 def test_a_host_with_no_credential_reports_an_empty_one(monkeypatch):
     """Public repositories clone anonymously on every host, so "none set" is an
     ordinary answer rather than a misconfiguration."""
-    from git_synapse.config import Config, GitHubConfig, ProviderConfig
+    from git_synapse.config import Config, HostCredential, ProviderConfig
 
     cfg = Config(providers=ProviderConfig(
-        github=GitHubConfig(token="", token_file="")))
+        github=HostCredential(token="", token_file="")))
     assert cfg.providers.token_for("github") == ""
     assert cfg.providers.token_for("gitlab") == ""
+
+
+def test_a_host_with_no_known_prefix_accepts_whatever_its_file_holds(tmp_path):
+    """Only GitHub publishes what its credentials look like. For any other host
+    the shape is unknown, so rejecting a token for not matching a pattern we
+    never had would refuse a perfectly good credential."""
+    from git_synapse.config import HostCredential
+
+    token_file = tmp_path / "gitlab-token"
+    token_file.write_text("glpat-anything-at-all\n")
+
+    host = HostCredential(token="fallback", token_file=str(token_file))
+    assert host.current_token() == "glpat-anything-at-all"
+
+
+def test_a_github_token_file_holding_something_else_is_ignored(tmp_path):
+    """A half-written file would otherwise be sent as a credential and come
+    back 401, which reads as "expired token" and costs somebody an afternoon."""
+    from git_synapse.config import ProviderConfig
+
+    token_file = tmp_path / "github-token"
+    token_file.write_text("ghu_")          # a write caught mid-flight
+
+    import dataclasses
+    host = dataclasses.replace(ProviderConfig().github,
+                               token="ghp_" + "w" * 36, token_file=str(token_file))
+    # The working environment value survives; the malformed file does not win.
+    assert host.current_token() == "ghp_" + "w" * 36

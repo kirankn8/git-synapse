@@ -546,10 +546,13 @@ def test_token_file_is_read_fresh_and_validated(tmp_path, monkeypatch):
     torn read must never be sent to GitHub, because the 401 it earns is
     indistinguishable from an expired token.
     """
-    from git_synapse.config import GitHubConfig
+    import dataclasses
+
+    from git_synapse.config import ProviderConfig
 
     token_path = tmp_path / "github-token"
-    cfg = GitHubConfig(token="ghu_" + "e" * 36, token_file=str(token_path))
+    cfg = dataclasses.replace(ProviderConfig().github,
+                              token="ghu_" + "e" * 36, token_file=str(token_path))
 
     # No file: the environment value stands.
     assert cfg.current_token() == "ghu_" + "e" * 36
@@ -598,12 +601,15 @@ def test_github_client_sends_the_live_token(tmp_path):
     the frozen environment copy. With that empty it sent no Authorization header
     and discovery silently returned 59 of 272 repositories.
     """
-    from git_synapse.config import GitHubConfig
+    import dataclasses
+
+    from git_synapse.config import ProviderConfig
     from git_synapse.ingest.github import GitHubClient
 
     token_path = tmp_path / "github-token"
     token_path.write_text("ghu_" + "f" * 36)
-    cfg = GitHubConfig(token="", token_file=str(token_path))
+    cfg = dataclasses.replace(ProviderConfig().github,
+                              token="", token_file=str(token_path))
 
     with GitHubClient(cfg) as client:
         auth = client._client.headers.get("Authorization")

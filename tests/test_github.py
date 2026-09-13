@@ -10,7 +10,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from git_synapse.config import GitHubConfig, SelectionConfig
+from git_synapse.config import ProviderConfig, SelectionConfig
 from git_synapse.ingest.github import GitHubClient, RepoRecord, select_repos
 
 
@@ -32,8 +32,20 @@ def _repo_payload(i: int, **over):
     return payload
 
 
+def _github_credential(**over):
+    """The real GitHub credential shape, with the field under test replaced.
+
+    Built from ProviderConfig rather than by hand so these keep testing what a
+    deployment actually gets -- the endpoint and the prefixes that reject a
+    half-written token file included.
+    """
+    import dataclasses
+
+    return dataclasses.replace(ProviderConfig().github, **over)
+
+
 def _client(handler, token="ghu_" + "t" * 36):
-    cfg = GitHubConfig(token=token, token_file="")
+    cfg = _github_credential(token=token, token_file="")
     c = GitHubClient(cfg)
     c._client = httpx.Client(
         transport=httpx.MockTransport(handler),
@@ -50,13 +62,13 @@ def test_the_live_token_reaches_the_authorization_header(tmp_path):
     -- 59 of 272 -- which discovery then accepted as the whole org."""
     token_file = tmp_path / "tok"
     token_file.write_text("ghu_" + "f" * 36)
-    cfg = GitHubConfig(token="", token_file=str(token_file))
+    cfg = _github_credential(token="", token_file=str(token_file))
     with GitHubClient(cfg) as c:
         assert c._client.headers["Authorization"] == "Bearer ghu_" + "f" * 36
 
 
 def test_no_token_means_no_authorization_header():
-    cfg = GitHubConfig(token="", token_file="")
+    cfg = _github_credential(token="", token_file="")
     with GitHubClient(cfg) as c:
         assert "Authorization" not in c._client.headers
 
