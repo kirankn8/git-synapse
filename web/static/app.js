@@ -867,6 +867,207 @@ on('/', async () => {
 const SORTABLE = new Set(['commit_count', 'file_count', 'pair_count', 'author_count',
                           'last_commit_at', 'primary_language', 'name']);
 
+// Editing what a source watches. only_repos is that list, and empty means
+// everything, so the two states need different words rather than a bare tick.
+// Repositories the picker never loaded keep whatever state they had: the set
+// starts from only_repos and is only ever changed by a tick.
+// One listing per source, kept for the session. Opening the dialog a second
+// time shows what was already fetched instead of starting again, and the walk
+// through the remaining pages carries on in the background either way.
+const _sourceListings = new Map();
+
+const sourceListing = (account) => {
+  const key = `${account.host}/${account.login}`.toLowerCase();
+  let entry = _sourceListings.get(key);
+  if (!entry) {
+    entry = { rows: [], seen: new Set(), page: 1, more: true, loading: false,
+              error: '', watchers: new Set() };
+    _sourceListings.set(key, entry);
+  }
+  entry.paused = false;
+  if (entry.more && !entry.loading) {
+    // Reopening retries where it stopped. Drop the message from last time first,
+    // or the dialog shows a stale complaint next to a live spinner.
+    entry.error = '';
+    entry.loading = true;
+    (async () => {
+      while (entry.more && !entry.paused) {
+        let found;
+        try {
+          found = await apiSend('POST', '/api/accounts/resolve',
+            { url: `https://${account.host}/${account.login}`, page: entry.page });
+        } catch (err) {
+          entry.error = String(err.message || err);
+          entry.more = false;
+          break;
+        }
+        // The host refused to list any further — commonly a rate limit. Keep what
+        // was gathered and leave `more` alone, so reopening resumes where this
+        // stopped instead of starting again.
+        if (found.listing_error) {
+          entry.error = found.listing_error;
+          entry.paused = true;
+          break;
+        }
+        entry.error = '';
+        // Appended in the order the provider gave them, so nothing already on
+        // screen moves when a later page lands.
+        for (const r of found.repos || []) {
+          if (!entry.seen.has(r.key)) { entry.seen.add(r.key); entry.rows.push(r); }
+        }
+        entry.page += 1;
+        entry.more = !!found.has_more;
+        for (const fn of [...entry.watchers]) fn();
+      }
+      entry.loading = false;
+      for (const fn of [...entry.watchers]) fn();
+    })();
+  }
+  return entry;
+};
+
+const watchModal = (account, onSaved) => {
+  // Only what is not watched yet: this is the add path, and removing is done by
+  // ticking rows in the table behind it.
+  const DRAWN = 200;
+  const watched = new Set(account.only_repos || []);
+  const everything = watched.size === 0;
+  const chosen = new Set();
+  const listing = sourceListing(account);
+  let drawn = 0;
+
+  const search = h('input', { class: 'input', type: 'search', style: 'flex:1',
+                              placeholder: 'Filter repositories…' });
+  const list = h('div', { style: 'flex:1;overflow:auto;border:1px solid var(--border);'
+                                 + 'border-radius:8px;padding:4px;min-height:180px' });
+  const status = h('span', { class: 'card-sub' }, '');
+  const save = h('button', { class: 'btn primary' }, 'Add');
+  save.disabled = true;
+
+  const available = () => {
+    const q = search.value.trim().toLowerCase();
+    return listing.rows.filter((r) => !watched.has(r.key)
+      && (!q || r.key.toLowerCase().includes(q)
+          || (r.description || '').toLowerCase().includes(q)));
+  };
+
+  const problem = h('div', { class: 'help', hidden: true,
+                             style: 'border-left-color:var(--warn)' });
+
+  const label = () => {
+    const n = available().length;
+    const partial = listing.more && !listing.paused;
+    status.textContent = chosen.size
+      ? `${num(chosen.size)} selected · ${num(n)}${listing.more ? '+' : ''} available`
+      : `${num(n)}${listing.more ? '+' : ''} available to add`
+        + (partial ? ' — still listing…' : '');
+    // A stopped listing is the difference between "nothing to add" and "could
+    // not finish asking", which is worth saying rather than showing a bare 0.
+    problem.hidden = !listing.error;
+    problem.textContent = listing.error
+      ? `${listing.error} Showing the ${num(listing.rows.length)} listed so far; `
+        + 'reopen this later to carry on.'
+      : '';
+    save.disabled = !chosen.size;
+    save.textContent = chosen.size ? `Add ${num(chosen.size)}` : 'Add';
+  };
+
+  const rowEl = (r) => {
+    const tick = h('input', { type: 'checkbox' });
+    tick.checked = chosen.has(r.key);
+    tick.addEventListener('change', () => {
+      if (tick.checked) chosen.add(r.key); else chosen.delete(r.key);
+      label();
+    });
+    return h('label', { class: 'pick-row' }, tick,
+      h('span', { class: 'pick-name mono', title: r.full_name }, r.key),
+      h('span', { class: 'pick-meta' },
+        r.language ? h('span', { class: 'badge muted' }, r.language) : null,
+        r.stars ? h('span', {}, `★ ${num(r.stars)}`) : null,
+        r.is_fork ? h('span', { class: 'badge warn' }, 'fork') : null,
+        r.is_archived ? h('span', { class: 'badge muted' }, 'archived') : null));
+  };
+
+  const note = h('div', { class: 'card-sub', style: 'padding:8px 10px' });
+
+  // Rows already on screen are left alone; only the new tail is appended, so a
+  // page landing mid-scroll does not move anything under the pointer.
+  const extend = () => {
+    const rows = available();
+    note.remove();
+    // drawn === 0 means the list is empty or holding a placeholder — the spinner
+    // or an empty-state line. Appending to that leaves it sitting above the first
+    // results, so clear it before the first row goes in.
+    if (!drawn) list.replaceChildren();
+    while (drawn < rows.length && drawn < DRAWN) {
+      list.append(rowEl(rows[drawn]));
+      drawn += 1;
+    }
+    if (rows.length > drawn) {
+      note.textContent = `Showing ${num(drawn)} of ${num(rows.length)}`
+        + ' — type to narrow the list.';
+      list.append(note);
+    }
+    if (!rows.length) {
+      // Spin only while a request is actually in flight. `more` stays true when a
+      // listing is paused so it can resume later, and keying the spinner off it
+      // left it turning over a source that had stopped asking.
+      list.replaceChildren(listing.loading && !listing.paused
+        ? h('div', { class: 'loading' }, h('div', { class: 'spinner' }), 'Listing repositories…')
+        : h('div', { class: 'empty' }, search.value.trim()
+            ? 'Nothing matches'
+            : (listing.error ? 'Could not list this source'
+                             : 'Everything here is already watched')));
+      drawn = 0;
+    }
+    label();
+  };
+
+  const rebuild = () => { list.replaceChildren(); drawn = 0; extend(); };
+
+  const onUpdate = () => { if (drawn < DRAWN) extend(); else label(); };
+  listing.watchers.add(onUpdate);
+  const close = () => { listing.watchers.delete(onUpdate); back.remove(); };
+
+  search.addEventListener('input', rebuild);
+  save.addEventListener('click', async () => {
+    save.disabled = true;
+    try {
+      await apiSend('PATCH', `/api/accounts/${account.id}`,
+                    { only_repos: [...watched, ...chosen] });
+      toast(`now watching ${num(chosen.size)} more`);
+      close();
+      (onSaved || route)();
+    } catch (err) { toast(String(err.message || err), true); save.disabled = false; }
+  });
+
+  const panel = h('div', {
+    style: 'background:var(--bg-panel);border:1px solid var(--border-strong);'
+         + 'border-radius:12px;width:min(680px,92vw);max-height:80vh;display:flex;'
+         + 'flex-direction:column;gap:10px;padding:18px;'
+         + 'box-shadow:0 24px 70px rgba(0,0,0,.6)',
+  },
+    h('div', {}, h('div', { class: 'card-title' }, `Add repositories — ${account.login}`),
+      h('div', { class: 'card-sub' }, everything
+        ? `${account.login} currently watches everything. Adding here narrows it to only what you pick.`
+        : 'Repositories under this source that are not watched yet.')),
+    h('div', { class: 'toolbar' }, search, status),
+    problem,
+    list,
+    h('div', { class: 'toolbar' }, save, h('span', { class: 'spacer' }),
+      h('button', { class: 'btn', onclick: close }, 'Cancel')));
+
+  const back = h('div', {
+    style: 'position:fixed;inset:0;background:rgba(3,7,15,.78);z-index:90;'
+         + 'backdrop-filter:blur(2px);display:flex;align-items:center;'
+         + 'justify-content:center;padding:20px',
+  }, panel);
+  back.addEventListener('click', (e) => { if (e.target === back) close(); });
+  window.document.body.appendChild(back);
+  rebuild();
+  return close;
+};
+
 const reposView = async (args, params) => {
   const accountId = args.id ? Number(args.id) : null;
   const [repos, langs, accounts] = await Promise.all([
@@ -918,6 +1119,29 @@ const reposView = async (args, params) => {
     go(`${base}${p.toString() ? '?' + p : ''}`);
   };
 
+  // Selecting is a mode on the table that is already on the page, rather than a
+  // second list of the same repositories somewhere else.
+  const pinnedNames = new Set(account ? (account.only_repos || []) : []);
+  const selecting = Boolean(account && params.select && pinnedNames.size);
+  const picked = new Set();
+  const stopBtn = h('button', { class: 'btn danger-btn' }, 'Stop watching');
+  const syncStop = () => {
+    stopBtn.disabled = !picked.size;
+    stopBtn.textContent = picked.size ? `Stop watching ${num(picked.size)}` : 'Stop watching';
+  };
+  stopBtn.addEventListener('click', async () => {
+    if (!picked.size) return;
+    if (!window.confirm(
+      `Stop watching ${picked.size} repositor${picked.size === 1 ? 'y' : 'ies'}?\n\n`
+      + 'They stop being refreshed. Everything already mined from them is kept.')) return;
+    try {
+      const next = [...pinnedNames].filter((n) => !picked.has(n));
+      await apiSend('PATCH', `/api/accounts/${account.id}`, { only_repos: next });
+      toast(`stopped watching ${picked.size}`);
+      go(`/sources/${account.id}`);
+    } catch (err) { toast(String(err.message || err), true); }
+  });
+
   wrap.append(
     h(
       'div',
@@ -926,11 +1150,36 @@ const reposView = async (args, params) => {
       h('div', { class: 'field' }, langSel),
       h('div', { class: 'field' }, statusSel),
       h('span', { class: 'spacer' }),
+      ...(account && !selecting ? [
+        h('button', { class: 'btn', onclick: () => watchModal(account) }, 'Add repositories'),
+      ] : []),
+      ...(account && pinnedNames.size && !selecting ? [
+        h('button', { class: 'btn', onclick: () => go(`/sources/${account.id}?select=1`) },
+          'Stop watching\u2026'),
+      ] : []),
+      ...(selecting ? [stopBtn,
+        h('button', { class: 'btn', onclick: () => go(`/sources/${account.id}`) }, 'Cancel'),
+      ] : []),
       h('button', { class: 'btn primary', onclick: triggerRefresh }, 'Refresh all'),
     ),
   );
 
   const cols = [
+    ...(selecting ? [{
+      key: 'select', label: '', sortable: false, render: (r) => {
+        const tick = h('input', { type: 'checkbox' });
+        tick.checked = picked.has(r.name);
+        tick.disabled = !pinnedNames.has(r.name);
+        tick.title = pinnedNames.has(r.name) ? `Select ${r.name}`
+                                             : 'Not in the watched list';
+        tick.addEventListener('click', (e) => e.stopPropagation());
+        tick.addEventListener('change', () => {
+          if (tick.checked) picked.add(r.name); else picked.delete(r.name);
+          syncStop();
+        });
+        return tick;
+      },
+    }] : []),
     { key: 'name', label: 'Repository', render: (r) => h('div', {},
         h('span', { class: 'mono', style: 'font-weight:550' }, r.name),
         r.description ? h('div', { style: 'font-size:11px;color:var(--text-faint);max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, r.description) : null) },
@@ -952,6 +1201,7 @@ const reposView = async (args, params) => {
 
   if (account) {
     // Already inside one source: the grouping is the page.
+    if (selecting) syncStop();
     wrap.append(card(`${repos.count} repositories`,
                      dataTable(repos.repos, cols, tableOpts)));
     return wrap;
@@ -3696,13 +3946,16 @@ on('/sources', async () => {
     } catch (err) { toast(String(err.message || err), true); }
   };
 
+  const usesFilter = (r) => Boolean(
+    (r.only_repos && r.only_repos.length) || (r.skip_repos && r.skip_repos.length)
+    || !r.include_archived || !r.include_private);
+
   const filterCell = (r) => {
     if (r.only_repos && r.only_repos.length) {
       return h('span', { class: 'badge info', title: r.only_repos.join(', ') },
                `${r.only_repos.length} chosen`);
     }
     const off = [
-      !r.include_forks ? 'no forks' : null,
       !r.include_archived ? 'no archived' : null,
       !r.include_private ? 'no private' : null,
       r.skip_repos && r.skip_repos.length ? `skip ${r.skip_repos.length}` : null,
@@ -3724,15 +3977,21 @@ on('/sources', async () => {
           ? h('a', { class: 'mono', href: `/sources/${r.id}`, 'data-nav': true,
                      onclick: (e) => e.stopPropagation() }, num(r.live_repo_count))
           : h('span', { class: 'muted-cell' }, '0')) },
-      { key: 'filters', label: 'Filters', sortable: false, render: filterCell },
-      { key: 'credential_hint', label: 'Token', sortable: false,
-        title: 'A token stored for this source alone, used instead of the '
-             + 'deployment-wide credential. Click to remove it.',
-        render: (r) => (r.has_credential
-          ? h('button', { class: 'badge ok clickable', title: 'Click to remove',
-                          onclick: (e) => { e.stopPropagation(); clearToken(r); } },
-              r.credential_hint || 'set')
-          : h('span', { class: 'muted-cell' }, '\u2014')) },
+      // Filters and Token describe the exception, not the rule: a column of
+      // dashes says nothing, so each appears only once some source uses it.
+      ...(rows.some(usesFilter) ? [
+        { key: 'filters', label: 'Filters', sortable: false, render: filterCell },
+      ] : []),
+      ...(rows.some((r) => r.has_credential) ? [
+        { key: 'credential_hint', label: 'Token', sortable: false,
+          title: 'A token stored for this source alone, used instead of the '
+               + 'deployment-wide credential. Click to remove it.',
+          render: (r) => (r.has_credential
+            ? h('button', { class: 'badge ok clickable', title: 'Click to remove',
+                            onclick: (e) => { e.stopPropagation(); clearToken(r); } },
+                r.credential_hint || 'set')
+            : h('span', { class: 'muted-cell' }, '\u2014')) },
+      ] : []),
       { key: 'last_discovered_at', label: 'Last discovery', render: (r) => (
           r.last_discover_error
             ? h('span', { class: 'badge danger', title: r.last_discover_error }, 'failed')
