@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
+from sqlalchemy import func
+from sqlalchemy.orm import aliased
 
 from git_synapse.db.orm import models, session_scope
 
@@ -236,49 +238,42 @@ def cross_directory_modules(repo_id: int, limit: int = 20) -> list[dict]:
 def drifting_pairs(repo_id: int | None = None, trend: str = "emerging", limit: int = 25,
                    include_deleted: bool = False) -> list[dict]:
     Drift, File, Repo = models().PairDrift, models().File, models().Repo
+    FileA, FileB = aliased(File), aliased(File)
     with session_scope() as session:
-        query = session.query(Drift).filter_by(trend=trend)
+        query = (session.query(Drift, FileA.path, FileB.path, Repo.name)
+                 .join(FileA, FileA.id == Drift.file_a_id)
+                 .join(FileB, FileB.id == Drift.file_b_id)
+                 .join(Repo, Repo.id == Drift.repo_id)
+                 .filter(Drift.trend == trend))
         if repo_id is not None:
-            query = query.filter_by(repo_id=repo_id)
-        rows = query.all()
-        files = {f.id: f for f in session.query(File).filter(File.id.in_([x for r in rows for x in (r.file_a_id, r.file_b_id)])).all()}
-        repos = {r.id: r for r in session.query(Repo).filter(Repo.id.in_([r.repo_id for r in rows])).all()}
-        output = []
-        for row in rows:
-            a, b = files.get(row.file_a_id), files.get(row.file_b_id)
-            if not a or not b or (not include_deleted and (a.is_deleted or b.is_deleted)):
-                continue
-            value = _dict(row)
-            value.update(path_a=a.path, path_b=b.path, repo=repos[row.repo_id].name)
-            output.append(value)
-        output.sort(key=lambda x: x["delta"], reverse=trend == "emerging")
-        return output[:limit]
+            query = query.filter(Drift.repo_id == repo_id)
+        if not include_deleted:
+            query = query.filter(FileA.is_deleted.is_(False), FileB.is_deleted.is_(False))
+        order = Drift.delta.desc() if trend == "emerging" else Drift.delta.asc()
+        rows = query.order_by(order, Drift.repo_id, Drift.file_a_id, Drift.file_b_id).limit(limit).all()
+        return [{**_dict(drift), "path_a": path_a, "path_b": path_b, "repo": repo}
+                for drift, path_a, path_b, repo in rows]
 
 
 def risky_files(repo_id: int | None = None, limit: int = 25, include_deleted: bool = False) -> list[dict]:
     Risk, File, Repo, Link, Author = models().FileRisk, models().File, models().Repo, models().AuthorFile, models().Author
     with session_scope() as session:
-        query = session.query(Risk).filter(Risk.change_count >= 5)
+        query = (session.query(Risk, File.path, File.extension, Repo.name, Repo.full_name)
+                 .join(File, File.id == Risk.file_id)
+                 .join(Repo, Repo.id == Risk.repo_id)
+                 .filter(Risk.change_count >= 5))
         if repo_id is not None:
-            query = query.filter_by(repo_id=repo_id)
-        rows = query.all()
-        files = {f.id: f for f in session.query(File).filter(File.id.in_([x.file_id for x in rows])).all()}
-        repos = {r.id: r for r in session.query(Repo).filter(Repo.id.in_([x.repo_id for x in rows])).all()}
-        links = session.query(Link).filter(Link.file_id.in_([x.file_id for x in rows])).all()
-        authors = {a.id: a for a in session.query(Author).filter(Author.id.in_([x.author_id for x in links])).all()}
-        top = {}
-        for link in links:
-            if link.file_id not in top or link.n_commits > top[link.file_id].n_commits:
-                top[link.file_id] = link
-        output = []
-        for row in rows:
-            file = files.get(row.file_id)
-            if not file or (file.is_deleted and not include_deleted):
-                continue
-            value = _dict(row)
-            value.update(path=file.path, extension=file.extension,
-                         repo=repos[row.repo_id].name, full_name=repos[row.repo_id].full_name,
-                         top_author=authors[top[row.file_id].author_id].display_name if row.file_id in top else None)
-            output.append(value)
-        output.sort(key=lambda x: x.get("risk_score") or 0, reverse=True)
-        return output[:limit]
+            query = query.filter(Risk.repo_id == repo_id)
+        if not include_deleted:
+            query = query.filter(File.is_deleted.is_(False))
+        rows = query.order_by(func.coalesce(Risk.risk_score, 0).desc(), Risk.file_id).limit(limit).all()
+        top_author = {}
+        for file_id, name in session.query(Link.file_id, Author.display_name).join(
+                Author, Author.id == Link.author_id).filter(
+                Link.file_id.in_([risk.file_id for risk, *_ in rows])).order_by(
+                Link.file_id, Link.n_commits.desc(), Link.author_id):
+            top_author.setdefault(file_id, name)
+        return [{**_dict(risk), "path": path, "extension": extension, "repo": repo,
+                 "full_name": full_name, "top_author": top_author.get(risk.file_id)}
+                for risk, path, extension, repo, full_name in rows]
+

@@ -139,7 +139,7 @@ def _chains(repo_id: int, reverse: bool, max_depth: int, min_score: float, limit
     Impact, Repo = models().RepoImpact, models().Repo
     with session_scope() as session:
         rows = session.query(Impact).filter(Impact.score >= min_score).order_by(Impact.score.desc()).all()
-        names = {r.id: r.name for r in session.query(Repo).all()}
+        names = dict(session.query(Repo.id, Repo.name).all())
     adjacency: dict[int, list[object]] = defaultdict(list)
     for row in rows:
         if not reverse or row.is_declared or row.has_bump_history:

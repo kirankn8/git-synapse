@@ -7,7 +7,7 @@ from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import Float, case, cast, func, literal, literal_column
 from sqlalchemy.orm import aliased
 
 from git_synapse.config import get_config
@@ -360,20 +360,23 @@ def coupling_graph(repo_id: int, measure: str = DEFAULT_MEASURE, limit: int = 15
 
 
 def overview() -> dict:
-    names = {"repos": _model("Repo"), "commits": _model("Commit"), "changes": _model("CommitFile"),
+    Repo, Commit = _model("Repo"), _model("Commit")
+    names = {"repos": Repo, "commits": Commit, "changes": _model("CommitFile"),
              "files": _model("File"), "directories": _model("Directory"), "authors": _model("Author"),
              "file_pairs": _model("FilePair"), "dir_pairs": _model("DirPair")}
     with session_scope() as session:
-        result = {key: session.query(model).count() for key, model in names.items()}
-        repos = session.query(names["repos"]).all()
-        commits = session.query(names["commits"]).all()
-        result["repos_ready"] = sum(row.ingest_status == "ready" for row in repos)
-        result["repos_failed"] = sum(row.ingest_status == "failed" for row in repos)
-        result["mirror_kb"] = sum(row.mirror_size_kb or 0 for row in repos)
-        result["first_commit_at"] = min((row.committed_at for row in commits), default=None)
-        result["last_commit_at"] = max((row.committed_at for row in commits), default=None)
-        result["file_changes"] = result.pop("changes")
-        return result
+        result = {key: session.query(func.count()).select_from(model).scalar()
+                  for key, model in names.items()}
+        ready, failed, mirror_kb = session.query(
+            func.count().filter(Repo.ingest_status == "ready"),
+            func.count().filter(Repo.ingest_status == "failed"),
+            func.coalesce(func.sum(Repo.mirror_size_kb), 0),
+        ).one()
+        first, last = session.query(func.min(Commit.committed_at), func.max(Commit.committed_at)).one()
+    result.update(repos_ready=ready, repos_failed=failed, mirror_kb=int(mirror_kb),
+                  first_commit_at=first, last_commit_at=last)
+    result["file_changes"] = result.pop("changes")
+    return result
 
 
 def hotspots(repo_id: int | None = None, limit: int = 25, min_changes: int = 0,
@@ -440,55 +443,51 @@ def directory_tree(repo_id: int, path: str = "", limit: int = 1000) -> dict:
         }
 
 
-def corpus_shape() -> dict:
-    Commit, Pair, Repo, File, _Author, Bump = (_model(name) for name in ("Commit", "FilePair", "Repo", "File", "Author", "DepBump"))
+def corpus_shape(now: datetime | None = None) -> dict:
+    """The distributions the landing page draws, counted in the database."""
+    Commit, Pair, Repo, File, Bump = (_model(n) for n in ("Commit", "FilePair", "Repo", "File", "DepBump"))
+    now = now or datetime.now(UTC)
+    size = case((Repo.commit_count < 100, "<100"), (Repo.commit_count < 1000, "100-1k"),
+                (Repo.commit_count < 10000, "1k-10k"), else_="10k+")
+    age = func.floor(func.extract("epoch", literal(now) - Repo.last_commit_at) / 86400)
+    recency = case((Repo.last_commit_at.is_(None), "never"), (age < 30, "past month"),
+                   (age < 180, "past 6 months"), (age < 365, "past year"), else_="over a year")
+    year = func.extract("year", func.timezone(literal_column("'UTC'"), Commit.authored_at))
+    adoption = func.least(func.greatest(
+        func.trunc(cast(Bump.adoption_seconds, Float) / 86400 / 60) + 1, 1), 7)
+
     with session_scope() as session:
-        commits = session.query(Commit).all()
-        pairs = session.query(Pair).all()
-        repos = session.query(Repo).all()
-        files = session.query(File).all()
-        bumps = session.query(Bump).all()
-        commits_by_year = Counter(x.authored_at.year for x in commits if x.authored_at)
-        pair_support = Counter(min(x.n_ab, 10) for x in pairs)
-        languages = Counter(x.primary_language or "unknown" for x in repos)
-        repo_sizes = Counter()
-        repo_commit_totals = defaultdict(int)
-        for repo in repos:
-            if repo.commit_count <= 0:
-                continue
-            bucket = ("<100" if repo.commit_count < 100 else
-                      "100-1k" if repo.commit_count < 1000 else
-                      "1k-10k" if repo.commit_count < 10000 else "10k+")
-            repo_sizes[bucket] += 1
-            repo_commit_totals[bucket] += repo.commit_count
-        commit_width = Counter(min(x.n_files, 12) for x in commits if x.pair_eligible)
-        authors_per_file = Counter(min(x.author_count, 8) for x in files if x.change_count > 0)
-        now = datetime.now(UTC)
-        recency = Counter()
-        for repo in repos:
-            if repo.last_commit_at is None:
-                bucket = "never"
-            else:
-                age = (now - repo.last_commit_at).days
-                bucket = ("past month" if age < 30 else "past 6 months" if age < 180 else
-                          "past year" if age < 365 else "over a year")
-            recency[bucket] += 1
-        adoption = Counter(
-            min(max(int((bump.adoption_seconds or 0) / 86400 / 60) + 1, 1), 7)
-            for bump in bumps if bump.adoption_seconds is not None
-        )
-        return {
-            "commits_by_year": [{"year": year, "n": count} for year, count in sorted(commits_by_year.items())],
-            "pair_support": [{"support": support, "n": count} for support, count in sorted(pair_support.items())],
-            "repo_sizes": [{"bucket": bucket, "n": repo_sizes[bucket], "commits": repo_commit_totals[bucket]}
-                           for bucket in ("<100", "100-1k", "1k-10k", "10k+") if bucket in repo_sizes],
-            "languages": [{"language": language, "n": count} for language, count in languages.most_common()],
-            "commit_width": [{"files": files_count, "n": count} for files_count, count in sorted(commit_width.items())],
-            "authors_per_file": [{"authors": count, "n": number} for count, number in sorted(authors_per_file.items())],
-            "adoption_days": [{"bucket": bucket, "n": count} for bucket, count in sorted(adoption.items())],
-            "repo_recency": [{"bucket": bucket, "n": recency[bucket]} for bucket in
-                             ("never", "past month", "past 6 months", "past year", "over a year") if bucket in recency],
-        }
+        def counted(column, where=None):
+            query = session.query(column, func.count())
+            if where is not None:
+                query = query.filter(where)
+            return query.group_by(literal_column("1")).all()
+
+        commits_by_year = counted(year, where=Commit.authored_at.is_not(None))
+        pair_support = counted(func.least(Pair.n_ab, 10))
+        language = func.coalesce(Repo.primary_language, "unknown")
+        languages = session.query(language, func.count()).group_by(literal_column("1")).order_by(
+            literal_column("2").desc(), literal_column("1")).all()
+        repo_sizes = {bucket: (n, total) for bucket, n, total in session.query(
+            size, func.count(), func.sum(Repo.commit_count)).filter(
+            Repo.commit_count > 0).group_by(literal_column("1")).all()}
+        commit_width = counted(func.least(Commit.n_files, 12), where=Commit.pair_eligible.is_(True))
+        authors_per_file = counted(func.least(File.author_count, 8), where=File.change_count > 0)
+        repo_recency = dict(counted(recency))
+        adoption_days = counted(adoption, where=Bump.adoption_seconds.is_not(None))
+    return {
+        "commits_by_year": [{"year": int(y), "n": n} for y, n in sorted(commits_by_year)],
+        "pair_support": [{"support": s, "n": n} for s, n in sorted(pair_support)],
+        "repo_sizes": [{"bucket": b, "n": repo_sizes[b][0], "commits": int(repo_sizes[b][1])}
+                       for b in ("<100", "100-1k", "1k-10k", "10k+") if b in repo_sizes],
+        "languages": [{"language": name, "n": n} for name, n in languages],
+        "commit_width": [{"files": f, "n": n} for f, n in sorted(commit_width)],
+        "authors_per_file": [{"authors": a, "n": n} for a, n in sorted(authors_per_file)],
+        "adoption_days": [{"bucket": int(b), "n": n} for b, n in sorted(adoption_days)],
+        "repo_recency": [{"bucket": b, "n": repo_recency[b]} for b in
+                         ("never", "past month", "past 6 months", "past year", "over a year")
+                         if b in repo_recency],
+    }
 
 
 def recent_runs(limit: int = 20) -> list[dict]:
@@ -774,19 +773,23 @@ def repo_dependencies(repo_id: int) -> dict:
 def mining_overview() -> dict:
     Cluster, Drift, Risk, Impact, Bump = (_model(x) for x in ("FileCluster", "PairDrift", "FileRisk", "RepoImpact", "DepBump"))
     with session_scope() as session:
-        clusters = session.query(Cluster.repo_id, Cluster.cluster_id, Cluster.dirs_spanned).distinct().all()
-        all_clusters = session.query(Cluster).all()
-        drifts = session.query(Drift).all()
-        risks = session.query(Risk).all()
-        impacts = session.query(Impact).all()
-        bumps = session.query(Bump).all()
-        return {"modules": len({(x.repo_id, x.cluster_id) for x in clusters}),
-                "clustered_files": len(all_clusters),
-                "cross_dir_modules": len({(x.repo_id, x.cluster_id) for x in clusters if x.dirs_spanned > 1}),
-                "emerging": sum(x.trend == "emerging" for x in drifts),
-                "decaying": sum(x.trend == "decaying" for x in drifts),
-                "stable": sum(x.trend == "stable" for x in drifts),
-                "risk_scored": len(risks), "impact_edges": len(impacts),
-                "declared_edges": sum(x.is_declared for x in impacts),
-                "bump_edges": sum(x.has_bump_history for x in impacts),
-                "dep_bumps": len(bumps)}
+        modules = session.query(Cluster.repo_id, Cluster.cluster_id).distinct().subquery()
+        spanning = session.query(Cluster.repo_id, Cluster.cluster_id).filter(
+            Cluster.dirs_spanned > 1).distinct().subquery()
+        trends = dict(session.query(Drift.trend, func.count()).group_by(Drift.trend).all())
+        impact_edges, declared, bumped = session.query(
+            func.count(), func.count().filter(Impact.is_declared.is_(True)),
+            func.count().filter(Impact.has_bump_history.is_(True))).select_from(Impact).one()
+
+        def total(model_or_subquery):
+            return session.query(func.count()).select_from(model_or_subquery).scalar()
+
+        return {"modules": total(modules),
+                "clustered_files": total(Cluster),
+                "cross_dir_modules": total(spanning),
+                "emerging": trends.get("emerging", 0),
+                "decaying": trends.get("decaying", 0),
+                "stable": trends.get("stable", 0),
+                "risk_scored": total(Risk),
+                "impact_edges": impact_edges, "declared_edges": declared, "bump_edges": bumped,
+                "dep_bumps": total(Bump)}
