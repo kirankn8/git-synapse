@@ -229,6 +229,10 @@ def load_commits(repo_id: int, commits: Iterable[ParsedCommit], conn: object,
                     conn.add(Parent(repo_id=repo_id, child_sha=parsed.sha, parent_sha=parent_sha, ordinal=ordinal))
             if stats.commits_read % COMMIT_FLUSH_SIZE == 0:
                 conn.flush()
+                # Flushing writes the rows but leaves every instance in the identity map,
+                # so a large history ends up holding all of them at once. Nothing below
+                # reads them back through the session.
+                conn.expunge_all()
         stats.files_created += files.flush()
         conn.flush()
     finally:

@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import combinations
 
+from sqlalchemy import and_, exists
+
 from git_synapse.config import get_config
 from git_synapse.db.orm import models, session_scope
 
@@ -52,8 +54,19 @@ def rebuild_repo(repo_id: int, conn: object | None = None) -> AggregateStats:
         Directory, FD = models().Directory, models().FileDirectory
         FilePair, DirPair, AuthorFile = models().FilePair, models().DirPair, models().AuthorFile
         cfg = get_config()
-        commits = session.query(Commit).filter_by(repo_id=repo_id).all()
-        changes = session.query(Change).filter_by(repo_id=repo_id).all()
+        # Only the columns the rebuild actually reads. Whole Commit rows carry subject and
+        # body, which cost ~2.7KB each and are never looked at here; whole CommitFile rows
+        # cost ~1.3KB against ~100 bytes for the five fields below. On the largest
+        # repositories that is the difference between ~1.8GB and a few tens of MB, and
+        # eight of these run at once.
+        commits = session.query(
+            Commit.id, Commit.committed_at, Commit.author_id, Commit.insertions,
+            Commit.deletions, Commit.n_files, Commit.is_merge, Commit.is_replay,
+        ).filter(Commit.repo_id == repo_id).all()
+        changes = session.query(
+            Change.commit_id, Change.file_id, Change.insertions, Change.deletions,
+            Change.change_type,
+        ).filter(Change.repo_id == repo_id).all()
         files = session.query(File).filter_by(repo_id=repo_id).all()
         commit_by_id = {x.id: x for x in commits}
         by_commit: dict[int, set[int]] = defaultdict(set)
@@ -62,11 +75,21 @@ def rebuild_repo(repo_id: int, conn: object | None = None) -> AggregateStats:
             by_commit[change.commit_id].add(change.file_id)
             changes_by_file[change.file_id].append(change)
         cap = cfg.ingest.max_files_per_commit
-        eligible: dict[int, bool] = {}
-        for commit in commits:
-            commit.pair_eligible = eligible[commit.id] = (
-                not commit.is_merge and not commit.is_replay and bool(by_commit[commit.id]) and
-                (cap <= 0 or commit.n_files <= cap))
+        eligible: dict[int, bool] = {
+            row.id: (
+                not row.is_merge and not row.is_replay and bool(by_commit[row.id]) and
+                (cap <= 0 or row.n_files <= cap))
+            for row in commits
+        }
+        # The column query above yields read-only rows, so the flag is written in one
+        # statement. Naming the ids instead would send one bound parameter per commit,
+        # well past the 65,535 the driver allows on a repository of this size.
+        has_change = exists().where(Change.commit_id == Commit.id)
+        is_eligible = and_(Commit.is_merge.is_(False), Commit.is_replay.is_(False), has_change)
+        if cap > 0:
+            is_eligible = and_(is_eligible, Commit.n_files <= cap)
+        session.query(Commit).filter(Commit.repo_id == repo_id).update(
+            {Commit.pair_eligible: is_eligible}, synchronize_session=False)
         population = sum(eligible.values())
         repo = session.get(Repo, repo_id)
         if repo:
