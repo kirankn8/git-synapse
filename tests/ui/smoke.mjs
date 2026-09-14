@@ -437,8 +437,16 @@ console.log('\n=== click walk: account -> repo -> folder -> file ===');
   // for the view to look settled: under load the old page still reads as
   // rendered content, and the walk then clicks a row of the page it just left.
   const clickRow = async (match) => {
-    const rows = [...view().querySelectorAll('table.data tbody tr')];
-    const row = match ? rows.find((r) => match(r)) : rows[0];
+    // Wait for the row rather than reading once: a table that has not painted
+    // yet is indistinguishable from one with nothing in it, and giving up on
+    // the first look is what made this walk fail under load.
+    let row = null;
+    for (let i = 0; i < 60; i++) {
+      const rows = [...view().querySelectorAll('table.data tbody tr')];
+      row = match ? rows.find((r) => match(r)) : rows[0];
+      if (row) break;
+      await sleep(120);
+    }
     if (!row) return false;
     const before = window.location.pathname;
     const tableBefore = view().querySelector('table.data tbody')?.textContent || '';
@@ -462,6 +470,9 @@ console.log('\n=== click walk: account -> repo -> folder -> file ===');
   // /sources is part of what has to keep working.
   window.history.pushState({}, '', '/accounts');
   window.dispatchEvent(new window.PopStateEvent('popstate'));
+  // The redirect is a second navigation, so settling on the page still on
+  // screen proves nothing. Wait for the address to arrive before reading it.
+  for (let i = 0; i < 60 && window.location.pathname !== '/sources'; i++) await sleep(120);
   await settle();
 
   const steps = [];
