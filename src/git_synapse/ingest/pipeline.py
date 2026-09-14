@@ -594,14 +594,18 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
         with session_scope() as conn:
             stats = load_commits(repo_id, commits, conn)
             branch = gitops.default_branch(fetch.path)
-            _mark_replays(repo_id, gitops.replayed_commits(fetch.path, branch), conn)
+            current_refs = gitops.ref_tips(fetch.path)
+            # Replays are a function of the commits and the tags; unchanged inputs cannot
+            # produce a different answer, and the scan costs hours on a large history.
+            if stats.commits_written or force_full or set(current_refs) != set(stored_refs):
+                _mark_replays(repo_id, gitops.replayed_commits(fetch.path, branch), conn)
             mirror = gitops.mirror_path_for(record.full_name, host=record.host)
             load_tags(repo_id, gitops.read_tags(mirror, gitops.default_branch(mirror)), conn)
             repo_row = conn.get(Repo, repo_id)
             if repo_row is not None:
                 repo_row.last_ingest_at = datetime.now(UTC)
                 repo_row.last_ingested_sha = fetch.head_sha or repo_row.last_ingested_sha
-                repo_row.last_ingested_refs = gitops.ref_tips(fetch.path)
+                repo_row.last_ingested_refs = current_refs
 
         result.commits_added = stats.commits_written
         result.files_created = stats.files_created

@@ -428,14 +428,20 @@ def replayed_commits(path: Path, branch: str | None) -> set[str]:
     """Commits off the branch whose diff already exists on it."""
     if not branch or not path.is_dir():
         return set()
-    proc = run_git(["for-each-ref", "--format=%(objectname)", "refs/tags"],
+    # *objectname is set for annotated tags only, so the first 40 characters peel both kinds.
+    proc = run_git(["for-each-ref", "--format=%(*objectname)%(objectname)", "refs/tags"],
                    cwd=path, check=False, timeout=120)
     if proc.returncode != 0:
         return set()
+    tips = {line[:40] for line in proc.stdout.split()}
+
+    # A tag already on the branch has nothing on the other side to compare.
+    on_branch = run_git(["rev-list", branch], cwd=path, check=False, timeout=600)
+    if on_branch.returncode == 0:
+        tips -= set(on_branch.stdout.split())
 
     replays: set[str] = set()
-    for tip in dict.fromkeys(proc.stdout.split()):
-        # A tag already on the branch has nothing on the other side to compare.
+    for tip in sorted(tips):
         marked = run_git(["rev-list", "--cherry-mark", "--right-only", "--no-merges",
                           f"{branch}...{tip}"], cwd=path, check=False, timeout=120)
         if marked.returncode != 0:
