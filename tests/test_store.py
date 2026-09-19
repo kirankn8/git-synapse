@@ -7,9 +7,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from git_synapse.db.orm import models, session_scope
+from git_synapse.ingest import store
 from git_synapse.ingest.github import RepoRecord
 from git_synapse.ingest.parser import FileChange, ParsedCommit
-from git_synapse.ingest.store import COMMIT_FLUSH_SIZE, load_commits, upsert_repo
+from git_synapse.ingest.store import load_commits, upsert_repo
 
 BASE = datetime(2024, 1, 1, tzinfo=UTC)
 
@@ -70,10 +71,18 @@ def test_loads_commits_and_files(temp_repo):
     assert counts(temp_repo) == (5, 10, 2)
 
 
-def test_survives_the_flush_boundary(temp_repo):
+def test_survives_the_flush_boundary(temp_repo, monkeypatch):
     """Rows written after the first flush must not be lost."""
-    total = COMMIT_FLUSH_SIZE * 2 + 17
-    commits = (make_commit(i, [f"pkg/mod_{i % 50}.py", "shared.py"]) for i in range(total))
+    # What has to happen is crossing the boundary more than once; where the
+    # boundary sits does not change the answer. Taking it from the shipped 5000
+    # takes this from 10,017 commits to 37, and from the slowest test in the
+    # suite by a factor of three to one that does not notice.
+    flush = 10
+    monkeypatch.setattr(store, "COMMIT_FLUSH_SIZE", flush)
+    total = flush * 2 + 17
+    modules = 12                      # fewer than `total`, so every one is touched
+    commits = (make_commit(i, [f"pkg/mod_{i % modules}.py", "shared.py"])
+               for i in range(total))
     with session_scope() as conn:
         stats = load_commits(temp_repo, commits, conn)
 
@@ -82,7 +91,7 @@ def test_survives_the_flush_boundary(temp_repo):
     written_commits, written_changes, written_files = counts(temp_repo)
     assert written_commits == total
     assert written_changes == total * 2, "file changes lost across a flush boundary"
-    assert written_files == 51  # 50 modules + shared.py
+    assert written_files == modules + 1  # the modules, plus shared.py
 
 
 def test_reingest_is_idempotent(temp_repo):
