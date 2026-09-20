@@ -237,12 +237,41 @@ def caller(request: Request) -> dict | None:
     return auth.session_user(request.cookies.get(COOKIE))
 
 
+#: Who the caller is when the deployment asks nobody to identify themselves.
+_ANYONE = {"id": None, "email": "", "name": "open deployment", "role": "admin"}
+
+
 def _require(request: Request, admin: bool = False) -> dict:
+    """Gate a route on the deployment's access policy.
+
+    An open deployment has nobody to be, and the middleware already admits
+    every request to it. Refusing here as well made openness arbitrary: the
+    corpus was readable, a refresh could be triggered, but a source could not
+    be added at all -- so the documented first run could not reach step five.
+    """
     user = caller(request)
-    if user is None:
-        raise HTTPException(401, "sign in to continue")
-    if admin and user["role"] != "admin":
-        raise HTTPException(403, "only an administrator can do that")
+    if user is not None:
+        if admin and user["role"] != "admin":
+            raise HTTPException(403, "only an administrator can do that")
+        return user
+    if auth.access_mode("dashboard") != "required":
+        return dict(_ANYONE)
+    raise HTTPException(401, "sign in to continue")
+
+
+def _require_account(request: Request, admin: bool = False) -> dict:
+    """Gate a route that acts *as* somebody: their tokens, or another account.
+
+    These need a real row to attribute the work to, which an open deployment
+    does not have, so it is refused rather than served with a null identity.
+    """
+    user = _require(request, admin=admin)
+    if user.get("id") is None:
+        raise HTTPException(
+            401,
+            "this deployment has no accounts. Set ADMIN_EMAIL and ADMIN_PASSWORD "
+            "to create one.",
+        )
     return user
 
 
@@ -253,14 +282,14 @@ class NewToken(BaseModel):
 
 @router.get("/auth/tokens", tags=["auth"])
 def my_tokens(request: Request) -> dict:
-    me = _require(request)
+    me = _require_account(request)
     return {"tokens": auth.list_tokens(me["id"]), "prefix": auth.TOKEN_PREFIX}
 
 
 @router.post("/auth/tokens", tags=["auth"], status_code=201)
 def mint_token(body: NewToken, request: Request) -> dict:
     """Create a personal token. The secret is returned once and never again."""
-    me = _require(request)
+    me = _require_account(request)
     try:
         secret, row = auth.create_token(me["id"], body.name, body.days)
     except auth.AuthError as exc:
@@ -271,7 +300,7 @@ def mint_token(body: NewToken, request: Request) -> dict:
 
 @router.delete("/auth/tokens/{token_id}", tags=["auth"])
 def revoke_token(token_id: int, request: Request) -> dict:
-    me = _require(request)
+    me = _require_account(request)
     if not auth.delete_token(token_id, me["id"]):
         raise HTTPException(404, f"token {token_id} not found")
     return {"deleted": token_id}
@@ -279,14 +308,18 @@ def revoke_token(token_id: int, request: Request) -> dict:
 
 @router.get("/users", tags=["auth"])
 def list_users(request: Request) -> dict:
-    """Everyone may see who has access; only an administrator may change it."""
-    _require(request)
+    """Everyone signed in may see who has access; only an administrator may change it.
+
+    An open dashboard shares findings, not the address book, so this stays
+    behind an account even when the corpus does not.
+    """
+    _require_account(request)
     return {"users": auth.list_users(), "roles": list(auth.ROLES)}
 
 
 @router.post("/users", tags=["auth"], status_code=201)
 def create_user(body: NewUser, request: Request) -> dict:
-    me = _require(request, admin=True)
+    me = _require_account(request, admin=True)
     try:
         return auth.create_user(body.email, body.name, body.password,
                                 role=body.role, created_by=me["id"])
@@ -310,7 +343,7 @@ def patch_user(user_id: int, body: UserPatch, request: Request) -> dict:
 
 @router.delete("/users/{user_id}", tags=["auth"])
 def delete_user(user_id: int, request: Request) -> dict:
-    me = _require(request, admin=True)
+    me = _require_account(request, admin=True)
     if user_id == me["id"]:
         raise HTTPException(409, "you cannot remove your own account")
     if auth.get_user(user_id) is None:

@@ -6,6 +6,8 @@ import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from sqlalchemy.exc import IntegrityError
+
 from git_synapse.analysis.manifests import version_key
 from git_synapse.config import get_config
 from git_synapse.db.orm import models, session_scope
@@ -95,10 +97,20 @@ class AuthorCache:
         Author = models().Author
         row = self._session.query(Author).filter_by(email=email).first()
         if row is None:
-            row = Author(email=email, display_name=name or None, known_names=[name] if name else [])
-            self._session.add(row)
-            self._session.flush()
-        else:
+            # author.email is unique across the corpus, and repositories are
+            # ingested concurrently. Two workers meeting the same contributor
+            # both miss here and both insert, and one of them loses. Take the
+            # loss inside a savepoint so the rest of the commit survives, then
+            # use the row the winner wrote.
+            try:
+                with self._session.begin_nested():
+                    row = Author(email=email, display_name=name or None,
+                                 known_names=[name] if name else [])
+                    self._session.add(row)
+                    self._session.flush()
+            except IntegrityError:
+                row = self._session.query(Author).filter_by(email=email).one()
+        if row is not None and row.id is not None:
             if not row.display_name and name:
                 row.display_name = name
             if name and name not in (row.known_names or []):
@@ -159,7 +171,16 @@ class FileResolver:
             if occupant is None:
                 row.path = path
                 row.dir_path, row.basename, row.extension, row.depth = split_path(path)
+        # The session does not autoflush, so this query cannot see a row added
+        # a moment ago in this same loop. A path renamed more than once appears
+        # twice in _pending_aliases, and both passed the check -- which is a
+        # duplicate key on (repo_id, old_path) at commit, failing the whole
+        # repository. The first rename is the one that survives.
+        seen: set[str] = set()
         for old_path, file_id in self._pending_aliases:
+            if old_path in seen:
+                continue
+            seen.add(old_path)
             exists = self._session.query(Alias).filter_by(
                 repo_id=self._repo_id, old_path=old_path,
             ).first()

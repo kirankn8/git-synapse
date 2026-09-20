@@ -376,3 +376,99 @@ def test_a_rename_onto_a_file_that_vanished_is_skipped(db):
         resolver._pending_renames = {999_999_999: "moved/elsewhere.py"}
         resolver._pending_aliases = []
         assert resolver.flush() == 0
+
+
+def test_an_author_inserted_by_another_repository_mid_flight_is_adopted(temp_repo):
+    """author.email is unique across the corpus and repositories load in parallel.
+
+    The loser of that race blocks on the winner's row, then gets the violation
+    once the winner commits. It must adopt the existing author rather than fail
+    the repository, which is what a release rehearsal hit on the second of two
+    repositories sharing a contributor.
+    """
+    from git_synapse.ingest.store import AuthorCache
+
+    shared = "collision@example.com"
+    # author.email is unique corpus-wide and nothing here is scoped to a repo,
+    # so the row has to be cleared going in and going out or this passes once.
+    def forget():
+        with session_scope() as session:
+            session.query(models().Author).filter_by(email=shared).delete(
+                synchronize_session=False)
+
+    forget()
+    with session_scope() as session:
+        session.add(models().Author(email=shared, display_name="Winner", known_names=["Winner"]))
+
+    with session_scope() as session:
+        cache = AuthorCache(session)
+        Author = models().Author
+        real_query = session.query
+
+        def blind_once(model, *a, **kw):
+            """Miss the lookup exactly once, as the losing worker did."""
+            q = real_query(model, *a, **kw)
+            if model is Author and not getattr(blind_once, "used", False):
+                blind_once.used = True
+
+                class Missing:
+                    def filter_by(self, **_kw):
+                        return self
+
+                    def first(self):
+                        return None
+
+                return Missing()
+            return q
+
+        session.query = blind_once
+        try:
+            resolved = cache.resolve(shared, "Loser")
+        finally:
+            session.query = real_query
+
+    assert resolved is not None, "the collision must resolve, not raise"
+    with session_scope() as session:
+        rows = [(r.id,) for r in session.query(models().Author).filter_by(email=shared)]
+    forget()
+    assert len(rows) == 1, "no second row for the same address"
+    assert rows[0][0] == resolved, "it must adopt the row that won"
+
+
+def test_a_path_renamed_twice_does_not_duplicate_its_alias(temp_repo):
+    """(repo_id, old_path) is unique, and the dedupe query cannot autoflush.
+
+    Renaming a.py -> b.py -> c.py queues the same old_path twice; both passed
+    the check and the repository failed on the duplicate at commit.
+    """
+    history = [
+        make_commit(0, ["a.py"]),
+        ParsedCommit(
+            sha=f"{1:040x}", parents=[f"{0:040x}"],
+            author_name="T", author_email="t@example.com", authored_at=BASE,
+            committer_name="T", committer_email="t@example.com", committed_at=BASE,
+            subject="rename once", body="",
+            files=[FileChange(path="b.py", change_type="R", old_path="a.py", similarity=99)],
+        ),
+        ParsedCommit(
+            sha=f"{2:040x}", parents=[f"{1:040x}"],
+            author_name="T", author_email="t@example.com", authored_at=BASE,
+            committer_name="T", committer_email="t@example.com", committed_at=BASE,
+            subject="rename back onto the first name", body="",
+            files=[FileChange(path="a.py", change_type="R", old_path="b.py", similarity=99)],
+        ),
+        ParsedCommit(
+            sha=f"{3:040x}", parents=[f"{2:040x}"],
+            author_name="T", author_email="t@example.com", authored_at=BASE,
+            committer_name="T", committer_email="t@example.com", committed_at=BASE,
+            subject="and away again", body="",
+            files=[FileChange(path="c.py", change_type="R", old_path="a.py", similarity=99)],
+        ),
+    ]
+    with session_scope() as conn:
+        load_commits(temp_repo, history, conn)
+
+    with session_scope() as session:
+        Alias = models().FileAlias
+        rows = [r.old_path for r in session.query(Alias).filter_by(repo_id=temp_repo)]
+    assert len(rows) == len(set(rows)), f"an old_path was aliased twice: {rows}"

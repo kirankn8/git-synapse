@@ -378,12 +378,12 @@ def coupled_files(
             (
                 {
                     "path": p["path"],
-                    "repo": p["repo"],
+                    "repo": target["repo"],
                     **{key: value for key, value in card.items() if key != "_rank"},
                 }
                 if not detail else {
                     "path": p["path"],
-                    "repo": p["repo"],
+                    "repo": target["repo"],
                     "labels": labels or None,
                     "informative": informative,
                     "score": _round(p.get("score")),

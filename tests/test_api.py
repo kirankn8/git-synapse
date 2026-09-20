@@ -1444,3 +1444,51 @@ def test_an_unusable_admin_address_is_reported_and_does_not_stop_the_server(db, 
         monkeypatch.delenv("ADMIN_EMAIL", raising=False)
         monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
         reset_config_cache()
+
+
+def test_an_open_deployment_can_be_used_and_not_merely_read(client):
+    """A release rehearsal followed the guide and could not reach step five.
+
+    The middleware admits every request while no account exists, but the
+    routes re-checked and refused, so the corpus was readable, a refresh could
+    be started, and yet a source could not be added at all -- which is the one
+    thing the guide asks a new user to do.
+    """
+    from git_synapse import auth
+
+    assert auth.count_users() == 0, "this test needs an open deployment"
+    assert client.get("/api/overview").status_code == 200
+    assert client.get("/api/settings").status_code == 200, \
+        "a gated read must answer when the deployment asks nobody to sign in"
+
+    # Acting *as* somebody still needs somebody to be.
+    assert client.get("/api/auth/tokens").status_code == 401
+    refused = client.post("/api/users", json={
+        "email": "pytest-open@example.com", "name": "Open",
+        "password": "a-sufficiently-long-pass"})
+    assert refused.status_code == 401
+    assert "ADMIN_EMAIL" in refused.json()["detail"], \
+        "the refusal should say how to get an account"
+
+
+def test_the_gate_refuses_a_caller_it_cannot_identify_on_a_closed_deployment(db):
+    """Over HTTP the middleware turns these away first, so this is the backstop.
+
+    It matters because the routes are the only guard if that middleware is ever
+    bypassed -- a task calling a handler directly, or a mounted sub-application.
+    """
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from git_synapse import auth
+    from git_synapse.api import routes
+
+    blank = Request({"type": "http", "headers": [], "method": "GET", "path": "/"})
+    user = auth.create_user("pytest-gate2@example.com", "Gate", "a-sufficiently-long-pass")
+    try:
+        assert auth.access_mode("dashboard") == "required"
+        with pytest.raises(HTTPException) as caught:
+            routes._require(blank)
+        assert caught.value.status_code == 401
+    finally:
+        auth.delete_user(user["id"])
