@@ -22,7 +22,12 @@ def scratch_db(db):
     os.environ["POSTGRES_DB"] = name
     reset_config_cache()
     close_pool()
-    apply_schema()
+    try:
+        apply_schema()
+    except Exception:  # noqa: BLE001 - a database of this name has never been made here
+        _create_database(name)
+        close_pool()
+        apply_schema()
     from git_synapse.db.orm import models, session_scope
     with session_scope() as session:
         for model in (models().UserSession, models().ApiToken, models().LoginAttempt):
@@ -39,6 +44,32 @@ def scratch_db(db):
         reset_config_cache()
 
 
+def _create_database(name: str) -> None:
+    """Create the test database when the server is up but the database is not.
+
+    A skip is the right answer when there is no server to talk to. It is the
+    wrong answer when there is one and it simply has no database of this name
+    yet: the pre-push hook starts a fresh Postgres holding only the default
+    database, so every database-backed check skipped and the gate that is
+    supposed to guard a push verified almost nothing.
+    """
+    import sqlalchemy
+
+    from git_synapse.config import get_config
+
+    cfg = get_config().db
+    url = (
+        f"postgresql+pg8000://{cfg.user}:{cfg.password}"
+        f"@{cfg.host}:{cfg.port}/postgres"
+    )
+    engine = sqlalchemy.create_engine(url, isolation_level="AUTOCOMMIT")
+    try:
+        with engine.connect() as conn:
+            conn.execute(sqlalchemy.text(f'CREATE DATABASE "{name}"'))
+    finally:
+        engine.dispose()
+
+
 @pytest.fixture(scope="session")
 def db():
     """Yield a working database, or skip the test when none is reachable."""
@@ -53,7 +84,12 @@ def db():
     close_pool()
 
     try:
-        wait_for_database(timeout_s=5, interval_s=0.5)
+        try:
+            wait_for_database(timeout_s=5, interval_s=0.5)
+        except Exception:  # noqa: BLE001 - maybe the database just is not there yet
+            _create_database(name)
+            close_pool()
+            wait_for_database(timeout_s=5, interval_s=0.5)
     except Exception as exc:  # noqa: BLE001 - any failure means "no database"
         close_pool()
         if previous is None:
