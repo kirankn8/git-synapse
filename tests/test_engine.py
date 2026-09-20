@@ -201,3 +201,64 @@ def test_a_default_that_is_neither_a_keyword_nor_a_number_is_kept_verbatim():
     # Not a keyword, not an integer: passed through as written.
     assert schema._python_default("nextval('seq')") == "nextval('seq')"
     assert schema._python_default("uuid_generate_v4()") == "uuid_generate_v4()"
+
+
+def test_the_schema_installs_the_extensions_its_indexes_need(db):
+    """Three GIN indexes are declared against gin_trgm_ops, which pg_trgm provides."""
+    from sqlalchemy import text
+
+    engine.apply_schema()
+    with engine.get_engine().begin() as conn:
+        installed = {row[0] for row in conn.execute(text("select extname from pg_extension"))}
+    assert {"pg_trgm", "btree_gin"} <= installed
+
+
+def test_a_database_that_forbids_extensions_still_reaches_the_schema(monkeypatch, caplog):
+    """Managed Postgres may refuse CREATE EXTENSION to an unprivileged role.
+
+    Failing there would strand a deployment whose extensions are already
+    installed by its operator, so the attempt is reported and not fatal.
+    """
+    class Refusing:
+        def begin(self):
+            raise PermissionError("permission denied to create extension")
+
+    def refusing_engine():
+        return Refusing()
+
+    monkeypatch.setattr(engine, "get_engine", refusing_engine)
+    with caplog.at_level("WARNING"):
+        engine._ensure_extensions()
+    assert "could not ensure extension" in caplog.text
+
+
+def test_an_extension_the_database_lacks_is_created(monkeypatch):
+    """The catalogue is read first, so only what is missing is created."""
+    issued = []
+
+    class Conn:
+        def execute(self, statement):
+            sql = str(statement)
+            issued.append(sql)
+            # Report a database that has neither of them yet.
+            return [] if "pg_extension" in sql else None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    class Bare:
+        def begin(self):
+            return Conn()
+
+    def bare_engine():
+        return Bare()
+
+    monkeypatch.setattr(engine, "get_engine", bare_engine)
+    engine._ensure_extensions()
+
+    created = [s for s in issued if "CREATE EXTENSION" in s]
+    assert any("pg_trgm" in s for s in created)
+    assert any("btree_gin" in s for s in created)

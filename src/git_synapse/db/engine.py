@@ -75,6 +75,32 @@ def schema_drift() -> int:
     return max(0, recorded - SCHEMA_VERSION) if recorded is not None else 0
 
 
+def _ensure_extensions() -> None:
+    """Install the extensions the schema's indexes are declared against.
+
+    schema.py declares three GIN trigram indexes, which need gin_trgm_ops from
+    pg_trgm. Nothing created it, so the schema only applied to a database where
+    someone had installed it by hand; a fresh one failed on the first index.
+    """
+    from sqlalchemy import text
+
+    wanted = ("pg_trgm", "btree_gin")
+    try:
+        with get_engine().begin() as conn:
+            # CREATE EXTENSION takes an exclusive lock even when it changes
+            # nothing, so two processes applying the schema at once block on each
+            # other. Reading the catalogue first keeps the usual case lock-free.
+            have = {row[0] for row in conn.execute(
+                text("select extname from pg_extension"))}
+            for extension in (e for e in wanted if e not in have):
+                # Managed Postgres may forbid this to an unprivileged role. If the
+                # extension is already there the indexes still build; if it is not,
+                # create_all fails next with a clearer message than this one.
+                conn.execute(text(f'CREATE EXTENSION IF NOT EXISTS "{extension}"'))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not ensure extension %s: %s", "/".join(wanted), exc)
+
+
 def apply_schema(force: bool = False) -> None:
     """Create the canonical ORM metadata and record its version."""
     recorded = recorded_schema_version()
@@ -92,6 +118,7 @@ def apply_schema(force: bool = False) -> None:
     last: Exception | None = None
     for attempt in range(1, SCHEMA_RETRIES + 1):
         try:
+            _ensure_extensions()
             metadata.create_all(get_engine(), checkfirst=True)
             Meta = models().Meta
             with session_scope() as session:
