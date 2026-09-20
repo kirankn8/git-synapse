@@ -104,3 +104,43 @@ def test_every_ui_path_named_in_the_docs_is_a_real_route(name):
                                   "/mcp", "/work", "/usr"))}
     dead = [p for p in sorted(named) if not served(p)]
     assert not dead, f"{name} sends the reader to {dead}, which no route serves"
+
+
+def _documented_cli_commands() -> set[str]:
+    """Every `cli <command>` the README tells a reader to run."""
+    section = README[README.index("## CLI and development"):]
+    found = set()
+    for line in section.splitlines():
+        match = re.search(r"\bcli ([a-z-]+)(?: ([a-z-]+))?", line)
+        if not match:
+            continue
+        group, sub = match.group(1), match.group(2)
+        found.add(f"{group} {sub}" if sub and not sub.startswith("-") else group)
+    return found
+
+
+def test_every_cli_command_in_the_readme_exists():
+    """The README listed eleven commands that had been deleted, and nothing noticed."""
+    from git_synapse import cli
+
+    def named(value, fallback=None):
+        # typer leaves `name` as a DefaultPlaceholder when the sub-app carries it.
+        return value if isinstance(value, str) else fallback
+
+    real = {c.name for c in cli.app.registered_commands if isinstance(c.name, str)}
+    for group in cli.app.registered_groups:
+        label = named(group.name, named(group.typer_instance.info.name))
+        if not label:
+            continue
+        real.add(label)
+        for command in group.typer_instance.registered_commands:
+            if isinstance(command.name, str):
+                real.add(f"{label} {command.name}")
+
+    documented = _documented_cli_commands()
+    assert documented, "the README should show how to run the CLI"
+    unknown = sorted(documented - real)
+    assert not unknown, (
+        f"README.md documents {unknown}, which the CLI does not provide. "
+        f"It offers {sorted(real)}."
+    )

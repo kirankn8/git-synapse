@@ -259,28 +259,42 @@ An agent typically calls `coupled_files` while editing, then checks
 
 ## CLI and development
 
+The CLI does the few things the server cannot do for itself: claim the first
+administrator, choose which sources are scanned, and empty the database.
+Discovery, ingest, scoring and mining are the scheduler's job and need no
+command.
+
 ```bash
-docker compose run --rm cli <command>
+docker compose run --rm cli admin setup-token        # one-time admin token
+docker compose run --rm cli account add my-org       # start scanning a source
+docker compose run --rm cli account list
+docker compose run --rm cli account enable 3 --off   # pause, keeping its data
+docker compose run --rm cli account remove 3
+docker compose run --rm cli reset --yes              # drop ingested data
 ```
 
-Useful commands include `status`, `measures`, `discover`, `ingest`, `aggregate`,
-`score`, `coupled`, `impact`, `chains`, `mine`, and `backtest`.
+`account add` also takes `--kind user`, `--no-private`, `--no-archived`, and
+`--only`/`--skip` for an allowlist or denylist of repository names. Sources can
+equally be added and edited on the **Sources** page.
+
+Replaying history to measure whether the suggestions would have helped is a
+script rather than a command; see [OSS benchmark](#oss-benchmark) above.
 
 The atomic facts and derived tables are documented in
 [`DESIGN.md`](DESIGN.md). Configuration is in [`.env.example`](.env.example).
 
-Run the test suite with Docker:
+Run the test suite, which has a 100% coverage gate:
 
 ```bash
 docker compose up -d postgres
-docker run --rm -v "$PWD:/work" -w /work \
-  -e POSTGRES_HOST=host.docker.internal -e POSTGRES_PORT=55432 \
-  git-synapse-test python -m pytest -q --cov=git_synapse
+docker compose run --rm --no-deps -v "$PWD:/repo" \
+  -e POSTGRES_HOST=postgres --entrypoint sh cli \
+  -c 'cd /repo && PYTHONPATH=src python -m pytest -q --cov=git_synapse'
 ```
 
-The pre-push hook runs the backend coverage gate, Ruff, and UI checks. Install
-the repository hooks with:
+The pre-push hook runs that gate, Ruff, and the two UI suites. Point git at the
+repository's hooks to enable it:
 
 ```bash
-make hooks-install
+git config core.hooksPath scripts/hooks
 ```
