@@ -41,10 +41,18 @@ def test_setup_docs_explain_both_paths_and_secret_location() -> None:
 
 
 def test_github_pages_publishes_docs_root() -> None:
+    """The workflow makes its own Pages site.
+
+    Asking it to was once wrong: a private repository on the free plan has no
+    Pages at all, so the step failed on that and the request was taken out.
+    Once the repository is public the step is the only thing that turns the
+    site on, and without it every run failed at Configure Pages while the
+    README sent people to an address that answered 404.
+    """
     workflow = (ROOT / ".github/workflows/pages.yml").read_text()
     index = (ROOT / "docs/index.html").read_text()
     assert "actions/deploy-pages" in workflow
-    assert "enablement: true" not in workflow
+    assert "enablement: true" in workflow
     assert "path: docs" in workflow
     assert "setup.html" in index
 

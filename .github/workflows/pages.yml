@@ -26,7 +26,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure Pages
+        # Create the Pages site if the repository has none, rather than failing
+        # and waiting for someone to find the setting. Every run of this
+        # workflow so far failed here, so the guide the README points at was
+        # never published.
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - name: Upload docs
         uses: actions/upload-pages-artifact@v3
         with:
