@@ -211,3 +211,21 @@ def test_the_guide_does_not_offer_an_install_that_cannot_work() -> None:
     assert "Not published yet" in page, "the guide does not say the chart is unpublished"
     # And it still has to leave a way in.
     assert "./charts/git-synapse" in page, "no way to install the chart from source"
+
+
+def test_the_site_previews_as_a_card_when_the_link_is_shared() -> None:
+    """A launch link gets pasted into Slack, Reddit, HN and X. Without these the
+    scraper has nothing and renders a bare URL."""
+    page = (ROOT / "docs/index.html").read_text()
+    for tag in ("og:title", "og:description", "og:url",
+                "og:image", "twitter:card"):
+        assert tag in page, f"{tag} is missing, so the link previews as plain text"
+    # Scrapers do not resolve relative paths.
+    assert 'content="https://kirankn8.github.io/git-synapse/og-card.png"' in page
+    card = ROOT / "docs/og-card.png"
+    assert card.exists(), "the preview image is not published with the page"
+
+    import struct
+
+    width, height = struct.unpack(">II", card.read_bytes()[16:24])
+    assert (width, height) == (1200, 630), f"card is {width}x{height}, not 1200x630"
