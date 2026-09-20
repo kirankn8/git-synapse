@@ -194,3 +194,20 @@ def test_the_agent_facing_text_asks_for_a_check_before_calling_work_done() -> No
             or "reports it done" in lowered or "reporting work finished" in lowered \
             or "report the work finished" in lowered or "reporting the work done" in lowered, \
             f"{name} does not ask for the check before the work is called done"
+
+
+def test_the_guide_does_not_offer_an_install_that_cannot_work() -> None:
+    """The Kubernetes section told everyone to helm install from an OCI registry
+    that has nothing on it, because no release tag has ever been cut. Naming the
+    address while explaining that is fine; presenting it as a command to run is
+    not."""
+
+    page = (ROOT / "docs/index.html").read_text()
+    for block in re.findall(r'<div class="code">(.*?)</div>', page, re.DOTALL):
+        assert "oci://ghcr.io" not in block, (
+            "the guide offers an oci:// install as a runnable command, but "
+            "nothing is published there"
+        )
+    assert "Not published yet" in page, "the guide does not say the chart is unpublished"
+    # And it still has to leave a way in.
+    assert "./charts/git-synapse" in page, "no way to install the chart from source"

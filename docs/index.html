@@ -291,10 +291,19 @@
       </section>
 
       <section class="step" id="kubernetes">
-        <div class="step-head"><div class="step-number">☸</div><div><h2>Kubernetes: one Helm command</h2><p class="muted">Use this path when you already have a Kubernetes cluster and Helm. The chart creates the app, scheduler, MCP server, Postgres, migration job, health checks, and persistent storage.</p></div></div>
-        <div class="code"><button class="copy" type="button">Copy</button><span class="prompt">$ </span>helm upgrade --install git-synapse \
-  oci://ghcr.io/kirankn8/charts/git-synapse \
-  --namespace git-synapse --create-namespace</div>
+        <div class="step-head"><div class="step-number">☸</div><div><h2>Kubernetes: install the chart from source</h2><p class="muted">Use this path when you already have a Kubernetes cluster and Helm. The chart creates the app, scheduler, MCP server, Postgres, migration job, health checks, and persistent storage.</p></div></div>
+        <div class="callout warn"><span>⚠️</span><span><strong>Not published yet.</strong> There is no release tag, so neither the chart
+        nor a container image is on a public registry — <code>oci://ghcr.io/kirankn8/charts/git-synapse</code>
+        will not resolve. The chart in the repository is complete and installs fine; you build the image once and
+        point the chart at it. If you just want to try Git Synapse, take the Docker path above instead.</span></div>
+        <p>Build and push the image to a registry your cluster can pull from:</p>
+        <div class="code"><button class="copy" type="button">Copy</button><span class="prompt">$ </span>git clone https://github.com/kirankn8/git-synapse.git &amp;&amp; cd git-synapse
+<span class="prompt">$ </span>docker build -f docker/Dockerfile -t &lt;your-registry&gt;/git-synapse:1.0.0 .
+<span class="prompt">$ </span>docker push &lt;your-registry&gt;/git-synapse:1.0.0</div>
+        <p>Then install the chart from the checkout, pointing it at that image:</p>
+        <div class="code"><button class="copy" type="button">Copy</button><span class="prompt">$ </span>helm upgrade --install git-synapse ./charts/git-synapse \
+  --namespace git-synapse --create-namespace \
+  --set image.repository=&lt;your-registry&gt;/git-synapse</div>
         <p class="small">You need a Kubernetes cluster, <code>kubectl</code>, and Helm already installed. The chart does not try to install a cluster because cluster providers differ.</p>
         <div class="callout"><span>🔐</span><span><strong>Where is the admin password?</strong><br>A cluster is shared, so the chart always requires a sign-in. It creates a Kubernetes Secret named <code>git-synapse</code> holding <code>ADMIN_EMAIL</code> and a generated <code>ADMIN_PASSWORD</code>. Read it with:<br><code>kubectl -n git-synapse get secret git-synapse -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d; echo</code><br>Set <code>secrets.adminEmail</code> to your own address. Helm prints this command in its notes too.</span></div>
         <div class="code"><button class="copy" type="button">Copy</button><span class="prompt">$ </span>kubectl -n git-synapse port-forward service/git-synapse 8080:8000</div>
