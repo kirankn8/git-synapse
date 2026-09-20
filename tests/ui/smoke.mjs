@@ -115,6 +115,9 @@ report('measure chips rendered', $('#measure-chips').children.length >= 6,
 // Resolve real ids from the live corpus to build deep-link routes.
 const repos = await (await fetch(BASE + '/api/repos?limit=1&order_by=pair_count', withCookie())).json();
 const repoId = repos.repos[0].id;
+const repoOwner = repos.repos[0].owner;
+const repoName = repos.repos[0].name;
+const sourceId = repos.repos[0].account_id;
 const files = await (await fetch(`${BASE}/api/repos/${repoId}/hotspots?limit=1`, withCookie())).json();
 const fileId = files.hotspots[0].id;
 const coupled = await (await fetch(`${BASE}/api/files/${fileId}/coupled?limit=1&min_support=2`, withCookie())).json();
@@ -205,14 +208,17 @@ for (const [hash, label] of routes) {
 // Interaction: clicking a table row must navigate.
 console.log('\n=== drill-down trail ===');
 for (const [path, label, expect] of [
-  ['/repos/5', 'repository', ['Sources', 'google']],
+  [`/repos/${repoId}`, 'repository', ['Sources', repoOwner]],
   [`/repos/${repoId}/tree/${dirPath}`, 'folder',
    ['Sources', ...dirPath.split('/')]],
   [`/repos/${repoId}/files/${filePath}`, 'file',
    ['Sources', filePath.split('/').pop()]],
-  ['/insights/risk?repo=5', 'scoped insights', ['Sources', 'google', 'guava', 'Insights']],
-  ['/insights/impact?repo=5', 'scoped impact',  ['Sources', 'google', 'guava', 'Insights']],
-  ['/insights/graph?repo=5', 'scoped graph', ['Sources', 'google', 'guava', 'Insights']],
+  [`/insights/risk?repo=${repoId}`, 'scoped insights',
+   ['Sources', repoOwner, repoName, 'Insights']],
+  [`/insights/impact?repo=${repoId}`, 'scoped impact',
+   ['Sources', repoOwner, repoName, 'Insights']],
+  [`/insights/graph?repo=${repoId}`, 'scoped graph',
+   ['Sources', repoOwner, repoName, 'Insights']],
 ]) {
   // The previous page's breadcrumb is still in the DOM until the new view
   // replaces it, and "the first non-empty trail" was therefore sometimes the
@@ -236,7 +242,7 @@ for (const [path, label, expect] of [
 
 // Opening a repository lands on its files, with the Files tab in focus -- not
 // a page the reader has to configure first.
-window.history.pushState({}, '', '/repos/5');
+window.history.pushState({}, '', `/repos/${repoId}`);
 window.dispatchEvent(new window.PopStateEvent('popstate'));
 {
   let rows = 0, active = '', folders = 0;
@@ -274,6 +280,24 @@ const openFirstGroup = async () => {
   return null;
 };
 
+/* The first group is whichever source sorts first, which on a small corpus is
+   often a single repository. Where a check needs rows to compare, it needs a
+   group that actually has them. */
+const openGroupWithRows = async (least) => {
+  for (let i = 0; i < 60; i++) {
+    for (const panel of view().querySelectorAll('details.repo-group')) {
+      if (!panel.open) {
+        panel.open = true;
+        panel.dispatchEvent(new window.Event('toggle'));
+        await sleep(120);
+      }
+      if (panel.querySelectorAll('table.data tbody tr').length >= least) return panel;
+    }
+    await sleep(120);
+  }
+  return null;
+};
+
 window.history.pushState({}, '', '/repos');
 window.dispatchEvent(new window.PopStateEvent('popstate'));
 await sleep(1400);
@@ -292,33 +316,49 @@ if (!firstRow) {
          `${before} -> ${window.location.pathname}`);
 }
 
-// Interaction: column sort must reorder.
+// Interaction: column sort must reorder. A group holding one repository cannot
+// reorder, and reading that as a broken sort is how this check failed on every
+// corpus but the one it was written on, so it takes a group that has two rows
+// to put in an order and says so when the corpus offers none.
 window.history.pushState({}, '', '/repos');
 window.dispatchEvent(new window.PopStateEvent('popstate'));
 await sleep(1400);
-await openFirstGroup();
-const th = [...view().querySelectorAll('th.sortable')].find((t) => t.textContent.includes('Commits'));
-const firstBefore = view().querySelector('tbody tr').textContent.slice(0, 30);
-th.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-await sleep(300);
-const firstAfter = view().querySelector('tbody tr').textContent.slice(0, 30);
-report('column sort reorders', firstBefore !== firstAfter, `${firstBefore.trim()} -> ${firstAfter.trim()}`);
+const sortable = await openGroupWithRows(2);
+if (!sortable) {
+  report('column sort reorders', true,
+         'no source here holds two repositories, so there is nothing to order');
+} else {
+  const th = [...sortable.querySelectorAll('th.sortable')]
+    .find((t) => t.textContent.includes('Commits'));
+  const firstBefore = sortable.querySelector('tbody tr').textContent.slice(0, 30);
+  th.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await sleep(300);
+  const firstAfter = sortable.querySelector('tbody tr').textContent.slice(0, 30);
+  report('column sort reorders', firstBefore !== firstAfter,
+         `${firstBefore.trim()} -> ${firstAfter.trim()}`);
+}
 
 // Interaction: switching the global measure must re-render.
 // setMeasure() repaints the chip row, so the clicked node is replaced.
 // Re-query by label rather than holding the (now detached) original.
+// This has to run on a page the measure actually ranks something on. Run from
+// /repos it passed for the wrong reason: the measure bar is hidden there, so
+// no column can be re-labelled, and what the check really saw was the sort
+// arrow left by the check before it falling off the header.
+window.history.pushState({}, '', `/repos/${repoId}?tab=pairs`);
+window.dispatchEvent(new window.PopStateEvent('popstate'));
+await sleep(1800);
 const chip = [...$('#measure-chips').children].find((c) => !c.classList.contains('active'));
 const chipName = chip.textContent;
 const headerBefore = view().querySelector('table.data thead').textContent;
 chip.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 await sleep(1800);
 const nowActive = [...$('#measure-chips').children].find((c) => c.classList.contains('active'));
-// The repaint rebuilds the group list shut, so open one again to read a header.
-await openFirstGroup();
 const headerAfter = view().querySelector('table.data thead').textContent;
 report('measure switch applies',
        nowActive && nowActive.textContent === chipName && headerBefore !== headerAfter,
-       `active chip = ${nowActive && nowActive.textContent}; table column re-labelled`);
+       `active chip = ${nowActive && nowActive.textContent}; `
+       + `header ${headerBefore === headerAfter ? 'unchanged' : 're-labelled'}`);
 
 // Interaction: theme toggle.
 const themeBefore = window.document.documentElement.dataset.theme;
@@ -327,9 +367,11 @@ await sleep(120);
 report('theme toggle', window.document.documentElement.dataset.theme !== themeBefore,
        `${themeBefore} -> ${window.document.documentElement.dataset.theme}`);
 
-// Interaction: omnibox search.
+// Interaction: omnibox search. The term comes from a file that is really in
+// the corpus: a word picked by hand only matches on the machine it was picked
+// on, and elsewhere an empty result set is indistinguishable from a broken box.
 const box = $('#omnibox');
-box.value = 'cluster';
+box.value = filePath.split('/').pop().replace(/\.[^.]+$/, '').slice(0, 6);
 box.dispatchEvent(new window.Event('input', { bubbles: true }));
 await sleep(1600);
 const results = $('#omnibox-results');
@@ -350,8 +392,8 @@ if (errors.length) {
 console.log('\n=== canonical paths ===');
 {
   const cases = [
-    ['/sources/7',                      'source'],
-    ['/repos/5',                        'repository'],
+    [`/sources/${sourceId}`,            'source'],
+    [`/repos/${repoId}`,                'repository'],
     [`/repos/${repoId}/files/${filePath}`,      'file'],
     dirPath ? [`/repos/${repoId}/tree/${dirPath}`, 'folder'] : null,
     // The root directory is a legitimate coupling partner, and its path is the
@@ -472,14 +514,17 @@ console.log('\n=== click walk: account -> repo -> folder -> file ===');
 
   // A source that has actually been scanned: the walk descends folder → file,
   // which needs history to descend into. A paused or never-scanned source is a
-  // legitimate row and simply has no tree below it.
-  let ok = await clickRow((r) => {
-    const n = Number((r.children[2]?.textContent || '0').replace(/[^0-9]/g, ''));
-    return n > 0 && !/paused/i.test(r.textContent);
-  });
+  // legitimate row and simply has no tree below it. Prefer the source holding
+  // the repository the routes above resolved, because whichever source happens
+  // to sort first may be one file deep and have no folder to descend into.
+  let ok = await clickRow((r) => r.textContent.includes(repoOwner))
+        || await clickRow((r) => {
+             const n = Number((r.children[2]?.textContent || '0').replace(/[^0-9]/g, ''));
+             return n > 0 && !/paused/i.test(r.textContent);
+           });
   step('source row opens the source', ok && /^\/sources\/\d+$/.test(window.location.pathname));
 
-  ok = await clickRow();
+  ok = await clickRow((r) => r.textContent.includes(repoName)) || await clickRow();
   step('repository row opens the repository',
        ok && /^\/repos\/\d+$/.test(window.location.pathname));
 
