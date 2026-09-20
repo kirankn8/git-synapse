@@ -1087,3 +1087,58 @@ def test_an_account_with_no_endpoint_gets_the_providers_public_one(
     pipeline._discover_account(accounts.get_account(beta["id"]))
 
     assert seen and seen[0].api_url == "https://api.github.com"
+
+
+def test_a_contended_repository_is_retried_and_then_succeeds(monkeypatch):
+    """The retry path used to be covered only when a real deadlock happened to
+    occur during the run, so a quiet machine left two lines uncovered and the
+    100% gate refused the push for reasons nobody had changed."""
+    from git_synapse.ingest import pipeline as pl
+    from git_synapse.ingest.github import RepoRecord
+
+    record = RepoRecord(github_id=1, owner="acme", name="app",
+                        full_name="acme/app", clone_url="https://example.invalid/app.git",
+                        default_branch="main")
+    attempts = {"n": 0}
+
+    def flaky(rec, force_full):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return pl.RepoResult(full_name=rec.full_name, status="failed",
+                                 error="deadlock detected")
+        return pl.RepoResult(full_name=rec.full_name, status="ok")
+
+    slept = []
+    monkeypatch.setattr(pl, "_sync_repo_once", flaky)
+    monkeypatch.setattr(pl.time, "sleep", slept.append)
+
+    result = pl.sync_repo(record)
+    assert result.status == "ok"
+    assert attempts["n"] == 2, "a contended repository must be tried again"
+    assert slept == [2], "the first retry waits two seconds"
+
+
+def test_a_repository_contended_every_time_gives_up_and_reports_it(monkeypatch):
+    """Retrying forever would hold the whole run open on one repository."""
+    from git_synapse.ingest import pipeline as pl
+    from git_synapse.ingest.github import RepoRecord
+
+    record = RepoRecord(github_id=2, owner="acme", name="busy",
+                        full_name="acme/busy", clone_url="https://example.invalid/busy.git",
+                        default_branch="main")
+    attempts = {"n": 0}
+
+    def always_contended(rec, force_full):
+        attempts["n"] += 1
+        return pl.RepoResult(full_name=rec.full_name, status="failed",
+                             error="could not serialize access")
+
+    slept = []
+    monkeypatch.setattr(pl, "_sync_repo_once", always_contended)
+    monkeypatch.setattr(pl.time, "sleep", slept.append)
+
+    result = pl.sync_repo(record)
+    assert result.status == "failed"
+    assert attempts["n"] == pl.DB_CONTENTION_RETRIES
+    # Waits between tries, but not after the last one.
+    assert slept == [2, 4]
