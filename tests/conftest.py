@@ -110,6 +110,34 @@ def _remote(root, name, commits):
     return bare
 
 
+@pytest.fixture
+def busy_file(corpus):
+    """The most-changed live file the corpus builds, and the repo holding it.
+
+    The checks that need one used to go looking in whatever database was
+    present for a file with more changes than the corpus ever produces, and
+    skip when they did not find it. On a clean database that is every run, so
+    the code they cover went out untested -- which is how a tool that raised
+    on every call passed a suite reporting full coverage. Built data, and a
+    failure rather than a skip when it is not there.
+    """
+    from git_synapse.db.orm import models, session_scope
+
+    with session_scope() as session:
+        row = session.query(
+            models().Repo.name, models().File.path, models().File.dir_path,
+            models().File.change_count,
+        ).join(
+            models().File, models().File.repo_id == models().Repo.id,
+        ).filter(
+            models().Repo.is_enabled.is_(True),
+            models().File.is_deleted.is_(False),
+            models().File.dir_path != "",
+        ).order_by(models().File.change_count.desc()).first()
+    assert row is not None, "the corpus built no live file in a directory"
+    return row
+
+
 @pytest.fixture(scope="module")
 def corpus(scratch_db, tmp_path_factory):
     """Two repositories linked by a declared dependency and shared tickets."""

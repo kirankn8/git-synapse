@@ -40,19 +40,13 @@ def test_coupled_files_rejects_an_unknown_path_with_a_hint(corpus):
     assert "error" in out and "hint" in out
 
 
-def test_coupled_files_shape_is_stable(db):
-    from git_synapse.db.orm import models, session_scope
-
-    with session_scope() as session:
-        row = session.query(models().Repo.name, models().File.path).join(
-            models().File, models().File.repo_id == models().Repo.id,
-        ).filter(models().Repo.is_enabled.is_(True), models().File.change_count > 30,
-                 models().File.is_deleted.is_(False)).first()
-    if row is None:
-        pytest.skip("no busy file")
+def test_coupled_files_shape_is_stable(busy_file):
+    row = busy_file
     out = server.coupled_files(repo=row.name, path=row.path, min_support=3, limit=5, detail=True)
     assert "error" not in out, out
     assert out["file"]["path"] == row.path
+    # A partner row is where the bugs live, so there has to be one to look at.
+    assert out["partners"], "the corpus file came back with no partners"
     for p in out["partners"]:
         for key in ("path", "score", "co_changes", "partner_total_changes",
                     "probability_also_changes", "informative", "currency"):
@@ -61,19 +55,12 @@ def test_coupled_files_shape_is_stable(db):
         assert 0.0 <= p["probability_also_changes"] <= 1.0
 
 
-def test_coupled_files_default_is_a_compact_evidence_card(db):
-    from git_synapse.db.orm import models, session_scope
-
-    with session_scope() as session:
-        row = session.query(models().Repo.name, models().File.path).join(
-            models().File, models().File.repo_id == models().Repo.id,
-        ).filter(models().Repo.is_enabled.is_(True), models().File.change_count > 30,
-                 models().File.is_deleted.is_(False)).first()
-    if row is None:
-        pytest.skip("no busy file")
+def test_coupled_files_default_is_a_compact_evidence_card(busy_file):
+    row = busy_file
     out = server.coupled_files(repo=row.name, path=row.path, min_support=3, limit=5)
     assert "error" not in out, out
     assert out["measure"] is None
+    assert out["partners"], "the corpus file came back with no partners"
     for partner in out["partners"]:
         assert {"path", "evidence", "support", "recency_days", "agreement", "summary"} <= partner.keys()
         assert "log_likelihood_ratio" not in partner
@@ -123,16 +110,8 @@ def test_module_context_rejects_a_path_that_does_not_exist(corpus):
     assert "error" in out
 
 
-def test_coupled_directories_accepts_a_file_or_a_directory(db):
-    from git_synapse.db.orm import models, session_scope
-
-    with session_scope() as session:
-        row = session.query(models().Repo.name, models().File.path, models().File.dir_path).join(
-            models().File, models().File.repo_id == models().Repo.id,
-        ).filter(models().Repo.is_enabled.is_(True), models().File.dir_path != "",
-                 models().File.change_count > 20).first()
-    if row is None:
-        pytest.skip("no suitable file")
+def test_coupled_directories_accepts_a_file_or_a_directory(busy_file):
+    row = busy_file
     by_file = server.coupled_directories(repo=row.name, path=row.path, limit=5)
     by_dir = server.coupled_directories(repo=row.name, path=row.dir_path, limit=5)
     assert by_file["directory"]["path"] == by_dir["directory"]["path"] == row.dir_path
@@ -240,15 +219,8 @@ def test_impact_of_change_and_upstream_agree(db):
     assert any(x["repo"].endswith(source) for x in up.get("upstream", []))
 
 
-def test_file_history_returns_commits_for_a_real_file(db):
-    from git_synapse.db.orm import models, session_scope
-
-    with session_scope() as session:
-        row = session.query(models().Repo.name, models().File.path).join(
-            models().File, models().File.repo_id == models().Repo.id,
-        ).filter(models().File.change_count > 5, models().Repo.is_enabled.is_(True)).first()
-    if row is None:
-        pytest.skip("no busy file")
+def test_file_history_returns_commits_for_a_real_file(busy_file):
+    row = busy_file
     out = server.file_history(repo=row.name, path=row.path, limit=5)
     assert "error" not in out
     assert out["recent_commits"]
