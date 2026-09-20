@@ -17,38 +17,50 @@ const BASE = process.env.GIT_SYNAPSE_URL || 'http://localhost:8080';
 const MIN_GAP = 10;
 const MAX_GAP = 28;
 
-const PAGES = [
-  ['/', 'Overview'],
-  ['/repos', 'Repositories'],
-  ['/repos/4', 'Repository'],
-  ['/repos/4?tab=pairs', 'Repository pairs'],
-  ['/repos/4/tree/src', 'Folder'],
-  ['/insights/graph', 'Insights map'],
-  ['/insights/impact?repo=5&dir=upstream', 'Impact'],
-  // Unscoped as well as scoped: the empty state is a different page, and it
-  // carried prose no other page did.
-  ['/insights/impact', 'Impact (unscoped)'],
-  ['/insights/shape', 'Distributions'],
-  ['/insights/shape/commit_width', 'One distribution'],
-  ['/insights/risk', 'Risk'],
-  ['/insights/drift', 'Drift'],
-  ['/sources', 'Sources'],
-  ['/jobs', 'Jobs'],
-  ['/jobs?tab=settings', 'Jobs settings'],
-  ['/activity', 'Activity'],
-  ['/measures', 'Measures'],
-  ['/people', 'People'],
-  ['/tokens', 'API tokens'],
-  ['/repos/4?tab=meta', 'Repository metadata'],
-  ['/insights/modules?repo=5', 'Modules'],
-  ['/feedback', 'Feedback'],
-];
+/* Which repository these pages are read on is resolved from the deployment,
+   not written down here: ids 4 and 5 and a folder called src exist on the
+   machine this was written on and on no new install, and a page that 404s
+   still has consistent spacing, so hard-coded ids turn most of these checks
+   into checks of the not-found page. Filled in once the API answers. */
+let PAGES = [];
+let MEASURE_BAR = [];
 
-// Where the ranking measure orders something on screen, and where it does not.
-const MEASURE_BAR = [
-  ['/', false], ['/repos/4?tab=pairs', true],
-  ['/repos', false], ['/insights/risk', false], ['/jobs', false],
-];
+function buildPages(repoId, dirPath) {
+  const repo = `/repos/${repoId}`;
+  const folder = dirPath ? [`${repo}/tree/${dirPath}`, 'Folder'] : null;
+  PAGES = [
+    ['/', 'Overview'],
+    ['/repos', 'Repositories'],
+    [repo, 'Repository'],
+    [`${repo}?tab=pairs`, 'Repository pairs'],
+    folder,
+    ['/insights/graph', 'Insights map'],
+    [`/insights/impact?repo=${repoId}&dir=upstream`, 'Impact'],
+    // Unscoped as well as scoped: the empty state is a different page, and it
+    // carried prose no other page did.
+    ['/insights/impact', 'Impact (unscoped)'],
+    ['/insights/shape', 'Distributions'],
+    ['/insights/shape/commit_width', 'One distribution'],
+    ['/insights/risk', 'Risk'],
+    ['/insights/drift', 'Drift'],
+    ['/sources', 'Sources'],
+    ['/jobs', 'Jobs'],
+    ['/jobs?tab=settings', 'Jobs settings'],
+    ['/activity', 'Activity'],
+    ['/measures', 'Measures'],
+    ['/people', 'People'],
+    ['/tokens', 'API tokens'],
+    [`${repo}?tab=meta`, 'Repository metadata'],
+    [`/insights/modules?repo=${repoId}`, 'Modules'],
+    ['/feedback', 'Feedback'],
+  ].filter(Boolean);
+
+  // Where the ranking measure orders something on screen, and where it does not.
+  MEASURE_BAR = [
+    ['/', false], [`${repo}?tab=pairs`, true],
+    ['/repos', false], ['/insights/risk', false], ['/jobs', false],
+  ];
+}
 
 const problems = [];
 const ok = (label, detail) => console.log(`  ok   ${label.padEnd(36)} ${detail}`);
@@ -78,6 +90,25 @@ async function sessionCookie() {
 }
 
 const AUTH_COOKIE = await sessionCookie();
+/* No cookie means the deployment asks nobody who they are -- the default the
+   setup guide leaves you on, and a different page from the gated one. */
+const OPEN_DEPLOYMENT = AUTH_COOKIE === null;
+let REPO_NAME = '';
+
+/* Ask the deployment what it actually holds, then build the routes from it. */
+const REPO_ID = await (async () => {
+  const headers = AUTH_COOKIE
+    ? { cookie: `${AUTH_COOKIE.name}=${AUTH_COOKIE.value}` } : {};
+  const list = await (await fetch(
+    BASE + '/api/repos?limit=1&order_by=pair_count', { headers })).json();
+  const repo = (list.repos || [])[0];
+  if (!repo) throw new Error('this deployment holds no repositories to lay out');
+  const tree = await (await fetch(
+    `${BASE}/api/repos/${repo.id}/tree`, { headers })).json();
+  buildPages(repo.id, ((tree.directories || [])[0] || {}).path || '');
+  REPO_NAME = repo.name;
+  return repo.id;
+})();
 
 const browser = await puppeteer.launch({
   executablePath: '/usr/bin/chromium-browser',
@@ -201,16 +232,21 @@ const STATIC_BY_DESIGN = new Set([
   'GitHub token',                 // explains why it is not editable here
   'Fixed for this deployment',    // reference values, changed only in .env
 ]);
+/* Titles that carry a count cannot be listed by name. A gap report is a record
+   of something an agent could not answer, and carries no repository or file of
+   its own to open, so the list is where it ends. */
+const STATIC_PATTERNS = [/^\d+ reports?$/];
 
 console.log('\n=== every card leads somewhere ===');
 for (const [path, label] of PAGES) {
   await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });
   await settle();
-  const dead = await page.evaluate((allowed) => {
+  const dead = await page.evaluate((allowed, patterns) => {
     const out = [];
     for (const c of document.querySelectorAll('#view .card')) {
       const title = ((c.querySelector('.card-title') || {}).textContent || '?').trim();
       if (allowed.includes(title)) continue;
+      if (patterns.some((p) => new RegExp(p).test(title))) continue;
       // An empty card has nothing to lead to, which is not a dead end.
       if (c.querySelector('.empty') && !c.querySelector('tbody tr')) continue;
       const wayOut = c.classList.contains('is-link')
@@ -218,7 +254,7 @@ for (const [path, label] of PAGES) {
       if (!wayOut) out.push(title);
     }
     return out;
-  }, [...STATIC_BY_DESIGN]);
+  }, [...STATIC_BY_DESIGN], STATIC_PATTERNS.map((p) => p.source));
   if (dead.length) bad(`${label} cards`, `no way out of: ${dead.join(', ')}`);
   else ok(`${label} cards`, 'every card leads somewhere');
 }
@@ -226,7 +262,7 @@ for (const [path, label] of PAGES) {
 /* A figure with no way in is a dead end, and on Overview they are the first
    thing a reader sees. Every tile opens what it counts. */
 console.log('\n=== every figure opens what it counts ===');
-for (const path of ['/', '/repos/4', '/activity', '/insights/shape/pair_support']) {
+for (const path of ['/', `/repos/${REPO_ID}`, '/activity', '/insights/shape/pair_support']) {
   await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });
   await settle();
   const inert = await page.evaluate(() => [...document.querySelectorAll('#view .stat')]
@@ -354,23 +390,38 @@ console.log('\n=== the splash covers the load and then leaves ===');
 }
 
 /* The door itself. Rendered for a visitor with no session, on a deployment
-   that has people -- which is every page they can reach until they sign in. */
-console.log('\n=== the sign-in screen ===');
+   that has people -- which is every page they can reach until they sign in.
+   A deployment with no admin set has no door by design, and asserting one
+   there failed the default install rather than checking it, so each mode is
+   checked for what it is supposed to do. */
+console.log(`\n=== ${OPEN_DEPLOYMENT ? 'an open deployment lets a stranger in'
+                                      : 'the sign-in screen'} ===`);
 {
   const anon = await browser.createIncognitoBrowserContext
     ? await (await browser.createIncognitoBrowserContext()).newPage()
     : await browser.newPage();
   await anon.deleteCookie(...(await anon.cookies(BASE)));
-  await anon.goto(BASE + '/repos/4', { waitUntil: 'domcontentloaded' });
+  // A new page is 800px wide, and the nav is display:none under 900px. Reading
+  // a hidden nav as proof the door is shut passed for the wrong reason; give
+  // this page the same window as the rest so the measurement means something.
+  await anon.setViewport({ width: 1440, height: 1000 });
+  await anon.goto(BASE + `/repos/${REPO_ID}`, { waitUntil: 'domcontentloaded' });
   await new Promise((r) => setTimeout(r, 1800));
-  const seen = await anon.evaluate(() => ({
+  const seen = await anon.evaluate((name) => ({
     gated: document.body.classList.contains('gated'),
     form: !!document.querySelector('.gate-form input[type=password]'),
     // The chrome is hidden: a nav that leads nowhere and a search that cannot.
     nav: (document.querySelector('.mainnav') || {}).offsetHeight || 0,
-    leaked: (document.getElementById('view').textContent || '').includes('closure-compiler'),
-  }));
-  if (seen.gated && seen.form && !seen.nav && !seen.leaked) {
+    shows: (document.getElementById('view').textContent || '').includes(name),
+  }), REPO_NAME);
+  if (OPEN_DEPLOYMENT) {
+    // The other half of the promise: no door, and the page behind it really there.
+    if (!seen.gated && !seen.form && seen.nav && seen.shows) {
+      ok('open to a stranger', 'the repository renders with no session at all');
+    } else {
+      bad('open to a stranger', JSON.stringify(seen));
+    }
+  } else if (seen.gated && seen.form && !seen.nav && !seen.shows) {
     ok('sign-in screen', 'shown instead of the page, with no data behind it');
   } else {
     bad('sign-in screen', JSON.stringify(seen));
@@ -525,8 +576,16 @@ console.log('\n=== repositories are grouped by source ===');
     bad('repositories grouped', JSON.stringify(shut));
   }
   // Sixty-six tables built up front is a lot of DOM for a page where most stay
-  // shut, so nothing is rendered until a group is opened.
-  if (shut.rows === 0) {
+  // shut, so nothing is rendered until a group is opened. Three or fewer
+  // sources are opened for you instead -- hiding a short list behind clicks
+  // helps nobody -- so on a small deployment the rows are meant to be there.
+  if (shut.groups <= 3) {
+    if (shut.rows > 0 && shut.open === shut.groups) {
+      ok('groups build lazily', `${shut.groups} sources, opened for you, ${shut.rows} rows`);
+    } else {
+      bad('groups build lazily', `short list not opened: ${JSON.stringify(shut)}`);
+    }
+  } else if (shut.rows === 0) {
     ok('groups build lazily', 'no rows rendered while every group is shut');
   } else {
     bad('groups build lazily', `${shut.rows} rows rendered with nothing open`);
@@ -543,7 +602,9 @@ console.log('\n=== repositories are grouped by source ===');
   }
 
   // A filter is a search: what it finds must not sit behind a shut triangle.
-  await page.goto(BASE + '/repos?q=inkscape', { waitUntil: 'domcontentloaded' });
+  // Search for a repository this deployment has, not one this machine has.
+  await page.goto(`${BASE}/repos?q=${encodeURIComponent(REPO_NAME)}`,
+                  { waitUntil: 'domcontentloaded' });
   await settle();
   const found = await page.evaluate(() => ({
     groups: document.querySelectorAll('.repo-group').length,
@@ -568,14 +629,18 @@ console.log('\n=== repositories are grouped by source ===');
       leader: groups[0]?.querySelector('.repo-group-owner')?.textContent,
       leaderOpen: Boolean(groups[0]?.open),
       leaderFiles: groups[0] ? files(groups[0]) : 0,
-      byCommits: [...document.querySelectorAll('.repo-group-counts')]
-        .map((c) => Number((c.textContent.match(/([\d,]+) commits/) || [0, '0'])[1].replace(/,/g, ''))),
+      byFiles: groups.map(files),
     };
   });
-  // Ordered by files, the head of the list is not the head of a commit ranking.
-  const descendingByCommits = ranked.byCommits.every((n, i, a) => i === 0 || a[i - 1] >= n);
-  if (ranked.leaderOpen && ranked.leaderFiles > 0 && !descendingByCommits) {
-    ok('a ranking orders the groups', `${ranked.leader} leads on files, open, ${ranked.leaderFiles} files`);
+  /* The claim is that the groups come back in the order that was asked for, so
+     that is what is read. Proving it by showing the order differs from a
+     commit ranking only works where the two disagree; on a corpus where the
+     biggest repository is also the busiest they coincide, and a page doing
+     exactly the right thing failed. */
+  const descendingByFiles = ranked.byFiles.every((n, i, a) => i === 0 || a[i - 1] >= n);
+  if (ranked.leaderOpen && ranked.leaderFiles > 0 && descendingByFiles) {
+    ok('a ranking orders the groups',
+       `${ranked.leader} leads on files, open, ${ranked.leaderFiles} files`);
   } else {
     bad('a ranking orders the groups', JSON.stringify(ranked).slice(0, 200));
   }
@@ -599,12 +664,15 @@ console.log('\n=== a repository picker is grouped by account ===');
   }
 
   // Typing narrows it, which is the whole reason it is not a native select.
-  await page.type('.picker-search', 'guav');
+  // The term is a prefix of a repository this deployment has; a word chosen by
+  // hand matches nothing anywhere else, and no matches reads as a broken box.
+  const term = REPO_NAME.slice(0, 4);
+  await page.type('.picker-search', term);
   await new Promise((r) => setTimeout(r, 250));
   const filtered = await page.evaluate(
     () => [...document.querySelectorAll('.picker-option')].map((o) => o.textContent));
   if (filtered.length && filtered.length < shape.options) {
-    ok('picker search', `"guav" narrows ${shape.options} to ${filtered.length}`);
+    ok('picker search', `"${term}" narrows ${shape.options} to ${filtered.length}`);
   } else {
     bad('picker search', `got ${filtered.length} of ${shape.options}`);
   }
