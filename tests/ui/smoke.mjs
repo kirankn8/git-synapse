@@ -229,8 +229,10 @@ for (const [path, label, expect] of [
   })();
   window.history.pushState({}, '', path);
   window.dispatchEvent(new window.PopStateEvent('popstate'));
+  // Long enough for the busiest repository in a large corpus: the trail paints
+  // with the view, and the view here is the one with the most pairs to fetch.
   let trail = '';
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 200; i++) {
     await sleep(120);
     const el = window.document.querySelector('.crumbs');
     trail = el ? el.textContent.replace(/\s+/g, ' ').trim() : '';
