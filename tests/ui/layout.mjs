@@ -244,36 +244,56 @@ for (const path of ['/', '/repos/4', '/activity', '/insights/shape/pair_support'
    to a filtered repository list, so where you landed depended on which pixel
    you hit. A preview is a picture of a whole; clicking part of it shows the
    whole. */
+/* Each of these cards fills in from its own query, and settle() returns as
+   soon as the view holds anything at all, so the set of cards is still growing
+   when it comes back. Two consequences, both fixed here: wait for the set to
+   stop growing before reading it, and find a card by its title rather than by
+   its position, because a list read on one load does not line up with the same
+   list on the next. Indexing into it clicked the wrong card on a good day, and
+   on a bad one read a property of undefined and took the whole run down. */
+const chartCards = async (path) => {
+  await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });
+  await settle();
+  let last = -1;
+  for (let i = 0; i < 40; i++) {
+    const titles = await page.evaluate(() => [...document.querySelectorAll('.card.is-link')]
+      .filter((c) => c.querySelector('.cbar, .hbar'))
+      .map((c) => (c.querySelector('.card-title') || {}).textContent || ''));
+    if (titles.length && titles.length === last) return titles;
+    last = titles.length;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  return [];
+};
+
 console.log('\n=== a chart goes where its card goes ===');
 for (const path of ['/', '/insights/shape']) {
-  const count = await (async () => {
-    await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });
-    await settle();
-    return page.evaluate(() => [...document.querySelectorAll('.card.is-link')]
-      .filter((c) => c.querySelector('.cbar, .hbar')).length);
-  })();
+  const titles = await chartCards(path);
 
-  for (let i = 0; i < count; i++) {
+  for (const title of titles) {
     const land = async (what) => {
-      await page.goto(BASE + path, { waitUntil: 'domcontentloaded' });
-      await settle();
-      const title = await page.evaluate((n, pick) => {
+      await chartCards(path);
+      const found = await page.evaluate((want, pick) => {
         const card = [...document.querySelectorAll('.card.is-link')]
-          .filter((c) => c.querySelector('.cbar, .hbar'))[n];
-        const name = card.querySelector('.card-title').textContent;
+          .filter((c) => c.querySelector('.cbar, .hbar'))
+          .find((c) => ((c.querySelector('.card-title') || {}).textContent || '') === want);
+        if (!card) return false;
         (pick === 'arrow' ? card.querySelector('.card-go')
                           : card.querySelector('.cbar, .hbar')).click();
-        return name;
-      }, i, what);
+        return true;
+      }, title, what);
+      if (!found) return null;
       await settle();
-      return { title, url: await page.evaluate(() => location.pathname + location.search) };
+      return page.evaluate(() => location.pathname + location.search);
     };
     const arrow = await land('arrow');
     const chart = await land('chart');
-    if (arrow.url === chart.url) {
-      ok(`${path} "${arrow.title}"`, `arrow and chart both open ${arrow.url}`);
+    if (arrow === null || chart === null) {
+      bad(`${path} "${title}"`, 'the card was on one load of the page and not the next');
+    } else if (arrow === chart) {
+      ok(`${path} "${title}"`, `arrow and chart both open ${arrow}`);
     } else {
-      bad(`${path} "${arrow.title}"`, `arrow opens ${arrow.url}, chart opens ${chart.url}`);
+      bad(`${path} "${title}"`, `arrow opens ${arrow}, chart opens ${chart}`);
     }
   }
 }
