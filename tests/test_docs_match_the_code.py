@@ -144,3 +144,28 @@ def test_every_cli_command_in_the_readme_exists():
         f"README.md documents {unknown}, which the CLI does not provide. "
         f"It offers {sorted(real)}."
     )
+
+
+def test_the_two_variables_that_close_a_deployment_reach_every_service():
+    """A deployment told to require a sign-in must actually require one.
+
+    ADMIN_EMAIL and ADMIN_PASSWORD are the only way to close a deployment, and
+    the setup guide says to put them in .env and restart. They were in no
+    service's environment, so compose never passed them in: following the guide
+    to secure a shared deployment left it open, and said nothing.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    compose = (root / "docker-compose.yml").read_text()
+    anchor = compose[compose.index("x-app-env:"):compose.index("services:")]
+    for name in ("ADMIN_EMAIL", "ADMIN_PASSWORD"):
+        assert f"{name}:" in anchor, (
+            f"{name} is not in the shared compose environment, so a deployment "
+            "that sets it in .env stays open"
+        )
+
+    # The chart carries them too, from its Secret rather than the environment.
+    helpers = (root / "charts/git-synapse/templates/_helpers.tpl").read_text()
+    for name in ("ADMIN_EMAIL", "ADMIN_PASSWORD"):
+        assert f"name: {name}" in helpers, f"{name} never reaches the pods"

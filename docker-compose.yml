@@ -13,6 +13,11 @@ x-app-env: &app-env
   BITBUCKET_USER: ${BITBUCKET_USER:-}
   BITBUCKET_TOKEN: ${BITBUCKET_TOKEN:-}
   GS_SECRET_KEY: ${GS_SECRET_KEY:-}
+  # Set both to require a sign-in; neither set leaves the deployment open.
+  # Every service reads them: the API creates the account and the others must
+  # agree about whether this deployment asks who is calling.
+  ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
   INGEST_CONCURRENCY: ${INGEST_CONCURRENCY:-8}
   MAX_FILES_PER_COMMIT: ${MAX_FILES_PER_COMMIT:-60}
   MIN_PAIR_SUPPORT: ${MIN_PAIR_SUPPORT:-2}
