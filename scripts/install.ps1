@@ -60,7 +60,9 @@ for ($i = 0; $i -lt 60; $i++) {
 }
 Write-Host "`nGit Synapse is ready" -ForegroundColor Cyan
 Write-Host "Open: $Url"
-Write-Host "`nFor a new installation, get the one-time setup token with:" -ForegroundColor Yellow
-Write-Host '  docker compose run --rm cli admin setup-token'
-Write-Host "Open the URL above, paste the token into the first-run page, and choose your email, name, and password."
-Write-Host "The first account becomes the administrator and the token expires after use."
+Write-Host "`nNothing else to do: the dashboard is there." -ForegroundColor Cyan
+Write-Host "`nThis deployment answers anyone who can reach it. To require a sign-in," -ForegroundColor Yellow
+Write-Host "set both in .env and restart:"
+Write-Host '  ADMIN_EMAIL=you@example.com'
+Write-Host '  ADMIN_PASSWORD=something-long-and-unguessable'
+Write-Host '  docker compose up -d' 

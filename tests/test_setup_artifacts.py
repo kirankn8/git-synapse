@@ -11,7 +11,7 @@ def test_local_installers_are_present_and_shell_script_parses() -> None:
     assert shell.is_file()
     assert powershell.is_file()
     subprocess.run(["bash", "-n", str(shell)], check=True)
-    assert "docker compose run --rm cli admin setup-token" in shell.read_text()
+    assert "ADMIN_EMAIL" in shell.read_text(), "the installer must say how to require a sign-in"
     assert ".env" in shell.read_text()
     assert "releases/latest" in shell.read_text()
 

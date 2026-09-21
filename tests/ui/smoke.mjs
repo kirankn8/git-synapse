@@ -13,7 +13,7 @@ const TEST_PASSWORD = process.env.GS_TEST_PASSWORD || 'ui-tests-password-1234';
 
 async function signIn() {
   const me = await (await fetch(BASE + '/api/auth/me')).json();
-  if (!me.auth_required && !me.needs_setup) return null;   // no door here
+  if (!me.auth_required) return null;   // an open deployment needs no session
 
   const post = (path, body) => fetch(BASE + path, {
     method: 'POST',
@@ -21,21 +21,13 @@ async function signIn() {
     body: JSON.stringify(body),
   });
 
-  const res = me.needs_setup
-    ? await post('/api/auth/setup',
-                 { email: TEST_EMAIL, name: 'UI tests', password: TEST_PASSWORD,
-                   setup_token: process.env.GS_SETUP_TOKEN || '' })
-    : await post('/api/auth/login', { email: TEST_EMAIL, password: TEST_PASSWORD });
+  const res = await post('/api/auth/login', { email: TEST_EMAIL, password: TEST_PASSWORD });
 
   if (!res.ok) {
     throw new Error(
-      `could not sign in as ${TEST_EMAIL} (${res.status}). `
-      + (me.needs_setup
-        // Creating the first account is what needs authorising; signing in to
-        // an existing one only needs the right password.
-        ? 'This deployment has no accounts yet. Set GS_SETUP_TOKEN to the token '
-          + 'the API printed at startup, or start it with ADMIN_SETUP_TOKEN.'
-        : 'Set GS_TEST_EMAIL and GS_TEST_PASSWORD to an account on this deployment.'));
+      `could not sign in as ${TEST_EMAIL} (${res.status}). Accounts come from the `
+      + 'environment: set ADMIN_EMAIL and ADMIN_PASSWORD on the deployment, and '
+      + 'GS_TEST_EMAIL and GS_TEST_PASSWORD here to match.');
   }
   const cookie = (res.headers.getSetCookie?.() || [])
     .map((c) => c.split(';')[0]).join('; ');

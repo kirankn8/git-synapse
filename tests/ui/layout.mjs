@@ -58,28 +58,18 @@ const bad = (label, detail) => { console.log(`  FAIL ${label.padEnd(36)} ${detai
    it to the browser, so these pages render rather than showing the door. */
 const TEST_EMAIL = process.env.GS_TEST_EMAIL || 'ui-tests@git-synapse.local';
 const TEST_PASSWORD = process.env.GS_TEST_PASSWORD || 'ui-tests-password-1234';
-// Only needed against a deployment nobody has claimed yet, where creating the
-// account is the only way in and the token is what authorises that.
-const SETUP_TOKEN = process.env.GS_SETUP_TOKEN || '';
-
 async function sessionCookie() {
   const me = await (await fetch(BASE + '/api/auth/me')).json();
-  if (!me.auth_required && !me.needs_setup) return null;
-  const res = await fetch(BASE + (me.needs_setup ? '/api/auth/setup' : '/api/auth/login'), {
+  if (!me.auth_required) return null;   // an open deployment needs no session
+  const res = await fetch(BASE + '/api/auth/login', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(me.needs_setup
-      ? { email: TEST_EMAIL, name: 'UI tests', password: TEST_PASSWORD,
-          setup_token: SETUP_TOKEN }
-      : { email: TEST_EMAIL, password: TEST_PASSWORD }),
+    body: JSON.stringify({ email: TEST_EMAIL, password: TEST_PASSWORD }),
   });
   if (!res.ok) {
-    throw new Error(`could not sign in as ${TEST_EMAIL} (${res.status}). `
-      + (me.needs_setup
-        ? 'This deployment has no accounts yet, so one must be created, which '
-          + 'needs the setup token. Set GS_SETUP_TOKEN to the value the API '
-          + 'printed at startup, or start it with ADMIN_SETUP_TOKEN.'
-        : 'Set GS_TEST_EMAIL and GS_TEST_PASSWORD to an account on this deployment.'));
+    throw new Error(`could not sign in as ${TEST_EMAIL} (${res.status}). Accounts `
+      + 'come from the environment: set ADMIN_EMAIL and ADMIN_PASSWORD on the '
+      + 'deployment, and GS_TEST_EMAIL and GS_TEST_PASSWORD here to match.');
   }
   const raw = (res.headers.getSetCookie?.() || [])[0] || '';
   const [pair] = raw.split(';');

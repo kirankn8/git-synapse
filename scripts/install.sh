@@ -115,12 +115,12 @@ for _ in $(seq 1 60); do
     printf ' ready.\n'
     info "Git Synapse is ready"
     printf 'Open: %s\n' "$URL"
-    printf '\nIf this is a new installation, create the first administrator:\n'
-    printf '  1. Get the one-time setup token with:\n'
-    printf '     cd %q && docker compose run --rm cli admin setup-token\n' "$TARGET_DIR"
-    printf '  2. Open the URL above and paste the token into the first-run page.\n'
-    printf '  3. Choose your email, name, and password.\n'
-    printf '\nThe first account becomes the administrator and the token expires after use.\n'
+    printf '\nNothing else to do: the dashboard is there.\n'
+    printf '\nThis deployment answers anyone who can reach it. To require a sign-in,\n'
+    printf 'set both in %q/.env and restart:\n' "$TARGET_DIR"
+    printf '  ADMIN_EMAIL=you@example.com\n'
+    printf '  ADMIN_PASSWORD=something-long-and-unguessable\n'
+    printf '\n  cd %q && docker compose up -d\n' "$TARGET_DIR"
     exit 0
   fi
   printf '.'

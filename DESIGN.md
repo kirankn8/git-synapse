@@ -97,7 +97,7 @@ operational state that belongs to the deployment rather than to the corpus.
 | `ingest_run` | Job history: what ran, when, and whether it worked. |
 | `ingest_run_repo` | Per-repo detail for a run, so a failure is traceable to the repository that caused it. |
 | `feedback` | Defects in Git Synapse reported by the sessions using it. The only table an agent may write to, and deliberately read by no measure. |
-| `meta` | Key/value for the schema version, the settings a running deployment may change, and the first-run setup token until it is used. |
+| `meta` | Key/value for the schema version and the settings a running deployment may change. |
 
 **Access and audit** — who may read this, and what they asked for
 
@@ -106,7 +106,7 @@ operational state that belongs to the deployment rather than to the corpus.
 | `app_user` | One row per person: email, name, role, and the scrypt hash with its own cost parameters, so the cost can be raised without invalidating anyone's password. |
 | `user_session` | Live browser sessions, as the SHA-256 of the cookie. A dump yields no working credential, only the fact that a session existed. |
 | `api_token` | Tokens for agents and scripts, likewise hashed. The visible prefix is kept so a person can tell their own tokens apart without the list being a set of live keys. |
-| `login_attempt` | Failed sign-ins inside the lockout window, counted per address. Also carries setup-token guesses, against a sentinel no real address can match. |
+| `login_attempt` | Failed sign-ins inside the lockout window, counted per address. |
 | `call_log` | Every call served on both surfaces — arguments, reply, duration, rows, client. The one table that grows with *traffic* rather than with history, so it is pruned by age and by count at the end of every ingest. |
 
 ---
@@ -746,9 +746,8 @@ anywhere with a container runtime:
 
 ```bash
 git clone <this repo> && cd git-synapse
-cp .env.example .env && $EDITOR .env     # add GITHUB_TOKEN
+cp .env.example .env && $EDITOR .env     # GITHUB_TOKEN, and ADMIN_* to require a sign-in
 docker compose up -d
-docker compose run --rm cli admin setup-token
 ```
 
 Nothing is host-specific. To carry the data across instead of re-ingesting:
@@ -941,36 +940,34 @@ is an API token: a database dump yields no working credential, only the fact
 that one existed. A token's first characters are kept so a person can tell
 their tokens apart without the list being a set of live keys.
 
-**The first administrator is created at the console, not in the environment.**
-`ADMIN_PASSWORD` in a compose file sits in a shell history, a process listing
-and every copy of that file. Instead, a deployment with no users is open — there
-is nobody to sign in as, and requiring it would lock the first administrator out
-of the screen that creates them — and the setup endpoint refuses as soon as one
-account exists, so it cannot mint a second administrator later.
+**The first administrator comes from the environment, and nowhere else.**
+`ADMIN_EMAIL` and `ADMIN_PASSWORD` name the account; the API reconciles it on
+every start. Set neither and no account exists, which means nobody to sign in
+as, which means the deployment answers every read — stated in the startup log
+and in a banner on the page, rather than implied.
 
-**That open window is closed by a setup token.** Being open means the screen
-that creates the administrator is reachable by whoever reaches the port, so
-without a second factor the first stranger to load the page owns the
-deployment. On a cold database the API mints a 32-byte token, stores it, and
-prints it once to its own log; `/auth/setup` will not create the account
-without it. The token proves the caller can read the console of the thing they
-just started, which is the same access being an administrator will later imply.
+This reverses an earlier design, and the reason is worth keeping. That design
+kept the password out of the environment by opening a window instead: a
+deployment with no users was reachable, and a stored setup token closed the
+window by proving the caller could read the console. The reasoning was sound
+and the mechanism worked, but it bought nothing. The window was open either
+way — `access_mode` returns `open` while no user exists, so every read was
+already answered — and the token only guarded the screen that created the
+account, not the data behind it. What it did reliably was cost four steps
+before anyone saw anything, and leave the page and the server holding different
+opinions about whether a fresh deployment was gated.
 
-Three details are load-bearing. It is *stored*, not generated per process, so
-four workers racing on a cold database converge on one value rather than
-printing three that will not work — the `INSERT … ON CONFLICT DO NOTHING` is
-the arbitration. It is *deleted* the moment the account is created, so a
-claimed deployment holds no standing secret that nothing will ever check again,
-and a restart announces nothing. And `ADMIN_SETUP_TOKEN` overrides it for a
-deployment that claims the account from a script rather than a terminal — that
-one is never echoed to the log, since whoever set it already has it.
+The cost of the current design is real and is accepted: the password sits in a
+file, a process listing, and every copy of that file. Three things make it the
+better trade here. It is the same file that already holds `POSTGRES_PASSWORD`
+and `GITHUB_TOKEN`, so it is not a new class of secret to protect. The account
+is reconciled rather than created once, so editing the file and restarting is
+the password reset — a deployment cannot be locked out of itself. And the
+alternative was not "no secret in a file" but "a secret in a file plus a token
+in a log plus a form", which is more surface for the same exposure.
 
-Guessing it is rate-limited on the same budget as a password. A 32-byte token
-will not fall to a brute-force run, but the endpoint is reachable during the
-one window in a deployment's life when nothing is signed in, and an unbounded
-loop against it is free noise in the log at best. The attempts are counted
-against the sentinel `setup`, which the email pattern can never match, so
-hammering the setup screen cannot lock a real person out.
+On Kubernetes the chart generates the password into a Secret instead of
+shipping something open, because a cluster is shared and a laptop is not.
 
 **A password cannot be guessed at machine speed.** scrypt costs about 70ms an
 attempt, which throttles one attacker on one thread and does nothing about a
