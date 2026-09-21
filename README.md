@@ -33,10 +33,19 @@ managed operation.
 
 ## Why it helps
 
-An agent can find names and imports in the current checkout. Git Synapse adds
-the relationships that are easy to miss: files that repeatedly changed together,
-the upstream repository that usually needs the fix first, and the downstream
-repositories that later consume it.
+An agent reads the checkout in front of it. It cannot see that this file has
+moved together with three others for two years, or that two services in other
+repositories follow it within the week. That is not in the code — it is in the
+commits.
+
+<p align="center">
+  <img src="docs/why-coupling.svg" alt="You change one file. Three more files in the same repository usually change with it, and two services in other repositories follow within days. Six places needed the change; one was on your screen." width="100%">
+</p>
+
+Six places needed the change and the checkout named one of them. Git Synapse
+reads the other five out of commits you already have: files that repeatedly
+changed together, the upstream repository that usually needs the fix first, and
+the downstream repositories that later consume it.
 
 ```mermaid
 flowchart LR
@@ -53,9 +62,9 @@ flowchart LR
     style R fill:#8b5cf6,color:#fff,stroke:#6d28d9
 ```
 
-The result is evidence, not a rule. Every suggestion includes support,
-directional confidence, and the underlying relationship so an agent or human
-can decide whether it matters.
+Each answer carries the evidence behind it — support, directional confidence,
+and the underlying relationship — so an agent or a human can decide whether it
+matters. It is evidence, not a rule.
 
 ## OSS benchmark
 
@@ -271,8 +280,9 @@ An agent typically calls `coupled_files` while editing, then checks
 
 ## CLI and development
 
-The CLI does the few things the server cannot do for itself: claim the first
-administrator, choose which sources are scanned, and empty the database.
+The CLI does the two things the server cannot do for itself: choose which
+sources are scanned, and empty the database. The first administrator comes from
+`ADMIN_EMAIL` and `ADMIN_PASSWORD` in `.env`, not from a command.
 Discovery, ingest, scoring and mining are the scheduler's job and need no
 command.
 

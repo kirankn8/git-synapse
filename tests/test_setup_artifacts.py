@@ -33,11 +33,53 @@ def test_helm_chart_has_secret_migration_and_health_contract() -> None:
 
 
 def test_setup_docs_explain_both_paths_and_secret_location() -> None:
-    docs = (ROOT / "docs/setup.html").read_text()
+    docs = (ROOT / "docs/index.html").read_text()
     assert "scripts/install.sh" in docs
     assert "helm upgrade --install git-synapse" in docs
     assert "Kubernetes Secret" in docs
     assert "ADMIN_EMAIL" in docs and "ADMIN_PASSWORD" in docs
+
+
+def test_the_guide_says_how_to_add_a_repository() -> None:
+    """Naming a source is the step without which nothing else happens, and it
+    used to sit inside the collapsed manual-install section, where anyone who
+    took the one-command path never saw it."""
+    docs = (ROOT / "docs/index.html").read_text()
+    assert 'id="add-repo"' in docs
+    assert "account add" in docs, "the CLI route to adding a source is missing"
+    assert "GITHUB_TOKEN" in docs, "nothing says how to reach a private repository"
+    # Outside the collapsed manual path, so every install path reaches it.
+    assert docs.index('id="add-repo"') > docs.index("</details>")
+
+
+def test_the_guide_connects_the_named_agents_to_mcp() -> None:
+    """The MCP server is the point of the tool, and the guide used to send
+    people to the README for it, where only one client was covered."""
+    docs = (ROOT / "docs/index.html").read_text()
+    assert "http://localhost:8081/mcp" in docs
+    for client in ("Claude Code", "Cursor", "VS Code", "opencode", "Claude Desktop"):
+        assert client in docs, f"{client} has no MCP instructions"
+    assert "claude mcp add --transport http" in docs
+    assert "Bearer gss_" in docs, "nothing says how to authenticate the MCP server"
+
+
+def test_both_the_guide_and_the_readme_draw_why_it_is_needed() -> None:
+    """The intuition -- an agent sees one checkout, the change spans more than
+    that -- carries better as a picture than a paragraph."""
+    figure = ROOT / "docs/why-coupling.svg"
+    assert figure.exists(), "the diagram both pages point at is missing"
+    art = figure.read_text()
+    # It has to carry the whole point on its own, in words anyone reads.
+    assert "the file you changed" in art
+    assert "its test file" in art, "the same-repository case is not drawn"
+    assert "OTHER REPOSITORIES" in art, "the cross-repository case is not drawn"
+    assert "@keyframes" in art, "the diagram does not move"
+    assert "prefers-reduced-motion" in art, "the motion cannot be turned off"
+    assert "prefers-color-scheme" in art, "the diagram only suits one theme"
+
+    for page, how in ((ROOT / "docs/index.html", 'src="why-coupling.svg"'),
+                      (ROOT / "README.md", 'src="docs/why-coupling.svg"')):
+        assert how in page.read_text(), f"{page.name} does not show the diagram"
 
 
 def test_github_pages_publishes_docs_root() -> None:
@@ -50,11 +92,12 @@ def test_github_pages_publishes_docs_root() -> None:
     README sent people to an address that answered 404.
     """
     workflow = (ROOT / ".github/workflows/pages.yml").read_text()
-    index = (ROOT / "docs/index.html").read_text()
     assert "actions/deploy-pages" in workflow
     assert "enablement: true" in workflow
     assert "path: docs" in workflow
-    assert "setup.html" in index
+    # setup.html stays as a redirect so links already pointing at it keep working.
+    redirect = (ROOT / "docs/setup.html").read_text()
+    assert "http-equiv=\"refresh\"" in redirect and "#install" in redirect
 
 
 def test_the_published_pages_only_link_inside_themselves_or_out_to_github() -> None:
@@ -75,9 +118,12 @@ def test_the_landing_page_introduces_the_project_and_leads_to_the_guide() -> Non
     """The site root is where the README sends a stranger, so it has to say what
     this is before it asks them to install anything."""
     index = (ROOT / "docs/index.html").read_text()
-    assert 'href="setup.html"' in index, "the landing page never reaches the guide"
-    assert "coupl" in index.lower(), "the landing page never says what the tool does"
-    assert "git clone" in index, "the landing page shows no way to start"
+    # One page now: the introduction opens it and the guide continues below.
+    assert index.index('id="why"') < index.index('id="install"'), \
+        "the page asks for an install before it says what this is"
+    assert 'href="#install"' in index, "the introduction never reaches the setup"
+    assert "coupl" in index.lower(), "the page never says what the tool does"
+    assert "git clone" in index, "the page shows no way to start"
     readme = (ROOT / "README.md").read_text()
     assert "kirankn8.github.io/git-synapse" in readme, "the README never links the site"
 
