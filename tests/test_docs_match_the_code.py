@@ -169,3 +169,18 @@ def test_the_two_variables_that_close_a_deployment_reach_every_service():
     helpers = (root / "charts/git-synapse/templates/_helpers.tpl").read_text()
     for name in ("ADMIN_EMAIL", "ADMIN_PASSWORD"):
         assert f"name: {name}" in helpers, f"{name} never reaches the pods"
+
+
+def test_every_local_link_in_the_documents_points_at_something() -> None:
+    """A link is resolved from the file holding it, which is how moving a page
+    into docs/ left its images pointing at docs/docs/."""
+    for name in ("README.md", "DESIGN.md", "docs/benchmark.md"):
+        page = ROOT / name
+        text = page.read_text(encoding="utf-8")
+        refs = re.findall(r'src="([^"]+)"', text)
+        refs += [m for m in re.findall(r"\]\(([^)\s]+)", text) if not m.startswith("http")]
+        for ref in refs:
+            target = ref.split("#")[0]
+            if not target or target.startswith(("http", "mailto:")):
+                continue
+            assert (page.parent / target).exists(), f"{name} points at {ref}, which is not there"
