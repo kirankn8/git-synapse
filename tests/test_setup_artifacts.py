@@ -128,6 +128,18 @@ def test_the_landing_page_introduces_the_project_and_leads_to_the_guide() -> Non
     assert "kirankn8.github.io/git-synapse" in readme, "the README never links the site"
 
 
+def test_both_pages_say_how_the_answers_are_derived() -> None:
+    """Claims about other repositories are the ones a reader will doubt, so both
+    pages say where the edges and the lag actually come from."""
+    for path in ("README.md", "docs/index.html"):
+        text = (ROOT / path).read_text()
+        assert "go.mod" in text and "package.json" in text, \
+            f"{path} does not say manifests are read out of history"
+        assert "declared" in text and "observed" in text, \
+            f"{path} does not distinguish a declared edge from an observed bump"
+        assert "patch id" in text, f"{path} does not say duplicates are dropped"
+
+
 def _requirement_names(lines: list[str]) -> set[str]:
     """Distribution names, stripped of version pins, extras and markers."""
     found = set()

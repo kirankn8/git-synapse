@@ -47,6 +47,25 @@ reads the other five out of commits you already have: files that repeatedly
 changed together, the upstream repository that usually needs the fix first, and
 the downstream repositories that later consume it.
 
+**How it gets there, from git alone.** There is no language server, no AST and
+no build. Inside a repository the only fact used is *this commit touched this
+file*, so pairs that keep appearing in the same commit accumulate support, and
+each pair is scored by several measures — conditional probability, G², Jaccard,
+NPMI — because one probability is not universal. Very large commits are capped
+so a sweeping rename cannot invent a relationship, renames are followed so a
+file keeps its history, and rebased or cherry-picked duplicates are dropped by
+patch id rather than counted twice.
+
+Across repositories it reads the manifests *out of the history itself* — go.mod,
+package.json, Cargo.toml, pom.xml, Gemfile.lock, Chart.yaml, docker-compose.yml
+and about thirty other formats, at each commit that changed them. A manifest in
+one repository naming another is a **declared** edge. Every time that pin moves
+is an **observed** bump, and because both sides are commits, the gap between
+them is measurable: the lag is the time from the upstream commit to the
+downstream commit that adopted it, and the median of those lags is how "usually
+follows within three days" is known. Bumps whose upstream commit is newer than
+the consumer's are thrown out rather than believed.
+
 ```mermaid
 flowchart LR
     A[Edit a file] --> B[Git Synapse]

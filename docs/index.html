@@ -243,6 +243,33 @@
             say which repository follows, and how fast.</p>
           </div>
         </div>
+
+        <h3 style="margin-top:30px">How it knows, from git alone</h3>
+        <p class="muted" style="max-width:64ch">No language server, no AST, no build — just commits, and the
+        manifests read out of the history itself.</p>
+        <div class="why-grid" style="grid-template-columns:repeat(3,1fr)">
+          <div class="why">
+            <h3>Inside a repository</h3>
+            <p>The only fact used is <em>this commit touched this file</em>. Pairs that keep
+            landing in the same commit build support, scored by several measures rather
+            than one. Sweeping commits are capped so a mass rename invents nothing,
+            renames are followed, and rebased duplicates are dropped by patch id.</p>
+          </div>
+          <div class="why">
+            <h3>Between repositories</h3>
+            <p>Manifests are read at every commit that changed them — go.mod,
+            package.json, Cargo.toml, pom.xml, Chart.yaml and about thirty more. One
+            naming another is a <strong>declared</strong> edge; every time that pin moves
+            is an <strong>observed</strong> bump.</p>
+          </div>
+          <div class="why">
+            <h3>Why the days are real</h3>
+            <p>Both ends of a bump are commits, so the gap between them is measurable:
+            upstream commit to the downstream commit that adopted it. The median of those
+            lags is how “usually follows within three days” is known — and a bump whose
+            upstream is newer than its consumer is thrown out, not believed.</p>
+          </div>
+        </div>
       </section>
 
       <section class="hero" id="install">
