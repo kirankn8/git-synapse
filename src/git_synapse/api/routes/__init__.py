@@ -171,12 +171,6 @@ class NewUser(BaseModel):
     role: str = "member"
 
 
-class FirstUser(NewUser):
-    """The first administrator, who has nobody to be authorised by."""
-
-    setup_token: str = Field(min_length=1, max_length=200)
-
-
 class UserPatch(BaseModel):
     name: str | None = None
     role: str | None = None
@@ -199,13 +193,16 @@ def _set_cookie(response: Response, token: str, secure: bool) -> None:
 def whoami(request: Request) -> dict:
     """Who is signed in, and whether anyone exists yet."""
     user = caller(request)
-    needs_setup = auth.count_users() == 0
+    mode = auth.access_mode("dashboard")
     return {
         "user": user,
         "authenticated": user is not None,
-        "needs_setup": needs_setup,
-        "setup_token_minted": needs_setup and auth.setup_token_is_minted(),
-        "auth_required": auth.access_mode("dashboard") == "required",
+        "auth_required": mode == "required",
+        # What the caller must do before seeing anything, decided here rather
+        # than inferred from the flags above. An unclaimed deployment answers
+        # every read already, so demanding an account first only hid that.
+        "gate": "signin" if user is None and mode == "required" else "none",
+        "claimed": auth.count_users() > 0,
     }
 
 
@@ -228,29 +225,6 @@ def logout(request: Request, response: Response) -> dict:
     response.delete_cookie(COOKIE, path="/")
     return {"signed_out": True}
 
-
-@router.post("/auth/setup", tags=["auth"], status_code=201)
-def setup(body: FirstUser, request: Request, response: Response) -> dict:
-    """Create the first administrator, once, for whoever holds the setup token."""
-    if auth.count_users() > 0:
-        raise HTTPException(409, "this deployment already has users")
-    try:
-        auth.check_setup_token(body.setup_token)
-    except auth.TooManyAttempts as exc:
-        raise HTTPException(429, str(exc)) from exc
-    except auth.AuthError as exc:
-        raise HTTPException(403, str(exc)) from exc
-    try:
-        token, user = auth.claim_first_admin(
-            body.email, body.name, body.password, body.setup_token,
-            request.headers.get("user-agent"),
-        )
-    except auth.SetupAlreadyClaimed as exc:  # pragma: no cover - race-only path
-        raise HTTPException(409, str(exc)) from exc
-    except auth.AuthError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    _set_cookie(response, token, request.url.scheme == "https")
-    return {"user": user}
 
 
 def caller(request: Request) -> dict | None:
@@ -276,7 +250,6 @@ class NewToken(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     #: Optional lifetime. A token that never expires is a key left in a door.
     days: int | None = Field(default=None, ge=1, le=730)
-
 
 @router.get("/auth/tokens", tags=["auth"])
 def my_tokens(request: Request) -> dict:

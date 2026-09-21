@@ -6,7 +6,11 @@ image:
 replicaCount: 1
 
 secrets:
-  adminSetupToken: ""
+  # The administrator account. A cluster is shared, so the chart requires a
+  # sign-in: leave adminPassword empty and one is generated and kept in the
+  # Secret below.
+  adminEmail: "admin@example.com"
+  adminPassword: ""
   githubToken: ""
   gsSecretKey: ""
   existingSecret: ""

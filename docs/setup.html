@@ -154,7 +154,7 @@
         <div class="code"><button class="copy" type="button">Copy</button><span class="prompt">$ </span>curl -fsSL https://raw.githubusercontent.com/kirankn8/git-synapse/main/scripts/install.sh | bash</div>
         <p class="small">The installer uses the newest published release. If no release exists yet, it uses <code>main</code>. Set <code>GIT_SYNAPSE_REF</code> to install a specific tag or branch. On Windows, open PowerShell and run:</p>
         <div class="code"><button class="copy" type="button">Copy</button><span class="prompt">&gt; </span>irm https://raw.githubusercontent.com/kirankn8/git-synapse/main/scripts/install.ps1 | iex</div>
-        <div class="callout"><span>🔐</span><span><strong>First administrator:</strong> when the command finishes, run the printed <code>docker compose run --rm cli admin setup-token</code> command. Open the printed URL, paste the token into the first-run page, and choose your email, name, and password. The first account becomes the administrator and the token expires immediately after use. The token is stored only in the database's <code>meta</code> table until it is claimed; it is never exposed through the public API.</span></div>
+        <div class="callout"><span>🔐</span><span><strong>Signing in:</strong> there is nothing to do. Open the printed URL and the dashboard is there, with a banner saying the deployment is open to anyone who can reach it. To require a sign-in, put <code>ADMIN_EMAIL</code> and <code>ADMIN_PASSWORD</code> in <code>.env</code> and restart — the account is created on start, and editing the password there resets it.</span></div>
         <details><summary>Prefer to inspect the installer first?</summary><p class="small">Download <a href="https://raw.githubusercontent.com/kirankn8/git-synapse/main/scripts/install.sh" target="_blank" rel="noopener">install.sh</a> or <a href="https://raw.githubusercontent.com/kirankn8/git-synapse/main/scripts/install.ps1" target="_blank" rel="noopener">install.ps1</a>, review it, then run it locally. The installer never overwrites an existing <code>.env</code>.</p></details>
       </section>
 
@@ -164,11 +164,11 @@
   oci://ghcr.io/kirankn8/charts/git-synapse \
   --namespace git-synapse --create-namespace</div>
         <p class="small">You need a Kubernetes cluster, <code>kubectl</code>, and Helm already installed. The chart does not try to install a cluster because cluster providers differ.</p>
-        <div class="callout"><span>🔐</span><span><strong>Where is the admin secret?</strong><br>The chart creates a Kubernetes Secret named <code>git-synapse</code> in the <code>git-synapse</code> namespace. It generates a random <code>ADMIN_SETUP_TOKEN</code> and passes it to the API as an environment variable. Retrieve it with:<br><code>kubectl -n git-synapse get secret git-synapse -o jsonpath='{.data.ADMIN_SETUP_TOKEN}' | base64 -d; echo</code><br>The token is valid only until the first administrator is created. Helm prints this command in its notes too.</span></div>
+        <div class="callout"><span>🔐</span><span><strong>Where is the admin password?</strong><br>A cluster is shared, so the chart always requires a sign-in. It creates a Kubernetes Secret named <code>git-synapse</code> holding <code>ADMIN_EMAIL</code> and a generated <code>ADMIN_PASSWORD</code>. Read it with:<br><code>kubectl -n git-synapse get secret git-synapse -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d; echo</code><br>Set <code>secrets.adminEmail</code> to your own address. Helm prints this command in its notes too.</span></div>
         <div class="code"><button class="copy" type="button">Copy</button><span class="prompt">$ </span>kubectl -n git-synapse port-forward service/git-synapse 8080:8000</div>
         <p>Open <a href="http://localhost:8080" target="_blank" rel="noopener"><strong>http://localhost:8080</strong></a>, paste the token, and create the first administrator. For a shared deployment, enable the chart's Ingress and use your organization's hostname instead.</p>
         <details><summary>What gets persisted?</summary><p class="small">Postgres data is stored in a Postgres PVC. Git mirrors are stored in the chart's mirror PVC. Secrets remain in Kubernetes so upgrades do not rotate them. For production, use managed Postgres and an RWX storage class, then set <code>postgresql.enabled=false</code> and configure <code>externalDatabase</code>.</p></details>
-        <details><summary>How is the Kubernetes Secret protected?</summary><p class="small">The token is stored as <code>ADMIN_SETUP_TOKEN</code> in the Kubernetes Secret; it is not printed in application logs. Kubernetes Secret values are base64-encoded by default, so production clusters should enable etcd encryption and restrict Secret access with RBAC. Helm release metadata can also contain rendered values, so limit access to Helm release Secrets.</p></details>
+        <details><summary>How is the Kubernetes Secret protected?</summary><p class="small">The password is stored as <code>ADMIN_PASSWORD</code> in the Kubernetes Secret; it is not printed in application logs. Kubernetes Secret values are base64-encoded by default, so production clusters should enable etcd encryption and restrict Secret access with RBAC. Helm release metadata can also contain rendered values, so limit access to Helm release Secrets.</p></details>
         <details><summary>How do upgrades work?</summary><p class="small">Use <code>helm upgrade ... --reuse-values</code>. The chart runs the schema migration Job as part of the release and the API uses health probes before it is considered ready. If a rollout fails, use <code>helm rollback git-synapse -n git-synapse</code>.</p></details>
       </section>
 
@@ -203,11 +203,11 @@
       </section>
 
       <section class="step" id="step-4">
-        <div class="step-head"><div class="step-number">4</div><div><h2>Create your administrator account</h2><p class="muted">The first screen asks for a one-time setup token. This protects the otherwise-open first-run page.</p></div></div>
-        <div class="code"><button class="copy" type="button">Copy</button><span class="prompt">$ </span>docker compose run --rm cli admin setup-token</div>
-        <p>Copy the printed token into the browser, then choose your email, name, and a strong password. The token stops working immediately after the first account is created.</p>
-        <div class="callout warn"><span>🔐</span><span><strong>Keep the token private.</strong><br>It can claim the first administrator account. Do not paste it into a ticket or commit it to the repository.</span></div>
-        <label class="check"><input type="checkbox" data-check="4"><span><strong>I am signed in</strong>The dashboard is visible after account creation.</span></label>
+        <div class="step-head"><div class="step-number">4</div><div><h2>Open the dashboard</h2><p class="muted">Nothing to create, and nothing to paste.</p></div></div>
+        <div class="code"><button class="copy" type="button">Copy</button><span class="prompt">$ </span>docker compose up -d</div>
+        <p>Open the printed URL. The dashboard is there, with a banner saying the deployment is open to anyone who can reach it. To require a sign-in, set <code>ADMIN_EMAIL</code> and <code>ADMIN_PASSWORD</code> in <code>.env</code> and restart.</p>
+        <div class="callout warn"><span>🔐</span><span><strong>An open deployment really is open.</strong><br>Anyone who can reach the port can read everything in it. On a laptop that is fine; on anything shared, set the two variables above before you add repositories.</span></div>
+        <label class="check"><input type="checkbox" data-check="4"><span><strong>The dashboard loads</strong>Open, or signed in if you set the two variables.</span></label>
       </section>
 
       <section class="step" id="step-5">

@@ -17,17 +17,19 @@ helm upgrade --install git-synapse \
   --create-namespace
 ```
 
-The default chart generates a random first-admin setup token and stores it in
-the Kubernetes Secret `git-synapse`. Retrieve it with:
+A cluster is shared, so the chart always requires a sign-in. It generates a
+random password for `secrets.adminEmail` and stores it in the Kubernetes Secret
+`git-synapse`. Read it with:
 
 ```bash
 kubectl -n git-synapse get secret git-synapse \
-  -o jsonpath='{.data.ADMIN_SETUP_TOKEN}' | base64 -d; echo
+  -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d; echo
 ```
 
-The token is valid only until the first administrator is created. The chart
-prints this command again in Helm's post-install notes. The Secret remains in
-Kubernetes, but the application refuses setup once any account exists.
+Set `secrets.adminEmail` to your own address, and `secrets.adminPassword` if you
+would rather choose it. The account is reconciled on every API start, so editing
+the password in the Secret and restarting resets it. Helm prints the command
+above in its post-install notes.
 
 By default the API is internal. Use the temporary port-forward shown by
 `helm get notes git-synapse -n git-synapse`, or enable an Ingress:

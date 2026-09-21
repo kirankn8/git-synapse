@@ -164,16 +164,24 @@ cp .env.example .env
 docker compose up -d
 ```
 
-Open `http://localhost`. On a new deployment, retrieve the one-time admin setup
-token from the running CLI:
+Open `http://localhost`. There is nothing else to do: with no account configured
+the dashboard is there immediately, and a banner says the deployment is open.
+
+### Requiring a sign-in
+
+Access comes from `.env` and nowhere else. Set both:
 
 ```bash
-docker compose run --rm cli admin setup-token
+ADMIN_EMAIL=you@example.com
+ADMIN_PASSWORD=something-long-and-unguessable
 ```
 
-The first account created becomes the administrator. The token is generated once
-and stored in the database metadata, unless `ADMIN_SETUP_TOKEN` was supplied in
-the environment. It becomes unusable as soon as the first account exists.
+and restart. The account is created on start and everyone signs in; the
+administrator adds other people from the **People** page. Editing the password
+here and restarting resets it, which is how a forgotten one is recovered.
+
+Leave them unset and the deployment answers every request without asking who is
+calling — fine on a laptop, not on anything others can reach.
 
 ### Kubernetes
 
@@ -186,16 +194,17 @@ helm upgrade --install git-synapse \
   --namespace git-synapse --create-namespace
 ```
 
-The chart creates the Kubernetes Secret `git-synapse` in the `git-synapse`
-namespace. The one-time admin token is stored in its `ADMIN_SETUP_TOKEN` key:
+A cluster is shared, so the chart always requires a sign-in. It creates the
+Kubernetes Secret `git-synapse` holding `ADMIN_EMAIL` and a generated
+`ADMIN_PASSWORD`:
 
 ```bash
 kubectl -n git-synapse get secret git-synapse \
-  -o jsonpath='{.data.ADMIN_SETUP_TOKEN}' | base64 -d; echo
+  -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d; echo
 ```
 
-The token is not printed into application logs by the chart. It becomes unusable
-after the first administrator is created. See
+Set `secrets.adminEmail` to your own address. The password is not printed into
+application logs. See
 [`charts/git-synapse/README.md`](charts/git-synapse/README.md) for external
 Postgres, storage, ingress, upgrades, and rollback settings.
 
@@ -265,7 +274,6 @@ Discovery, ingest, scoring and mining are the scheduler's job and need no
 command.
 
 ```bash
-docker compose run --rm cli admin setup-token        # one-time admin token
 docker compose run --rm cli account add my-org       # start scanning a source
 docker compose run --rm cli account list
 docker compose run --rm cli account enable 3 --off   # pause, keeping its data

@@ -24,10 +24,12 @@ def test_helm_chart_has_secret_migration_and_health_contract() -> None:
     migration = (chart / "templates/migration-job.yaml").read_text()
     api = (chart / "templates/api.yaml").read_text()
     notes = (chart / "templates/NOTES.txt").read_text()
-    assert "ADMIN_SETUP_TOKEN" in secrets
+    # A cluster is shared, so the chart must ship an account rather than an
+    # open deployment, and must say where its password is.
+    assert "ADMIN_EMAIL" in secrets and "ADMIN_PASSWORD" in secrets
     assert "post-install,post-upgrade" in migration
     assert "/api/health" in api
-    assert "jsonpath='{.data.ADMIN_SETUP_TOKEN}'" in notes
+    assert "jsonpath='{.data.ADMIN_PASSWORD}'" in notes
 
 
 def test_setup_docs_explain_both_paths_and_secret_location() -> None:
@@ -35,7 +37,7 @@ def test_setup_docs_explain_both_paths_and_secret_location() -> None:
     assert "scripts/install.sh" in docs
     assert "helm upgrade --install git-synapse" in docs
     assert "Kubernetes Secret" in docs
-    assert "docker compose run --rm cli admin setup-token" in docs
+    assert "ADMIN_EMAIL" in docs and "ADMIN_PASSWORD" in docs
 
 
 def test_github_pages_publishes_docs_root() -> None:

@@ -20,7 +20,6 @@ def person(db):
     auth.delete_user(user["id"])
 
 
-
 def test_a_password_verifies_only_against_itself():
     stored = auth.hash_password("correct horse battery staple")
     assert auth.verify_password("correct horse battery staple", stored)
@@ -53,7 +52,6 @@ def test_a_malformed_hash_fails_closed(garbage):
 def test_a_short_password_is_refused_where_it_is_set():
     with pytest.raises(auth.AuthError, match="at least"):
         auth.hash_password("short")
-
 
 
 def test_a_person_can_sign_in_and_the_session_finds_them(person):
@@ -156,7 +154,6 @@ def test_admin_count_can_ignore_one(db):
         auth.delete_user(b["id"])
 
 
-
 def test_a_token_acts_as_the_person_who_made_it(person):
     secret, row = auth.create_token(person["id"], "laptop agent")
     assert secret.startswith(auth.TOKEN_PREFIX)
@@ -226,23 +223,6 @@ def test_a_nameless_token_is_refused(person):
         auth.create_token(person["id"], "  ")
 
 
-def test_first_admin_claim_is_validated_and_single_use(db):
-    secret = auth.setup_token()
-    with pytest.raises(auth.AuthError, match="name"):
-        auth.claim_first_admin("first@example.com", " ",
-                               "a-sufficiently-long-pass", secret)
-    with pytest.raises(auth.AuthError, match="setup token"):
-        auth.claim_first_admin("first@example.com", "First",
-                               "a-sufficiently-long-pass", "wrong")
-    user = auth.create_user("already@example.com", "Already",
-                            "a-sufficiently-long-pass")
-    with pytest.raises(auth.SetupAlreadyClaimed):
-        auth.claim_first_admin("first@example.com", "First",
-                               "a-sufficiently-long-pass", secret)
-    auth.delete_user(user["id"])
-
-
-
 def test_with_nobody_registered_the_door_is_open(db):
     """Requiring sign-in when no account exists would lock the first administrator out of the screen that creates them."""
     assert auth.count_users() == 0, "this test needs a deployment with no users"
@@ -274,7 +254,6 @@ def test_a_stored_mode_that_is_not_one_falls_closed(person):
         assert auth.access_mode("dashboard") == "required"
     finally:
         settings.clear("dashboard_auth")
-
 
 
 def test_a_password_cannot_be_guessed_at_machine_speed(person):
@@ -341,24 +320,86 @@ def test_deleting_a_user_who_is_not_there_reports_it_rather_than_raising(db):
     assert auth.delete_user(999_999_999) is False
 
 
-def test_the_first_admin_can_be_claimed_before_the_schema_row_exists(scratch_db):
-    """The claim locks the schema row to serialise two simultaneous first-run requests."""
-    from git_synapse import auth
-    from git_synapse.db.orm import models, session_scope
 
-    with session_scope() as session:
-        for model in (models().UserSession, models().ApiToken, models().LoginAttempt):
-            session.query(model).delete(synchronize_session=False)
-        session.query(models().AppUser).delete(synchronize_session=False)
-        row = session.get(models().Meta, "schema_version")
-        if row is not None:
-            session.delete(row)
 
-    token = auth.setup_token()
-    _session_token, user = auth.claim_first_admin(
-        "first@example.com", "First Admin", "a-long-password-1234", token)
-    assert user["email"] == "first@example.com"
-    auth.delete_user(user["id"])
+def _clear_admin_env(monkeypatch):
+    from git_synapse.config import reset_config_cache
 
-    with session_scope() as session:
-        assert session.get(models().Meta, "schema_version") is not None
+    monkeypatch.delenv("ADMIN_EMAIL", raising=False)
+    monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
+    reset_config_cache()
+
+
+def test_without_the_variables_no_account_is_made_and_the_door_stays_open(db, monkeypatch):
+    """The only way in is the environment, so an empty one means an open deployment."""
+    from git_synapse.config import reset_config_cache
+
+    _clear_admin_env(monkeypatch)
+    try:
+        assert auth.ensure_admin() is None
+        assert auth.count_users() == 0
+        assert auth.access_mode("dashboard") == "open"
+    finally:
+        reset_config_cache()
+
+
+def test_the_named_administrator_is_created_and_creating_twice_changes_nothing(db, monkeypatch):
+    from git_synapse.config import reset_config_cache
+
+    monkeypatch.setenv("ADMIN_EMAIL", "env-admin@example.com")
+    monkeypatch.setenv("ADMIN_PASSWORD", "a-sufficiently-long-pass")
+    reset_config_cache()
+    try:
+        assert auth.ensure_admin() == "env-admin@example.com"
+        first = auth.by_email("env-admin@example.com")
+        assert first["role"] == "admin"
+        # Starting again must not add a second account, nor disturb the first.
+        assert auth.ensure_admin() == "env-admin@example.com"
+        assert auth.count_users() == 1
+        assert auth.sign_in("env-admin@example.com", "a-sufficiently-long-pass")
+    finally:
+        user = auth.by_email("env-admin@example.com")
+        if user:
+            auth.delete_user(user["id"])
+        _clear_admin_env(monkeypatch)
+        reset_config_cache()
+
+
+def test_editing_the_password_in_the_environment_resets_it(db, monkeypatch):
+    """Which is what makes a forgotten password recoverable without a console."""
+    from git_synapse.config import reset_config_cache
+
+    monkeypatch.setenv("ADMIN_EMAIL", "env-reset@example.com")
+    monkeypatch.setenv("ADMIN_PASSWORD", "the-first-long-password")
+    reset_config_cache()
+    try:
+        auth.ensure_admin()
+        monkeypatch.setenv("ADMIN_PASSWORD", "the-second-long-password")
+        reset_config_cache()
+        auth.ensure_admin()
+
+        assert auth.count_users() == 1, "a password change must not add an account"
+        assert auth.sign_in("env-reset@example.com", "the-second-long-password")
+        with pytest.raises(auth.AuthError):
+            auth.sign_in("env-reset@example.com", "the-first-long-password")
+    finally:
+        user = auth.by_email("env-reset@example.com")
+        if user:
+            auth.delete_user(user["id"])
+        _clear_admin_env(monkeypatch)
+        reset_config_cache()
+
+
+def test_an_address_that_is_not_one_is_refused_rather_than_stored(db, monkeypatch):
+    from git_synapse.config import reset_config_cache
+
+    monkeypatch.setenv("ADMIN_EMAIL", "not-an-address")
+    monkeypatch.setenv("ADMIN_PASSWORD", "a-sufficiently-long-pass")
+    reset_config_cache()
+    try:
+        with pytest.raises(auth.AuthError):
+            auth.ensure_admin()
+        assert auth.count_users() == 0
+    finally:
+        _clear_admin_env(monkeypatch)
+        reset_config_cache()

@@ -1,15 +1,15 @@
 Git Synapse {{ .Chart.AppVersion }} is installed.
 
-The first administrator setup token is stored in the Kubernetes Secret:
+Sign in as {{ .Values.secrets.adminEmail }}. Its password is in the Kubernetes
+Secret:
   {{ include "git-synapse.secretName" . }}
 
-Retrieve it with:
-  kubectl -n {{ .Release.Namespace }} get secret {{ include "git-synapse.secretName" . }} -o jsonpath='{.data.ADMIN_SETUP_TOKEN}' | base64 -d; echo
+Read it with:
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "git-synapse.secretName" . }} -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d; echo
 
-The token is valid only until the first administrator account is created.
-After that, it is not returned by the application and should be treated as
-consumed. The Secret remains for deployment continuity, but the app refuses
-setup once an account exists.
+The account is created every time the API starts, so changing the password in
+the Secret and restarting is also how you reset a forgotten one. Add other
+people from the People page once you are in.
 
 {{- if .Values.ingress.enabled }}
 Open the configured Ingress URL:

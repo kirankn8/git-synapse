@@ -30,24 +30,19 @@ def configure_logging() -> None:
     )
 
 
-def _announce_setup_token() -> None:
-    """Print the token that claims the first administrator account."""
+def _announce_access() -> None:
+    """Say plainly whether this deployment asks anyone to sign in."""
     try:
-        if auth.count_users() > 0:
-            return
-        if not auth.setup_token_is_minted():
-            log.warning("No account exists yet. Create the first administrator "
-                        "in the web UI using the configured ADMIN_SETUP_TOKEN.")
-            return
-        token = auth.setup_token()
-    except Exception:  # noqa: BLE001 - never let the console note stop the API
-        log.warning("could not determine the first-run setup token")
+        email = auth.ensure_admin()
+    except auth.AuthError as exc:
+        log.error("%s; no administrator was created", exc)
         return
-    log.warning(
-        "\n%s\n  No account exists yet. Open the dashboard and create the first\n"
-        "  administrator with this one-time setup token:\n\n      %s\n\n"
-        "  It stops being accepted the moment the account is created.\n%s",
-        "=" * 72, token, "=" * 72)
+    if email:
+        log.info("sign-in required; administrator is %s", email)
+    else:
+        log.warning(
+            "no ADMIN_EMAIL and ADMIN_PASSWORD set: this deployment answers "
+            "every request without asking who is calling")
 
 
 @asynccontextmanager
@@ -59,7 +54,7 @@ async def lifespan(app: FastAPI):
     from git_synapse.ingest.pipeline import reconcile_stale_runs
 
     reconcile_stale_runs()
-    _announce_setup_token()
+    _announce_access()
     log.info("git-synapse api ready")
     yield
     close_pool()

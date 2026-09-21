@@ -38,7 +38,6 @@ def client(db):
         reset_config_cache()
 
 
-
 def test_health_reports_the_database(client):
     r = client.get("/api/health")
     assert r.status_code == 200
@@ -57,7 +56,6 @@ def test_measures_catalogue_is_complete_and_self_describing(client):
     assert len(measures) >= 29
     for m in measures:
         assert m["key"] and m["label"]
-
 
 
 def test_repos_listing_and_pagination(client):
@@ -132,7 +130,6 @@ def test_repo_zero_is_not_treated_as_unset(corpus, client):
     assert scoped != everything
 
 
-
 def test_coupled_partners_are_oriented_and_ranked(corpus, client):
     args = _a_real_file()
     if args is None:
@@ -177,14 +174,12 @@ def test_out_of_range_limits_are_clamped_or_refused(client, limit):
         assert len(rows) <= 1000
 
 
-
 def test_feedback_status_filter(client):
     """`status=all` was dropped by the query-string builder, so the filter silently fell back to `open` and showed nothing."""
     everything = client.get("/api/feedback", params={"status": "all"}).json()
     only_open = client.get("/api/feedback", params={"status": "open"}).json()
     assert len(everything["reports"]) >= len(only_open["reports"])
     assert all(r["status"] == "open" for r in only_open["reports"])
-
 
 
 def test_spa_routes_serve_the_shell_so_a_deep_link_survives_refresh(client):
@@ -221,7 +216,6 @@ def test_the_shell_stamps_a_current_asset_version(client):
     versions = set(re.findall(r"/static/[\w.-]+\?v=(\d+)", html))
     assert versions, "assets must carry a version"
     assert all(v.isdigit() and int(v) > 2 for v in versions)
-
 
 
 def test_file_detail_endpoints_agree_with_each_other(corpus, client):
@@ -313,7 +307,6 @@ def test_refresh_endpoint_refuses_while_a_run_is_active(client):
                 session.query(models().IngestRun).filter_by(id=run_id).delete(synchronize_session=False)
     finally:
         holder.__exit__(None, None, None)
-
 
 
 def _real_ids():
@@ -416,7 +409,6 @@ def test_every_route_refuses_a_nonexistent_id_rather_than_500ing(client, db):
         if r.status_code >= 500:
             failures.append(f"{concrete} -> {r.status_code}")
     assert not failures, "\n".join(failures)
-
 
 
 def test_health_reports_degraded_rather_than_raising(client, monkeypatch):
@@ -535,7 +527,6 @@ def test_a_report_can_be_resolved_and_says_so(signed_in, db):
                     params={"status": "wontfix", "resolution": "fixture"})
     assert r.status_code == 200
     assert r.json() == {"id": created["id"], "status": "wontfix"}
-
 
 
 @pytest.fixture()
@@ -923,7 +914,6 @@ def _spa_routes():
     raise AssertionError("SPA_ROUTES no longer exists in api/main.py")
 
 
-
 def test_settings_lists_only_what_may_be_changed(admin_client):
     client = admin_client
     payload = client.get("/api/settings").json()
@@ -1066,15 +1056,43 @@ def test_the_shape_endpoint_serves_every_distribution(client):
     }
 
 
-
 def test_the_api_is_open_until_somebody_has_an_account(client):
-    """A fresh deployment must be reachable, or the screen that creates the first administrator is itself behind a sign-in."""
+    """With no ADMIN_EMAIL set there is nobody to sign in as, so nothing is withheld."""
     from git_synapse import auth
 
     assert auth.count_users() == 0, "this test needs a deployment with no users"
     assert client.get("/api/overview").status_code == 200
     me = client.get("/api/auth/me").json()
-    assert me["needs_setup"] is True and me["auth_required"] is False
+    assert me["auth_required"] is False
+    assert me["gate"] == "none" and me["claimed"] is False
+
+
+def test_an_unclaimed_deployment_is_not_asked_to_sign_in(client):
+    """The gate is the server's decision, not something the page infers.
+
+    The UI used to read "nobody has an account" as "create one first", which
+    stood a wall in front of an API that answers every read unauthenticated --
+    friction that protected nothing.
+    """
+    from git_synapse import auth
+
+    assert auth.count_users() == 0
+    me = client.get("/api/auth/me").json()
+    assert me["gate"] == "none", "an open deployment must not demand a sign-in"
+    assert me["claimed"] is False, "and it has to say that nobody owns it"
+
+
+def test_the_gate_closes_for_a_visitor_once_the_deployment_is_claimed(client):
+    """With an account in place the door shuts, and the server says so."""
+    from git_synapse import auth
+
+    user = auth.create_user("pytest-gate@example.com", "Gate", "a-sufficiently-long-pass")
+    try:
+        me = client.get("/api/auth/me").json()
+        assert me["gate"] == "signin", "a claimed deployment must ask a visitor in"
+        assert me["claimed"] is True
+    finally:
+        auth.delete_user(user["id"])
 
 
 def test_the_door_shuts_as_soon_as_anyone_exists(client):
@@ -1088,142 +1106,6 @@ def test_the_door_shuts_as_soon_as_anyone_exists(client):
     finally:
         auth.delete_user(user["id"])
     assert client.get("/api/overview").status_code == 200
-
-
-def test_setup_creates_the_first_administrator_once(client):
-    from git_synapse import auth
-
-    body = {"email": "pytest-first@example.com", "name": "First",
-            "password": "a-sufficiently-long-pass",
-            "setup_token": auth.setup_token()}
-    created = client.post("/api/auth/setup", json=body)
-    try:
-        assert created.status_code == 201
-        assert created.json()["user"]["role"] == "admin", "the first account must be able to add others"
-        assert client.cookies.get("gs_session"), "setup signs you in"
-        # It cannot be replayed to mint a second administrator later.
-        again = client.post("/api/auth/setup", json={**body, "email": "pytest-second@example.com"})
-        assert again.status_code == 409
-    finally:
-        for row in auth.list_users():
-            auth.delete_user(row["id"])
-        auth.clear_setup_token()
-        client.cookies.clear()
-
-
-def test_setup_refuses_a_caller_who_does_not_hold_the_token(client):
-    """The gap this closes: between a migrated database and a claimed account, the setup screen is reachable by anyone who reaches the port."""
-    from git_synapse import auth
-
-    body = {"email": "pytest-stranger@example.com", "name": "Stranger",
-            "password": "a-sufficiently-long-pass", "setup_token": "not-the-token"}
-    try:
-        refused = client.post("/api/auth/setup", json=body)
-        assert refused.status_code == 403
-        assert auth.count_users() == 0, "a refused setup must create nothing"
-
-        # Omitting it entirely is refused by the model, not waved through.
-        del body["setup_token"]
-        assert client.post("/api/auth/setup", json=body).status_code == 422
-        assert auth.count_users() == 0
-    finally:
-        from git_synapse.db.orm import models, session_scope
-        with session_scope() as session:
-            session.query(models().LoginAttempt).filter_by(email="setup").delete(synchronize_session=False)
-        auth.clear_setup_token()
-
-
-def test_the_setup_token_is_stable_and_survives_a_restart(client):
-    """Four workers on a cold database must agree, or three of them print a token that will not work."""
-    from git_synapse import auth
-
-    try:
-        first = auth.setup_token()
-        assert len(first) > 20, "long enough not to be guessed"
-        assert auth.setup_token() == first, "reading it must not mint a new one"
-    finally:
-        auth.clear_setup_token()
-
-
-def test_guessing_the_setup_token_is_rate_limited(client):
-    """It cannot be brute-forced, but it also should not be a free loop."""
-    from git_synapse import auth
-
-    body = {"email": "pytest-guess@example.com", "name": "G",
-            "password": "a-sufficiently-long-pass", "setup_token": "wrong"}
-    try:
-        codes = {client.post("/api/auth/setup", json=body).status_code
-                 for _ in range(auth.MAX_FAILURES + 2)}
-        assert codes == {403, 429}, f"expected refusals then a lockout, got {codes}"
-        assert auth.count_users() == 0
-    finally:
-        from git_synapse.db.orm import models, session_scope
-        with session_scope() as session:
-            session.query(models().LoginAttempt).filter_by(email="setup").delete(synchronize_session=False)
-        auth.clear_setup_token()
-
-
-def test_the_console_prints_the_token_exactly_when_it_is_useful(client, monkeypatch, caplog):
-    """The only channel the token has."""
-    import logging
-
-    from git_synapse import auth, config
-    from git_synapse.api import main
-
-    try:
-        with caplog.at_level(logging.WARNING, logger="git_synapse.api.main"):
-            main._announce_setup_token()
-        printed = caplog.text
-        assert auth.setup_token() in printed, "a fresh deployment must be told the token"
-
-        # Configured rather than minted: say where to look, never the value.
-        caplog.clear()
-        monkeypatch.setenv("ADMIN_SETUP_TOKEN", "from-the-secret-store")
-        config.get_config.cache_clear()
-        with caplog.at_level(logging.WARNING, logger="git_synapse.api.main"):
-            main._announce_setup_token()
-        assert "ADMIN_SETUP_TOKEN" in caplog.text
-        assert "from-the-secret-store" not in caplog.text, \
-            "a value the operator already holds must not be echoed into the log"
-        monkeypatch.delenv("ADMIN_SETUP_TOKEN")
-        config.get_config.cache_clear()
-
-        # Claimed: nothing to announce.
-        user = auth.create_user("pytest-quiet@example.com", "Q", "a-sufficiently-long-pass")
-        caplog.clear()
-        with caplog.at_level(logging.WARNING, logger="git_synapse.api.main"):
-            main._announce_setup_token()
-        assert caplog.text == "", f"expected silence, got {caplog.text!r}"
-        auth.delete_user(user["id"])
-
-        # A database that will not answer must not stop the API from serving.
-        caplog.clear()
-        monkeypatch.setattr(auth, "count_users", lambda: 1 / 0)
-        with caplog.at_level(logging.WARNING, logger="git_synapse.api.main"):
-            main._announce_setup_token()
-        assert "could not determine" in caplog.text
-    finally:
-        config.get_config.cache_clear()
-        auth.clear_setup_token()
-
-
-def test_an_environment_supplied_token_is_used_verbatim(client, monkeypatch):
-    """An automated deployment claims the account with a value it already has, without anyone reading a log."""
-    from git_synapse import auth, config
-
-    monkeypatch.setenv("ADMIN_SETUP_TOKEN", "a-token-from-the-secret-store")
-    config.get_config.cache_clear()
-    try:
-        assert auth.setup_token() == "a-token-from-the-secret-store"
-        assert auth.setup_token_is_minted() is False
-        assert client.get("/api/auth/me").json()["setup_token_minted"] is False
-        # Nothing was written: there is nothing to leak and nothing to clear.
-        from git_synapse.db.orm import models, session_scope
-        with session_scope() as session:
-            assert session.get(models().Meta, "setup:token") is None
-    finally:
-        monkeypatch.delenv("ADMIN_SETUP_TOKEN", raising=False)
-        config.get_config.cache_clear()
 
 
 def test_a_member_reads_everything_and_administers_nothing(client):
@@ -1316,25 +1198,6 @@ def test_the_access_mode_endpoint_validates_and_clears(admin_client):
     finally:
         settings.clear("mcp_auth")
         settings.clear("dashboard_auth")
-
-
-def test_setup_refuses_what_it_cannot_store(client):
-    """Order matters here: a valid attempt creates the first administrator and every later attempt is then a 409, so the invalid cases go first."""
-    from git_synapse import auth
-
-    token = auth.setup_token()
-    too_short = client.post("/api/auth/setup", json={
-        "email": "pytest-weak@example.com", "name": "W", "password": "short",
-        "setup_token": token})
-    assert too_short.status_code == 422, "the model refuses it before the handler"
-
-    bad_email = client.post("/api/auth/setup", json={
-        "email": "not-an-email", "name": "W", "password": "a-sufficiently-long-pass",
-        "setup_token": token})
-    assert bad_email.status_code == 400 and "email" in bad_email.json()["detail"]
-
-    assert auth.count_users() == 0, "nothing above may have created an account"
-    auth.clear_setup_token()
 
 
 def test_signing_in_with_the_wrong_password_is_a_401(client):
@@ -1454,7 +1317,6 @@ def test_repeated_wrong_passwords_answer_429_not_401(client):
         client.cookies.clear()
 
 
-
 def test_a_minted_token_never_reaches_the_call_log(signed_in, db, settled_calls):
     """`create_token` promises the secret is stored only as a hash."""
     from datetime import UTC, datetime, timedelta
@@ -1531,3 +1393,54 @@ def test_managing_a_source_needs_an_administrator(client, db):
             row = auth.by_email(email)
             if row:
                 auth.delete_user(row["id"])
+
+
+def test_the_log_says_whether_anyone_has_to_sign_in(db, monkeypatch, caplog):
+    """An operator reading the startup log must be able to tell which it is."""
+    from git_synapse import auth
+    from git_synapse.api import main as api_main
+    from git_synapse.config import reset_config_cache
+
+    monkeypatch.delenv("ADMIN_EMAIL", raising=False)
+    monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
+    reset_config_cache()
+    try:
+        with caplog.at_level("WARNING"):
+            api_main._announce_access()
+        assert "without asking who is calling" in caplog.text
+
+        caplog.clear()
+        monkeypatch.setenv("ADMIN_EMAIL", "log-admin@example.com")
+        monkeypatch.setenv("ADMIN_PASSWORD", "a-sufficiently-long-pass")
+        reset_config_cache()
+        with caplog.at_level("INFO"):
+            api_main._announce_access()
+        assert "sign-in required" in caplog.text
+        assert "log-admin@example.com" in caplog.text
+    finally:
+        user = auth.by_email("log-admin@example.com")
+        if user:
+            auth.delete_user(user["id"])
+        monkeypatch.delenv("ADMIN_EMAIL", raising=False)
+        monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
+        reset_config_cache()
+
+
+def test_an_unusable_admin_address_is_reported_and_does_not_stop_the_server(db, monkeypatch, caplog):
+    """Refusing to start over a typo in .env would be worse than serving openly."""
+    from git_synapse import auth
+    from git_synapse.api import main as api_main
+    from git_synapse.config import reset_config_cache
+
+    monkeypatch.setenv("ADMIN_EMAIL", "nonsense")
+    monkeypatch.setenv("ADMIN_PASSWORD", "a-sufficiently-long-pass")
+    reset_config_cache()
+    try:
+        with caplog.at_level("ERROR"):
+            api_main._announce_access()
+        assert "no administrator was created" in caplog.text
+        assert auth.count_users() == 0
+    finally:
+        monkeypatch.delenv("ADMIN_EMAIL", raising=False)
+        monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
+        reset_config_cache()

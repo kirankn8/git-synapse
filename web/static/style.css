@@ -1241,3 +1241,16 @@ body.gated .topbar { border-bottom-color: transparent; }
   white-space: nowrap;
 }
 .repo-group-open:hover { text-decoration: underline; }
+
+/* An unclaimed deployment is readable, and says so above the view it is
+   showing, rather than standing in front of it. */
+.claim-banner {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  margin: 0 0 14px; padding: 11px 14px;
+  background: var(--bg-panel); border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--warn); border-radius: var(--radius);
+  font-size: 13px; color: var(--text-dim);
+}
+.claim-banner strong { color: var(--text); }
+.claim-banner > div { flex: 1; min-width: 240px; }
+.gate-back { margin-top: 8px; width: 100%; }

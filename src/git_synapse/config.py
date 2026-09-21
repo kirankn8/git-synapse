@@ -182,9 +182,9 @@ class ServerConfig:
     )
     web_root: Path = field(default_factory=lambda: Path(_env_str("WEB_ROOT", "/app/web")))
 
-    admin_setup_token: str = field(
-        default_factory=lambda: _env_str("ADMIN_SETUP_TOKEN", "")
-    )
+    #: Set both to require a sign-in. Neither set means the deployment is open.
+    admin_email: str = field(default_factory=lambda: _env_str("ADMIN_EMAIL", ""))
+    admin_password: str = field(default_factory=lambda: _env_str("ADMIN_PASSWORD", ""))
 
 
 @dataclass(frozen=True)

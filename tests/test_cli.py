@@ -1,4 +1,4 @@
-"""The CLI: first-admin setup, source management and reset."""
+"""The CLI: source management and reset. Access comes from the environment."""
 from __future__ import annotations
 
 import pytest
@@ -12,37 +12,16 @@ from git_synapse.cli import app
 runner = CliRunner()
 
 
-def test_admin_setup_token_prints_the_token_for_a_fresh_deployment(monkeypatch):
-    monkeypatch.setattr(cli, "_setup", lambda: None)
-    monkeypatch.setattr(cli.auth, "count_users", lambda: 0)
-    monkeypatch.setattr(cli.auth, "setup_token", lambda: "setup-token-for-test")
-
-    r = runner.invoke(app, ["admin", "setup-token"])
-
-    assert r.exit_code == 0, r.stdout
-    assert "setup-token-for-test" in r.stdout
-
-
-def test_admin_setup_token_refuses_after_the_first_account_exists(monkeypatch):
-    monkeypatch.setattr(cli, "_setup", lambda: None)
-    monkeypatch.setattr(cli.auth, "count_users", lambda: 1)
-
-    r = runner.invoke(app, ["admin", "setup-token"])
-
-    assert r.exit_code == 1
-    assert "already been created" in r.stdout
-
-
 def test_help_lists_every_command():
     r = runner.invoke(app, ["--help"])
     assert r.exit_code == 0
-    for cmd in ("admin", "account", "reset"):
+    for cmd in ("account", "reset"):
         assert cmd in r.stdout
 
 
 @pytest.mark.parametrize(
     "cmd",
-    [["reset"], ["admin", "setup-token"], ["account", "add"], ["account", "list"],
+    [["reset"], ["account", "add"], ["account", "list"],
      ["account", "remove"], ["account", "enable"]],
 )
 def test_every_command_has_usable_help(cmd):
@@ -62,8 +41,6 @@ def test_reset_does_not_wipe_anything_without_confirmation(db):
         after = session.query(models().Repo).count()
     assert after == before, "reset destroyed data without an explicit confirmation"
     assert r.exit_code != 0 or "abort" in r.stdout.lower() or "cancel" in r.stdout.lower()
-
-
 
 
 def test_reset_requires_an_explicit_yes(scratch_db):

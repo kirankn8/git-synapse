@@ -9,7 +9,6 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from git_synapse import auth
 from git_synapse.config import get_config
 from git_synapse.db.engine import apply_schema, wait_for_database
 from git_synapse.db.orm import models, session_scope
@@ -21,8 +20,6 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
-admin_app = typer.Typer(help="First-administrator setup.", no_args_is_help=True)
-app.add_typer(admin_app, name="admin")
 account_app = typer.Typer(name="account", help="Manage the sources that get scanned.",
                           no_args_is_help=True)
 app.add_typer(account_app)
@@ -38,16 +35,6 @@ def _setup() -> None:
     )
     wait_for_database()
     apply_schema()
-
-
-@admin_app.command("setup-token")
-def admin_setup_token() -> None:
-    """Print the one-time token used to create the first administrator."""
-    _setup()
-    if auth.count_users() > 0:
-        console.print("[yellow]The first administrator has already been created.[/yellow]")
-        raise typer.Exit(1)
-    console.print(auth.setup_token())
 
 
 @app.command("reset")

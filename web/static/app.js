@@ -181,8 +181,10 @@ const store = {
 export const state = {
   //: The signed-in user, and what this deployment asks of a visitor.
   me: null,
-  needsSetup: false,
   authRequired: false,
+  //: What the server says a visitor must do first: "signin" or "none".
+  gate: 'none',
+  claimed: true,
   measure: store.get('git-synapse.measure') || 'npmi',
   measures: [],
   byKey: new Map(),
@@ -276,6 +278,14 @@ function measureRanksSomething(path, params) {
 /** Current view token, used to discard results from a superseded navigation. */
 let navToken = 0;
 
+/** Say plainly that this deployment is not asking anyone to sign in. */
+function openBanner() {
+  return h('div', { class: 'claim-banner' },
+    h('div', {},
+      h('strong', {}, 'Open deployment.'),
+      h('span', {}, ' Anyone who can reach this can read everything here. '
+        + 'Set ADMIN_EMAIL and ADMIN_PASSWORD in .env and restart to require a sign-in.')));
+}
 async function route() {
   const raw = currentPath();
   const [rawPath, qs] = raw.split('?');
@@ -299,14 +309,23 @@ async function route() {
   const view = $('#view');
   const token = ++navToken;
 
-  if (state.needsSetup || (state.authRequired && !state.me)) {
+  // The server decides; this only renders what it asked for.
+  if (state.gate === 'signin') {
     document.body.classList.add('gated');
     settled();
     progress(false);
-    view.replaceChildren(gate({ setup: state.needsSetup, minted: state.setupTokenMinted }));
+    view.replaceChildren(gate());
     return;
   }
   document.body.classList.remove('gated');
+
+  const banner = document.getElementById('claim-banner');
+  if (banner) banner.remove();
+  if (!state.claimed) {
+    const node = openBanner();
+    node.id = 'claim-banner';
+    view.parentNode.insertBefore(node, view);
+  }
 
   for (const { rx, keys, handler } of routes) {
     const match = path.match(rx);
@@ -2921,38 +2940,25 @@ function gateField(label, attrs, hint) {
 }
 
 /** The sign-in screen, and the first-run screen that creates the first administrator. */
-function gate({ setup = false, minted = true } = {}) {
+function gate() {
   const email = gateField('Email', { type: 'email', autocomplete: 'username',
                                      placeholder: 'you@example.com', required: true });
-  const name = gateField('Name', { autocomplete: 'name', placeholder: 'Your name' });
   const password = gateField('Password',
-    { type: 'password', autocomplete: setup ? 'new-password' : 'current-password',
-      placeholder: setup ? `at least ${12} characters` : '', required: true },
-    setup ? 'You will be the administrator: only you can add other people.' : null);
-  const token = gateField('Setup token',
-    { autocomplete: 'off', spellcheck: 'false', class: 'input mono',
-      placeholder: 'paste it here', required: true },
-    minted ? 'Printed in the API log when it started: docker compose logs api'
-           : 'The ADMIN_SETUP_TOKEN this deployment was configured with.');
+    { type: 'password', autocomplete: 'current-password', required: true });
 
   const error = h('div', { class: 'gate-error', hidden: true });
-  const submit = h('button', { class: 'btn primary gate-submit', type: 'submit' },
-    setup ? 'Create administrator' : 'Sign in');
+  const submit = h('button', { class: 'btn primary gate-submit', type: 'submit' }, 'Sign in');
 
-  const form = h('form', { class: 'gate-form' },
-    email, setup ? name : null, password, setup ? token : null, error, submit);
+  const form = h('form', { class: 'gate-form' }, email, password, error, submit);
 
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     error.hidden = true;
     submit.disabled = true;
-    submit.textContent = setup ? 'Creating…' : 'Signing in…';
+    submit.textContent = 'Signing in…';
     try {
-      const body = setup
-        ? { email: email.input.value, name: name.input.value,
-            password: password.input.value, setup_token: token.input.value.trim() }
-        : { email: email.input.value, password: password.input.value };
-      await apiSend('POST', setup ? '/api/auth/setup' : '/api/auth/login', body);
+      await apiSend('POST', '/api/auth/login',
+                    { email: email.input.value, password: password.input.value });
       await loadMe();
       paintProfile();
       route();
@@ -2963,7 +2969,7 @@ function gate({ setup = false, minted = true } = {}) {
       password.input.focus();
     } finally {
       submit.disabled = false;
-      submit.textContent = setup ? 'Create administrator' : 'Sign in';
+      submit.textContent = 'Sign in';
     }
   });
 
@@ -2983,16 +2989,15 @@ function gate({ setup = false, minted = true } = {}) {
             h('li', {}, h('b', {}, 'Across repositories'), ' — every edge backed by a manifest or a bump'),
             h('li', {}, h('b', {}, 'Measured'), ' — every prediction scored against the commits before it')),
           h('div', { class: 'gate-figure' },
-            h('span', {}, '29'), ' association measures · ',
+            h('span', {}, '31'), ' association measures · ',
             h('span', {}, 'prequential'), ' backtesting · ',
             h('span', {}, 'no'), ' inference without evidence'))),
 
       h('div', { class: 'gate-main' },
         h('div', { class: 'gate-head' },
-          h('h2', { class: 'gate-title' }, setup ? 'Create the first account' : 'Sign in'),
-          h('div', { class: 'gate-sub' }, setup
-            ? 'Nobody has an account on this deployment yet. Yours will be the administrator.'
-            : 'This deployment is private to the people who have been added to it.')),
+          h('h2', { class: 'gate-title' }, 'Sign in'),
+          h('div', { class: 'gate-sub' },
+            'This deployment is private to the people who have been added to it.')),
         form)));
 }
 
@@ -3002,13 +3007,15 @@ async function loadMe() {
     const me = await fetch('/api/auth/me', { headers: { Accept: 'application/json' } })
       .then((r) => r.json());
     state.me = me.user;
-    state.needsSetup = me.needs_setup;
-    state.setupTokenMinted = me.setup_token_minted !== false;
     state.authRequired = me.auth_required;
+    state.gate = me.gate || 'none';
+    state.claimed = me.claimed !== false;
   } catch {
     state.me = null;
-    state.needsSetup = false;
     state.authRequired = false;
+    // A server that did not answer is not an invitation to show its data.
+    state.gate = 'signin';
+    state.claimed = true;
   }
   return state.me;
 }
@@ -3059,7 +3066,7 @@ async function boot() {
   wireOmnibox();
   await loadMe();
   paintProfile();
-  if (state.needsSetup || (state.authRequired && !state.me)) {
+  if (state.gate === 'signin') {
     window.addEventListener('popstate', route);
     return route();
   }

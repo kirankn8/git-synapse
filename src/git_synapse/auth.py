@@ -10,6 +10,8 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from sqlalchemy import func
+
 from git_synapse.db.orm import models, session_scope
 
 log = logging.getLogger(__name__)
@@ -37,10 +39,6 @@ class AuthError(Exception):
 
 class TooManyAttempts(AuthError):
     """Refused for now, not refused outright."""
-
-
-class SetupAlreadyClaimed(AuthError):
-    """The first administrator was created while this request was waiting."""
 
 
 
@@ -360,101 +358,40 @@ def token_user(secret: str | None) -> dict | None:
 
 
 
-_SETUP_KEY = "setup:token"
+def ensure_admin() -> str | None:
+    """Make the account named in the environment exist, and return its email.
 
-_SETUP_PRINCIPAL = "setup"
-
-
-def setup_token() -> str:
-    """The token that must be presented to create the first administrator."""
+    This is the only way a deployment gets its first user. With both variables
+    set the account is created, or its password brought back into line, every
+    time the process starts -- which is also how a forgotten password is reset.
+    With neither set nothing is created, and a deployment with no users answers
+    every read without asking who is calling.
+    """
     from git_synapse.config import get_config
 
-    configured = get_config().server.admin_setup_token
-    if configured:
-        return configured
+    cfg = get_config().server
+    email, password = cfg.admin_email.strip(), cfg.admin_password
+    if not email or not password:
+        return None
+    if not _EMAIL.match(email):
+        raise AuthError(f"ADMIN_EMAIL {email!r} does not look like an email address")
 
     with session_scope() as session:
-        Meta = models().Meta
-        row = session.query(Meta).filter_by(key=_SETUP_KEY).one_or_none()
+        User = models().AppUser
+        row = session.query(User).filter(func.lower(User.email) == email.lower()).one_or_none()
         if row is None:
-            row = Meta(key=_SETUP_KEY, value=secrets.token_urlsafe(32))
-            session.add(row)
-            session.flush()
-        return str(row.value)
-
-
-def setup_token_is_minted() -> bool:
-    """Whether the token was generated here, rather than supplied."""
-    from git_synapse.config import get_config
-
-    return not get_config().server.admin_setup_token
-
-
-def check_setup_token(supplied: str) -> None:
-    """Raise unless `supplied` is the setup token."""
-    if recent_failures(_SETUP_PRINCIPAL) >= MAX_FAILURES:
-        raise TooManyAttempts(
-            f"too many failed attempts; try again in {LOCKOUT_MINUTES} minutes")
-    if not hmac.compare_digest(supplied.strip(), setup_token()):
-        with session_scope() as session:
-            session.add(models().LoginAttempt(email=_SETUP_PRINCIPAL, client="setup"))
-        raise AuthError("that is not the setup token for this deployment")
-
-
-def clear_setup_token() -> None:
-    """Drop it once it has been used."""
-    with session_scope() as session:
-        Meta = models().Meta
-        row = session.query(Meta).filter_by(key=_SETUP_KEY).one_or_none()
-        if row is not None:
-            session.delete(row)
-
-
-def claim_first_admin(
-    email: str, name: str, password: str, setup_secret: str,
-    user_agent: str | None = None,
-) -> tuple[str, dict]:
-    """Atomically claim the empty deployment for its first administrator."""
-    from git_synapse.config import get_config
-
-    email = email.strip()
-    name = name.strip()
-    configured = get_config().server.admin_setup_token
-    token = secrets.token_urlsafe(32)
-    with session_scope() as session:
-        User, Meta, UserSession = models().AppUser, models().Meta, models().UserSession
-        lock_row = session.query(Meta).filter_by(key="schema_version").with_for_update().one_or_none()
-        if lock_row is None:
-            lock_row = Meta(key="schema_version", value=0)
-            session.add(lock_row)
-            session.flush()
-        if session.query(User).count() > 0:
-            raise SetupAlreadyClaimed("this deployment already has users")
-        if not _EMAIL.match(email):
-            raise AuthError(f"{email!r} does not look like an email address")
-        if not name:
-            raise AuthError("a name is required")
-        stored = session.query(Meta).filter_by(key=_SETUP_KEY).one_or_none()
-        expected = configured or (str(stored.value) if stored is not None else "")
-        if not hmac.compare_digest(setup_secret.strip(), expected):
-            raise AuthError("that is not the setup token for this deployment")
-
-        row = User(email=email, name=name, role="admin", password_hash=hash_password(password))
-        session.add(row)
-        session.flush()
-        user = {column.name: getattr(row, column.name) for column in row.__table__.columns}
-        session.add(UserSession(
-            token_hash=_token_hash(token), user_id=user["id"],
-            expires_at=datetime.now(UTC) + timedelta(days=SESSION_DAYS),
-            user_agent=(user_agent or "")[:200],
-        ))
-        row.last_login_at = datetime.now(UTC)
-        if stored is not None:
-            session.delete(stored)
-        user = {key: user[key] for key in
-                ("id", "email", "name", "role", "is_active", "created_at", "last_login_at")}
-        return token, user
-
+            session.add(User(email=email, name=email.split("@")[0], role="admin",
+                             password_hash=hash_password(password)))
+            log.info("administrator %s created from the environment", email)
+            return email
+        # An operator who edits the variable means it: bring the stored account back
+        # to what the file says, including the role, and leave everything else.
+        if not verify_password(password, row.password_hash):
+            row.password_hash = hash_password(password)
+            log.info("administrator %s password reset from the environment", email)
+        row.role = "admin"
+        row.is_active = True
+    return email
 
 
 ACCESS_MODES = ("required", "open")

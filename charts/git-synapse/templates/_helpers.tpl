@@ -57,11 +57,16 @@ app.kubernetes.io/instance: {{ .Release.Name }}
     secretKeyRef:
       name: {{ include "git-synapse.postgresSecretName" . }}
       key: POSTGRES_PASSWORD
-- name: ADMIN_SETUP_TOKEN
+- name: ADMIN_EMAIL
   valueFrom:
     secretKeyRef:
       name: {{ include "git-synapse.secretName" . }}
-      key: ADMIN_SETUP_TOKEN
+      key: ADMIN_EMAIL
+- name: ADMIN_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "git-synapse.secretName" . }}
+      key: ADMIN_PASSWORD
 - name: GS_SECRET_KEY
   valueFrom:
     secretKeyRef:
