@@ -61,8 +61,13 @@ for ($i = 0; $i -lt 60; $i++) {
 Write-Host "`nGit Synapse is ready" -ForegroundColor Cyan
 Write-Host "Open: $Url"
 Write-Host "`nNothing else to do: the dashboard is there." -ForegroundColor Cyan
-Write-Host "`nThis deployment answers anyone who can reach it. To require a sign-in," -ForegroundColor Yellow
-Write-Host "set both in .env and restart:"
-Write-Host '  ADMIN_EMAIL=you@example.com'
-Write-Host '  ADMIN_PASSWORD=something-long-and-unguessable'
-Write-Host '  docker compose up -d' 
+Write-Host "`n+- This deployment is OPEN ---------------------------------+" -ForegroundColor Yellow
+Write-Host "| Anyone who can reach $Url" -ForegroundColor Yellow
+Write-Host "| can read every repository and finding in it.              |" -ForegroundColor Yellow
+Write-Host "|                                                           |" -ForegroundColor Yellow
+Write-Host "| To require a sign-in, add these to .env and restart:       |" -ForegroundColor Yellow
+Write-Host "|                                                           |" -ForegroundColor Yellow
+Write-Host "|   ADMIN_EMAIL=you@example.com                             |" -ForegroundColor Yellow
+Write-Host "|   ADMIN_PASSWORD=something-long-and-unguessable           |" -ForegroundColor Yellow
+Write-Host "+-----------------------------------------------------------+" -ForegroundColor Yellow
+Write-Host "`n  notepad .env; docker compose up -d" 

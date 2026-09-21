@@ -166,7 +166,7 @@
         <p class="small">You need a Kubernetes cluster, <code>kubectl</code>, and Helm already installed. The chart does not try to install a cluster because cluster providers differ.</p>
         <div class="callout"><span>🔐</span><span><strong>Where is the admin password?</strong><br>A cluster is shared, so the chart always requires a sign-in. It creates a Kubernetes Secret named <code>git-synapse</code> holding <code>ADMIN_EMAIL</code> and a generated <code>ADMIN_PASSWORD</code>. Read it with:<br><code>kubectl -n git-synapse get secret git-synapse -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d; echo</code><br>Set <code>secrets.adminEmail</code> to your own address. Helm prints this command in its notes too.</span></div>
         <div class="code"><button class="copy" type="button">Copy</button><span class="prompt">$ </span>kubectl -n git-synapse port-forward service/git-synapse 8080:8000</div>
-        <p>Open <a href="http://localhost:8080" target="_blank" rel="noopener"><strong>http://localhost:8080</strong></a>, paste the token, and create the first administrator. For a shared deployment, enable the chart's Ingress and use your organization's hostname instead.</p>
+        <p>Open <a href="http://localhost:8080" target="_blank" rel="noopener"><strong>http://localhost:8080</strong></a> and sign in with the address and password above. For a shared deployment, enable the chart's Ingress and use your organization's hostname instead.</p>
         <details><summary>What gets persisted?</summary><p class="small">Postgres data is stored in a Postgres PVC. Git mirrors are stored in the chart's mirror PVC. Secrets remain in Kubernetes so upgrades do not rotate them. For production, use managed Postgres and an RWX storage class, then set <code>postgresql.enabled=false</code> and configure <code>externalDatabase</code>.</p></details>
         <details><summary>How is the Kubernetes Secret protected?</summary><p class="small">The password is stored as <code>ADMIN_PASSWORD</code> in the Kubernetes Secret; it is not printed in application logs. Kubernetes Secret values are base64-encoded by default, so production clusters should enable etcd encryption and restrict Secret access with RBAC. Helm release metadata can also contain rendered values, so limit access to Helm release Secrets.</p></details>
         <details><summary>How do upgrades work?</summary><p class="small">Use <code>helm upgrade ... --reuse-values</code>. The chart runs the schema migration Job as part of the release and the API uses health probes before it is considered ready. If a rollout fails, use <code>helm rollback git-synapse -n git-synapse</code>.</p></details>
@@ -198,14 +198,17 @@
 <span class="prompt">$ </span>docker compose up -d</div>
         <div class="callout"><span>💡</span><span><strong>First start can take a little longer.</strong><br>Docker may download images and create the database. That is normal.</span></div>
         <p>When it finishes, open <a href="http://localhost" target="_blank" rel="noopener"><strong>http://localhost</strong></a>. If port 80 is busy, try <a href="http://localhost:8080" target="_blank" rel="noopener"><strong>http://localhost:8080</strong></a>.</p>
-        <label class="check"><input type="checkbox" data-check="3"><span><strong>The Git Synapse page opens</strong>I can see the first-run setup screen.</span></label>
+        <label class="check"><input type="checkbox" data-check="3"><span><strong>The Git Synapse page opens</strong>I can see the dashboard.</span></label>
         <details><summary>It does not open</summary><p class="small">Run <code>docker compose ps</code>. The services should be running. To see what is wrong, run <code>docker compose logs api --tail=80</code>. If port 80 is occupied, use <code>http://localhost:8080</code>.</p></details>
       </section>
 
       <section class="step" id="step-4">
-        <div class="step-head"><div class="step-number">4</div><div><h2>Open the dashboard</h2><p class="muted">Nothing to create, and nothing to paste.</p></div></div>
+        <div class="step-head"><div class="step-number">4</div><div><h2>Decide who can see it</h2><p class="muted">Optional on a laptop. Not optional on anything others can reach.</p></div></div>
+        <p>The dashboard opened without asking who you are, and a banner says so. That is the whole of it until you change it: there is no account to create and no token to paste. To require a sign-in, put both of these in <code>.env</code> and restart.</p>
+        <div class="code"><button class="copy" type="button">Copy</button>ADMIN_EMAIL=you@example.com
+ADMIN_PASSWORD=something-long-and-unguessable</div>
         <div class="code"><button class="copy" type="button">Copy</button><span class="prompt">$ </span>docker compose up -d</div>
-        <p>Open the printed URL. The dashboard is there, with a banner saying the deployment is open to anyone who can reach it. To require a sign-in, set <code>ADMIN_EMAIL</code> and <code>ADMIN_PASSWORD</code> in <code>.env</code> and restart.</p>
+        <p class="small">The account is created when the API starts. Editing the password here and restarting resets it, so a forgotten one never needs a console.</p>
         <div class="callout warn"><span>🔐</span><span><strong>An open deployment really is open.</strong><br>Anyone who can reach the port can read everything in it. On a laptop that is fine; on anything shared, set the two variables above before you add repositories.</span></div>
         <label class="check"><input type="checkbox" data-check="4"><span><strong>The dashboard loads</strong>Open, or signed in if you set the two variables.</span></label>
       </section>

@@ -115,12 +115,20 @@ for _ in $(seq 1 60); do
     printf ' ready.\n'
     info "Git Synapse is ready"
     printf 'Open: %s\n' "$URL"
-    printf '\nNothing else to do: the dashboard is there.\n'
-    printf '\nThis deployment answers anyone who can reach it. To require a sign-in,\n'
-    printf 'set both in %q/.env and restart:\n' "$TARGET_DIR"
-    printf '  ADMIN_EMAIL=you@example.com\n'
-    printf '  ADMIN_PASSWORD=something-long-and-unguessable\n'
-    printf '\n  cd %q && docker compose up -d\n' "$TARGET_DIR"
+    printf 'Nothing else to do: the dashboard is there.\n'
+    # Open is the default because it makes the first run one command. Whoever
+    # ran that command has to be told, plainly, what it means and how to undo
+    # it -- a line of ordinary text here scrolls past and is never read.
+    printf '\n\033[1;33m┌─ This deployment is OPEN ─────────────────────────────────┐\033[0m\n'
+    printf '\033[1;33m│\033[0m Anyone who can reach %-36s \033[1;33m│\033[0m\n' "$URL"
+    printf '\033[1;33m│\033[0m can read every repository and finding in it.               \033[1;33m│\033[0m\n'
+    printf '\033[1;33m│\033[0m                                                           \033[1;33m│\033[0m\n'
+    printf '\033[1;33m│\033[0m To require a sign-in, add these to .env and restart:       \033[1;33m│\033[0m\n'
+    printf '\033[1;33m│\033[0m                                                           \033[1;33m│\033[0m\n'
+    printf '\033[1;33m│\033[0m   ADMIN_EMAIL=you@example.com                             \033[1;33m│\033[0m\n'
+    printf '\033[1;33m│\033[0m   ADMIN_PASSWORD=something-long-and-unguessable           \033[1;33m│\033[0m\n'
+    printf '\033[1;33m└───────────────────────────────────────────────────────────┘\033[0m\n'
+    printf '\n  cd %q && $EDITOR .env && docker compose up -d\n' "$TARGET_DIR"
     exit 0
   fi
   printf '.'
