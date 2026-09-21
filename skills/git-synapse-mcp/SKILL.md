@@ -1,6 +1,6 @@
 ---
 name: git-synapse-mcp
-description: Use the Git Synapse MCP server to find what else has to change. Before editing a file, before fixing a bug, or when asked "what else does this affect" - Git Synapse computes change coupling from the commit history of every repository in your configured organisations and answers both "which other files in this repo move with it" and "which other repository does this change really belong in". Also covers when NOT to act on a result, which is most of the value.
+description: Use the Git Synapse MCP server to find what else has to change. Run it as a completeness check before reporting work finished, and when editing a file, fixing a bug, or asked "what else does this affect" - Git Synapse computes change coupling from the commit history of every repository in your configured organisations and answers both "which other files in this repo move with it" and "which other repository does this change really belong in". Also covers when NOT to act on a result, which is most of the value.
 ---
 
 # Git Synapse MCP: what else has to change
@@ -16,6 +16,21 @@ inside a file, read the code.
 Git Synapse answers one question from real commit history:
 
 > **If I change this, what else has historically had to change too?**
+
+## Before you report the work finished
+
+The highest-value moment is not before you start -- you do not yet know what
+you will touch. It is when the change is written and you are about to call it
+done:
+
+1. For each file in your diff, call `coupled_files(repo, path)`.
+2. Anything with real support that is **not** in your diff is a candidate you
+   have missed. Check it; say why if you are leaving it out.
+3. Call `impact_of_change(repo, path)` for repositories that usually follow,
+   and report them with the observed lag rather than editing them silently.
+
+An edit that is correct in the file and incomplete across the repository is the
+failure this exists to catch.
 
 Two levels. The second prevents the most common incomplete change: patching a
 symptom in the repository you were pointed at, when the defect lives upstream.
@@ -33,7 +48,7 @@ than no claim.
 
 | tool | use |
 |---|---|
-| `coupled_files(repo, path)` | Which files move with this one. **Start here before editing.** |
+| `coupled_files(repo, path)` | Which files move with this one. **Run on every file you edited, before reporting done.** |
 | `explain_pair(repo, path_a, path_b)` | Full 2×2 table, all 31 measures, and the commits behind them |
 | `file_history(repo, path)` | Recent commits and who actually owns the file |
 | `module_context(repo, path)` | In a monorepo: which module owns this file, what it declares, and what declares it |

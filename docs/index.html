@@ -375,7 +375,7 @@ ADMIN_PASSWORD=something-long-and-unguessable</div>
       </section>
 
       <section class="step" id="mcp">
-        <div class="step-head"><div class="step-number">⚙</div><div><h2>Connect your coding agent</h2><p class="muted">This is the point of it: let the agent ask what moves together before it writes the patch.</p></div></div>
+        <div class="step-head"><div class="step-number">⚙</div><div><h2>Connect your coding agent</h2><p class="muted">This is the point of it: the agent checks its own change for what it missed, before it reports the work done.</p></div></div>
 
         <p>The MCP server is already running beside the dashboard. Everything below points one client at the same address:</p>
         <div class="code"><button class="copy" type="button">Copy</button>http://localhost:8081/mcp</div>
@@ -444,10 +444,21 @@ ADMIN_PASSWORD=something-long-and-unguessable</div>
 
         <div class="callout"><span>🔑</span><span><strong>If you set a sign-in,</strong> the MCP server wants a token too. Create one under <strong>API tokens</strong> in the dashboard and send it as <code>Authorization: Bearer gss_…</code> — in Claude Code, append <code>--header "Authorization: Bearer gss_…"</code>; in a JSON config, add a <code>"headers"</code> object beside the URL.</span></div>
 
+        <h3>Give it the skill too</h3>
+        <p>Connecting the server hands the agent the tools. The skill tells it <em>when</em>
+        to reach for them — as a completeness check before reporting work finished — and
+        when a result is noise, which is most of the value. For Claude Code:</p>
+        <div class="code"><button class="copy" type="button">Copy</button><span class="prompt">$ </span>mkdir -p ~/.claude/skills/git-synapse-mcp
+<span class="prompt">$ </span>curl -fsSL https://raw.githubusercontent.com/kirankn8/git-synapse/main/skills/git-synapse-mcp/SKILL.md \
+    -o ~/.claude/skills/git-synapse-mcp/SKILL.md</div>
+        <p class="small">Any other agent: paste
+        <a href="https://github.com/kirankn8/git-synapse/blob/main/skills/git-synapse-mcp/SKILL.md">SKILL.md</a>
+        into whichever instructions file it reads.</p>
+
         <p><strong>How to tell it worked.</strong> Ask your agent something like <em>“what usually changes with <code>src/…/models.py</code>?”</em> A connected agent answers with file names and co-change counts. Every call is also logged on the <strong>Activity</strong> page in the dashboard.</p>
         <label class="check"><input type="checkbox" data-check="mcp"><span><strong>My agent can query Git Synapse</strong>It answers with coupled files and their evidence.</span></label>
 
-        <div class="done-box"><h3>You're ready 🎉</h3><p>Open a file in the dashboard and read its strongest couplings, or just ask your agent before the next change. The scheduler refreshes known repositories every hour.</p><p class="small">All fourteen tools are listed in the <a href="https://github.com/kirankn8/git-synapse#fourteen-tools">README</a>.</p></div>
+        <div class="done-box"><h3>You're ready 🎉</h3><p>Open a file in the dashboard and read its strongest couplings, or let your agent check its own diff before it calls the work done. The scheduler refreshes known repositories every hour.</p><p class="small">All fourteen tools are listed in the <a href="https://github.com/kirankn8/git-synapse#fourteen-tools">README</a>.</p></div>
       </section>
 
       <section class="step" id="help">

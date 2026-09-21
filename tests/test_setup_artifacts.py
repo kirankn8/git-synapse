@@ -164,3 +164,33 @@ def test_the_two_dependency_lists_name_the_same_distributions() -> None:
         "only in requirements.txt": sorted(requirements - declared),
         "only in pyproject.toml": sorted(declared - requirements),
     }
+
+
+def test_the_skill_is_findable_and_says_when_to_call_the_tools() -> None:
+    """The skill existed for months, referenced only in a file tree in DESIGN.md,
+    so nobody using the MCP server could find the thing that says when to use it.
+    """
+    skill = ROOT / "skills/git-synapse-mcp/SKILL.md"
+    assert skill.exists()
+    body = skill.read_text()
+    assert "before reporting" in body or "before you report" in body, \
+        "the skill does not name the moment it is for"
+
+    for page in (ROOT / "README.md", ROOT / "docs/index.html"):
+        assert "skills/git-synapse-mcp" in page.read_text(), \
+            f"{page.name} never points at the skill"
+
+
+def test_the_agent_facing_text_asks_for_a_check_before_calling_work_done() -> None:
+    """Calling this only before editing misses the moment that matters: an agent
+    does not know what it will touch until it has touched it."""
+    from git_synapse.mcp import server
+
+    for name, text in (("the MCP instructions", server.INSTRUCTIONS),
+                       ("the skill", (ROOT / "skills/git-synapse-mcp/SKILL.md").read_text()),
+                       ("README.md", (ROOT / "README.md").read_text())):
+        lowered = text.lower()
+        assert "report it finished" in lowered or "reporting done" in lowered \
+            or "reports it done" in lowered or "reporting work finished" in lowered \
+            or "report the work finished" in lowered or "reporting the work done" in lowered, \
+            f"{name} does not ask for the check before the work is called done"

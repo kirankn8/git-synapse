@@ -63,7 +63,8 @@ Everything else — Kubernetes, tokens, troubleshooting — is in the
 ## From your coding agent
 
 An agent only ever sees the repository you opened, which is exactly the blind
-spot. Point it at the MCP server and it can ask first:
+spot. Point it at the MCP server and it can check its own work: after the change
+is written, before it reports it done.
 
 ```bash
 claude mcp add --transport http git-synapse http://localhost:8081/mcp
@@ -71,6 +72,20 @@ claude mcp add --transport http git-synapse http://localhost:8081/mcp
 
 Cursor, VS Code, opencode and Claude Desktop are in the
 [guide](https://kirankn8.github.io/git-synapse/#mcp).
+
+Connecting the server gives the agent the tools; the skill tells it *when* to
+reach for them and — more importantly — when a result is noise. For Claude
+Code:
+
+```bash
+mkdir -p ~/.claude/skills/git-synapse-mcp
+curl -fsSL https://raw.githubusercontent.com/kirankn8/git-synapse/main/skills/git-synapse-mcp/SKILL.md \
+  -o ~/.claude/skills/git-synapse-mcp/SKILL.md
+```
+
+For any other agent, paste
+[`SKILL.md`](skills/git-synapse-mcp/SKILL.md) into whatever instructions file it
+reads.
 
 ## How it works
 
@@ -131,10 +146,12 @@ in **[docs/benchmark.md](docs/benchmark.md)**.
 
 ### The workflow
 
-An agent typically calls `coupled_files` while editing, then checks
-`upstream_repos` and `impact_of_change` before opening a pull request. Use
-`explain_pair` when a suggestion needs evidence. Treat every result as review
-guidance, not a rule.
+The useful moment is not before the agent starts — it does not yet know what it
+will touch. It is after the change is written and before it reports it finished:
+`coupled_files` on each edited file to see whether anything that usually moves
+with it is missing from the diff, then `impact_of_change` for the repositories
+likely to need a follow-up. Use `explain_pair` when a suggestion needs evidence.
+Treat every result as review guidance, not a rule.
 
 </details>
 

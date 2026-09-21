@@ -29,14 +29,25 @@ Git Synapse answers "if I change this, what else has to change?" from the commit
 history of an entire GitHub organisation. Full guide: AGENTS.md in the git-synapse \
 repository.
 
-WITHIN a repository, call `coupled_files` before editing a file. Read \
-`probability_also_changes` together with `co_changes` -- a score is meaningless \
-without its support count. `explain_pair` gives the full statistical case for one \
-relationship, including the commits that produced it.
+WHEN TO CALL THIS. The moment that matters most is not before you start, when \
+you do not yet know what you will touch. It is after the change is written and \
+before you report it finished: for each file you edited, call `coupled_files` \
+and ask whether anything that usually moves with it is missing from your diff. \
+An edit that is correct in the file and incomplete across the repository is the \
+failure this exists to catch. Calling it before editing is also useful, to see \
+what you are walking into.
 
-ACROSS repositories, this prevents the most common incomplete change: patching a \
-symptom in a downstream repo when the defect belongs upstream. Before fixing a \
-bug, call `upstream_repos` on the repo you are editing. If it names a dependency \
+WITHIN a repository, read `probability_also_changes` together with `co_changes` \
+-- a score is meaningless without its support count. `explain_pair` gives the \
+full statistical case for one relationship, including the commits that produced \
+it.
+
+ACROSS repositories, this prevents the most common incomplete change: an edit \
+that is finished inside its own repository while a consumer of it, in a repo you \
+never opened, still needs the matching change. Before reporting the work done, \
+call `impact_of_change` on what you edited and say what is likely to need \
+following up, with the observed lag. Before fixing a bug, call `upstream_repos` \
+on the repo you are editing. If it names a dependency \
 with bump history and a short propagation lag, the fix may belong there instead. \
 `impact_of_change` is the opposite direction. `coupling_chain` follows multi-hop \
 paths such as signer -> packager -> runtime.
