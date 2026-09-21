@@ -1,12 +1,258 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta http-equiv="refresh" content="0; url=setup.html">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Git Synapse setup</title>
-  </head>
-  <body>
-    <p>Opening the <a href="setup.html">Git Synapse setup guide</a>…</p>
-  </body>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Git Synapse — what changes together</title>
+  <meta name="description" content="Change-coupling history for coding agents. See what else is likely to need changing before you open a pull request.">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #070b14; --panel: #101a2c; --panel-2: #0d1524; --input: #0a1120;
+      --border: #20304a; --border-strong: #355071; --text: #e6edf7;
+      --muted: #9aaac0; --faint: #6b7e9c; --accent: #5eead4; --accent-2: #2dd4bf;
+      --blue: #38bdf8; --violet: #a78bfa; --warn: #fbbf24; --ok: #4ade80;
+      --shadow: 0 18px 55px rgba(0,0,0,.28); --radius: 14px;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+    :root[data-theme="light"] {
+      color-scheme: light; --bg: #f6f8fb; --panel: #fff; --panel-2: #f9fbfe;
+      --input: #fff; --border: #dce4ef; --border-strong: #bdcadb; --text: #102039;
+      --muted: #52647c; --faint: #7d8ca2; --accent: #0d9488; --accent-2: #0f766e;
+      --blue: #0284c7; --violet: #7c3aed; --warn: #b45309; --ok: #15803d;
+      --shadow: 0 18px 50px rgba(15,27,45,.10);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; background: radial-gradient(circle at 78% 4%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 28rem), var(--bg); color: var(--text); font: 15px/1.6 var(--sans); }
+    a { color: var(--accent); }
+    button { cursor: pointer; font: inherit; }
+
+    .top { position: sticky; top: 0; z-index: 10; border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(14px); }
+    .top-inner { max-width: 1060px; margin: auto; min-height: 64px; padding: 0 24px;
+      display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+    .brand { display: flex; gap: 10px; align-items: center; color: var(--text); text-decoration: none; font-weight: 750; }
+    .mark { width: 27px; height: 27px; }
+    .mark path { fill: none; stroke: var(--accent); stroke-width: 2.3; stroke-linecap: round; }
+    .mark circle { fill: none; stroke: var(--accent); stroke-width: 2.5; }
+    .top-actions { display: flex; align-items: center; gap: 9px; }
+    .top-actions a, .theme { color: var(--muted); text-decoration: none; padding: 7px 10px; border-radius: 8px; font-size: 14px; }
+    .top-actions a:hover, .theme:hover { background: var(--panel); color: var(--text); }
+    .theme { border: 1px solid var(--border); background: transparent; }
+
+    .wrap { max-width: 1060px; margin: 0 auto; padding: 0 24px; }
+    .hero { padding-block: 64px 20px; max-width: 760px; }
+    .eyebrow { display: inline-flex; align-items: center; gap: 7px; color: var(--accent); font-size: 12px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .eyebrow::before { content: ""; width: 24px; height: 1px; background: var(--accent); }
+    h1 { font-size: clamp(34px, 5.2vw, 54px); line-height: 1.03; letter-spacing: -.055em; margin: 16px 0 0; text-wrap: balance; }
+    .lede { color: var(--muted); font-size: 18px; margin: 18px 0 0; max-width: 62ch; }
+
+    .cta-row { display: flex; flex-wrap: wrap; gap: 11px; margin-top: 30px; }
+    .cta { display: inline-flex; align-items: center; gap: 9px; padding: 13px 20px; border-radius: 11px;
+      text-decoration: none; font-weight: 700; border: 1px solid transparent; }
+    .cta-primary { background: var(--accent); color: #04121a; box-shadow: 0 14px 34px color-mix(in srgb, var(--accent) 22%, transparent); }
+    .cta-primary:hover { background: var(--accent-2); }
+    .cta-ghost { border-color: var(--border-strong); color: var(--text); }
+    .cta-ghost:hover { border-color: var(--accent-2); color: var(--accent); }
+    .cta-note { margin-top: 13px; color: var(--faint); font-size: 13px; }
+
+    /* The question the tool answers, shown the way it is actually asked. */
+    .ask { margin: 46px 0 0; border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--panel); box-shadow: var(--shadow); overflow: hidden; }
+    .ask-head { padding: 13px 17px; border-bottom: 1px solid var(--border); color: var(--faint);
+      font: 12px/1 var(--mono); letter-spacing: .04em; }
+    .ask-body { padding: 17px; font: 13px/1.75 var(--mono); overflow-x: auto; }
+    .ask-q { color: var(--blue); }
+    .ask-a { color: var(--text); }
+    .pill { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px;
+      border: 1px solid var(--border-strong); color: var(--muted); margin-left: 6px; }
+    .pill.hot { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--accent); }
+
+    h2 { font-size: 22px; letter-spacing: -.025em; margin: 0 0 6px; }
+    .section { padding-block: 52px 0; }
+    .section > p.sub { color: var(--muted); margin: 0 0 22px; max-width: 62ch; }
+
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .card { padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel-2); }
+    .card h3 { margin: 0 0 7px; font-size: 15px; }
+    .card p { margin: 0; color: var(--muted); font-size: 13.5px; }
+    .card .ic { font-size: 19px; display: block; margin-bottom: 11px; }
+
+    .surfaces { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .surface { padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+    .surface h3 { margin: 0 0 7px; font-size: 15px; }
+    .surface p { margin: 0 0 10px; color: var(--muted); font-size: 13.5px; }
+    .surface code { font: 12px var(--mono); color: var(--accent); overflow-wrap: anywhere; }
+
+    .start { margin: 54px 0 0; padding: 30px; border-radius: var(--radius); background: var(--panel);
+      border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+      box-shadow: 0 22px 70px color-mix(in srgb, var(--accent) 9%, transparent); }
+    .start h2 { margin-bottom: 10px; }
+    .code { position: relative; margin: 15px 0 0; padding: 16px 52px 16px 16px; border: 1px solid var(--border);
+      border-radius: 10px; background: var(--input); overflow-x: auto;
+      font: 12.5px/1.7 var(--mono); color: var(--text); white-space: pre-wrap; word-break: break-word; }
+    .code .prompt { color: var(--accent); user-select: none; }
+    .copy { position: absolute; top: 9px; right: 9px; border: 1px solid var(--border-strong); border-radius: 6px;
+      padding: 5px 8px; background: var(--panel); color: var(--muted); font-size: 11px; }
+    .copy:hover { color: var(--accent); border-color: var(--accent-2); }
+
+    .callout { display: flex; gap: 11px; margin: 18px 0 0; padding: 13px 15px; border: 1px solid var(--border);
+      border-left: 3px solid var(--warn); border-radius: 9px; background: var(--panel-2); color: var(--muted); font-size: 13px; }
+    .callout strong { color: var(--text); }
+
+    footer { border-top: 1px solid var(--border); margin-top: 66px; }
+    .foot-inner { max-width: 1060px; margin: auto; padding: 26px 24px 46px; color: var(--faint); font-size: 12.5px;
+      display: flex; flex-wrap: wrap; gap: 14px; justify-content: space-between; }
+
+    @media (max-width: 860px) {
+      .grid, .surfaces { grid-template-columns: 1fr; }
+      .hero { padding-block: 42px 8px; }
+      .top-actions a { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="./">
+        <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M8 24C8 18.5 9.5 15.5 12 13.6M20 18.4C22.5 16.5 24 13.5 24 8"/><circle cx="8" cy="24" r="2.6"/><circle cx="24" cy="8" r="2.6"/></svg>
+        <span>Git Synapse</span>
+      </a>
+      <div class="top-actions">
+        <a href="setup.html">Setup guide</a>
+        <a href="https://github.com/kirankn8/git-synapse">GitHub</a>
+        <button class="theme" id="theme" type="button">☼ Theme</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="hero">
+      <div class="eyebrow">Change-coupling history</div>
+      <h1>Know what else has to change.</h1>
+      <p class="lede">
+        You edit a file and miss the one that always moves with it. Review catches
+        it, or production does. Git Synapse reads the history you already have and
+        answers the question before you open the pull request.
+      </p>
+      <div class="cta-row">
+        <a class="cta cta-primary" href="setup.html">Set it up →</a>
+        <a class="cta cta-ghost" href="https://github.com/kirankn8/git-synapse">View the source</a>
+      </div>
+      <p class="cta-note">Runs on your machine, against your own repositories. Public repositories need no token.</p>
+    </section>
+
+    <!-- The product in one exchange: the question, and the evidence behind the answer. -->
+    <section class="ask" aria-label="An example answer">
+      <div class="ask-head">what changes with this file?</div>
+      <div class="ask-body">
+<span class="ask-q">? src/requests/models.py</span>
+
+<span class="ask-a">tests/test_requests.py</span>     <span class="pill hot">142 co-changes</span>
+<span class="ask-a">src/requests/sessions.py</span>  <span class="pill">31 co-changes</span>
+<span class="ask-a">src/requests/utils.py</span>     <span class="pill">28 co-changes</span>
+<span class="ask-a">src/requests/compat.py</span>    <span class="pill">26 co-changes</span>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>How it works</h2>
+      <p class="sub">
+        There is no language parser and no model of your framework. The base fact is
+        simply <em>this commit touched this file</em>, and everything is built from that.
+      </p>
+      <div class="grid">
+        <div class="card">
+          <span class="ic">🧩</span>
+          <h3>It reads real commits</h3>
+          <p>Files that repeatedly changed together, drawn from your own history. Works on any language, because it never looks inside the file.</p>
+        </div>
+        <div class="card">
+          <span class="ic">⚖️</span>
+          <h3>It shows its evidence</h3>
+          <p>Every suggestion carries how often the pair actually moved together, so you can tell a real coupling from two files that are merely busy.</p>
+        </div>
+        <div class="card">
+          <span class="ic">🔗</span>
+          <h3>It crosses repositories</h3>
+          <p>Where one repository declares another as a dependency, it tracks how quickly version bumps are adopted downstream.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Three ways to ask</h2>
+      <p class="sub">The same corpus behind a dashboard, an HTTP API, and a tool an agent can call directly.</p>
+      <div class="surfaces">
+        <div class="surface">
+          <h3>Dashboard</h3>
+          <p>Browse repositories, open a file, and read its strongest couplings with the evidence beside them.</p>
+          <code>http://localhost:8080</code>
+        </div>
+        <div class="surface">
+          <h3>MCP server</h3>
+          <p>Fourteen tools, so a coding agent can ask what moves together before it writes the patch.</p>
+          <code>http://localhost:8081/mcp</code>
+        </div>
+        <div class="surface">
+          <h3>HTTP API</h3>
+          <p>The same answers as JSON, for scripts, checks in CI, and anything else you want to build on it.</p>
+          <code>GET /api/files/{id}/coupled</code>
+        </div>
+      </div>
+    </section>
+
+    <section class="start">
+      <h2>Start here</h2>
+      <p class="sub" style="margin-bottom:0">
+        Docker brings up the API, dashboard, Postgres, scheduler and MCP server together.
+        You do not need Python, Git or a database on the host.
+      </p>
+      <div class="code"><button class="copy" type="button">Copy</button><span class="prompt">$ </span>git clone https://github.com/kirankn8/git-synapse.git
+<span class="prompt">$ </span>cd git-synapse
+<span class="prompt">$ </span>cp .env.example .env
+<span class="prompt">$ </span>docker compose up -d</div>
+      <div class="cta-row">
+        <a class="cta cta-primary" href="setup.html">Full setup guide →</a>
+      </div>
+      <div class="callout">
+        <span>🔐</span>
+        <span><strong>It opens with no sign-in,</strong> so you can try it in a couple of minutes.
+        Put <code>ADMIN_EMAIL</code> and <code>ADMIN_PASSWORD</code> in <code>.env</code> and restart
+        before you put it anywhere other people can reach.</span>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="foot-inner">
+      <span>Git Synapse — change-coupling history for coding agents.</span>
+      <span>
+        <a href="setup.html">Setup</a> ·
+        <a href="https://github.com/kirankn8/git-synapse">GitHub</a> ·
+        <a href="https://github.com/kirankn8/git-synapse/blob/main/LICENSE">AGPL-3.0</a>
+      </span>
+    </div>
+  </footer>
+
+  <script>
+    (() => {
+      const root = document.documentElement;
+      const savedTheme = localStorage.getItem('gs-theme');
+      if (savedTheme) root.dataset.theme = savedTheme;
+      document.getElementById('theme').addEventListener('click', () => {
+        const next = root.dataset.theme === 'light' ? 'dark' : 'light';
+        root.dataset.theme = next; localStorage.setItem('gs-theme', next);
+      });
+
+      document.querySelectorAll('.copy').forEach(button => button.addEventListener('click', async () => {
+        const code = button.parentElement.innerText.replace(/^Copy\n?/, '').replace(/^\$ /gm, '');
+        try { await navigator.clipboard.writeText(code); button.textContent = 'Copied'; setTimeout(() => button.textContent = 'Copy', 1200); }
+        catch { button.textContent = 'Select & copy'; setTimeout(() => button.textContent = 'Copy', 1500); }
+      }));
+    })();
+  </script>
+</body>
 </html>

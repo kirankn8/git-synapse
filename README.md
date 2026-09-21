@@ -14,6 +14,8 @@ See what else is likely to need changing before you open a pull request.
 ![Tests](https://img.shields.io/badge/tests-1%2C477-3fb950?style=flat-square)
 ![Coverage](https://img.shields.io/badge/backend%20coverage-100%25-3fb950?style=flat-square)
 
+**[Read the introduction and set it up →](https://kirankn8.github.io/git-synapse/)**
+
 </div>
 
 Git Synapse learns from the files that changed together in real commits. It does
@@ -208,9 +210,10 @@ application logs. See
 [`charts/git-synapse/README.md`](charts/git-synapse/README.md) for external
 Postgres, storage, ingress, upgrades, and rollback settings.
 
-The beginner-friendly setup page is available at
-[`docs/setup.html`](docs/setup.html) and, after GitHub Pages is enabled, at
-`https://kirankn8.github.io/git-synapse/`.
+The beginner-friendly setup page is published at
+**<https://kirankn8.github.io/git-synapse/>**, which introduces the project and
+leads into the guide. The same pages live in the repository as
+[`docs/index.html`](docs/index.html) and [`docs/setup.html`](docs/setup.html).
 
 ## Use it
 

@@ -57,6 +57,31 @@ def test_github_pages_publishes_docs_root() -> None:
     assert "setup.html" in index
 
 
+def test_the_published_pages_only_link_inside_themselves_or_out_to_github() -> None:
+    """A relative link up out of docs/ breaks once the site is deployed.
+
+    Only docs/ is published, so ../README.md resolves above the site root. It
+    did not 404 either: it landed on the owner's user site and served whatever
+    happened to be there, which is worse than an error because it looks like a
+    page. Links either stay inside docs/ or name github.com outright.
+    """
+    for name in ("index.html", "setup.html"):
+        page = (ROOT / "docs" / name).read_text()
+        escaping = re.findall(r'href="(\.\./[^"]*)"', page)
+        assert not escaping, f"docs/{name} links above the published root: {escaping}"
+
+
+def test_the_landing_page_introduces_the_project_and_leads_to_the_guide() -> None:
+    """The site root is where the README sends a stranger, so it has to say what
+    this is before it asks them to install anything."""
+    index = (ROOT / "docs/index.html").read_text()
+    assert 'href="setup.html"' in index, "the landing page never reaches the guide"
+    assert "coupl" in index.lower(), "the landing page never says what the tool does"
+    assert "git clone" in index, "the landing page shows no way to start"
+    readme = (ROOT / "README.md").read_text()
+    assert "kirankn8.github.io/git-synapse" in readme, "the README never links the site"
+
+
 def _requirement_names(lines: list[str]) -> set[str]:
     """Distribution names, stripped of version pins, extras and markers."""
     found = set()
