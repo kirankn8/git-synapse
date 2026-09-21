@@ -63,8 +63,9 @@ Everything else — Kubernetes, tokens, troubleshooting — is in the
 ## From your coding agent
 
 An agent only ever sees the repository you opened, which is exactly the blind
-spot. Point it at the MCP server and it can check its own work: after the change
-is written, before it reports it done.
+spot. Git Synapse exposes what it knows over an **MCP server and a skill file**,
+so the agent can check its own work: after the change is written, before it
+reports it done.
 
 ```bash
 claude mcp add --transport http git-synapse http://localhost:8081/mcp
