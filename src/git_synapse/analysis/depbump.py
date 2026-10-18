@@ -406,11 +406,18 @@ def rebuild(force: bool = False, conn: object | None = None) -> BumpStats:
             for path, ecosystem in manifest_paths(mirror):
                 edges.extend(extract_from_mirror(mirror, repo.name, path, ecosystem))
             stats.edges_found += len(edges)
+            # autoflush is off, so the exists check below cannot see an edge added earlier in this batch.
+            seen: set[tuple[str, str, str]] = set()
             for edge in edges:
+                dep_version = edge.dep_version[:200]
+                identity = (edge.consumer_sha, edge.dep_name, dep_version)
+                if identity in seen:
+                    continue
+                seen.add(identity)
                 dep_repo = resolve_repo(edge.dep_name, by_full, by_name, by_package, edge.ecosystem)
                 exists = session.query(Bump).filter(
                     Bump.consumer_repo_id == repo.id, Bump.consumer_sha == edge.consumer_sha,
-                    Bump.dep_name == edge.dep_name, Bump.dep_version == edge.dep_version,
+                    Bump.dep_name == edge.dep_name, Bump.dep_version == dep_version,
                 ).first()
                 if exists:
                     continue
@@ -418,7 +425,7 @@ def rebuild(force: bool = False, conn: object | None = None) -> BumpStats:
                 dep_commit = next((c for c in session.query(Commit).filter_by(repo_id=dep_repo).all()
                                    if edge.dep_sha and c.sha.startswith(edge.dep_sha)), None) if dep_repo else None
                 session.add(Bump(consumer_repo_id=repo.id, consumer_sha=edge.consumer_sha, dep_repo_id=dep_repo,
-                                 dep_name=edge.dep_name, dep_version=edge.dep_version[:200], dep_sha=edge.dep_sha,
+                                 dep_name=edge.dep_name, dep_version=dep_version, dep_sha=edge.dep_sha,
                                  dep_commit_id=dep_commit.id if dep_commit else None, manifest=edge.manifest,
                                  bumped_at=consumer.committed_at if consumer else None,
                                  resolution="sha" if dep_commit else None, ecosystem=edge.ecosystem))

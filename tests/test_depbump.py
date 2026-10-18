@@ -922,3 +922,50 @@ def test_an_edge_already_recorded_is_not_stored_a_second_time(db, tmp_path, monk
                 consumer_repo_id=repo_id).delete(synchronize_session=False)
             session.query(models().Repo).filter_by(id=repo_id).delete(
                 synchronize_session=False)
+
+
+def test_the_same_dependency_in_two_manifests_is_stored_once(db, tmp_path, monkeypatch):
+    """One dependency pinned in five action files produced duplicate identities, and the second copy aborted the whole rebuild."""
+    from uuid import uuid4
+
+    from git_synapse.db.orm import session_scope
+
+    tag = uuid4().hex[:10]
+    with session_scope() as session:
+        repo = models().Repo(full_name=f"acme/dup-edge-{tag}", name=f"dup-edge-{tag}",
+                             owner="acme", head_sha="d" * 40)
+        session.add(repo)
+        session.flush()
+        repo_id = repo.id
+
+    edges = [
+        depbump.BumpEdge(consumer_sha="e" * 40, dep_name="hashicorp/vault-action",
+                         dep_version="v3.3.0", dep_sha=None,
+                         manifest=".github/actions/aws-creds-from-vault/action.yaml",
+                         ecosystem="actions"),
+        depbump.BumpEdge(consumer_sha="e" * 40, dep_name="hashicorp/vault-action",
+                         dep_version="v3.3.0", dep_sha=None,
+                         manifest=".github/actions/bdd-job-setup/action.yaml",
+                         ecosystem="actions"),
+    ]
+    monkeypatch.setattr(depbump, "_repos_to_scan", lambda s, f: [
+        s.get(models().Repo, repo_id)])
+    monkeypatch.setattr(depbump, "mirror_path_for", lambda *a, **kw: tmp_path)
+    monkeypatch.setattr(depbump, "manifest_paths",
+                        lambda m: [("a/action.yaml", "actions"), ("b/action.yaml", "actions")])
+    monkeypatch.setattr(depbump, "published_at_head", lambda m: set())
+    monkeypatch.setattr(depbump, "extract_from_mirror", lambda *a, **kw: edges)
+
+    try:
+        with session_scope() as session:
+            depbump.rebuild(conn=session)
+        with session_scope() as session:
+            rows = session.query(models().DepBump).filter_by(
+                consumer_repo_id=repo_id).all()
+            assert len(rows) == 1
+    finally:
+        with session_scope() as session:
+            session.query(models().DepBump).filter_by(
+                consumer_repo_id=repo_id).delete(synchronize_session=False)
+            session.query(models().Repo).filter_by(id=repo_id).delete(
+                synchronize_session=False)
