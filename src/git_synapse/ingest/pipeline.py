@@ -7,7 +7,7 @@ import logging
 import subprocess
 import time
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -792,6 +792,12 @@ def _run_ingest_locked(
             record = futures[future]
             try:
                 result = future.result()
+            except CancelledError:
+                # Aborting cancels the pending futures; each still needs a result, or run_ingest never finishes.
+                result = RepoResult(
+                    full_name=record.full_name, status="failed",
+                    error="cancelled when the run was aborted",
+                )
             except Exception as exc:  # noqa: BLE001 - defensive; sync_repo catches
                 result = RepoResult(
                     full_name=record.full_name,

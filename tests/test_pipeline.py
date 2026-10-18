@@ -1192,3 +1192,23 @@ def test_cross_repository_layers_are_not_rebuilt_more_often_than_the_interval(db
 
     assert calls == [True]
 
+
+def test_a_cancelled_future_does_not_leave_the_run_running(db, monkeypatch):
+    """Aborting cancels the pending futures, and CancelledError is not an Exception, so the run was never finalised."""
+    from concurrent.futures import CancelledError
+
+    from git_synapse.db.orm import models, session_scope
+    from git_synapse.ingest import pipeline
+
+    records = _fake_run(monkeypatch, pipeline, 1)
+
+    def cancelled(record, force_full=False):
+        raise CancelledError()
+
+    monkeypatch.setattr(pipeline, "sync_repo", cancelled)
+
+    run = pipeline.run_ingest(records=records, trigger="test")
+
+    with session_scope() as conn:
+        row = conn.get(models().IngestRun, run.run_id)
+        assert row is not None and row.status == "failed"
