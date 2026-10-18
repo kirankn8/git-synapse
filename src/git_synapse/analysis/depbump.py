@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from sqlalchemy import or_
+
 from git_synapse.analysis import manifests
 from git_synapse.analysis.manifests import bounds, version_key
 from git_synapse.db.orm import models, session_scope
@@ -171,9 +173,13 @@ def _record_packages(session: object, repo_id: int, claims: set[tuple[str, str]]
     session.add_all([Package(repo_id=repo_id, ecosystem=eco, name=name) for eco, name in sorted(claims)])
 
 
-def _manifest_repos(session: object, force: bool, watermark: str) -> list[object]:
+def _manifest_repos(session: object, force: bool, watermark: str,
+                    repo_ids: object | None = None) -> list[object]:
     Repo, File = models().Repo, models().File
-    repos = session.query(Repo).filter(Repo.is_enabled.is_(True)).order_by(Repo.id).all()
+    query = session.query(Repo).filter(Repo.is_enabled.is_(True))
+    if repo_ids is not None:
+        query = query.filter(Repo.id.in_(list(repo_ids)))
+    repos = query.order_by(Repo.id).all()
     result = []
     for repo in repos:
         if repo.ingest_status == "ingesting":
@@ -218,10 +224,11 @@ def refresh_modules(conn: object | None = None) -> int:
         return run(session)
 
 
-def refresh_declared(conn: object | None = None, force: bool = False) -> int:
+def refresh_declared(conn: object | None = None, force: bool = False,
+                     repo_ids: object | None = None) -> int:
     def run(session: object) -> int:
         Repo, _File, Dependency = models().Repo, models().File, models().RepoDependency
-        repos = _manifest_repos(session, force, "last_declared_sha")
+        repos = _manifest_repos(session, force, "last_declared_sha", repo_ids)
         by_full, by_name, by_package = _repo_lookups(session)
         payload, scanned = [], []
         for repo in repos:
@@ -256,10 +263,6 @@ def refresh_declared(conn: object | None = None, force: bool = False) -> int:
         return run(session)
 
 
-def _repos_to_scan(conn: object, force: bool) -> list[object]:
-    return _manifest_repos(conn, force, "last_depbump_sha")
-
-
 def _ordinal(key: str | None) -> tuple[int, ...] | None:
     if not key or "-" in key:
         return None
@@ -269,10 +272,24 @@ def _ordinal(key: str | None) -> tuple[int, ...] | None:
         return None
 
 
-def _link_repositories(session: object) -> int:
+def _bump_scope(Bump: object, consumer_ids: object | None,
+                upstream_ids: object | None) -> object | None:
+    """Rows a scoped rebuild can have changed: the repositories scanned, and those they point at."""
+    clauses = []
+    if consumer_ids:
+        clauses.append(Bump.consumer_repo_id.in_(list(consumer_ids)))
+    if upstream_ids:
+        clauses.append(Bump.dep_repo_id.in_(list(upstream_ids)))
+    return or_(*clauses) if clauses else None
+
+
+def _link_repositories(session: object, scope: object | None = None) -> int:
     by_full, by_name, by_package = _repo_lookups(session)
     linked = 0
-    for bump in session.query(models().DepBump).filter(models().DepBump.dep_repo_id.is_(None)).all():
+    query = session.query(models().DepBump).filter(models().DepBump.dep_repo_id.is_(None))
+    if scope is not None:
+        query = query.filter(scope)
+    for bump in query.all():
         repo_id = resolve_repo(bump.dep_name, by_full, by_name, by_package, bump.ecosystem)
         if repo_id is not None and repo_id != bump.consumer_repo_id:
             bump.dep_repo_id = repo_id
@@ -280,18 +297,24 @@ def _link_repositories(session: object) -> int:
     return linked
 
 
-def _fill_version_keys(session: object) -> None:
-    for bump in session.query(models().DepBump).filter(models().DepBump.version_key.is_(None)).all():
+def _fill_version_keys(session: object, scope: object | None = None) -> None:
+    query = session.query(models().DepBump).filter(models().DepBump.version_key.is_(None))
+    if scope is not None:
+        query = query.filter(scope)
+    for bump in query.all():
         floor, ceiling = bounds(bump.dep_version or "")
         if ceiling and not floor:
             continue
         bump.version_key = version_key(floor or bump.dep_version)
 
 
-def _resolve_ceilings(session: object) -> int:
+def _resolve_ceilings(session: object, scope: object | None = None) -> int:
     Bump, Tag, Commit = models().DepBump, models().RefTag, models().Commit
     resolved = 0
-    for bump in session.query(Bump).filter(Bump.dep_commit_id.is_(None), Bump.dep_repo_id.is_not(None)).all():
+    query = session.query(Bump).filter(Bump.dep_commit_id.is_(None), Bump.dep_repo_id.is_not(None))
+    if scope is not None:
+        query = query.filter(scope)
+    for bump in query.all():
         floor, ceiling = bounds(bump.dep_version or "")
         limit = _ordinal(version_key(ceiling)) if ceiling and not floor else None
         if not limit:
@@ -313,10 +336,13 @@ def _resolve_ceilings(session: object) -> int:
     return resolved
 
 
-def _reject_impossible(session: object) -> int:
+def _reject_impossible(session: object, scope: object | None = None) -> int:
     Bump, Commit = models().DepBump, models().Commit
     rejected = 0
-    for bump in session.query(Bump).filter(Bump.dep_commit_id.is_not(None)).all():
+    query = session.query(Bump).filter(Bump.dep_commit_id.is_not(None))
+    if scope is not None:
+        query = query.filter(scope)
+    for bump in query.all():
         upstream = session.get(Commit, bump.dep_commit_id)
         consumer = session.query(Commit).filter_by(
             repo_id=bump.consumer_repo_id, sha=bump.consumer_sha
@@ -329,20 +355,28 @@ def _reject_impossible(session: object) -> int:
     return rejected
 
 
-def resolve_bumps(conn: object | None = None) -> int:
+def resolve_bumps(conn: object | None = None, consumer_ids: object | None = None,
+                  upstream_ids: object | None = None) -> int:
     def run(session: object) -> int:
         Bump, Tag, Commit = models().DepBump, models().RefTag, models().Commit
         session.flush()
-        _link_repositories(session)
-        _fill_version_keys(session)
-        for bump in session.query(Bump).filter(Bump.resolution.in_(["tag", "floor"])).all():
+        scope = _bump_scope(Bump, consumer_ids, upstream_ids)
+        _link_repositories(session, scope)
+        _fill_version_keys(session, scope)
+        reset = session.query(Bump).filter(Bump.resolution.in_(["tag", "floor"]))
+        if scope is not None:
+            reset = reset.filter(scope)
+        for bump in reset.all():
             bump.dep_commit_id = None
             bump.resolution = None
             bump.adoption_seconds = None
         session.flush()
-        pending = session.query(Bump).filter(
+        pending_query = session.query(Bump).filter(
             Bump.dep_commit_id.is_(None), Bump.dep_repo_id.is_not(None)
-        ).all()
+        )
+        if scope is not None:
+            pending_query = pending_query.filter(scope)
+        pending = pending_query.all()
         consumer_keys = {(bump.consumer_repo_id, bump.consumer_sha) for bump in pending}
         consumers = {}
         for repo_id in {repo_id for repo_id, _ in consumer_keys}:
@@ -358,22 +392,29 @@ def resolve_bumps(conn: object | None = None) -> int:
                 ).first()
                 if match:
                     bump.dep_commit_id, bump.resolution = match.id, "sha"
-        tags = session.query(Tag).filter(Tag.version_key.is_not(None)).all()
+        tag_query = session.query(Tag).filter(Tag.version_key.is_not(None))
+        if scope is not None:
+            # Only a publisher's own tags can resolve a bump, and only the publishers in scope changed.
+            tag_query = tag_query.filter(Tag.repo_id.in_({b.dep_repo_id for b in pending}))
+        tags = tag_query.all()
         unique = defaultdict(set)
         for tag in tags:
             commit_id = tag.commit_id or tag.main_commit_id
             if commit_id:
                 unique[(tag.repo_id, tag.version_key)].add(commit_id)
-        for bump in session.query(Bump).filter(
+        unresolved_query = session.query(Bump).filter(
             Bump.dep_commit_id.is_(None), Bump.dep_repo_id.is_not(None)
-        ).all():
+        )
+        if scope is not None:
+            unresolved_query = unresolved_query.filter(scope)
+        for bump in unresolved_query.all():
             ids = unique.get((bump.dep_repo_id, bump.version_key), set())
             if len(ids) == 1:
                 bump.dep_commit_id = next(iter(ids))
                 bump.resolution = "floor" if (bump.dep_version or "").startswith(("^", "~", ">", "<", "=")) else "tag"
-        _resolve_ceilings(session)
+        _resolve_ceilings(session, scope)
         session.flush()
-        _reject_impossible(session)
+        _reject_impossible(session, scope)
         session.flush()
         for bump in session.query(Bump).filter(Bump.dep_commit_id.is_not(None)).all():
             upstream = session.get(Commit, bump.dep_commit_id)
@@ -391,13 +432,14 @@ def resolve_bumps(conn: object | None = None) -> int:
         return run(session)
 
 
-def rebuild(force: bool = False, conn: object | None = None) -> BumpStats:
+def rebuild(force: bool = False, conn: object | None = None,
+            repo_ids: object | None = None) -> BumpStats:
     def run(session: object) -> BumpStats:
         started = time.monotonic()
         stats = BumpStats()
         _Repo, Bump, Commit = models().Repo, models().DepBump, models().Commit
         by_full, by_name, by_package = _repo_lookups(session)
-        payload_repos = _repos_to_scan(session, force)
+        payload_repos = _manifest_repos(session, force, "last_depbump_sha", repo_ids)
         for repo in payload_repos:
             mirror = mirror_path_for(repo.full_name, host=repo.host)
             if not mirror.is_dir():
@@ -435,7 +477,12 @@ def rebuild(force: bool = False, conn: object | None = None) -> BumpStats:
                 stats.edges_written += 1
             repo.last_depbump_at = datetime.now(UTC)
             repo.last_depbump_sha = repo.head_sha
-        stats.resolved_commits = resolve_bumps(session)
+        scanned_ids = {repo.id for repo in payload_repos}
+        stats.resolved_commits = resolve_bumps(
+            session,
+            consumer_ids=scanned_ids if repo_ids is not None else None,
+            upstream_ids=scanned_ids if repo_ids is not None else None,
+        )
         stats.duration_s = time.monotonic() - started
         return stats
     if conn is not None:

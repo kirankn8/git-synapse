@@ -857,7 +857,7 @@ def test_one_manifest_declaring_a_dependency_twice_records_it_once(db, tmp_path,
         session.flush()
         repo_id = repo.id
 
-    monkeypatch.setattr(depbump, "_manifest_repos", lambda s, f, w: [
+    monkeypatch.setattr(depbump, "_manifest_repos", lambda s, f, w, repo_ids=None: [
         s.get(models().Repo, repo_id)])
     monkeypatch.setattr(depbump, "mirror_path_for", lambda *a, **kw: tmp_path)
     monkeypatch.setattr(depbump, "manifest_paths", lambda m: [("pom.xml", "maven")])
@@ -902,7 +902,7 @@ def test_an_edge_already_recorded_is_not_stored_a_second_time(db, tmp_path, monk
     edge = depbump.BumpEdge(consumer_sha="c" * 40, dep_name="com.example:widget",
                             dep_version="2.0.0", dep_sha=None, manifest="pom.xml",
                             ecosystem="maven")
-    monkeypatch.setattr(depbump, "_repos_to_scan", lambda s, f: [
+    monkeypatch.setattr(depbump, "_manifest_repos", lambda s, f, w, repo_ids=None: [
         s.get(models().Repo, repo_id)])
     monkeypatch.setattr(depbump, "mirror_path_for", lambda *a, **kw: tmp_path)
     monkeypatch.setattr(depbump, "manifest_paths", lambda m: [("pom.xml", "maven")])
@@ -948,7 +948,7 @@ def test_the_same_dependency_in_two_manifests_is_stored_once(db, tmp_path, monke
                          manifest=".github/actions/bdd-job-setup/action.yaml",
                          ecosystem="actions"),
     ]
-    monkeypatch.setattr(depbump, "_repos_to_scan", lambda s, f: [
+    monkeypatch.setattr(depbump, "_manifest_repos", lambda s, f, w, repo_ids=None: [
         s.get(models().Repo, repo_id)])
     monkeypatch.setattr(depbump, "mirror_path_for", lambda *a, **kw: tmp_path)
     monkeypatch.setattr(depbump, "manifest_paths",
@@ -1000,3 +1000,70 @@ def test_a_repository_still_ingesting_is_not_scanned(db):
                 models().File.repo_id.in_([live_id, done_id])).delete(synchronize_session=False)
             session.query(models().Repo).filter(
                 models().Repo.id.in_([live_id, done_id])).delete(synchronize_session=False)
+
+
+def test_a_scoped_rebuild_only_scans_the_repository_it_is_given(db, tmp_path, monkeypatch):
+    """A repository that just landed must not cost a scan of the repositories that landed before it."""
+    from uuid import uuid4
+
+    from git_synapse.db.orm import session_scope
+
+    tag = uuid4().hex[:10]
+    with session_scope() as session:
+        first = models().Repo(full_name=f"acme/first-{tag}", name=f"first-{tag}", owner="acme",
+                              head_sha="1" * 40, ingest_status="ready")
+        second = models().Repo(full_name=f"acme/second-{tag}", name=f"second-{tag}", owner="acme",
+                               head_sha="2" * 40, ingest_status="ready")
+        session.add_all([first, second])
+        session.flush()
+        for repo in (first, second):
+            session.add(models().File(repo_id=repo.id, path="go.mod", basename="go.mod"))
+        first_id, second_id = first.id, second.id
+
+    def one_edge(mirror, name, path, ecosystem):
+        return [depbump.BumpEdge(consumer_sha=name.ljust(40, "0"), dep_name="acme/up",
+                                 dep_version="1.0.0", dep_sha=None, manifest="go.mod",
+                                 ecosystem="go")]
+
+    monkeypatch.setattr(depbump, "mirror_path_for", lambda *a, **kw: tmp_path)
+    monkeypatch.setattr(depbump, "manifest_paths", lambda m: [("go.mod", "go")])
+    monkeypatch.setattr(depbump, "published_at_head", lambda m: set())
+    monkeypatch.setattr(depbump, "extract_from_mirror", one_edge)
+
+    try:
+        with session_scope() as session:
+            depbump.rebuild(conn=session, repo_ids={first_id})
+        with session_scope() as session:
+            consumers = {row.consumer_repo_id for row in session.query(models().DepBump).filter(
+                models().DepBump.consumer_repo_id.in_([first_id, second_id])).all()}
+        assert consumers == {first_id}
+    finally:
+        with session_scope() as session:
+            session.query(models().DepBump).filter(models().DepBump.consumer_repo_id.in_(
+                [first_id, second_id])).delete(synchronize_session=False)
+            session.query(models().File).filter(models().File.repo_id.in_(
+                [first_id, second_id])).delete(synchronize_session=False)
+            session.query(models().Repo).filter(models().Repo.id.in_(
+                [first_id, second_id])).delete(synchronize_session=False)
+
+
+def test_scanning_a_publisher_revalidates_the_bumps_that_point_at_it(bump_env):
+    """A new tag on the publisher changes the answer for consumers that was correct a moment ago."""
+    conn, consumer, library = bump_env
+    first = _commit(conn, library, "aa" * 20, "2024-01-01")
+    _tag(conn, library, "v1.0.0", commit_id=first, main_commit_id=first, key="1")
+    row = _bump(conn, consumer, library, version="1.0.0", at="2024-02-01")
+    depbump.resolve_bumps(conn)
+    assert _resolved(conn, row) == (first, "tag")
+
+    second = _commit(conn, library, "bb" * 20, "2024-01-02")
+    _tag(conn, library, "release-1", commit_id=second, main_commit_id=second, key="1")
+
+    other = models().Repo(full_name=f"acme/other-{second}", name="other", owner="acme")
+    conn.add(other)
+    conn.flush()
+    depbump.resolve_bumps(conn, consumer_ids={other.id}, upstream_ids={other.id})
+    assert _resolved(conn, row) == (first, "tag"), "an unrelated repository must not disturb the answer"
+
+    depbump.resolve_bumps(conn, consumer_ids={library}, upstream_ids={library})
+    assert _resolved(conn, row) == (None, None), "the publisher's new tag makes it ambiguous"

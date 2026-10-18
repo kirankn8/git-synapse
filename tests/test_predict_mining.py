@@ -592,3 +592,32 @@ def test_a_cycle_in_the_graph_does_not_walk_forever(impact_corpus):
         assert len(chain["path"]) == len(set(chain["path"])), chain["path"]
 
     assert predict.impact_chains(signer, max_depth=1, min_score=0.1) == []
+
+
+def test_a_scoped_rebuild_leaves_the_other_publishers_untouched(impact_corpus):
+    """Only the publisher of the changed consumer can be re-ranked, so the rest must not be rewritten."""
+    from git_synapse.db.orm import models, session_scope
+
+    def rows_for(source_id):
+        with session_scope() as conn:
+            return sorted(
+                (row.target_repo_id, row.score, row.rank_in_source, row.bump_count,
+                 row.median_adoption_days, row.is_declared, row.has_bump_history)
+                for row in conn.query(models().RepoImpact).filter_by(
+                    source_repo_id=source_id).all()
+            )
+
+    before = rows_for(impact_corpus["signer"])
+    with session_scope() as conn:
+        conn.add(models().RepoDependency(
+            consumer_repo_id=impact_corpus["runtime"],
+            dep_repo_id=impact_corpus["unrelated"],
+            dep_name="github.com/acme/unrelated", manifest="go.mod", ecosystem="go",
+        ))
+
+    predict.rebuild(repo_ids={impact_corpus["runtime"]})
+
+    assert rows_for(impact_corpus["signer"]) == before
+    assert rows_for(impact_corpus["unrelated"]) == [
+        (impact_corpus["runtime"], 0.5, 1, 0, None, True, False)
+    ]

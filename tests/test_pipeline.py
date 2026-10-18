@@ -1144,53 +1144,64 @@ def test_a_repository_contended_every_time_gives_up_and_reports_it(monkeypatch):
     assert slept == [2, 4]
 
 
-def _fake_run(monkeypatch, pipeline, count: int):
+def _fake_run(monkeypatch, pipeline, count: int, commits: int = 1):
+    from uuid import uuid4
+
+    from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest.github import RepoRecord
     from git_synapse.ingest.pipeline import RepoResult
+
+    tag = uuid4().hex[:8]
+    with session_scope() as conn:
+        rows = [models().Repo(full_name=f"t/r{i}-{tag}", name=f"r{i}-{tag}", owner="t")
+                for i in range(count)]
+        conn.add_all(rows)
+        conn.flush()
+        ids = [row.id for row in rows]
 
     monkeypatch.setattr(pipeline, "verify_credentials", lambda **_: "ok")
     monkeypatch.setattr(pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
     monkeypatch.setattr(
         pipeline, "sync_repo",
         lambda record, force_full=False: RepoResult(
-            full_name=record.full_name, status="success", commits_added=1),
+            full_name=record.full_name, repo_id=record.github_id, status="success",
+            commits_added=commits),
     )
     return [
-        RepoRecord(github_id=i, owner="t", name=f"r{i}", full_name=f"t/r{i}",
-                   clone_url="", default_branch="main")
+        RepoRecord(github_id=ids[i], owner="t", name=f"r{i}-{tag}",
+                   full_name=f"t/r{i}-{tag}", clone_url="", default_branch="main")
         for i in range(count)
     ]
 
 
-def test_cross_repository_layers_follow_the_repositories_in(db, monkeypatch):
+def test_the_cross_repository_layers_follow_each_finished_repository(db, monkeypatch):
     """Waiting for the last repository left upstream and impact empty for the whole run."""
     from git_synapse.ingest import pipeline
 
     records = _fake_run(monkeypatch, pipeline, 3)
-    monkeypatch.setattr(pipeline, "CROSSREPO_REFRESH_SECONDS", 0.0)
     calls = []
     monkeypatch.setattr(pipeline, "_refresh_crossrepo",
-                        lambda force, *, mining_too: calls.append(mining_too))
+                        lambda force, *, mining_too, repo_ids=None: calls.append((mining_too, repo_ids)))
 
     pipeline.run_ingest(records=records, trigger="test")
 
-    assert calls[:3] == [False, False, False], "each finished repository refreshes the layers"
-    assert calls[-1] is True and len(calls) == 4, "the full stage still runs once at the end"
+    assert [call[0] for call in calls[:3]] == [False, False, False]
+    assert {next(iter(call[1])) for call in calls[:3]} == {r.github_id for r in records}
+    assert calls[-1] == (True, None), "the full stage still runs once at the end"
 
 
-def test_cross_repository_layers_are_not_rebuilt_more_often_than_the_interval(db, monkeypatch):
-    """A rebuild reads every manifest again, so an impatient cadence costs more than it gives."""
+def test_a_repository_that_added_nothing_does_not_rebuild_the_layers(db, monkeypatch):
+    """A refresh that fetched no new commits cannot have changed a manifest edge, so nothing is rebuilt."""
     from git_synapse.ingest import pipeline
 
-    records = _fake_run(monkeypatch, pipeline, 3)
-    monkeypatch.setattr(pipeline, "CROSSREPO_REFRESH_SECONDS", 10**9)
+    records = _fake_run(monkeypatch, pipeline, 3, commits=0)
     calls = []
     monkeypatch.setattr(pipeline, "_refresh_crossrepo",
-                        lambda force, *, mining_too: calls.append(mining_too))
+                        lambda force, *, mining_too, repo_ids=None: calls.append((mining_too, repo_ids)))
 
     pipeline.run_ingest(records=records, trigger="test")
 
-    assert calls == [True]
+    assert calls == []
 
 
 def test_a_cancelled_future_does_not_leave_the_run_running(db, monkeypatch):

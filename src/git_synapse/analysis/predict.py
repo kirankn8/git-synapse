@@ -43,17 +43,34 @@ def _input_fingerprint(conn: object) -> str:
     return hashlib.md5("\n".join(parts).encode(), usedforsecurity=False).hexdigest()
 
 
-def rebuild(conn: object | None = None, force: bool = False) -> PredictStats:
+def rebuild(conn: object | None = None, force: bool = False,
+            repo_ids: object | None = None) -> PredictStats:
     """Recompute the repository impact graph from declared and bump facts."""
     def run(session: object) -> PredictStats:
         started = time.monotonic()
         stats = PredictStats()
-        fingerprint = _input_fingerprint(session)
-        if not force and get_watermark("predict_inputs") == fingerprint:
-            return stats
+        if repo_ids is None:
+            fingerprint = _input_fingerprint(session)
+            if not force and get_watermark("predict_inputs") == fingerprint:
+                return stats
         Dependency, Bump, Impact = models().RepoDependency, models().DepBump, models().RepoImpact
-        dependencies = session.query(Dependency).filter(Dependency.dep_repo_id.is_not(None)).all()
-        bumps = session.query(Bump).filter(Bump.dep_repo_id.is_not(None)).all()
+        if repo_ids is None:
+            dependencies = session.query(Dependency).filter(Dependency.dep_repo_id.is_not(None)).all()
+            bumps = session.query(Bump).filter(Bump.dep_repo_id.is_not(None)).all()
+        else:
+            # An edge is ranked under its publisher, so the publishers of changed consumers are the affected sources.
+            changed = list(repo_ids)
+            sources = {row[0] for row in session.query(Dependency.dep_repo_id).filter(
+                Dependency.consumer_repo_id.in_(changed), Dependency.dep_repo_id.is_not(None)).all()}
+            sources |= {row[0] for row in session.query(Bump.dep_repo_id).filter(
+                Bump.consumer_repo_id.in_(changed), Bump.dep_repo_id.is_not(None)).all()}
+            # Edges that disappeared are gone from the facts, so the previous rows say who used to point there.
+            sources |= {row[0] for row in session.query(Impact.source_repo_id).filter(
+                Impact.target_repo_id.in_(changed)).all()}
+            if not sources:
+                return stats
+            dependencies = session.query(Dependency).filter(Dependency.dep_repo_id.in_(sources)).all()
+            bumps = session.query(Bump).filter(Bump.dep_repo_id.in_(sources)).all()
         grouped: dict[tuple[int, int], list[object]] = defaultdict(list)
         for bump in bumps:
             if bump.dep_repo_id != bump.consumer_repo_id:
@@ -61,7 +78,11 @@ def rebuild(conn: object | None = None, force: bool = False) -> PredictStats:
         declared = {(row.dep_repo_id, row.consumer_repo_id) for row in dependencies
                     if row.dep_repo_id != row.consumer_repo_id}
         edges = declared | set(grouped)
-        session.query(Impact).delete(synchronize_session=False)
+        if repo_ids is None:
+            session.query(Impact).delete(synchronize_session=False)
+        else:
+            session.query(Impact).filter(Impact.source_repo_id.in_(sources)).delete(
+                synchronize_session=False)
         now = datetime.now(UTC)
         output = []
         rank_groups: dict[int, list[dict]] = defaultdict(list)
@@ -92,7 +113,8 @@ def rebuild(conn: object | None = None, force: bool = False) -> PredictStats:
         stats.sources = len(rank_groups)
         stats.declared_edges = sum(x.is_declared for x in output)
         stats.bumped_edges = sum(x.has_bump_history for x in output)
-        set_watermark("predict_inputs", fingerprint, session)
+        if repo_ids is None:
+            set_watermark("predict_inputs", fingerprint, session)
         stats.duration_s = time.monotonic() - started
         return stats
 
