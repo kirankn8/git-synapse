@@ -73,7 +73,8 @@ def rebuild(consumer_ids: object | None = None, conn: object | None = None) -> X
         stats = XrepoStats()
         Bump, Pair = models().DepBump, models().XrepoFilePair
         query = session.query(Bump).filter(
-            Bump.dep_repo_id.is_not(None), Bump.dep_commit_id.is_not(None))
+            Bump.dep_repo_id.is_not(None), Bump.dep_commit_id.is_not(None),
+            Bump.tier != "transitive")
         if consumer_ids is not None:
             query = query.filter(Bump.consumer_repo_id.in_(list(consumer_ids)))
         bumps = query.all()

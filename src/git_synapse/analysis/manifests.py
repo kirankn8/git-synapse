@@ -378,30 +378,33 @@ class Ecosystem:
     name: str
     files: tuple[str, ...]
     parse: Callable[[str], list[tuple[str, str]]]
+    lock: bool = False
 
 
 ECOSYSTEMS: tuple[Ecosystem, ...] = (
     Ecosystem("go", ("go.mod",), parse_go),
 
-    Ecosystem("npm", ("package-lock.json", "npm-shrinkwrap.json"), parse_json_pins),
+    Ecosystem("npm", ("package-lock.json", "npm-shrinkwrap.json"), parse_json_pins, lock=True),
     Ecosystem("npm", ("package.json",), parse_json_deps),
-    Ecosystem("npm", ("pnpm-lock.yaml",), parse_yaml),
-    Ecosystem("npm", ("yarn.lock", "bun.lock"), parse_pinned_refs),
+    Ecosystem("npm", ("pnpm-lock.yaml",), parse_yaml, lock=True),
+    Ecosystem("npm", ("yarn.lock", "bun.lock"), parse_pinned_refs, lock=True),
     Ecosystem("deno", ("deno.json", "deno.jsonc", "import_map.json"), parse_json_deps),
 
-    Ecosystem("python", ("Pipfile.lock",), parse_json_pins),
-    Ecosystem("python", ("uv.lock",), parse_toml),
-    Ecosystem("python", ("poetry.lock", "pyproject.toml", "Pipfile"), parse_toml),
+    Ecosystem("python", ("Pipfile.lock",), parse_json_pins, lock=True),
+    Ecosystem("python", ("uv.lock",), parse_toml, lock=True),
+    Ecosystem("python", ("pyproject.toml", "Pipfile"), parse_toml),
+    Ecosystem("python", ("poetry.lock",), parse_toml, lock=True),
     Ecosystem("python", ("requirements.txt", "requirements-dev.txt", "constraints.txt",
                          "dev-requirements.txt", "test-requirements.txt"), parse_requirements),
     Ecosystem("python", ("environment.yml", "conda.yaml"), parse_conda),
 
-    Ecosystem("rust", ("Cargo.lock", "Cargo.toml"), parse_toml),
+    Ecosystem("rust", ("Cargo.toml",), parse_toml),
+    Ecosystem("rust", ("Cargo.lock",), parse_toml, lock=True),
 
-    Ecosystem("ruby", ("Gemfile.lock",), parse_gemfile_lock),
+    Ecosystem("ruby", ("Gemfile.lock",), parse_gemfile_lock, lock=True),
     Ecosystem("ruby", ("Gemfile", "gems.rb"), parse_pinned_refs),
 
-    Ecosystem("php", ("composer.lock",), parse_json_pins),
+    Ecosystem("php", ("composer.lock",), parse_json_pins, lock=True),
     Ecosystem("php", ("composer.json",), parse_json_deps),
 
     Ecosystem("java", ("pom.xml",), parse_xml),
@@ -410,37 +413,46 @@ ECOSYSTEMS: tuple[Ecosystem, ...] = (
                        "gradle.properties"), parse_pinned_refs),
 
     Ecosystem("dotnet", ("Directory.Packages.props", "packages.config"), parse_xml),
-    Ecosystem("dotnet", ("paket.lock",), parse_pinned_refs),
+    Ecosystem("dotnet", ("paket.lock",), parse_pinned_refs, lock=True),
 
-    Ecosystem("cpp", (".gitmodules", "conanfile.txt", "conan.lock"), parse_ini_like),
+    Ecosystem("cpp", (".gitmodules", "conanfile.txt"), parse_ini_like),
+    Ecosystem("cpp", ("conan.lock",), parse_ini_like, lock=True),
     Ecosystem("cpp", ("vcpkg.json",), parse_json_deps),
     Ecosystem("cpp", ("CMakeLists.txt", "conanfile.py", "meson.build"), parse_pinned_refs),
 
-    Ecosystem("swift", ("Package.resolved", "Cartfile.resolved"), parse_json_pins),
-    Ecosystem("swift", ("Package.swift", "Podfile.lock", "Podfile"), parse_pinned_refs),
+    Ecosystem("swift", ("Package.resolved", "Cartfile.resolved"), parse_json_pins, lock=True),
+    Ecosystem("swift", ("Package.swift", "Podfile"), parse_pinned_refs),
+    Ecosystem("swift", ("Podfile.lock",), parse_pinned_refs, lock=True),
 
-    Ecosystem("dart", ("pubspec.lock", "pubspec.yaml"), parse_yaml),
+    Ecosystem("dart", ("pubspec.yaml",), parse_yaml),
+    Ecosystem("dart", ("pubspec.lock",), parse_yaml, lock=True),
 
-    Ecosystem("elixir", ("mix.lock", "mix.exs"), parse_pinned_refs),
-    Ecosystem("erlang", ("rebar.lock", "rebar.config"), parse_pinned_refs),
+    Ecosystem("elixir", ("mix.exs",), parse_pinned_refs),
+    Ecosystem("elixir", ("mix.lock",), parse_pinned_refs, lock=True),
+    Ecosystem("erlang", ("rebar.config",), parse_pinned_refs),
+    Ecosystem("erlang", ("rebar.lock",), parse_pinned_refs, lock=True),
 
-    Ecosystem("haskell", ("stack.yaml", "stack.yaml.lock"), parse_yaml),
-    Ecosystem("haskell", ("cabal.project.freeze",), parse_pinned_refs),
+    Ecosystem("haskell", ("stack.yaml",), parse_yaml),
+    Ecosystem("haskell", ("stack.yaml.lock",), parse_yaml, lock=True),
+    Ecosystem("haskell", ("cabal.project.freeze",), parse_pinned_refs, lock=True),
 
     Ecosystem("clojure", ("deps.edn", "project.clj"), parse_pinned_refs),
-    Ecosystem("julia", ("Project.toml", "Manifest.toml"), parse_toml),
-    Ecosystem("r", ("renv.lock",), parse_json_pins),
+    Ecosystem("julia", ("Project.toml",), parse_toml),
+    Ecosystem("julia", ("Manifest.toml",), parse_toml, lock=True),
+    Ecosystem("r", ("renv.lock",), parse_json_pins, lock=True),
     Ecosystem("r", ("DESCRIPTION",), parse_ini_like),
-    Ecosystem("perl", ("cpanfile", "cpanfile.snapshot"), parse_pinned_refs),
+    Ecosystem("perl", ("cpanfile",), parse_pinned_refs),
+    Ecosystem("perl", ("cpanfile.snapshot",), parse_pinned_refs, lock=True),
     Ecosystem("lua", ("rockspec",), parse_pinned_refs),
     Ecosystem("ocaml", ("dune-project", "opam"), parse_pinned_refs),
     Ecosystem("zig", ("build.zig.zon",), parse_pinned_refs),
-    Ecosystem("nim", ("nimble.lock",), parse_json_pins),
+    Ecosystem("nim", ("nimble.lock",), parse_json_pins, lock=True),
 
-    Ecosystem("nix", ("flake.lock",), parse_json_pins),
+    Ecosystem("nix", ("flake.lock",), parse_json_pins, lock=True),
     Ecosystem("bazel", ("MODULE.bazel", "WORKSPACE", "WORKSPACE.bazel"), parse_pinned_refs),
     Ecosystem("terraform", (".terraform.lock.hcl", "main.tf", "versions.tf"), parse_pinned_refs),
-    Ecosystem("helm", ("Chart.lock", "Chart.yaml"), parse_yaml),
+    Ecosystem("helm", ("Chart.yaml",), parse_yaml),
+    Ecosystem("helm", ("Chart.lock",), parse_yaml, lock=True),
     Ecosystem("docker", ("Dockerfile", "docker-compose.yml"), parse_pinned_refs),
     Ecosystem("actions", ("action.yml", "action.yaml"), parse_yaml),
 )
@@ -456,6 +468,51 @@ SUFFIX_MATCH: tuple[tuple[str, str, Callable], ...] = (
 
 #: Every basename worth reading, for the tree scan.
 MANIFEST_FILES: tuple[str, ...] = tuple(dict.fromkeys(f for e in ECOSYSTEMS for f in e.files))
+
+#: Files that record resolved versions rather than a declaration. Derived from the
+#: table above so the flag and the parser cannot drift apart.
+LOCK_FILES: frozenset[str] = frozenset(
+    name for eco in ECOSYSTEMS if eco.lock for name in eco.files
+) | {"go.sum", "packages.lock.json"}
+
+
+def locked_versions(basename: str, text: str) -> dict[str, str]:
+    """Exact versions a lockfile resolved, keyed by lower-cased package name."""
+    out: dict[str, str] = {}
+    if basename in ("package-lock.json", "npm-shrinkwrap.json"):
+        doc = _load_json(text)
+        if isinstance(doc, dict):
+            for key, entry in (doc.get("packages") or {}).items():
+                if not isinstance(entry, dict) or not entry.get("version"):
+                    continue
+                name = key.rsplit("node_modules/", 1)[-1]
+                if name:
+                    out[name.lower()] = str(entry["version"])
+            for name, entry in (doc.get("dependencies") or {}).items():
+                if isinstance(entry, dict) and entry.get("version"):
+                    out.setdefault(name.lower(), str(entry["version"]))
+    elif basename in ("Cargo.lock", "poetry.lock"):
+        try:
+            doc = tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            return {}
+        for entry in doc.get("package") or []:
+            if isinstance(entry, dict) and entry.get("name") and entry.get("version"):
+                out[str(entry["name"]).lower()] = str(entry["version"])
+    elif basename == "composer.lock":
+        doc = _load_json(text)
+        if isinstance(doc, dict):
+            for entry in (doc.get("packages") or []) + (doc.get("packages-dev") or []):
+                if isinstance(entry, dict) and entry.get("name") and entry.get("version"):
+                    out[str(entry["name"]).lower()] = str(entry["version"])
+    elif basename == "Pipfile.lock":
+        doc = _load_json(text)
+        if isinstance(doc, dict):
+            for block in ("default", "develop"):
+                for name, entry in (doc.get(block) or {}).items():
+                    if isinstance(entry, dict) and entry.get("version"):
+                        out[str(name).lower()] = str(entry["version"]).lstrip("=")
+    return out
 
 #: Workflow files live under a fixed directory rather than having a fixed name.
 WORKFLOW_DIR = ".github/workflows/"

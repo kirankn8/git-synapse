@@ -76,7 +76,7 @@ operational state that belongs to the deployment rather than to the corpus.
 | Table | What it holds |
 |---|---|
 | `ref_tag` | Every release tag, peeled to its commit, carrying a canonical `version_key` and the shipping-branch commit it was cut from. Without the latter a release tagged on a release branch resolves to nothing, which was 116 of guava's 123 tags. |
-| `dep_bump` | One version change recorded in a manifest, resolved where possible to the upstream commit it consumed, with the tier that resolution came from. Ground truth rather than correlation. |
+| `dep_bump` | One version change recorded in a manifest, resolved where possible to the upstream commit it consumed, with the tier that resolution came from and whether it was declared, read from a lockfile, or arrived transitively. Ground truth rather than correlation. |
 | `repo_package` | What each repository publishes, read from its own manifests, scoped by ecosystem. Answers "which repository *is* `com.google.guava:guava`?" from a declaration rather than from whether the strings agree. |
 | `repo_dependency` | What each repository declares at HEAD. **This is the answer to "which repositories depend on each other".** |
 | `module_dependency` | The intra-repository module graph, for monorepos whose real structure lives in submodules rather than cross-repo edges. |

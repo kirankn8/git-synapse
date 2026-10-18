@@ -14,7 +14,7 @@ from pathlib import Path
 from sqlalchemy import or_
 
 from git_synapse.analysis import manifests
-from git_synapse.analysis.manifests import bounds, version_key
+from git_synapse.analysis.manifests import LOCK_FILES, bounds, locked_versions, version_key
 from git_synapse.db.orm import models, session_scope
 from git_synapse.ingest.gitops import _base_env, mirror_path_for
 
@@ -109,26 +109,100 @@ class BumpEdge:
     dep_sha: str | None
     manifest: str
     ecosystem: str = ""
+    tier: str = "declared"
+
+
+#: Where a declaration's exact version is recorded, by ecosystem.
+_LOCK_CANDIDATES = {
+    "npm": ("package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock"),
+    "rust": ("Cargo.lock",),
+    "php": ("composer.lock",),
+    "python": ("poetry.lock", "Pipfile.lock"),
+}
+_DECLARATION_CANDIDATES = {
+    "npm": ("package.json",),
+    "rust": ("Cargo.toml",),
+    "php": ("composer.json",),
+    "python": ("pyproject.toml", "Pipfile", "requirements.txt"),
+}
+
+
+def _blob(mirror: Path, sha: str, path: str, cache: dict | None = None) -> str:
+    key = (sha, path)
+    if cache is not None and key in cache:
+        return cache[key]
+    proc = subprocess.run(["git", "show", f"{sha}:{path}"], cwd=str(mirror), env=_base_env(),
+                          capture_output=True, text=True, errors="replace", timeout=120)
+    text = proc.stdout if proc.returncode == 0 else ""
+    if cache is not None:
+        cache[key] = text
+    return text
+
+
+def _locked(mirror: Path, sha: str, manifest: str, ecosystem: str, cache: dict) -> dict[str, str]:
+    directory = manifest.rsplit("/", 1)[0] + "/" if "/" in manifest else ""
+    versions: dict[str, str] = {}
+    for name in _LOCK_CANDIDATES.get(ecosystem, ()):
+        text = _blob(mirror, sha, directory + name, cache)
+        if text:
+            versions.update(locked_versions(name, text))
+    return versions
 
 
 def extract_from_mirror(mirror: Path, repo_name: str, manifest: str = "go.mod", ecosystem: str = "go", max_commits: int = 400) -> list[BumpEdge]:
+    if Path(manifest).name in LOCK_FILES:
+        return []
     proc = subprocess.run(["git", "log", "--all", "--no-merges", "--format=%H", "--", manifest], cwd=str(mirror), env=_base_env(),
                           capture_output=True, text=True, errors="replace", timeout=900)
     if proc.returncode != 0:
         return []
     revisions = list(reversed(proc.stdout.split()[:max_commits]))
     previous: dict[str, manifests.Reference] = {}
+    cache: dict = {}
     edges = []
     for sha in revisions:
         current = _snapshot(mirror, sha, manifest)
+        exact = _locked(mirror, sha, manifest, ecosystem, cache)
         for name, ref in current.items():
             old = previous.get(name)
             if old is not None and old.raw == ref.raw:
                 continue
             if repo_key(name) == repo_key(repo_name):
                 continue
-            edges.append(BumpEdge(sha, name, ref.raw, ref.sha, manifest, ecosystem))
+            version = exact.get(name.lower())
+            edges.append(BumpEdge(sha, name, version or ref.raw, ref.sha, manifest, ecosystem,
+                                  tier="locked" if version else "declared"))
         previous = current
+    return edges
+
+
+def transitive_from_mirror(mirror: Path, lock_manifest: str, ecosystem: str,
+                           max_commits: int = 200, max_entries: int = 2_000) -> list[BumpEdge]:
+    """Resolved packages the repository did not declare, which only matter when one is a tracked repo."""
+    basename = Path(lock_manifest).name
+    proc = subprocess.run(["git", "log", "--all", "--no-merges", "--format=%H", "--", lock_manifest],
+                          cwd=str(mirror), env=_base_env(), capture_output=True, text=True,
+                          errors="replace", timeout=900)
+    if proc.returncode != 0:
+        return []
+    directory = lock_manifest.rsplit("/", 1)[0] + "/" if "/" in lock_manifest else ""
+    edges = []
+    cache: dict = {}
+    for sha in reversed(proc.stdout.split()[:max_commits]):
+        resolved = locked_versions(basename, _blob(mirror, sha, lock_manifest, cache))
+        if not resolved:
+            continue
+        declared: set[str] = set()
+        for name in _DECLARATION_CANDIDATES.get(ecosystem, ()):
+            text = _blob(mirror, sha, directory + name, cache)
+            if text:
+                parser = manifests.ecosystem_for(name)
+                if parser is not None:
+                    declared.update(ref.lower() for ref, _ in parser.parse(text))
+        for name, version in list(resolved.items())[:max_entries]:
+            if name in declared:
+                continue
+            edges.append(BumpEdge(sha, name, version, None, lock_manifest, ecosystem, tier="transitive"))
     return edges
 
 
@@ -449,7 +523,10 @@ def rebuild(force: bool = False, conn: object | None = None,
             by_full, by_name, by_package = _repo_lookups(session)
             edges = []
             for path, ecosystem in manifest_paths(mirror):
-                edges.extend(extract_from_mirror(mirror, repo.name, path, ecosystem))
+                if Path(path).name in LOCK_FILES:
+                    edges.extend(transitive_from_mirror(mirror, path, ecosystem))
+                else:
+                    edges.extend(extract_from_mirror(mirror, repo.name, path, ecosystem))
             stats.edges_found += len(edges)
             # autoflush is off, so the exists check below cannot see an edge added earlier in this batch.
             seen: set[tuple[str, str, str]] = set()
@@ -460,6 +537,8 @@ def rebuild(force: bool = False, conn: object | None = None,
                     continue
                 seen.add(identity)
                 dep_repo = resolve_repo(edge.dep_name, by_full, by_name, by_package, edge.ecosystem)
+                if edge.tier == "transitive" and dep_repo is None:
+                    continue
                 exists = session.query(Bump).filter(
                     Bump.consumer_repo_id == repo.id, Bump.consumer_sha == edge.consumer_sha,
                     Bump.dep_name == edge.dep_name, Bump.dep_version == dep_version,
@@ -473,7 +552,8 @@ def rebuild(force: bool = False, conn: object | None = None,
                                  dep_name=edge.dep_name, dep_version=dep_version, dep_sha=edge.dep_sha,
                                  dep_commit_id=dep_commit.id if dep_commit else None, manifest=edge.manifest,
                                  bumped_at=consumer.committed_at if consumer else None,
-                                 resolution="sha" if dep_commit else None, ecosystem=edge.ecosystem))
+                                 resolution="sha" if dep_commit else None, ecosystem=edge.ecosystem,
+                                 tier=edge.tier))
                 stats.edges_written += 1
             repo.last_depbump_at = datetime.now(UTC)
             repo.last_depbump_sha = repo.head_sha

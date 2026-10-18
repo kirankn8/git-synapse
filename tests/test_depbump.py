@@ -1067,3 +1067,78 @@ def test_scanning_a_publisher_revalidates_the_bumps_that_point_at_it(bump_env):
 
     depbump.resolve_bumps(conn, consumer_ids={library}, upstream_ids={library})
     assert _resolved(conn, row) == (None, None), "the publisher's new tag makes it ambiguous"
+
+
+def test_a_lockfile_supplies_the_exact_version_of_a_declared_dependency(tmp_path):
+    """The declaration says ^1.0.0 and the lockfile says 1.0.7; the installed version is the fact."""
+    mirror = _repo(tmp_path, {
+        "package.json": '{"dependencies":{"acme-lib":"^1.0.0"}}',
+        "package-lock.json": '{"packages":{"node_modules/acme-lib":{"version":"1.0.7"}}}',
+    })
+    edges = extract_from_mirror(mirror, "consumer", "package.json", "npm")
+    assert [(e.dep_name, e.dep_version, e.tier) for e in edges] == [("acme-lib", "1.0.7", "locked")]
+
+
+def test_a_declaration_without_a_lockfile_keeps_what_it_says(tmp_path):
+    mirror = _repo(tmp_path, {"package.json": '{"dependencies":{"acme-lib":"^1.0.0"}}'})
+    edges = extract_from_mirror(mirror, "consumer", "package.json", "npm")
+    assert [(e.dep_version, e.tier) for e in edges] == [("^1.0.0", "declared")]
+
+
+def test_a_lockfile_is_never_read_as_a_declaration(tmp_path):
+    """Its entries are resolutions, and reading them as declarations is what produced 60k edges from one repository."""
+    mirror = _repo(tmp_path, {
+        "package.json": '{"dependencies":{"acme-lib":"^1.0.0"}}',
+        "package-lock.json": '{"packages":{"node_modules/acme-lib":{"version":"1.0.7"}}}',
+    })
+    assert extract_from_mirror(mirror, "consumer", "package-lock.json", "npm") == []
+
+
+def test_a_transitive_entry_is_labelled_and_its_declared_sibling_is_not(tmp_path):
+    """`acme-lib` was chosen by the repository; `left-pad` arrived with it."""
+    mirror = _repo(tmp_path, {
+        "package.json": '{"dependencies":{"acme-lib":"^1.0.0"}}',
+        "package-lock.json": '{"packages":{"node_modules/acme-lib":{"version":"1.0.7"},'
+                             '"node_modules/left-pad":{"version":"1.3.0"}}}',
+    })
+    edges = depbump.transitive_from_mirror(mirror, "package-lock.json", "npm")
+    assert [(e.dep_name, e.dep_version, e.tier) for e in edges] == [("left-pad", "1.3.0", "transitive")]
+
+
+def test_an_unresolved_transitive_edge_is_not_stored(db, tmp_path, monkeypatch):
+    """A lock entry that names no tracked repository can never answer a cross-repository question."""
+    from uuid import uuid4
+
+    from git_synapse.db.orm import session_scope
+
+    tag = uuid4().hex[:10]
+    with session_scope() as session:
+        repo = models().Repo(full_name=f"acme/trans-{tag}", name=f"trans-{tag}", owner="acme",
+                             head_sha="ee" * 20, ingest_status="ready")
+        session.add(repo)
+        session.flush()
+        repo_id = repo.id
+        session.add(models().File(repo_id=repo_id, path="package-lock.json",
+                                  basename="package-lock.json"))
+
+    edge = depbump.BumpEdge(consumer_sha="ee" * 20, dep_name="left-pad", dep_version="1.3.0",
+                            dep_sha=None, manifest="package-lock.json", ecosystem="npm",
+                            tier="transitive")
+    monkeypatch.setattr(depbump, "_manifest_repos", lambda s, f, w, repo_ids=None: [
+        s.get(models().Repo, repo_id)])
+    monkeypatch.setattr(depbump, "mirror_path_for", lambda *a, **kw: tmp_path)
+    monkeypatch.setattr(depbump, "manifest_paths", lambda m: [("package-lock.json", "npm")])
+    monkeypatch.setattr(depbump, "published_at_head", lambda m: set())
+    monkeypatch.setattr(depbump, "transitive_from_mirror", lambda *a, **kw: [edge])
+
+    try:
+        with session_scope() as session:
+            depbump.rebuild(conn=session, repo_ids={repo_id})
+        with session_scope() as session:
+            assert session.query(models().DepBump).filter_by(consumer_repo_id=repo_id).count() == 0
+    finally:
+        with session_scope() as session:
+            session.query(models().DepBump).filter_by(consumer_repo_id=repo_id).delete(
+                synchronize_session=False)
+            session.query(models().File).filter_by(repo_id=repo_id).delete(synchronize_session=False)
+            session.query(models().Repo).filter_by(id=repo_id).delete(synchronize_session=False)
