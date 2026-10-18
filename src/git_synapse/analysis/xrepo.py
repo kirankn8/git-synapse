@@ -105,11 +105,17 @@ def rebuild(consumer_ids: object | None = None, conn: object | None = None) -> X
                     for consumer_id, _ in consumer_files:
                         key = (upstream_id, consumer_id)
                         counts[key] += 1
-                        evidence[key] = {
-                            "upstream_repo_id": bump.dep_repo_id,
-                            "last_version": bump.dep_version,
-                            "last_linked_at": bump.bumped_at,
-                        }
+                        seen = evidence.get(key)
+                        if seen is None or (
+                            bump.bumped_at is not None
+                            and (seen["last_linked_at"] is None
+                                 or bump.bumped_at > seen["last_linked_at"])
+                        ):
+                            evidence[key] = {
+                                "upstream_repo_id": bump.dep_repo_id,
+                                "last_version": bump.dep_version,
+                                "last_linked_at": bump.bumped_at,
+                            }
             rows = []
             for (upstream_id, consumer_id), n in counts.items():
                 info = evidence[(upstream_id, consumer_id)]
