@@ -233,7 +233,11 @@ def coupled_files(file_id: int, measure: str = DEFAULT_MEASURE, limit: int | Non
 
 def coupled_directories(dir_id: int, measure: str = DEFAULT_MEASURE, limit: int | None = 25,
                         min_support: int = 1, min_score: float | None = None) -> list[dict]:
-    return _pair_rows(_model("DirPairMetric"), dir_id, measure, _clamp_limit(limit), max(min_support, 1), min_score, "dir_a_id", "dir_b_id")
+    """Directory partners. The repository root is a parent of everything, so it is never one."""
+    return [row for row in _pair_rows(
+        _model("DirPairMetric"), dir_id, measure, _clamp_limit(limit),
+        max(min_support, 1), min_score, "dir_a_id", "dir_b_id",
+    ) if row.get("path")]
 
 
 def pair_detail(file_a_id: int, file_b_id: int) -> dict | None:
@@ -423,7 +427,10 @@ def hotspots(repo_id: int | None = None, limit: int = 25, min_changes: int = 0,
             query = query.filter(File.is_deleted.is_(False))
         if repo_id is not None:
             query = query.filter(File.repo_id == repo_id)
-        files = query.order_by(File.change_count.desc()).limit(max(limit, 1)).all()
+        from git_synapse.analysis.noise import is_noise
+
+        files = [row for row in query.order_by(File.change_count.desc()).limit(
+            max(limit * 4, limit + 1)).all() if not is_noise(row.path)][:max(limit, 1)]
         pair_rows = session.query(Pair).filter(
             Pair.repo_id.in_({row.repo_id for row in files})
         ).all()

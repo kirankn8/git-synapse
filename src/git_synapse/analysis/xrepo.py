@@ -9,27 +9,15 @@ a relationship from calendar time or a ticket convention.
 from __future__ import annotations
 
 import logging
-import re
 import time
 from collections import Counter
 from dataclasses import dataclass
 
-from git_synapse.analysis import manifests
+from git_synapse.analysis.noise import is_noise
 from git_synapse.db.orm import models, session_scope
 
 log = logging.getLogger(__name__)
 
-#: A generated or vendored tree says nothing about design coupling, and a release
-#: commit that rewrites thousands of generated files would dominate the ranking.
-_GENERATED = re.compile(
-    r"(^|/)(vendor|node_modules|third_party|dist|generated|gen|__pycache__)/"
-    r"|(_gen|\.pb|_auto_test)\.go$|\.min\.(js|css)$"
-)
-_BULK = frozenset(("package-lock.json", "yarn.lock", "pnpm-lock.yaml", "go.sum",
-                   "Cargo.lock", "poetry.lock", "Pipfile.lock", "composer.lock"))
-_MANIFESTS = frozenset(manifests.MANIFEST_FILES)
-
-#: Sides are capped so one release cannot pair its way through the whole repository.
 MAX_FILES_PER_SIDE = 200
 #: A bump whose two sides would exceed this is a bulk change, not a relationship.
 MAX_PAIRS_PER_BUMP = 5_000
@@ -45,10 +33,7 @@ class XrepoStats:
 
 
 def _interesting(path: str) -> bool:
-    base = path.rsplit("/", 1)[-1]
-    if base in _MANIFESTS or base in _BULK:
-        return False
-    return not _GENERATED.search(path)
+    return not is_noise(path)
 
 
 def _files(session: object, commit_id: int | None) -> list[tuple[int, str]]:
