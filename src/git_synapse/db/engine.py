@@ -14,7 +14,7 @@ from git_synapse.db.orm import get_engine, models, session_scope
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 34
+SCHEMA_VERSION = 35
 SCHEMA_RETRIES = 5
 
 

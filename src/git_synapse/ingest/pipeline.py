@@ -14,7 +14,7 @@ from pathlib import Path
 
 from sqlalchemy.exc import DBAPIError, OperationalError
 
-from git_synapse.analysis import depbump, derived, mining, predict
+from git_synapse.analysis import depbump, derived, mining, predict, xrepo
 from git_synapse.analysis.aggregate import rebuild_repo
 from git_synapse.analysis.score import score_repo
 from git_synapse.config import get_config
@@ -727,6 +727,16 @@ def _refresh_crossrepo(force_full: bool, *, mining_too: bool,
         )
     except Exception:
         log.exception("impact prediction failed")
+
+    # A pair needs the resolved bump it rests on, so it follows the stages above.
+    try:
+        xr = xrepo.rebuild(consumer_ids=repo_ids)
+        log.info(
+            "cross-repo pairs: %d bumps, %d pairs in %.1fs",
+            xr.bumps, xr.pairs, xr.duration_s,
+        )
+    except Exception:
+        log.exception("cross-repo pairing failed")
 
     if not mining_too:
         return

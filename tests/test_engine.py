@@ -52,9 +52,9 @@ def test_declarative_schema_is_typed_and_complete():
 
     from git_synapse.db.schema import Base, metadata
 
-    assert engine.SCHEMA_VERSION == 34
+    assert engine.SCHEMA_VERSION == 35
     assert Base.metadata is metadata
-    assert len(metadata.tables) == 33
+    assert len(metadata.tables) == 34
     assert isinstance(models().Repo.__table__.c.languages.type, JSONB)
     assert isinstance(models().Repo.__table__.c.is_private.type, Boolean)
     assert isinstance(models().Commit.__table__.c.committed_at.type, DateTime)

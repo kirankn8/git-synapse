@@ -174,6 +174,14 @@ file_pair = _model(
     "distinct_authors INT nn default=0", constraints=(PrimaryKeyConstraint("repo_id", "file_a_id", "file_b_id"), CheckConstraint("file_a_id < file_b_id", name="file_pair_order_ck"), CheckConstraint("n_ab > 0 AND w_ab >= 0 AND w_ab <= n_ab + 1e-6", name="file_pair_weight_ck")),
 )
 
+xrepo_file_pair = _model(
+    "xrepo_file_pair", "upstream_file_id BIGINT nn fk file.id", "consumer_file_id BIGINT nn fk file.id",
+    "upstream_repo_id BIGINT nn fk repo.id", "consumer_repo_id BIGINT nn fk repo.id",
+    "n_bumps BIGINT nn default=0", "first_linked_at TIMESTAMPTZ", "last_linked_at TIMESTAMPTZ",
+    "last_version TEXT",
+    constraints=(PrimaryKeyConstraint("upstream_file_id", "consumer_file_id"),),
+)
+
 _metric_names = ["jaccard", "dice", "sorensen", "ochiai", "simpson", "braun_blanquet", "kulczynski", "fager", "russell_rao", "sokal_michener", "rogers_tanimoto", "hamann", "faith", "mutual_information", "pmi", "npmi", "ppmi", "chi_square", "log_likelihood_ratio", "t_score", "z_score", "poisson_significance", "hypergeometric_significance", "phi", "cramers_v", "yules_q", "yules_y", "michael", "association_strength", "confidence_ab", "confidence_ba"]
 _metric_specs = tuple(f"{name} FLOAT" for name in _metric_names)
 file_pair_metric = _model(
@@ -223,6 +231,7 @@ MODEL_CLASSES = SimpleNamespace(
             file_directory, dir_pair, dir_pair_metric, author_file, ingest_run,
             ingest_run_repo, dep_bump, repo_dependency, module_dependency,
             repo_impact, feedback, file_cluster, pair_drift, file_risk,
+            xrepo_file_pair,
             repo_package, call_log, app_user, user_session, api_token,
             login_attempt, meta,
         )
@@ -248,6 +257,8 @@ Index("commit_file_file_idx", commit_file.__table__.c.file_id)
 Index("commit_file_repo_idx", commit_file.__table__.c.repo_id)
 Index("file_pair_a_idx", file_pair.__table__.c.file_a_id)
 Index("file_pair_b_idx", file_pair.__table__.c.file_b_id)
+Index("xrepo_consumer_file_idx", xrepo_file_pair.__table__.c.consumer_file_id)
+Index("xrepo_consumer_repo_idx", xrepo_file_pair.__table__.c.consumer_repo_id)
 Index("fpm_npmi_idx", file_pair_metric.__table__.c.repo_id, file_pair_metric.__table__.c.npmi.desc())
 Index("fpm_llr_idx", file_pair_metric.__table__.c.repo_id, file_pair_metric.__table__.c.log_likelihood_ratio.desc())
 Index("fpm_jaccard_idx", file_pair_metric.__table__.c.repo_id, file_pair_metric.__table__.c.jaccard.desc())

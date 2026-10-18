@@ -8,7 +8,7 @@
 
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql&logoColor=white)
-![MCP](https://img.shields.io/badge/MCP-14%20tools-14b8a6?style=flat-square)
+![MCP](https://img.shields.io/badge/MCP-15%20tools-14b8a6?style=flat-square)
 ![Coverage](https://img.shields.io/badge/backend%20coverage-100%25-3fb950?style=flat-square)
 
 **[Read the guide →](https://kirankn8.github.io/git-synapse/)**
@@ -124,13 +124,14 @@ and naming do not already reveal the relationship. Full method and every number
 in **[docs/benchmark.md](docs/benchmark.md)**.
 
 <details>
-<summary><b>The fourteen MCP tools</b></summary>
+<summary><b>The fifteen MCP tools</b></summary>
 
-### Fourteen tools
+### Fifteen tools
 
 | Tool | Use |
 |---|---|
 | `coupled_files` | Find files that commonly change with this file. |
+| `crossrepo_files` | Find files in other repositories tied to this file by a dependency bump. |
 | `explain_pair` | Inspect the full evidence and all measures for a pair. |
 | `file_history` | Inspect recent commits and authors for a file. |
 | `search_files` | Find a file by path substring. |

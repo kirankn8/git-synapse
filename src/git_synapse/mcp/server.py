@@ -11,7 +11,7 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
-from git_synapse.analysis import calls, predict
+from git_synapse.analysis import calls, predict, xrepo
 from git_synapse.analysis import query as q
 from git_synapse.db.engine import apply_schema, wait_for_database
 from git_synapse.stats.registry import (
@@ -319,6 +319,36 @@ def _evidence_card(partner: dict, labels: list[str], informative: bool) -> dict:
         "on a deleted file or a finished refactor is history, not live coupling."
     ),
 )
+@server.tool(
+    name="crossrepo_files",
+    title="Files in other repositories tied to this file by a dependency bump",
+    description=(
+        "Given a file, find files in OTHER repositories that a version bump ties it to: "
+        "the consumer commit that moved the pin, and the upstream commit that pin adopted. "
+        "Use it when the matching edit is in a checkout you never opened."
+    ),
+)
+def crossrepo_files(repo: str, path: str, limit: int = 12, min_support: int = 2) -> dict:
+    """Cross-repository file partners for one file."""
+    target = q.resolve_file(repo, path)
+    if target is None:
+        return {
+            "error": f"no file {path!r} found in repository {repo!r}",
+            "hint": "call search_files to find the right path",
+        }
+    partners = xrepo.coupled_across_repos(target["id"], limit, min_support)
+    return {
+        "file": {"repo": target["repo"], "path": target["path"]},
+        "partners": partners,
+        "summary": (
+            f"{len(partners)} file(s) in other repositories share a declared dependency link; "
+            "each row names the bump support behind it" if partners else
+            "no cross-repository link recorded for this file -- either the repository "
+            "declares no dependency on an indexed one, or no bump has been resolved yet"
+        ),
+    }
+
+
 def coupled_files(
     repo: str,
     path: str,

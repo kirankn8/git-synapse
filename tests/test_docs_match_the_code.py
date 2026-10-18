@@ -18,7 +18,7 @@ def _section(text: str, start: str, end: str) -> str:
 def test_the_readme_lists_every_mcp_tool_and_no_others():
     from git_synapse.mcp import server
 
-    section = _section(README, "### Fourteen tools", "### The workflow")
+    section = _section(README, "### Fifteen tools", "### The workflow")
     listed = set(re.findall(r"^\| `(\w+)`", section, re.MULTILINE))
     assert listed == set(server.server._tool_manager._tools)
 
