@@ -1142,3 +1142,53 @@ def test_a_repository_contended_every_time_gives_up_and_reports_it(monkeypatch):
     assert attempts["n"] == pl.DB_CONTENTION_RETRIES
     # Waits between tries, but not after the last one.
     assert slept == [2, 4]
+
+
+def _fake_run(monkeypatch, pipeline, count: int):
+    from git_synapse.ingest.github import RepoRecord
+    from git_synapse.ingest.pipeline import RepoResult
+
+    monkeypatch.setattr(pipeline, "verify_credentials", lambda **_: "ok")
+    monkeypatch.setattr(pipeline, "reconcile_stale_runs", lambda *a, **kw: 0)
+    monkeypatch.setattr(
+        pipeline, "sync_repo",
+        lambda record, force_full=False: RepoResult(
+            full_name=record.full_name, status="success", commits_added=1),
+    )
+    return [
+        RepoRecord(github_id=i, owner="t", name=f"r{i}", full_name=f"t/r{i}",
+                   clone_url="", default_branch="main")
+        for i in range(count)
+    ]
+
+
+def test_cross_repository_layers_follow_the_repositories_in(db, monkeypatch):
+    """Waiting for the last repository left upstream and impact empty for the whole run."""
+    from git_synapse.ingest import pipeline
+
+    records = _fake_run(monkeypatch, pipeline, 3)
+    monkeypatch.setattr(pipeline, "CROSSREPO_REFRESH_SECONDS", 0.0)
+    calls = []
+    monkeypatch.setattr(pipeline, "_refresh_crossrepo",
+                        lambda force, *, mining_too: calls.append(mining_too))
+
+    pipeline.run_ingest(records=records, trigger="test")
+
+    assert calls[:3] == [False, False, False], "each finished repository refreshes the layers"
+    assert calls[-1] is True and len(calls) == 4, "the full stage still runs once at the end"
+
+
+def test_cross_repository_layers_are_not_rebuilt_more_often_than_the_interval(db, monkeypatch):
+    """A rebuild reads every manifest again, so an impatient cadence costs more than it gives."""
+    from git_synapse.ingest import pipeline
+
+    records = _fake_run(monkeypatch, pipeline, 3)
+    monkeypatch.setattr(pipeline, "CROSSREPO_REFRESH_SECONDS", 10**9)
+    calls = []
+    monkeypatch.setattr(pipeline, "_refresh_crossrepo",
+                        lambda force, *, mining_too: calls.append(mining_too))
+
+    pipeline.run_ingest(records=records, trigger="test")
+
+    assert calls == [True]
+

@@ -106,6 +106,9 @@ class RunResult:
 
 STALE_RUN_HOURS = 6
 
+#: How often the cross-repository layers are rebuilt during a long ingest.
+CROSSREPO_REFRESH_SECONDS = 300.0
+
 
 def reconcile_stale_runs(max_age_hours: int = STALE_RUN_HOURS) -> int:
     """Mark abandoned runs as failed."""
@@ -699,6 +702,47 @@ def _aborted_run(
     return run
 
 
+def _refresh_crossrepo(force_full: bool, *, mining_too: bool) -> None:
+    """Rebuild the cross-repository layers from whatever is already ingested."""
+    try:
+        db = depbump.rebuild(force=force_full)
+        log.info(
+            "manifest bumps: %d repos scanned, %d new edges in %.1fs",
+            db.repos_scanned, db.edges_written, db.duration_s,
+        )
+    except Exception:
+        log.exception("manifest bump scan failed")
+
+    try:
+        with session_scope() as conn:
+            depbump.refresh_declared(conn=conn, force=force_full)
+            if mining_too:
+                depbump.refresh_modules(conn=conn)
+    except Exception:
+        log.exception("declared dependency refresh failed")
+
+    # Impact ranks the declared graph, so it runs after the stages above.
+    try:
+        pr = predict.rebuild(force=force_full)
+        log.info(
+            "impact: %d edges across %d repos in %.1fs",
+            pr.rows_written, pr.sources, pr.duration_s,
+        )
+    except Exception:
+        log.exception("impact prediction failed")
+
+    if not mining_too:
+        return
+    try:
+        mn = mining.rebuild(force=force_full)
+        log.info(
+            "mining: %d modules, %d drift rows, %d risk rows in %.1fs",
+            mn.clusters, mn.drift_rows, mn.risk_rows, mn.duration_s,
+        )
+    except Exception:
+        log.exception("mining rebuild failed")
+
+
 def _run_ingest_locked(
     records: list[RepoRecord] | None,
     trigger: str,
@@ -743,6 +787,7 @@ def _run_ingest_locked(
         done = 0
         consecutive_network_failures = 0
         aborted = False
+        last_crossrepo = time.monotonic()
         for future in as_completed(futures):
             record = futures[future]
             try:
@@ -781,42 +826,12 @@ def _run_ingest_locked(
                 result.commits_added, result.duration_s,
                 " (blobless)" if result.blobless else "",
             )
+            if not aborted and time.monotonic() - last_crossrepo >= CROSSREPO_REFRESH_SECONDS:
+                _refresh_crossrepo(force_full, mining_too=False)
+                last_crossrepo = time.monotonic()
 
     if run.commits_added > 0 or force_full or _crossrepo_rebuild_needed():
-        try:
-            db = depbump.rebuild(force=force_full)
-            log.info(
-                "manifest bumps: %d repos scanned, %d new edges in %.1fs",
-                db.repos_scanned, db.edges_written, db.duration_s,
-            )
-        except Exception:
-            log.exception("manifest bump scan failed")
-
-        try:
-            with session_scope() as conn:
-                depbump.refresh_declared(conn=conn, force=force_full)
-                depbump.refresh_modules(conn=conn)
-        except Exception:
-            log.exception("declared dependency refresh failed")
-
-        # Impact ranks the declared graph, so it runs after both stages above.
-        try:
-            pr = predict.rebuild(force=force_full)
-            log.info(
-                "impact: %d edges across %d repos in %.1fs",
-                pr.rows_written, pr.sources, pr.duration_s,
-            )
-        except Exception:
-            log.exception("impact prediction failed")
-
-        try:
-            mn = mining.rebuild(force=force_full)
-            log.info(
-                "mining: %d modules, %d drift rows, %d risk rows in %.1fs",
-                mn.clusters, mn.drift_rows, mn.risk_rows, mn.duration_s,
-            )
-        except Exception:
-            log.exception("mining rebuild failed")
+        _refresh_crossrepo(force_full, mining_too=True)
 
     run.duration_s = time.monotonic() - started
     _prune_call_log()

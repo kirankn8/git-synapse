@@ -176,6 +176,9 @@ def _manifest_repos(session: object, force: bool, watermark: str) -> list[object
     repos = session.query(Repo).filter(Repo.is_enabled.is_(True)).order_by(Repo.id).all()
     result = []
     for repo in repos:
+        if repo.ingest_status == "ingesting":
+            # Still being parsed: the mirror exists but its commits do not.
+            continue
         if not force and getattr(repo, watermark) == repo.head_sha and repo.head_sha is not None:
             continue
         if session.query(File.id).filter(File.repo_id == repo.id, File.basename.in_(list(manifests.MANIFEST_FILES))).first() is not None:

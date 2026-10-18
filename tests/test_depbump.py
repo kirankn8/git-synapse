@@ -969,3 +969,34 @@ def test_the_same_dependency_in_two_manifests_is_stored_once(db, tmp_path, monke
                 consumer_repo_id=repo_id).delete(synchronize_session=False)
             session.query(models().Repo).filter_by(id=repo_id).delete(
                 synchronize_session=False)
+
+
+def test_a_repository_still_ingesting_is_not_scanned(db):
+    """Its mirror exists before its commits do, so a scan now loses the consumer and the watermark hides it."""
+    from uuid import uuid4
+
+    from git_synapse.db.orm import session_scope
+
+    tag = uuid4().hex[:10]
+    with session_scope() as session:
+        live = models().Repo(full_name=f"acme/live-{tag}", name=f"live-{tag}", owner="acme",
+                             head_sha="f" * 40, ingest_status="ingesting")
+        done = models().Repo(full_name=f"acme/done-{tag}", name=f"done-{tag}", owner="acme",
+                             head_sha="a" * 40, ingest_status="ready")
+        session.add_all([live, done])
+        session.flush()
+        for repo in (live, done):
+            session.add(models().File(repo_id=repo.id, path="go.mod", basename="go.mod"))
+        live_id, done_id = live.id, done.id
+
+    try:
+        with session_scope() as session:
+            scanned = {r.id for r in depbump._manifest_repos(session, False, "last_depbump_sha")}
+        assert live_id not in scanned
+        assert done_id in scanned
+    finally:
+        with session_scope() as session:
+            session.query(models().File).filter(
+                models().File.repo_id.in_([live_id, done_id])).delete(synchronize_session=False)
+            session.query(models().Repo).filter(
+                models().Repo.id.in_([live_id, done_id])).delete(synchronize_session=False)
