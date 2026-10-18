@@ -9,6 +9,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import func
+
 from git_synapse.db.engine import get_watermark, set_watermark
 from git_synapse.db.orm import models, session_scope
 
@@ -29,18 +31,24 @@ def _as_dict(row: object) -> dict:
 
 
 def _input_fingerprint(conn: object) -> str:
+    """Hash the inputs with order-independent aggregates, so no row is materialised here."""
     Dependency, Bump = models().RepoDependency, models().DepBump
     conn.flush()
-    dependencies = conn.query(Dependency).order_by(
-        Dependency.consumer_repo_id, Dependency.dep_name, Dependency.manifest,
-    ).all()
-    bumps = conn.query(Bump).order_by(Bump.id).all()
-    parts = ["|".join(str(x) for x in (r.consumer_repo_id, r.dep_repo_id or "", r.dep_name,
-                                          r.manifest, r.ecosystem, r.dep_version or "")) for r in dependencies]
-    parts += ["|".join(str(x) for x in (r.consumer_repo_id, r.dep_repo_id or "", r.dep_name,
-                                          r.dep_version, r.bumped_at, r.adoption_seconds,
-                                          r.version_key or "")) for r in bumps]
-    return hashlib.md5("\n".join(parts).encode(), usedforsecurity=False).hexdigest()
+    dependency_row = conn.query(
+        func.count(),
+        func.coalesce(func.sum(func.hashtext(func.concat_ws(
+            "|", Dependency.consumer_repo_id, Dependency.dep_repo_id,
+            Dependency.dep_name, Dependency.manifest, Dependency.ecosystem,
+            Dependency.dep_version))), 0),
+    ).select_from(Dependency).one()
+    bump_row = conn.query(
+        func.count(),
+        func.coalesce(func.sum(func.hashtext(func.concat_ws(
+            "|", Bump.consumer_repo_id, Bump.dep_repo_id, Bump.dep_name,
+            Bump.dep_version, Bump.bumped_at, Bump.adoption_seconds, Bump.version_key))), 0),
+    ).select_from(Bump).one()
+    material = repr((tuple(dependency_row), tuple(bump_row))).encode()
+    return hashlib.md5(material, usedforsecurity=False).hexdigest()
 
 
 def rebuild(conn: object | None = None, force: bool = False,
@@ -54,10 +62,8 @@ def rebuild(conn: object | None = None, force: bool = False,
             if not force and get_watermark("predict_inputs") == fingerprint:
                 return stats
         Dependency, Bump, Impact = models().RepoDependency, models().DepBump, models().RepoImpact
-        if repo_ids is None:
-            dependencies = session.query(Dependency).filter(Dependency.dep_repo_id.is_not(None)).all()
-            bumps = session.query(Bump).filter(Bump.dep_repo_id.is_not(None)).all()
-        else:
+        sources: set[int] | None = None
+        if repo_ids is not None:
             # An edge is ranked under its publisher, so the publishers of changed consumers are the affected sources.
             changed = list(repo_ids)
             sources = {row[0] for row in session.query(Dependency.dep_repo_id).filter(
@@ -69,14 +75,24 @@ def rebuild(conn: object | None = None, force: bool = False,
                 Impact.target_repo_id.in_(changed)).all()}
             if not sources:
                 return stats
-            dependencies = session.query(Dependency).filter(Dependency.dep_repo_id.in_(sources)).all()
-            bumps = session.query(Bump).filter(Bump.dep_repo_id.in_(sources)).all()
-        grouped: dict[tuple[int, int], list[object]] = defaultdict(list)
-        for bump in bumps:
-            if bump.dep_repo_id != bump.consumer_repo_id:
-                grouped[(bump.dep_repo_id, bump.consumer_repo_id)].append(bump)
-        declared = {(row.dep_repo_id, row.consumer_repo_id) for row in dependencies
-                    if row.dep_repo_id != row.consumer_repo_id}
+
+        # Aggregate in the database: the corpus holds far more bumps than one process should hold as rows.
+        bump_query = session.query(
+            Bump.dep_repo_id, Bump.consumer_repo_id, func.count().label("n"),
+            func.max(Bump.bumped_at).label("last_bump"),
+            func.percentile_cont(0.5).within_group(Bump.adoption_seconds).label("median_s"),
+        ).filter(Bump.dep_repo_id.is_not(None), Bump.dep_repo_id != Bump.consumer_repo_id)
+        dependency_query = session.query(Dependency.dep_repo_id, Dependency.consumer_repo_id).filter(
+            Dependency.dep_repo_id.is_not(None), Dependency.dep_repo_id != Dependency.consumer_repo_id)
+        if sources is not None:
+            bump_query = bump_query.filter(Bump.dep_repo_id.in_(sources))
+            dependency_query = dependency_query.filter(Dependency.dep_repo_id.in_(sources))
+        grouped = {
+            (source, target): {"n": int(n), "last_bump": last_bump, "median_s": median_s}
+            for source, target, n, last_bump, median_s in bump_query.group_by(
+                Bump.dep_repo_id, Bump.consumer_repo_id).all()
+        }
+        declared = {(int(source), int(target)) for source, target in dependency_query.distinct().all()}
         edges = declared | set(grouped)
         if repo_ids is None:
             session.query(Impact).delete(synchronize_session=False)
@@ -87,12 +103,12 @@ def rebuild(conn: object | None = None, force: bool = False,
         output = []
         rank_groups: dict[int, list[dict]] = defaultdict(list)
         for source, target in edges:
-            history = grouped.get((source, target), [])
-            last_bump = max((x.bumped_at for x in history if x.bumped_at), default=None)
-            lags = sorted(x.adoption_seconds for x in history if x.adoption_seconds is not None)
-            median = lags[len(lags) // 2] / 86400.0 if lags else None
+            history = grouped.get((source, target), {})
+            last_bump = history.get("last_bump")
+            median_s = history.get("median_s")
+            median = float(median_s) / 86400.0 if median_s is not None else None
             is_declared = (source, target) in declared
-            bump_count = len(history)
+            bump_count = int(history.get("n", 0))
             recency = 0.2 if last_bump and last_bump > now - timedelta(days=90) else (
                 0.1 if last_bump and last_bump > now - timedelta(days=365) else 0.0)
             score = min(1.0, (0.5 if is_declared else 0.2) + min(0.3, bump_count * 0.02) + recency)

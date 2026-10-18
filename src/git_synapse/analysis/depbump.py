@@ -557,6 +557,10 @@ def rebuild(force: bool = False, conn: object | None = None,
                 stats.edges_written += 1
             repo.last_depbump_at = datetime.now(UTC)
             repo.last_depbump_sha = repo.head_sha
+            session.flush()
+            # Commit per repository: memory stays bounded to one repository's edges,
+            # and the rows are visible while the scan continues.
+            session.commit()
         scanned_ids = {repo.id for repo in payload_repos}
         stats.resolved_commits = resolve_bumps(
             session,

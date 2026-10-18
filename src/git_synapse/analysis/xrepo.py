@@ -72,55 +72,57 @@ def rebuild(consumer_ids: object | None = None, conn: object | None = None) -> X
         started = time.monotonic()
         stats = XrepoStats()
         Bump, Pair = models().DepBump, models().XrepoFilePair
-        query = session.query(Bump).filter(
-            Bump.dep_repo_id.is_not(None), Bump.dep_commit_id.is_not(None),
-            Bump.tier != "transitive")
+        scoped = {row[0] for row in session.query(Pair.consumer_repo_id).distinct().all()}
         if consumer_ids is not None:
-            query = query.filter(Bump.consumer_repo_id.in_(list(consumer_ids)))
-        bumps = query.all()
-
-        if consumer_ids is not None:
-            session.query(Pair).filter(Pair.consumer_repo_id.in_(list(consumer_ids))).delete(
-                synchronize_session=False)
+            scoped |= set(consumer_ids)
         else:
-            session.query(Pair).delete(synchronize_session=False)
-        stats.consumers = len({bump.consumer_repo_id for bump in bumps})
+            scoped |= {row[0] for row in session.query(Bump.consumer_repo_id).distinct().filter(
+                Bump.dep_repo_id.is_not(None), Bump.dep_commit_id.is_not(None),
+                Bump.tier != "transitive").all()}
+        stats.consumers = len(scoped)
 
-        counts: Counter = Counter()
-        evidence: dict[tuple[int, int], dict] = {}
-        for bump in bumps:
-            consumer_files = _files(session, _consumer_commit_id(
-                session, bump.consumer_repo_id, bump.consumer_sha))
-            upstream_files = _files(session, bump.dep_commit_id)
-            if not consumer_files or not upstream_files:
-                continue
-            if len(consumer_files) * len(upstream_files) > MAX_PAIRS_PER_BUMP:
-                stats.skipped_bulk += 1
-                continue
-            stats.bumps += 1
-            for upstream_id, _ in upstream_files:
-                for consumer_id, _ in consumer_files:
-                    key = (upstream_id, consumer_id)
-                    counts[key] += 1
-                    evidence[key] = {
-                        "upstream_repo_id": bump.dep_repo_id,
-                        "consumer_repo_id": bump.consumer_repo_id,
-                        "last_version": bump.dep_version,
-                        "last_linked_at": bump.bumped_at,
-                    }
-
-        rows = []
-        for (upstream_id, consumer_id), n in counts.items():
-            info = evidence[(upstream_id, consumer_id)]
-            rows.append(Pair(upstream_file_id=upstream_id, consumer_file_id=consumer_id,
-                             upstream_repo_id=info["upstream_repo_id"],
-                             consumer_repo_id=info["consumer_repo_id"], n_bumps=n,
-                             first_linked_at=info["last_linked_at"],
-                             last_linked_at=info["last_linked_at"],
-                             last_version=info["last_version"]))
-        session.add_all(rows)
-        session.flush()
-        stats.pairs = len(rows)
+        # One consumer per transaction: its pairs appear while the rebuild
+        # continues, and the pending rows never span the whole corpus.
+        for consumer in sorted(scoped):
+            bumps = session.query(Bump).filter(
+                Bump.consumer_repo_id == consumer, Bump.dep_repo_id.is_not(None),
+                Bump.dep_commit_id.is_not(None), Bump.tier != "transitive").all()
+            session.query(Pair).filter(Pair.consumer_repo_id == consumer).delete(
+                synchronize_session=False)
+            counts: Counter = Counter()
+            evidence: dict[tuple[int, int], dict] = {}
+            for bump in bumps:
+                consumer_files = _files(session, _consumer_commit_id(
+                    session, bump.consumer_repo_id, bump.consumer_sha))
+                upstream_files = _files(session, bump.dep_commit_id)
+                if not consumer_files or not upstream_files:
+                    continue
+                if len(consumer_files) * len(upstream_files) > MAX_PAIRS_PER_BUMP:
+                    stats.skipped_bulk += 1
+                    continue
+                stats.bumps += 1
+                for upstream_id, _ in upstream_files:
+                    for consumer_id, _ in consumer_files:
+                        key = (upstream_id, consumer_id)
+                        counts[key] += 1
+                        evidence[key] = {
+                            "upstream_repo_id": bump.dep_repo_id,
+                            "last_version": bump.dep_version,
+                            "last_linked_at": bump.bumped_at,
+                        }
+            rows = []
+            for (upstream_id, consumer_id), n in counts.items():
+                info = evidence[(upstream_id, consumer_id)]
+                rows.append(Pair(upstream_file_id=upstream_id, consumer_file_id=consumer_id,
+                                 upstream_repo_id=info["upstream_repo_id"],
+                                 consumer_repo_id=consumer,
+                                 n_bumps=n, first_linked_at=info["last_linked_at"],
+                                 last_linked_at=info["last_linked_at"],
+                                 last_version=info["last_version"]))
+            session.add_all(rows)
+            session.flush()
+            session.commit()
+            stats.pairs += len(rows)
         stats.duration_s = time.monotonic() - started
         return stats
 
