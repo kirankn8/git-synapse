@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.exc import IntegrityError
 
+from git_synapse.analysis import facts as fact_text
 from git_synapse.analysis.manifests import version_key
 from git_synapse.config import get_config
 from git_synapse.db.orm import models, session_scope
@@ -231,6 +232,9 @@ def load_commits(repo_id: int, commits: Iterable[ParsedCommit], conn: object,
                 conn.add(commit)
                 conn.flush()
                 stats.commits_written += 1
+                for fact in fact_text.extract(parsed.subject, parsed.body):
+                    conn.add(models().CommitFact(commit_id=commit.id, repo_id=repo_id,
+                                                 kind=fact.kind, key=fact.key))
             seen: set[int] = set()
             for change in parsed.files:
                 file_id = files.resolve(change.path, change.old_path)

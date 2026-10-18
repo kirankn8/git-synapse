@@ -80,7 +80,8 @@ def _model(table_name: str, *specs: str, constraints: tuple[Any, ...] = ()) -> t
         fk_index = next((i for i, part in enumerate(parts) if part == "fk"), None)
         args: list[Any] = [_types[type_name]]
         if fk_index is not None:
-            args.append(ForeignKey(parts[fk_index + 1]))
+            args.append(ForeignKey(parts[fk_index + 1],
+                                   ondelete="CASCADE" if "cascade" in flags else None))
         kwargs: dict[str, Any] = {
             "nullable": not ("nn" in flags or "pk" in flags),
             "primary_key": "pk" in flags,
@@ -174,6 +175,12 @@ file_pair = _model(
     "distinct_authors INT nn default=0", constraints=(PrimaryKeyConstraint("repo_id", "file_a_id", "file_b_id"), CheckConstraint("file_a_id < file_b_id", name="file_pair_order_ck"), CheckConstraint("n_ab > 0 AND w_ab >= 0 AND w_ab <= n_ab + 1e-6", name="file_pair_weight_ck")),
 )
 
+commit_fact = _model(
+    "commit_fact", "commit_id BIGINT nn fk commit.id cascade", "repo_id BIGINT nn fk repo.id cascade",
+    "kind TEXT nn", "key TEXT nn",
+    constraints=(PrimaryKeyConstraint("commit_id", "kind", "key"),),
+)
+
 xrepo_file_pair = _model(
     "xrepo_file_pair", "upstream_file_id BIGINT nn fk file.id", "consumer_file_id BIGINT nn fk file.id",
     "upstream_repo_id BIGINT nn fk repo.id", "consumer_repo_id BIGINT nn fk repo.id",
@@ -231,7 +238,7 @@ MODEL_CLASSES = SimpleNamespace(
             file_directory, dir_pair, dir_pair_metric, author_file, ingest_run,
             ingest_run_repo, dep_bump, repo_dependency, module_dependency,
             repo_impact, feedback, file_cluster, pair_drift, file_risk,
-            xrepo_file_pair,
+            xrepo_file_pair, commit_fact,
             repo_package, call_log, app_user, user_session, api_token,
             login_attempt, meta,
         )
@@ -257,6 +264,8 @@ Index("commit_file_file_idx", commit_file.__table__.c.file_id)
 Index("commit_file_repo_idx", commit_file.__table__.c.repo_id)
 Index("file_pair_a_idx", file_pair.__table__.c.file_a_id)
 Index("file_pair_b_idx", file_pair.__table__.c.file_b_id)
+Index("commit_fact_key_idx", commit_fact.__table__.c.kind, commit_fact.__table__.c.key)
+Index("commit_fact_repo_idx", commit_fact.__table__.c.repo_id)
 Index("xrepo_consumer_file_idx", xrepo_file_pair.__table__.c.consumer_file_id)
 Index("xrepo_consumer_repo_idx", xrepo_file_pair.__table__.c.consumer_repo_id)
 Index("fpm_npmi_idx", file_pair_metric.__table__.c.repo_id, file_pair_metric.__table__.c.npmi.desc())

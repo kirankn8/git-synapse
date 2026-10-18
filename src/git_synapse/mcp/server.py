@@ -320,6 +320,31 @@ def _evidence_card(partner: dict, labels: list[str], informative: bool) -> dict:
     ),
 )
 @server.tool(
+    name="commits_by_key",
+    title="Commits that state the same identifier",
+    description=(
+        "Given an identifier a commit carries in its message -- an issue key such as "
+        "AB-1234, a PR reference, or a trailer -- list the commits across every "
+        "repository that state the same one. Use it to see the work behind a ticket "
+        "without assuming the commits are one change."
+    ),
+)
+def commits_by_key(key: str, kind: str = "issue_key", limit: int = 50) -> dict:
+    """Commits sharing one stored identifier."""
+    rows = q.commits_by_key(kind, key, limit)
+    return {
+        "kind": kind,
+        "key": key,
+        "commits": rows,
+        "summary": (
+            f"{len(rows)} commit(s) state {key}. They share an identifier, which is a "
+            "fact; whether they are one change is yours to decide."
+            if rows else f"no commit states {key}"
+        ),
+    }
+
+
+@server.tool(
     name="crossrepo_files",
     title="Files in other repositories tied to this file by a dependency bump",
     description=(

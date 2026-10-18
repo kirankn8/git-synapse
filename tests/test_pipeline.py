@@ -513,6 +513,7 @@ def test_a_failing_derived_stage_does_not_stop_the_ones_after_it(db, monkeypatch
 def test_the_derived_stages_are_skipped_when_nothing_changed(db, monkeypatch):
     """Six global rebuilds over the whole corpus are not free; a sync that added no commits must not pay for them."""
     _stub_run(monkeypatch)
+    monkeypatch.setattr(pipeline, "_crossrepo_rebuild_needed", lambda: False)
     for mod, fn in _STAGES:
         monkeypatch.setattr(
             f"{mod}.{fn}",

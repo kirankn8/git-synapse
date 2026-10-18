@@ -175,7 +175,7 @@ def test_a_consumer_file_answers_with_upstream_partners_and_the_reverse(db):
 def test_a_pair_reports_the_most_recent_bump_not_whichever_came_last(db):
     """The row is an answer about now, so the version it names must be the newest one seen."""
     tag = uuid4().hex[:8]
-    consumer, upstream, c_code, u_code = _scenario(tag)
+    consumer, upstream, _c_code, _u_code = _scenario(tag)
     try:
         with session_scope() as session:
             c2 = _commit(session, consumer, "c4" * 20)

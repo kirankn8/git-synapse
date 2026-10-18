@@ -295,6 +295,34 @@ def co_change_commits(file_a_id: int, file_b_id: int, limit: int = 25) -> list[d
                             if authors.get(c.author_id) else None)} for c in commits]
 
 
+def commit_facts(commit_id: int) -> list[dict]:
+    """Identifiers stored for one commit, as written."""
+    Fact = _model("CommitFact")
+    with session_scope() as session:
+        rows = session.query(Fact.kind, Fact.key).filter(
+            Fact.commit_id == commit_id).order_by(Fact.kind, Fact.key).all()
+    return [{"kind": kind, "key": key} for kind, key in rows]
+
+
+def commits_by_key(kind: str, key: str, limit: int = 50) -> list[dict]:
+    """Commits across the corpus that state the same identifier."""
+    Fact, Commit, Repo, Author = _model("CommitFact"), _model("Commit"), _model("Repo"), _model("Author")
+    with session_scope() as session:
+        rows = session.query(
+            Commit.id, Commit.sha, Commit.subject, Commit.committed_at,
+            Repo.full_name, Author.display_name, Author.email,
+        ).join(Fact, Fact.commit_id == Commit.id).join(
+            Repo, Repo.id == Commit.repo_id).outerjoin(
+            Author, Author.id == Commit.author_id).filter(
+            Fact.kind == kind, Fact.key == key,
+        ).order_by(Commit.committed_at.desc()).limit(_clamp_limit(limit)).all()
+    return [{
+        "commit_id": commit_id, "sha": sha, "subject": subject,
+        "committed_at": committed.isoformat() if committed else None,
+        "repo": repo, "author": name or email,
+    } for commit_id, sha, subject, committed, repo, name, email in rows]
+
+
 def file_commits(file_id: int, limit: int = 50) -> list[dict]:
     Commit, Change, Author = _model("Commit"), _model("CommitFile"), _model("Author")
     with session_scope() as session:
@@ -305,6 +333,12 @@ def file_commits(file_id: int, limit: int = 50) -> list[dict]:
         authors = {row.id: row for row in session.query(Author).filter(
             Author.id.in_({c.author_id for c in commits.values() if c.author_id})
         ).all()}
+        Fact = _model("CommitFact")
+        facts: dict[int, list[dict]] = {}
+        for commit_id, kind, key in session.query(
+            Fact.commit_id, Fact.kind, Fact.key,
+        ).filter(Fact.commit_id.in_(list(commits))).order_by(Fact.kind, Fact.key).all():
+            facts.setdefault(commit_id, []).append({"kind": kind, "key": key})
         output = []
         for change in changes:
             commit = commits.get(change.commit_id)
@@ -315,7 +349,8 @@ def file_commits(file_id: int, limit: int = 50) -> list[dict]:
                            "committed_at": commit.committed_at, "n_files": commit.n_files,
                            "change_type": change.change_type, "insertions": change.insertions,
                            "deletions": change.deletions,
-                           "author": (author.display_name or author.email) if author else None})
+                           "author": (author.display_name or author.email) if author else None,
+                           "facts": facts.get(commit.id, [])})
         output.sort(key=lambda row: row["committed_at"], reverse=True)
         return output[:max(limit, 1)]
 

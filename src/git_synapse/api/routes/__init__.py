@@ -700,6 +700,18 @@ def coupled(
     }
 
 
+@router.get("/commits/{commit_id}/facts", tags=["files"])
+def commit_facts(commit_id: int) -> dict:
+    """Identifiers this commit states: issue keys, PR references and trailers."""
+    return {"facts": q.commit_facts(commit_id)}
+
+
+@router.get("/facts/{kind}/{key}/commits", tags=["files"])
+def commits_by_key(kind: str, key: str, limit: int = Query(50, ge=1, le=500)) -> dict:
+    """Commits across the corpus that state the same identifier."""
+    return {"kind": kind, "key": key, "commits": q.commits_by_key(kind, key, limit)}
+
+
 @router.get("/files/{file_id}/commits", tags=["files"])
 def file_commits(file_id: int, limit: int = Query(50, ge=1, le=500)) -> dict:
     return {"commits": q.file_commits(file_id, limit)}

@@ -42,7 +42,7 @@ arithmetic remains in Python/NumPy.
 
 ## Every table at a glance
 
-Thirty-four tables. The first group is the only one that cannot be recomputed;
+Thirty-five tables. The first group is the only one that cannot be recomputed;
 everything derived from it is a materialised cache, and the last two groups hold
 operational state that belongs to the deployment rather than to the corpus.
 
@@ -81,6 +81,7 @@ operational state that belongs to the deployment rather than to the corpus.
 | `repo_dependency` | What each repository declares at HEAD. **This is the answer to "which repositories depend on each other".** |
 | `module_dependency` | The intra-repository module graph, for monorepos whose real structure lives in submodules rather than cross-repo edges. |
 | `repo_impact` | The ranked answer to "I am changing X, what else?", carrying the evidence behind each score so any number can be explained. |
+| `commit_fact` | Identifiers a commit states in plain text - issue keys, PR references, trailers - each with the kind and the field it came from. Storing one asserts nothing about relatedness. |
 | `xrepo_file_pair` | Files on both sides of a resolved bump, with the number of bumps that paired them. The consumer commit and the upstream commit its pin names are the unit, so the relationship is declared rather than inferred from tickets or timing. |
 
 **Mining layer** — patterns over the pairs

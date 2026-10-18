@@ -10,64 +10,28 @@ os.environ.setdefault("POSTGRES_HOST", "127.0.0.1")
 os.environ.setdefault("POSTGRES_PORT", "55432")
 
 
-@pytest.fixture(scope="module")
-def scratch_db(db):
-    """Use the configured ORM database for isolated run-lifecycle tests."""
-    from git_synapse.config import get_config, reset_config_cache
-    from git_synapse.db.engine import apply_schema, close_pool
-
-    base = get_config().db.database
-    name = os.environ.get("TEST_POSTGRES_DB", f"{base}_test")
-    previous = os.environ.get("POSTGRES_DB")
-    os.environ["POSTGRES_DB"] = name
-    reset_config_cache()
-    close_pool()
-    try:
-        apply_schema()
-    except Exception:  # noqa: BLE001 - a database of this name has never been made here
-        _create_database(name)
-        close_pool()
-        apply_schema()
-    from git_synapse.db.orm import models, session_scope
-    with session_scope() as session:
-        for model in (models().UserSession, models().ApiToken, models().LoginAttempt):
-            session.query(model).delete(synchronize_session=False)
-        session.query(models().AppUser).delete(synchronize_session=False)
-    try:
-        yield name
-    finally:
-        close_pool()
-        if previous is None:
-            os.environ.pop("POSTGRES_DB", None)
-        else:
-            os.environ["POSTGRES_DB"] = previous
-        reset_config_cache()
-
-
-def _create_database(name: str) -> None:
-    """Create the test database when the server is up but the database is not.
-
-    A skip is the right answer when there is no server to talk to. It is the
-    wrong answer when there is one and it simply has no database of this name
-    yet: the pre-push hook starts a fresh Postgres holding only the default
-    database, so every database-backed check skipped and the gate that is
-    supposed to guard a push verified almost nothing.
-    """
+def _recreate_database(name: str) -> None:
+    """Drop and recreate the database, so its schema always comes from the models."""
     import sqlalchemy
 
     from git_synapse.config import get_config
 
     cfg = get_config().db
-    url = (
-        f"postgresql+pg8000://{cfg.user}:{cfg.password}"
-        f"@{cfg.host}:{cfg.port}/postgres"
-    )
+    url = (f"postgresql+pg8000://{cfg.user}:{cfg.password}"
+           f"@{cfg.host}:{cfg.port}/postgres")
     engine = sqlalchemy.create_engine(url, isolation_level="AUTOCOMMIT")
     try:
         with engine.connect() as conn:
+            conn.execute(sqlalchemy.text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
             conn.execute(sqlalchemy.text(f'CREATE DATABASE "{name}"'))
     finally:
         engine.dispose()
+
+
+@pytest.fixture(scope="module")
+def scratch_db(db):
+    """The session's disposable database. It is already clean; tests remove what they add."""
+    return db
 
 
 @pytest.fixture(scope="session")
@@ -84,12 +48,7 @@ def db():
     close_pool()
 
     try:
-        try:
-            wait_for_database(timeout_s=5, interval_s=0.5)
-        except Exception:  # noqa: BLE001 - maybe the database just is not there yet
-            _create_database(name)
-            close_pool()
-            wait_for_database(timeout_s=5, interval_s=0.5)
+        _recreate_database(name)
     except Exception as exc:  # noqa: BLE001 - any failure means "no database"
         close_pool()
         if previous is None:
@@ -98,6 +57,8 @@ def db():
             os.environ["POSTGRES_DB"] = previous
         reset_config_cache()
         pytest.skip(f"no database available: {exc}")
+    close_pool()
+    wait_for_database(timeout_s=5, interval_s=0.5)
     apply_schema()
     from git_synapse.db.orm import models, session_scope
     with session_scope() as session:

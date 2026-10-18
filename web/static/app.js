@@ -1784,7 +1784,12 @@ on('/repos/:repo/files/*path', async ({ repo, path }, params) => {
           [
             { key: 'sha', label: 'SHA', mono: true, render: (c) => h('span', { class: 'mono' }, c.sha.slice(0, 9)) },
             { key: 'change_type', label: 'Type', render: (c) => h('span', { class: `badge ${c.change_type === 'A' ? 'ok' : c.change_type === 'D' ? 'danger' : c.change_type === 'R' ? 'violet' : 'muted'}` }, c.change_type) },
-            { key: 'subject', label: 'Subject', render: (c) => h('span', { style: 'display:block;max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, c.subject) },
+            { key: 'subject', label: 'Subject', render: (c) => h('span', { style: 'display:inline-flex;gap:6px;align-items:center;max-width:520px' },
+                h('span', { style: 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, c.subject),
+                ...(c.facts || []).filter((f) => f.kind !== 'trailer').map((f) => h('span', {
+                  class: `badge ${f.kind === 'issue_key' ? 'violet' : 'muted'}`,
+                  title: f.kind === 'issue_key' ? 'Issue key stated in this commit' : 'Pull request reference',
+                }, f.key))) },
             { key: 'author', label: 'Author' },
             { key: 'insertions', label: '+', num: true },
             { key: 'deletions', label: '−', num: true },
