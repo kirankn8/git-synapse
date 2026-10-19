@@ -427,10 +427,12 @@ def hotspots(repo_id: int | None = None, limit: int = 25, min_changes: int = 0,
             query = query.filter(File.is_deleted.is_(False))
         if repo_id is not None:
             query = query.filter(File.repo_id == repo_id)
-        from git_synapse.analysis.noise import is_noise
+        from git_synapse.analysis.noise import is_auxiliary, is_noise
 
-        files = [row for row in query.order_by(File.change_count.desc()).limit(
-            max(limit * 4, limit + 1)).all() if not is_noise(row.path)][:max(limit, 1)]
+        rows = query.order_by(File.change_count.desc()).limit(max(limit * 8, limit + 1)).all()
+        rows = [row for row in rows if not is_noise(row.path)]
+        files = ([row for row in rows if not is_auxiliary(row.path)]
+                 + [row for row in rows if is_auxiliary(row.path)])[:max(limit, 1)]
         pair_rows = session.query(Pair).filter(
             Pair.repo_id.in_({row.repo_id for row in files})
         ).all()

@@ -25,7 +25,20 @@ _RELEASE = re.compile(
     r"|(^|/)\.changeset/"
 )
 
+#: Documentation and CI describe the project, but they are not the code being coupled.
+_AUXILIARY = re.compile(
+    r"(^|/)docs?/|(^|/)(README|CONTRIBUTING|SECURITY|CODE_OF_CONDUCT)(\.[a-z]+)?$"
+    r"|\.(md|mdx|rst)$"
+    r"|(^|/)\.github/|(^|/)\.gitlab-ci\.ya?ml$|(^|/)Jenkinsfile$"
+    r"|(^|/)\.circleci/|(^|/)azure-pipelines\.ya?ml$|(^|/)\.buildkite/"
+)
+
 _NOISE_NAMES = frozenset(MANIFEST_FILES) | frozenset(LOCK_FILES)
+
+
+def is_auxiliary(path: str) -> bool:
+    """Noise, or documentation and CI: ranked below source, never used for coupling."""
+    return is_noise(path) or bool(_AUXILIARY.search(path or ""))
 
 
 def is_noise(path: str) -> bool:

@@ -1,7 +1,7 @@
 """One rule for paths that describe a build rather than a relationship."""
 from __future__ import annotations
 
-from git_synapse.analysis.noise import is_noise
+from git_synapse.analysis.noise import is_auxiliary, is_noise
 
 
 def test_manifests_lockfiles_and_generated_trees_are_noise():
@@ -19,7 +19,14 @@ def test_source_files_are_not_noise():
         assert not is_noise(path), path
 
 
-def test_hotspots_rank_source_files_over_lockfiles(db):
+def test_docs_and_ci_are_auxiliary_not_noise():
+    for path in ("README.md", "docs/guide.mdx", ".github/workflows/test.yaml",
+                 "Jenkinsfile", ".gitlab-ci.yml"):
+        assert is_auxiliary(path) and not is_noise(path), path
+    assert not is_auxiliary("pkg/server/server.go")
+
+
+def test_hotspots_rank_source_before_docs_and_drop_lockfiles(db):
     from uuid import uuid4
 
     from git_synapse.analysis import query
@@ -34,12 +41,14 @@ def test_hotspots_rank_source_files_over_lockfiles(db):
             models().File(repo_id=repo.id, path="package-lock.json", basename="package-lock.json",
                           change_count=500),
             models().File(repo_id=repo.id, path="svc/a.go", basename="a.go", change_count=5),
+            models().File(repo_id=repo.id, path="README.md", basename="README.md",
+                          change_count=900),
         ])
         repo_id = repo.id
 
     try:
         rows = query.hotspots(repo_id, limit=5)
-        assert [row["path"] for row in rows] == ["svc/a.go"]
+        assert [row["path"] for row in rows] == ["svc/a.go", "README.md"]
     finally:
         with session_scope() as session:
             session.query(models().File).filter_by(repo_id=repo_id).delete(synchronize_session=False)
