@@ -17,10 +17,19 @@ _GENERATED = re.compile(
     r"|(_gen|\.pb|_auto_test)\.go$|\.min\.(js|css)$"
 )
 
+#: Release tooling rewrites these on every release, so they track cadence, not design.
+_RELEASE = re.compile(
+    r"(^|/)(CHANGELOG|CHANGES|HISTORY|VERSION|version|version\.txt)(\.(md|txt))?$"
+    r"|(^|/)\.release-please-manifest\.json$"
+    r"|(^|/)(release-please-config|\.releaserc|\.versionrc|lerna)\.(json|js|ya?ml|cjs)$"
+    r"|(^|/)\.changeset/"
+)
+
 _NOISE_NAMES = frozenset(MANIFEST_FILES) | frozenset(LOCK_FILES)
 
 
 def is_noise(path: str) -> bool:
     """True when the path says nothing about how the code is put together."""
     base = (path or "").rsplit("/", 1)[-1]
-    return base in _NOISE_NAMES or bool(_GENERATED.search(path or ""))
+    return (base in _NOISE_NAMES or bool(_GENERATED.search(path or ""))
+            or bool(_RELEASE.search(path or "")))

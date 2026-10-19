@@ -7,7 +7,9 @@ from git_synapse.analysis.noise import is_noise
 def test_manifests_lockfiles_and_generated_trees_are_noise():
     for path in ("go.mod", "svc/package.json", "package-lock.json", "Cargo.lock",
                  "vendor/x/y.go", "node_modules/a/b.js", "api/foo_gen.go",
-                 "api/responses.pb.go", "web/app.min.js", "svc/thing_auto_test.go"):
+                 "api/responses.pb.go", "web/app.min.js", "svc/thing_auto_test.go",
+                 ".release-please-manifest.json", "CHANGELOG.md", ".changeset/config.json",
+                 "VERSION", "version.txt", ".releaserc.json"):
         assert is_noise(path), path
 
 
