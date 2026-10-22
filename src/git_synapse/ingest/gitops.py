@@ -165,6 +165,20 @@ def run_git_network(
     raise last
 
 
+def remote_head(url: str, branch: str | None = None, timeout: int = 60) -> str | None:
+    """The remote's tip sha, asked without fetching any objects."""
+    ref = f"refs/heads/{branch}" if branch else "HEAD"
+    try:
+        proc = run_git_network(["ls-remote", "--quiet", url, ref], timeout=timeout)
+    except GitError:
+        return None
+    for line in proc.stdout.splitlines():
+        sha, _, name = line.partition("\t")
+        if len(sha) == 40 and name.strip() == ref:
+            return sha
+    return None
+
+
 def mirror_path_for(full_name: str, cfg: IngestConfig | None = None,
                     host: str = "github.com") -> Path:
     """Filesystem location of a repo's bare mirror."""

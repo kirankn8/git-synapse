@@ -205,7 +205,7 @@ def _alpha(ingested):
     )
 
 
-def test_a_watermark_written_by_an_older_version_is_still_honoured(ingested):
+def test_a_watermark_written_by_an_older_version_is_still_honoured(ingested, monkeypatch):
     """The watermark used to be a single SHA."""
     from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest import pipeline
@@ -216,6 +216,7 @@ def test_a_watermark_written_by_an_older_version_is_still_honoured(ingested):
         head = repo.last_ingested_sha
         repo.last_ingested_refs = []
 
+    monkeypatch.setattr(pipeline, "_unchanged", lambda record: None)
     result = pipeline.sync_repo(_alpha(ingested))
     assert result.status != "failed", result.error
     assert result.commits_added == 0, "the legacy watermark was ignored"
@@ -234,7 +235,7 @@ def test_a_force_pushed_away_ref_tip_does_not_fail_the_repository(ingested):
     assert result.status != "failed", result.error
 
 
-def test_a_rewritten_commit_is_swept_during_the_next_sync(ingested):
+def test_a_rewritten_commit_is_swept_during_the_next_sync(ingested, monkeypatch):
     """Insert-only was the bug: 735 commits across 24 repositories outlived the history they came from, inflating the N of every contingency table there."""
     from git_synapse.db.orm import models, session_scope
     from git_synapse.ingest import pipeline
@@ -250,6 +251,7 @@ def test_a_rewritten_commit_is_swept_during_the_next_sync(ingested):
                                  committer_id=author.id, authored_at=datetime.now(UTC),
                                  committed_at=datetime.now(UTC), subject="rewritten away"))
 
+    monkeypatch.setattr(pipeline, "_unchanged", lambda record: None)
     result = pipeline.sync_repo(_alpha(ingested))
     assert result.status != "failed", result.error
     with session_scope() as conn:

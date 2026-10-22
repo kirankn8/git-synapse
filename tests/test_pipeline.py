@@ -1224,3 +1224,120 @@ def test_a_cancelled_future_does_not_leave_the_run_running(db, monkeypatch):
     with session_scope() as conn:
         row = conn.get(models().IngestRun, run.run_id)
         assert row is not None and row.status == "failed"
+
+
+def _stored_repo(tag: str, head: str):
+    from git_synapse.db.orm import models, session_scope
+
+    with session_scope() as conn:
+        repo = models().Repo(full_name=f"t/skip-{tag}", name=f"skip-{tag}", owner="t",
+                             host="github.com", head_sha=head, last_ingested_sha=head,
+                             ingest_status="ready")
+        conn.add(repo)
+        conn.flush()
+        return repo.id
+
+
+def _skip_record(tag: str):
+    from git_synapse.ingest.github import RepoRecord
+
+    return RepoRecord(github_id=abs(hash(tag)) % 1_000_000_000, owner="t", name=f"skip-{tag}",
+                      full_name=f"t/skip-{tag}", clone_url="https://example.invalid/t/skip.git",
+                      default_branch="main")
+
+
+def test_a_repository_whose_remote_tip_has_not_moved_is_not_fetched(db, monkeypatch):
+    """A refresh of thirty thousand repositories must not clone the ones nobody pushed to."""
+    from uuid import uuid4
+
+    from git_synapse.db.orm import models, session_scope
+    from git_synapse.ingest import pipeline
+
+    tag = uuid4().hex[:8]
+    repo_id = _stored_repo(tag, "a" * 40)
+    fetched = []
+    monkeypatch.setattr(pipeline.gitops, "remote_head", lambda *a, **kw: "a" * 40)
+    monkeypatch.setattr(pipeline.gitops, "sync_mirror", lambda *a, **kw: fetched.append(1))
+
+    try:
+        result = pipeline.sync_repo(_skip_record(tag))
+        assert result.status == "unchanged"
+        assert result.repo_id == repo_id
+        assert fetched == []
+    finally:
+        with session_scope() as conn:
+            conn.query(models().Repo).filter_by(id=repo_id).delete(synchronize_session=False)
+
+
+def test_a_repository_whose_remote_tip_moved_is_fetched(db, monkeypatch):
+    from uuid import uuid4
+
+    from git_synapse.db.orm import models, session_scope
+    from git_synapse.ingest import pipeline
+
+    tag = uuid4().hex[:8]
+    repo_id = _stored_repo(tag, "a" * 40)
+
+    def touched(*a, **kw):
+        raise RuntimeError("fetched the repository")
+
+    monkeypatch.setattr(pipeline.gitops, "remote_head", lambda *a, **kw: "b" * 40)
+    monkeypatch.setattr(pipeline.gitops, "sync_mirror", touched)
+
+    try:
+        result = pipeline.sync_repo(_skip_record(tag))
+        assert result.status == "failed" and "fetched the repository" in (result.error or "")
+    finally:
+        with session_scope() as conn:
+            conn.query(models().Repo).filter_by(id=repo_id).delete(synchronize_session=False)
+
+
+def test_a_repository_with_no_commits_is_reported_empty(db, monkeypatch, tmp_path):
+    """An empty repository is not a failure, and git's error about it is not actionable."""
+    from uuid import uuid4
+
+    from git_synapse.db.orm import models, session_scope
+    from git_synapse.ingest import gitops, pipeline
+
+    tag = uuid4().hex[:8]
+    monkeypatch.setattr(pipeline.gitops, "sync_mirror", lambda *a, **kw: gitops.FetchResult(
+        path=tmp_path, head_sha=None, cloned=True, changed=False, duration_s=0.0))
+
+    result = pipeline.sync_repo(_skip_record(tag))
+    try:
+        assert result.status == "empty"
+        with session_scope() as conn:
+            row = conn.query(models().Repo).filter_by(full_name=f"t/skip-{tag}").one()
+            assert row.ingest_status == "empty"
+    finally:
+        with session_scope() as conn:
+            conn.query(models().Repo).filter_by(full_name=f"t/skip-{tag}").delete(
+                synchronize_session=False)
+
+
+def test_a_run_whose_heartbeat_stopped_is_reclaimed(db):
+    """A deploy kills the process mid-run; without a heartbeat the row says 'running' for hours."""
+    from datetime import UTC, datetime, timedelta
+
+    from git_synapse.db.orm import models, session_scope
+
+    now = datetime.now(UTC)
+    with session_scope() as conn:
+        stale = models().IngestRun(kind="sync", trigger="test", status="running",
+                                   started_at=now - timedelta(hours=4),
+                                   heartbeat_at=now - timedelta(hours=3))
+        live = models().IngestRun(kind="sync", trigger="test", status="running",
+                                  started_at=now - timedelta(hours=4), heartbeat_at=now)
+        conn.add_all([stale, live])
+        conn.flush()
+        stale_id, live_id = stale.id, live.id
+
+    try:
+        pipeline.reconcile_stale_runs()
+        with session_scope() as conn:
+            assert conn.get(models().IngestRun, stale_id).status == "failed"
+            assert conn.get(models().IngestRun, live_id).status == "running"
+    finally:
+        with session_scope() as conn:
+            conn.query(models().IngestRun).filter(
+                models().IngestRun.id.in_([stale_id, live_id])).delete(synchronize_session=False)

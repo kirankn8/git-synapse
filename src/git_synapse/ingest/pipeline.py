@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from sqlalchemy import func
 from sqlalchemy.exc import DBAPIError, OperationalError
 
 from git_synapse.analysis import depbump, derived, mining, predict, xrepo
@@ -93,7 +94,8 @@ class RunResult:
 
     @property
     def ok(self) -> list[RepoResult]:
-        return [r for r in self.repos if r.status == "success"]
+        """Repositories that were processed, whether or not they had new commits."""
+        return [r for r in self.repos if r.status in ("success", "unchanged", "empty")]
 
     @property
     def failed(self) -> list[RepoResult]:
@@ -106,12 +108,29 @@ class RunResult:
 
 STALE_RUN_HOURS = 6
 
-def reconcile_stale_runs(max_age_hours: int = STALE_RUN_HOURS) -> int:
-    """Mark abandoned runs as failed."""
+#: A run that has recorded nothing for this long is not running any more.
+IDLE_RUN_MINUTES = 120
+
+def reconcile_stale_runs(max_age_hours: int = STALE_RUN_HOURS,
+                         max_idle_minutes: int = IDLE_RUN_MINUTES) -> int:
+    """Mark abandoned runs as failed: a run whose heartbeat stopped is not running."""
     cutoff = datetime.now(UTC).timestamp() - max_age_hours * 3600
     cutoff_at = datetime.fromtimestamp(cutoff, tz=UTC)
+    idle_cutoff = datetime.fromtimestamp(
+        datetime.now(UTC).timestamp() - max_idle_minutes * 60, tz=UTC)
     IngestRun = models().IngestRun
     with session_scope() as conn:
+        idle = conn.query(IngestRun).filter(
+            IngestRun.status == "running",
+            func.coalesce(IngestRun.heartbeat_at, IngestRun.started_at) < idle_cutoff,
+        ).all()
+        for row in idle:
+            row.status = "failed"
+            row.finished_at = datetime.now(UTC)
+            row.error = ("interrupted: no progress for "
+                         f"{max_idle_minutes} minutes")
+        if idle:
+            conn.flush()
         rows = conn.query(IngestRun).filter(
             IngestRun.status == "running", IngestRun.started_at < cutoff_at,
         ).all()
@@ -255,6 +274,9 @@ def _record_repo_result(run_id: int, result: RepoResult) -> None:
         row.commits_added = result.commits_added
         row.duration_s = result.duration_s
         row.error = (result.error or "")[:4000] or None
+        run = conn.get(models().IngestRun, run_id)
+        if run is not None:
+            run.heartbeat_at = datetime.now(UTC)
 
 
 class AuthError(RuntimeError):
@@ -451,8 +473,32 @@ def _fetch_by_name(client, login: str, names: list[str]) -> list[RepoRecord]:
 DB_CONTENTION_RETRIES = 3
 
 
+def _unchanged(record: RepoRecord) -> RepoResult | None:
+    """Return a result when the remote tip is where it was, so nothing needs fetching."""
+    cfg = get_config()
+    token = _clone_token(record) or cfg.providers.github.current_token()
+    Repo = models().Repo
+    with session_scope() as conn:
+        existing = conn.query(Repo).filter(
+            Repo.host == record.host, Repo.full_name == record.full_name).one_or_none()
+        ready = (existing is not None and existing.ingest_status == "ready"
+                 and existing.head_sha is not None and existing.last_ingested_sha is not None)
+        stored_head = existing.head_sha if existing is not None else None
+        stored_id = existing.id if existing is not None else None
+    if not ready:
+        return None
+    remote = gitops.remote_head(record.authed_clone_url(token), record.default_branch)
+    if remote is None or remote != stored_head:
+        return None
+    return RepoResult(full_name=record.full_name, repo_id=stored_id, status="unchanged")
+
+
 def sync_repo(record: RepoRecord, force_full: bool = False) -> RepoResult:
     """Mirror, parse and load one repository, retrying on database contention."""
+    if not force_full:
+        unchanged = _unchanged(record)
+        if unchanged is not None:
+            return unchanged
     for attempt in range(1, DB_CONTENTION_RETRIES + 1):
         result = _sync_repo_once(record, force_full)
         if result.status != "failed" or not _is_contention(result.error):
@@ -532,6 +578,8 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
     started = time.monotonic()
     result = RepoResult(full_name=record.full_name)
 
+    token = _clone_token(record) or cfg.providers.github.current_token()
+
     try:
         with session_scope() as conn:
             repo_id = upsert_repo(record, conn)
@@ -540,7 +588,6 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
         blobless = gitops.choose_clone_mode(record.disk_usage_kb, cfg.ingest)
         result.blobless = blobless
 
-        token = _clone_token(record) or cfg.providers.github.current_token()
         fetch = gitops.sync_mirror(
             record.full_name,
             record.authed_clone_url(token),
@@ -551,6 +598,19 @@ def _sync_repo_once(record: RepoRecord, force_full: bool = False) -> RepoResult:
         result.cloned = fetch.cloned
 
         Repo = models().Repo
+        if fetch.head_sha is None:
+            with session_scope() as conn:
+                repo_row = conn.get(Repo, repo_id)
+                if repo_row is not None:
+                    repo_row.mirror_path = str(fetch.path)
+                    repo_row.head_sha = None
+                    repo_row.last_fetch_at = datetime.now(UTC)
+                    repo_row.ingest_status = "empty"
+                    repo_row.ingest_error = None
+            result.status = "empty"
+            result.duration_s = time.monotonic() - started
+            return result
+
         with session_scope() as conn:
             repo_row = conn.get(Repo, repo_id)
             if repo_row is None:
