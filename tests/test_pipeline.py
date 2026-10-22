@@ -1341,3 +1341,14 @@ def test_a_run_whose_heartbeat_stopped_is_reclaimed(db):
         with session_scope() as conn:
             conn.query(models().IngestRun).filter(
                 models().IngestRun.id.in_([stale_id, live_id])).delete(synchronize_session=False)
+
+
+def test_an_unborn_head_is_not_a_commit_sha(tmp_path):
+    """`git rev-parse HEAD` echoes the word and exits 0 in an empty mirror."""
+    import subprocess
+
+    from git_synapse.ingest import gitops
+
+    bare = tmp_path / "empty.git"
+    subprocess.run(["git", "init", "--quiet", "--bare", str(bare)], check=True)
+    assert gitops.current_head(bare) is None

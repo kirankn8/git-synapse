@@ -345,7 +345,8 @@ def current_head(path: Path) -> str | None:
     if proc.returncode != 0:
         return None
     sha = proc.stdout.strip()
-    return sha or None
+    # An unborn HEAD echoes the word back and exits 0, so only a sha counts.
+    return sha if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha) else None
 
 
 def default_branch(path: Path) -> str | None:
