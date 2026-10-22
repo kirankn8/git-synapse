@@ -308,18 +308,6 @@ def _evidence_card(partner: dict, labels: list[str], informative: bool) -> dict:
 
 
 @server.tool(
-    name="coupled_files",
-    title="Find files that change together",
-    description=(
-        "Given a file, return the files that have historically changed in the same "
-        "commits, ranked by statistical association. Call this before editing to "
-        "find the code that usually has to change alongside it. Read each "
-        "partner's `currency` field before acting: it flags partners that no "
-        "longer exist at HEAD, and coupling that has decayed since. A high score "
-        "on a deleted file or a finished refactor is history, not live coupling."
-    ),
-)
-@server.tool(
     name="commits_by_key",
     title="Commits that state the same identifier",
     description=(
@@ -344,6 +332,18 @@ def commits_by_key(key: str, kind: str = "issue_key", limit: int = 50) -> dict:
     }
 
 
+@server.tool(
+    name="coupled_files",
+    title="Find files that change together",
+    description=(
+        "Given a file, return the files that have historically changed in the same "
+        "commits, ranked by statistical association. Call this before editing to "
+        "find the code that usually has to change alongside it. Read each "
+        "partner's `currency` field before acting: it flags partners that no "
+        "longer exist at HEAD, and coupling that has decayed since. A high score "
+        "on a deleted file or a finished refactor is history, not live coupling."
+    ),
+)
 @server.tool(
     name="crossrepo_files",
     title="Files in other repositories tied to this file by a dependency bump",

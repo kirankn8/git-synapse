@@ -997,3 +997,16 @@ def test_an_uninformative_partner_is_called_structural_noise():
     card = _card(n_ab=50, confidence_out=1.0, npmi=1.0, _informative=False)
     assert card["evidence"] == "weak"
     assert card["summary"] == "Likely structural noise; verify before editing."
+
+
+def test_every_tool_is_registered_with_its_own_signature():
+    """A decorator that lands on the wrong function silently reroutes a tool's arguments."""
+    import inspect
+
+    from git_synapse.mcp import server
+
+    tools = server.server._tool_manager._tools
+    for name, tool in tools.items():
+        signature = set(inspect.signature(tool.fn).parameters)
+        declared = set((tool.parameters or {}).get("properties", {}))
+        assert declared == signature, f"{name}: schema {declared} does not match {signature}"
