@@ -9,7 +9,7 @@ def test_manifests_lockfiles_and_generated_trees_are_noise():
                  "vendor/x/y.go", "node_modules/a/b.js", "api/foo_gen.go",
                  "api/responses.pb.go", "web/app.min.js", "svc/thing_auto_test.go",
                  ".release-please-manifest.json", "CHANGELOG.md", ".changeset/config.json",
-                 "VERSION", "version.txt", ".releaserc.json"):
+                 "VERSION", "version.txt", ".releaserc.json", "go.work", "go.work.sum"):
         assert is_noise(path), path
 
 

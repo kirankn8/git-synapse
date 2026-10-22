@@ -33,7 +33,10 @@ _AUXILIARY = re.compile(
     r"|(^|/)\.circleci/|(^|/)azure-pipelines\.ya?ml$|(^|/)\.buildkite/"
 )
 
-_NOISE_NAMES = frozenset(MANIFEST_FILES) | frozenset(LOCK_FILES)
+#: Workspace files pin the build, not the design, and are not read as manifests.
+_EXTRA_NAMES = frozenset(("go.work", "go.work.sum"))
+
+_NOISE_NAMES = frozenset(MANIFEST_FILES) | frozenset(LOCK_FILES) | _EXTRA_NAMES
 
 
 def is_auxiliary(path: str) -> bool:
